@@ -534,39 +534,24 @@ function App() {
         const savedProject = localStorage.getItem('chatgpt-current-project');
         const savedChat = localStorage.getItem('chatgpt-current-chat');
         
-        console.log('=== RESTORATION START ===');
-        console.log('Restoring from localStorage:', { project: savedProject, chat: savedChat });
-        console.log('Current user:', user?.username);
-        
         try {
           if (savedProject) {
-            console.log('Attempting to enter project:', savedProject);
             await enterProject(savedProject);
-            console.log('Successfully entered project:', savedProject);
-            
+
             if (savedChat) {
-              console.log('Attempting to open chat:', savedChat, 'in project:', savedProject);
               await openChat(savedChat, savedProject);
-              console.log('Successfully opened chat:', savedChat);
             }
           } else if (savedChat) {
-            console.log('Attempting to open root chat:', savedChat);
             await openChat(savedChat, null);
-            console.log('Successfully opened root chat:', savedChat);
-          } else {
-            console.log('No saved location to restore');
           }
-          console.log('=== RESTORATION SUCCESS ===');
         } catch (err) {
-          console.log('=== RESTORATION FAILED ===');
-          console.log('Error:', err);
+          // Failed to restore previous session state - clear invalid saved values
           localStorage.removeItem('chatgpt-current-project');
           localStorage.removeItem('chatgpt-current-chat');
         } finally {
           // Re-enable saving after restoration completes (even if nothing to restore)
           isRestoringRef.current = false;
           restorationTimeoutRef.current = null;
-          console.log('Saving re-enabled');
         }
       }, 300); // Wait 300ms for initial data to load
     } else if (user && !user.has_api_key) {
@@ -588,21 +573,17 @@ function App() {
   useEffect(() => {
     // Don't save during restoration to avoid clearing values
     if (user && !isRestoringRef.current) {
-      console.log('Saving to localStorage:', { project: currentProject, chat: currentChat });
-      
       if (currentProject) {
         localStorage.setItem('chatgpt-current-project', currentProject);
       } else {
         localStorage.removeItem('chatgpt-current-project');
       }
-      
+
       if (currentChat) {
         localStorage.setItem('chatgpt-current-chat', currentChat);
       } else {
         localStorage.removeItem('chatgpt-current-chat');
       }
-    } else if (user && isRestoringRef.current) {
-      console.log('Skipping save during restoration:', { project: currentProject, chat: currentChat });
     }
   }, [currentProject, currentChat, user]);
 
@@ -683,9 +664,8 @@ function App() {
           ...prev,
           [projectName]: data.chats || []
         }));
-      } catch (err) {
-        // Silent fail - not critical
-        console.log(`Failed to preload chats for ${projectName}`);
+      } catch {
+        // Silent fail - preloading is not critical
       }
     });
     
@@ -1161,18 +1141,10 @@ function App() {
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
         console.error('Backend returned invalid total_messages:', data.total_messages);
-        console.error('Full response:', data);
         setError('Server error: invalid message count. Please refresh.');
         return;
       }
-      
-      console.log('Chat loaded:', {
-        chatName,
-        totalMessages: data.total_messages,
-        loadedCount: loadedMessages.length,
-        hasMore: data.has_more_messages
-      });
-      
+
       setTotalMessages(data.total_messages);
       setHasMoreMessages(data.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
@@ -1309,7 +1281,6 @@ function App() {
     // Prevent rapid-fire calls (minimum 500ms between loads)
     const now = Date.now();
     if (now - lastLoadTimeRef.current < 500) {
-      console.log('Skipping load - too soon after last load');
       return;
     }
     lastLoadTimeRef.current = now;
@@ -1341,14 +1312,7 @@ function App() {
       }
       
       const olderMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
-      
-      console.log('Loading more messages:', {
-        requestedOffset: messageOffset,
-        receivedCount: olderMessages.length,
-        hasMore: data.has_more_messages,
-        totalMessages
-      });
-      
+
       const container = messagesContainerRef.current;
       const oldScrollHeight = container?.scrollHeight || 0;
       const oldScrollTop = container?.scrollTop || 0;
@@ -1356,9 +1320,7 @@ function App() {
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
       setMessageOffset(prev => prev + olderMessages.length);
-      
-      console.log('After loading, messageOffset will be:', messageOffset + olderMessages.length);
-      
+
       requestAnimationFrame(() => {
         if (container) {
           const newScrollHeight = container.scrollHeight;
@@ -1514,10 +1476,6 @@ function App() {
       const firstMessageActualIndex = totalMessages - messageOffset;
       const actualIndexInFullConversation = firstMessageActualIndex + displayIndexToEdit;
       
-      console.log('=== MESSAGE EDIT CALCULATION ===');
-      console.log('totalMessages:', totalMessages, 'messageOffset:', messageOffset);
-      console.log('displayIndexToEdit:', displayIndexToEdit, 'actualIndexInFullConversation:', actualIndexInFullConversation);
-      
       // Validation
       if (actualIndexInFullConversation < 1 || actualIndexInFullConversation >= totalMessages) {
         const errorMsg = `Invalid truncation index: ${actualIndexInFullConversation}. Please refresh and try again.`;
@@ -1568,8 +1526,14 @@ function App() {
           setMessages(finalMessages);
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
-          setTotalMessages(finalMessages.length + 1);
-          setHasMoreMessages(false);
+          // Calculate new total: backend truncated to truncate_to_index, then added user + assistant
+          const newTotalMessages = actualIndexInFullConversation + 2;
+          setTotalMessages(newTotalMessages);
+          // There may still be older messages before the truncation point
+          // hasMoreMessages is true if there are messages before what we're displaying
+          // After edit, we display from the edit point onward, so check if there are messages before that
+          const hasOlderMessages = actualIndexInFullConversation > 1; // > 1 because index 0 is system
+          setHasMoreMessages(hasOlderMessages);
           setMessageOffset(finalMessages.length);
           requestAnimationFrame(() => scrollToBottom());
         }
