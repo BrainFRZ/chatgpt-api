@@ -1098,16 +1098,16 @@ def send_message(request: SendMessageRequest):
         user_content = build_message_content(branch_path[-1])
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
-        # Build messages list
-        messages_for_api = [system_msg] + history_msgs + [new_user_msg]
-
-        # Add updates as a separate trailing message if present
-        # This keeps the user message content identical between when sent and when in history,
-        # allowing the cache to match at message boundaries rather than mid-content
+        # Build messages list with updates in a FIXED position (right after system message)
+        # This ensures updates are cached as part of the prefix when they don't change,
+        # rather than breaking the cache every turn by being at the shifting "end" position
         updates_text = data.get("updates", "").strip()
         if updates_text:
-            updates_msg = {"role": "user", "content": f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"}
-            messages_for_api.append(updates_msg)
+            updates_msg = {"role": "user", "content": f"[CONTEXT UPDATES - Reference these as needed throughout the conversation]\n{updates_text}\n[/CONTEXT UPDATES]"}
+            ack_msg = {"role": "assistant", "content": "Understood, I'll reference these updates as needed."}
+            messages_for_api = [system_msg, updates_msg, ack_msg] + history_msgs + [new_user_msg]
+        else:
+            messages_for_api = [system_msg] + history_msgs + [new_user_msg]
         
         # Include project in cache key to avoid collisions between same-named chats in different projects
         # Sanitize project name for cache key (replace spaces and special chars with hyphens)
