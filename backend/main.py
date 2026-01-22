@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import tiktoken
 import logging
 import fcntl
+import uuid
 
 # Configure logging for debugging
 logger = logging.getLogger(__name__)
@@ -106,28 +107,6 @@ def atomic_write_json(path: str, data: dict, indent: int = 2) -> None:
         os.replace(temp_path, path)  # Atomic on POSIX systems
     except Exception:
         # Clean up temp file if write/rename failed
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-        raise
-
-
-def atomic_write_text(path: str, content: str) -> None:
-    """
-    Atomically write text content to a file using write-to-temp-then-rename.
-
-    Args:
-        path: Destination file path
-        content: Text content to write
-    """
-    temp_path = path + '.tmp'
-    try:
-        with open(temp_path, 'w') as f:
-            f.write(content)
-        os.replace(temp_path, path)
-    except Exception:
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -384,55 +363,170 @@ def calculate_context_window(
 
     return context_start_index
 
+# ============================================================
+# Tree/Branching Utility Functions
+# ============================================================
+
+def generate_message_id() -> str:
+    """Generate a unique message ID"""
+    return str(uuid.uuid4())
+
+
+def build_message_index(messages: list) -> dict:
+    """
+    Build an index of messages by ID for O(1) lookup.
+
+    Returns:
+        dict mapping message_id -> message dict
+    """
+    return {msg["id"]: msg for msg in messages if "id" in msg}
+
+
+def get_path_to_root(messages: list, leaf_id: str) -> list[dict]:
+    """
+    Get the path from root to the specified leaf message.
+
+    Returns:
+        List of messages in order from root (system) to leaf
+    """
+    if not messages or not leaf_id:
+        return []
+
+    index = build_message_index(messages)
+
+    # Walk backwards from leaf to root
+    path = []
+    current_id = leaf_id
+    while current_id:
+        if current_id not in index:
+            break
+        msg = index[current_id]
+        path.append(msg)
+        current_id = msg.get("parent_id")
+
+    # Reverse to get root-to-leaf order
+    path.reverse()
+    return path
+
+
+def get_children(messages: list, parent_id: str | None) -> list[dict]:
+    """
+    Get all direct children of a message.
+
+    Args:
+        messages: List of all messages
+        parent_id: ID of the parent message (None for root's children)
+
+    Returns:
+        List of messages that have this parent_id
+    """
+    return [msg for msg in messages if msg.get("parent_id") == parent_id]
+
+
+def get_siblings(messages: list, message_id: str) -> list[dict]:
+    """
+    Get all siblings of a message (messages with the same parent).
+
+    Returns:
+        List of sibling messages (including the message itself), sorted by timestamp
+    """
+    if not messages or not message_id:
+        return []
+
+    index = build_message_index(messages)
+    if message_id not in index:
+        return []
+
+    target_msg = index[message_id]
+    parent_id = target_msg.get("parent_id")
+
+    # Find all messages with the same parent
+    siblings = [msg for msg in messages if msg.get("parent_id") == parent_id]
+
+    # Sort by timestamp (oldest first) for consistent ordering
+    siblings.sort(key=lambda m: m.get("timestamp", ""))
+
+    return siblings
+
+
+def get_deepest_leaf(messages: list, start_id: str) -> str:
+    """
+    Find the deepest leaf in the subtree starting from start_id.
+
+    For branch navigation: when switching to a sibling branch, we want to
+    navigate to the most recent message in that branch.
+
+    Returns:
+        ID of the deepest leaf message in the subtree
+    """
+    if not messages or not start_id:
+        return start_id
+
+    index = build_message_index(messages)
+    if start_id not in index:
+        return start_id
+
+    # Build children lookup
+    children_map: dict[str | None, list[dict]] = {}
+    for msg in messages:
+        parent = msg.get("parent_id")
+        if parent not in children_map:
+            children_map[parent] = []
+        children_map[parent].append(msg)
+
+    # Sort children by timestamp (most recent last) so we follow the "main" path
+    for children in children_map.values():
+        children.sort(key=lambda m: m.get("timestamp", ""))
+
+    # Walk down, always taking the last (most recent) child
+    current_id = start_id
+    while current_id in children_map and children_map[current_id]:
+        children = children_map[current_id]
+        current_id = children[-1]["id"]  # Take most recent child
+
+    return current_id
+
+
+def is_migrated(data: dict) -> bool:
+    """Check if a chat has been migrated to branching format"""
+    messages = data.get("messages", [])
+    return bool(messages and "id" in messages[0])
+
+
+def migrate_chat_inline(data: dict) -> dict:
+    """
+    Migrate a chat to branching format inline (without saving).
+    Used for on-the-fly migration when loading old chats.
+    """
+    messages = data.get("messages", [])
+
+    if not messages or "id" in messages[0]:
+        return data  # Already migrated or empty
+
+    prev_id = None
+    for msg in messages:
+        msg["id"] = generate_message_id()
+        msg["parent_id"] = prev_id
+        prev_id = msg["id"]
+
+    if messages:
+        data["current_leaf_id"] = messages[-1]["id"]
+
+    return data
+
+
 def load_chat(username: str, chat_name: str, project: str = None) -> dict:
     path = get_chat_path(username, chat_name, project)
     if os.path.exists(path):
         with open(path, 'r') as f:
             data = json.load(f)
             if isinstance(data, list):
-                return {"messages": data, "stats": create_empty_stats()}
+                data = {"messages": data, "stats": create_empty_stats()}
+            # Auto-migrate on load if not yet migrated
+            if not is_migrated(data):
+                data = migrate_chat_inline(data)
             return data
     return None
-
-def generate_txt_from_chat(data: dict) -> str:
-    """Generate human-readable text version of chat"""
-    lines = []
-    lines.append("=" * 80)
-    lines.append("CHAT TRANSCRIPT")
-    lines.append("=" * 80)
-    lines.append("")
-    
-    for msg in data.get("messages", []):
-        role = msg.get("role", "unknown").upper()
-        content = msg.get("content", "")
-        timestamp = msg.get("timestamp", "")
-        attached_files = msg.get("attached_files", [])
-        
-        lines.append(f"[{role}]" + (f" {timestamp}" if timestamp else ""))
-        
-        # Show attached files if present
-        if attached_files:
-            filenames = [f["filename"] for f in attached_files]
-            lines.append(f"Attached files: {', '.join(filenames)}")
-        
-        lines.append(content)
-        lines.append("")
-        lines.append("-" * 80)
-        lines.append("")
-    
-    # Add stats at the end
-    if "stats" in data:
-        lines.append("=" * 80)
-        lines.append("STATISTICS")
-        lines.append("=" * 80)
-        stats = data["stats"]
-        lines.append(f"Total Prompts: {stats.get('total_prompts', 0)}")
-        lines.append(f"Total Cost: ${stats.get('total_cost', 0):.4f}")
-        lines.append(f"Input Tokens: {stats.get('total_input_tokens', 0):,}")
-        lines.append(f"Cached Tokens: {stats.get('total_cached_tokens', 0):,}")
-        lines.append(f"Output Tokens: {stats.get('total_output_tokens', 0):,}")
-    
-    return "\n".join(lines)
 
 def save_chat(username: str, chat_name: str, data: dict, project: str = None):
     """Save chat data atomically with file locking for concurrent access safety."""
@@ -441,14 +535,6 @@ def save_chat(username: str, chat_name: str, data: dict, project: str = None):
 
     with file_lock(path):
         atomic_write_json(path, data)
-
-        # Save TXT version (non-critical, failure is logged but not fatal)
-        txt_path = path.replace('.json', '.txt')
-        try:
-            txt_content = generate_txt_from_chat(data)
-            atomic_write_text(txt_path, txt_content)
-        except Exception as e:
-            logger.warning(f"Failed to save TXT version of chat {chat_name}: {e}")
 
 def create_backup(username: str, chat_name: str, project: str = None):
     """Create timestamped backup before destructive operation"""
@@ -472,12 +558,6 @@ def create_backup(username: str, chat_name: str, project: str = None):
     # Save backup
     with open(backup_path, 'w') as f:
         json.dump(data, f, indent=2)
-    
-    # Also save txt backup
-    txt_backup_path = backup_path.replace('.json', '.txt')
-    txt_content = generate_txt_from_chat(data)
-    with open(txt_backup_path, 'w') as f:
-        f.write(txt_content)
 
 def create_empty_stats() -> dict:
     return {
@@ -667,10 +747,13 @@ class SendMessageRequest(BaseModel):
     chat_name: str
     message: str
     project: str | None = None
-    truncate_to_index: int | None = None  # If provided, truncate messages array to this index before adding new message
+    parent_id: str | None = None  # If provided, create message as child of this parent (for branching edits)
+    truncate_to_index: int | None = None  # DEPRECATED: kept for backwards compatibility, prefer parent_id
     attached_files: list[AttachedFile] | None = None  # Optional list of files to attach to this message
 
 class ChatMessage(BaseModel):
+    id: str | None = None  # Unique message ID (for branching)
+    parent_id: str | None = None  # ID of parent message (for branching)
     role: str
     content: str
     timestamp: str | None = None
@@ -681,10 +764,12 @@ class ChatMessage(BaseModel):
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
 
 class ChatResponse(BaseModel):
-    messages: list[ChatMessage]
+    messages: list[ChatMessage]  # Current branch path (paginated, for display)
+    all_messages: list[ChatMessage] | None = None  # Full message tree (for branch navigation)
     stats: dict
     total_messages: int
     has_more_messages: bool
+    current_leaf_id: str | None = None  # ID of the current leaf message (for branching)
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -693,6 +778,9 @@ class MessageResponse(BaseModel):
     stats: dict
     context_start_index: int  # Index of first message in context (for frontend graying)
     reasoning: Optional[str] = None  # Reasoning summary from model
+    user_message_id: Optional[str] = None  # ID of the user message (for branching)
+    assistant_message_id: Optional[str] = None  # ID of the assistant message (for branching)
+    current_leaf_id: Optional[str] = None  # ID of the new current leaf
 
 class ProjectFileInfo(BaseModel):
     filename: str
@@ -821,25 +909,45 @@ def create_chat(request: CreateChatRequest):
     return {"status": "ok"}
 
 @app.get("/api/chat/{username}/{chat_name}", response_model=ChatResponse)
-def get_chat(username: str, chat_name: str, project: str = None, limit: int = 30, offset: int = 0):
+def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = None, limit: int = 30, offset: int = 0):
     """
     Get messages from a chat with pagination.
-    Returns the LAST 'limit' messages by default (most recent).
-    Use offset to get older messages (offset=30 gets messages 30-60 from the end).
+
+    For branching support:
+    - If leaf_id is provided, returns the path from root to that leaf
+    - If not provided, uses current_leaf_id (the last viewed branch)
+
+    Pagination:
+    - offset=0 means "last 'limit' messages of the branch"
+    - offset=30 means "30 messages before the last 30"
     """
     data = load_chat(username, chat_name, project)
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     # Update last_accessed timestamp
     if "stats" not in data:
         data["stats"] = create_empty_stats()
     data["stats"]["last_accessed"] = datetime.now().isoformat()
-    save_chat(username, chat_name, data, project)
-    
+
     all_messages = data["messages"]
-    total_messages = len(all_messages)
-    
+    current_leaf = data.get("current_leaf_id")
+
+    # Determine which leaf to show
+    target_leaf = leaf_id or current_leaf
+
+    # Get the branch path (messages from root to target leaf)
+    if target_leaf and is_migrated(data):
+        branch_messages = get_path_to_root(all_messages, target_leaf)
+        # Update current_leaf_id if navigating to a different leaf
+        if leaf_id and leaf_id != current_leaf:
+            data["current_leaf_id"] = leaf_id
+    else:
+        # Fallback for non-migrated chats or no leaf specified: use linear order
+        branch_messages = all_messages
+
+    total_messages = len(branch_messages)
+
     # Calculate slice for LAST N messages
     # offset=0 means "last 30 messages"
     # offset=30 means "30 messages before the last 30" (i.e., messages 30-60 from end)
@@ -851,50 +959,85 @@ def get_chat(username: str, chat_name: str, project: str = None, limit: int = 30
         paginated_messages = []
         has_more_messages = False
     else:
-        paginated_messages = all_messages[start_idx:end_idx]
+        paginated_messages = branch_messages[start_idx:end_idx]
         has_more_messages = start_idx > 0
-    
+
+    save_chat(username, chat_name, data, project)
+
     return ChatResponse(
         messages=paginated_messages,
+        all_messages=all_messages,  # Full tree for branch navigation
         stats=data.get("stats", create_empty_stats()),
         total_messages=total_messages,
-        has_more_messages=has_more_messages
+        has_more_messages=has_more_messages,
+        current_leaf_id=data.get("current_leaf_id")
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
 def send_message(request: SendMessageRequest):
     username = request.username.strip().lower()
     api_key = get_api_key(username)
-    
+
     if not api_key:
         raise HTTPException(status_code=400, detail="API key not set")
-    
+
     data = load_chat(username, request.chat_name, request.project)
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
-    # Truncate messages if requested (for message editing)
-    if request.truncate_to_index is not None:
-        # Validate truncation index
-        total_msgs = len(data["messages"])
-        
+
+    all_messages = data["messages"]
+
+    # Determine the parent for the new message (branching support)
+    if request.parent_id is not None:
+        # Branching: create message as child of specified parent
+        parent_id = request.parent_id
+        # Validate parent exists
+        index = build_message_index(all_messages)
+        if parent_id not in index:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Parent message {parent_id} not found"
+            )
+    elif request.truncate_to_index is not None:
+        # DEPRECATED: Legacy truncation mode for backwards compatibility
+        # This will be removed in a future version
+        total_msgs = len(all_messages)
+
         if request.truncate_to_index < 1:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Invalid truncation index {request.truncate_to_index}. Must be >= 1 to preserve system message."
             )
-        
+
         if request.truncate_to_index >= total_msgs:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid truncation index {request.truncate_to_index}. Chat only has {total_msgs} messages."
             )
-        
+
         # Create backup before destructive truncation
         create_backup(username, request.chat_name, request.project)
-        data["messages"] = data["messages"][:request.truncate_to_index]
-    
-    # Add user message
+
+        # Find the parent_id of the message at truncate_to_index
+        # This is the message BEFORE where we're truncating
+        truncate_msg = all_messages[request.truncate_to_index]
+        parent_id = truncate_msg.get("parent_id")
+
+        # Actually truncate for backwards compat
+        data["messages"] = all_messages[:request.truncate_to_index]
+        all_messages = data["messages"]
+    else:
+        # Normal message: append to current leaf
+        current_leaf_id = data.get("current_leaf_id")
+        if current_leaf_id:
+            parent_id = current_leaf_id
+        elif all_messages:
+            # Fallback: use last message as parent
+            parent_id = all_messages[-1].get("id")
+        else:
+            parent_id = None
+
+    # Add user message with branching fields
     user_message_tokens = count_tokens(request.message)
     
     # Include attached files if present, and add their tokens to the count
@@ -909,25 +1052,32 @@ def send_message(request: SendMessageRequest):
             wrapper_text = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
             user_message_tokens += count_tokens(wrapper_text)
     
+    user_msg_id = generate_message_id()
     user_msg_data = {
+        "id": user_msg_id,
+        "parent_id": parent_id,
         "role": "user",
         "content": request.message,
         "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
         "total_tokens": user_message_tokens
     }
-    
+
     if attached_files_data:
         user_msg_data["attached_files"] = attached_files_data
-    
+
     data["messages"].append(user_msg_data)
-    
+
     # Call OpenAI
     client = OpenAI(api_key=api_key)
-    
+
     try:
-        # Calculate context window (which messages to include)
-        context_start_index = calculate_context_window(data["messages"])
-        
+        # Get the branch path from root to new user message
+        # This is the linear conversation that will be sent to the API
+        branch_path = get_path_to_root(data["messages"], user_msg_id)
+
+        # Calculate context window based on branch path (not full message tree)
+        context_start_index = calculate_context_window(branch_path)
+
         # Helper to build message content with FILE wrappers
         def build_message_content(msg):
             content = msg["content"]
@@ -939,22 +1089,22 @@ def send_message(request: SendMessageRequest):
                 files_text = "\n\n".join(file_wrappers)
                 content = f"{files_text}\n\n{content}"
             return content
-        
+
         # Build messages for API: system + in-context history + new user message (with updates prepended)
-        system_msg = {"role": data["messages"][0]["role"], "content": data["messages"][0]["content"]}
-        history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in data["messages"][context_start_index:-1]]
-        
+        system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
+        history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
+
         # Build user content, prepending attached files and updates
-        user_content = build_message_content(data["messages"][-1])
-        
+        user_content = build_message_content(branch_path[-1])
+
         # Prepend updates if present
         # This keeps updates in the uncached portion while history stays cached
         updates_text = data.get("updates", "").strip()
         if updates_text:
             user_content = f"[CONTEXT UPDATES - Reference as needed, respond to the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n{user_content}"
-        
-        new_user_msg = {"role": data["messages"][-1]["role"], "content": user_content}
-        
+
+        new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
+
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
         
         # Include project in cache key to avoid collisions between same-named chats in different projects
@@ -1044,8 +1194,11 @@ def send_message(request: SendMessageRequest):
         # Update persistent lifetime stats (survives chat deletion)
         update_persistent_stats(username, new_input_tokens, cached_tokens, text_output_tokens, reasoning_tokens, actual_cost)
         
-        # Add assistant message
+        # Add assistant message with branching fields
+        assistant_msg_id = generate_message_id()
         assistant_msg_data = {
+            "id": assistant_msg_id,
+            "parent_id": user_msg_id,  # Assistant is child of user message
             "role": "assistant",
             "content": assistant_message,
             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
@@ -1055,18 +1208,24 @@ def send_message(request: SendMessageRequest):
         }
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
-        
+
         data["messages"].append(assistant_msg_data)
-        
+
+        # Update current_leaf_id to the new assistant message
+        data["current_leaf_id"] = assistant_msg_id
+
         save_chat(username, request.chat_name, data, request.project)
-        
+
         return MessageResponse(
             assistant_message=assistant_message,
             tokens=tokens_str,
             cost=cost_str,
             stats=stats,
             context_start_index=context_start_index,
-            reasoning=reasoning_summary
+            reasoning=reasoning_summary,
+            user_message_id=user_msg_id,
+            assistant_message_id=assistant_msg_id,
+            current_leaf_id=assistant_msg_id
         )
         
     except HTTPException:
@@ -1087,6 +1246,93 @@ def send_message(request: SendMessageRequest):
         elif "timeout" in str(e).lower():
             error_msg = "Request timed out. Please try again."
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+class SiblingInfo(BaseModel):
+    id: str
+    index: int  # 0-based index among siblings
+    total: int  # Total number of siblings
+
+
+class BranchInfoResponse(BaseModel):
+    siblings: list[SiblingInfo]
+    current_index: int
+    total_siblings: int
+
+
+@app.get("/api/branch-info/{username}/{chat_name}")
+def get_branch_info(username: str, chat_name: str, message_id: str, project: str = None):
+    """
+    Get sibling information for a message (for branch navigation UI).
+
+    Returns the siblings of the specified message and the current message's
+    position among them.
+    """
+    data = load_chat(username, chat_name, project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    all_messages = data["messages"]
+
+    # Get siblings of the specified message
+    siblings = get_siblings(all_messages, message_id)
+
+    if not siblings:
+        # Message not found or no siblings
+        return BranchInfoResponse(
+            siblings=[],
+            current_index=0,
+            total_siblings=1
+        )
+
+    # Build response with sibling info
+    sibling_infos = []
+    current_index = 0
+    for i, sib in enumerate(siblings):
+        sibling_infos.append(SiblingInfo(
+            id=sib["id"],
+            index=i,
+            total=len(siblings)
+        ))
+        if sib["id"] == message_id:
+            current_index = i
+
+    return BranchInfoResponse(
+        siblings=sibling_infos,
+        current_index=current_index,
+        total_siblings=len(siblings)
+    )
+
+
+@app.post("/api/switch-branch/{username}/{chat_name}")
+def switch_branch(username: str, chat_name: str, target_message_id: str, project: str = None):
+    """
+    Switch to a different branch by navigating to a sibling message.
+
+    Updates current_leaf_id to the deepest leaf in the target message's subtree.
+    """
+    data = load_chat(username, chat_name, project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    all_messages = data["messages"]
+    index = build_message_index(all_messages)
+
+    if target_message_id not in index:
+        raise HTTPException(status_code=404, detail="Target message not found")
+
+    # Find the deepest leaf in the target message's subtree
+    new_leaf_id = get_deepest_leaf(all_messages, target_message_id)
+
+    # Update current_leaf_id
+    data["current_leaf_id"] = new_leaf_id
+    save_chat(username, chat_name, data, project)
+
+    return {
+        "status": "ok",
+        "new_leaf_id": new_leaf_id
+    }
+
 
 class RenameChatRequest(BaseModel):
     username: str
@@ -1208,13 +1454,7 @@ def rename_chat(request: RenameChatRequest):
     
     # Rename JSON file
     os.rename(old_path, new_path)
-    
-    # Rename TXT file if it exists
-    old_txt_path = old_path.replace('.json', '.txt')
-    new_txt_path = new_path.replace('.json', '.txt')
-    if os.path.exists(old_txt_path):
-        os.rename(old_txt_path, new_txt_path)
-    
+
     return {"status": "ok"}
 
 @app.post("/api/delete-chat")
@@ -1230,12 +1470,7 @@ def delete_chat(request: DeleteChatRequest):
     
     # Delete JSON file
     os.remove(path)
-    
-    # Delete TXT file if it exists
-    txt_path = path.replace('.json', '.txt')
-    if os.path.exists(txt_path):
-        os.remove(txt_path)
-    
+
     return {"status": "ok"}
 
 @app.post("/api/reload-chat")
