@@ -1235,6 +1235,15 @@ function App() {
         return;
       }
       
+      // Debug: log what we got from API
+      console.log('Chat data from API:', {
+        messagesCount: data.messages?.length,
+        allMessagesCount: data.all_messages?.length,
+        firstMsgHasId: data.messages?.[0]?.id ? 'yes' : 'no',
+        firstMsgHasTimestamp: data.messages?.[0]?.timestamp ? 'yes' : 'no',
+        current_leaf_id: data.current_leaf_id
+      });
+
       const loadedMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
       setMessages(loadedMessages);
       setAllMessages(data.all_messages || data.messages);  // Full tree for branch navigation
@@ -2632,8 +2641,15 @@ function App() {
                                 <span style={styles.messageTokens}>{msg.tokens} | {msg.cost}</span>
                               )}
                               {/* Branch navigation - show only for user messages with siblings */}
-                              {msg.role === 'user' && msg.id && (() => {
+                              {msg.role === 'user' && (() => {
+                                // Debug: log message info
+                                console.log('User message:', { id: msg.id, parent_id: msg.parent_id, timestamp: msg.timestamp, allMessagesLength: allMessages.length });
+                                if (!msg.id) {
+                                  console.log('No msg.id - skipping branch nav');
+                                  return null;
+                                }
                                 const siblings = getSiblings(allMessages, msg.id);
+                                console.log('Siblings for', msg.id, ':', siblings.map(s => ({ id: s.id, parent_id: s.parent_id })));
                                 if (siblings.length <= 1) return null;
                                 const currentIndex = siblings.findIndex(s => s.id === msg.id);
                                 const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
@@ -2668,9 +2684,13 @@ function App() {
                                   </span>
                                 );
                               })()}
-                              {msg.timestamp && (
-                                <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
-                              )}
+                              {(() => {
+                                // Debug: always log timestamp status
+                                if (!msg.timestamp) console.log('No timestamp for message:', msg.role, msg.id?.slice(0, 8) || 'no-id');
+                                return msg.timestamp ? (
+                                  <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
+                                ) : null;
+                              })()}
                             </div>
                           </>
                         )}
