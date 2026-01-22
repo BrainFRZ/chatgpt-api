@@ -1651,6 +1651,8 @@ function App() {
           setTotalMessages(finalMessages.length + 1); // +1 for system message
           setHasMoreMessages(truncatedMessages.length > 0);
           setMessageOffset(finalMessages.length);
+          fetchUserStats();
+          fetchFreeTokens();
           requestAnimationFrame(() => scrollToBottom());
         }
       } else {
