@@ -1206,7 +1206,7 @@ def send_message(request: SendMessageRequest):
             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
             "tokens": tokens_str,
             "cost": cost_str,
-            "total_tokens": output_tokens
+            "total_tokens": text_output_tokens
         }
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
