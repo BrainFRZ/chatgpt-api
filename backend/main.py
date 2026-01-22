@@ -14,6 +14,20 @@ import shutil
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import tiktoken
+import logging
+
+# Configure logging for debugging
+logger = logging.getLogger(__name__)
+
+# Cache the tiktoken encoder for performance (avoid creating new instance on every call)
+_token_encoder = None
+
+def get_token_encoder():
+    """Get cached tiktoken encoder instance"""
+    global _token_encoder
+    if _token_encoder is None:
+        _token_encoder = tiktoken.get_encoding("cl100k_base")
+    return _token_encoder
 
 app = FastAPI()
 
@@ -104,9 +118,9 @@ def load_persistent_stats(username: str) -> dict:
                     if first_prompt:
                         if migrated["first_prompt_date"] is None or first_prompt < migrated["first_prompt_date"]:
                             migrated["first_prompt_date"] = first_prompt
-                except:
-                    pass
-        
+                except Exception as e:
+                    logger.warning(f"Failed to migrate stats from chat {f}: {e}")
+
         # Process project chats
         projects_dir = os.path.join(user_dir, "projects")
         if os.path.exists(projects_dir):
@@ -129,13 +143,20 @@ def load_persistent_stats(username: str) -> dict:
                                 if first_prompt:
                                     if migrated["first_prompt_date"] is None or first_prompt < migrated["first_prompt_date"]:
                                         migrated["first_prompt_date"] = first_prompt
-                            except:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"Failed to migrate stats from project chat {f}: {e}")
         
-        # Save migrated stats if we found any
+        # Save migrated stats if we found any (atomic write)
         if migrated["total_prompts"] > 0:
-            with open(path, 'w') as f:
-                json.dump(migrated, f, indent=2)
+            temp_path = path + '.tmp'
+            try:
+                with open(temp_path, 'w') as f:
+                    json.dump(migrated, f, indent=2)
+                os.replace(temp_path, path)
+            except Exception:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
             return migrated
     
     return {
@@ -160,10 +181,18 @@ def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int
     # Track first prompt date
     if stats["first_prompt_date"] is None:
         stats["first_prompt_date"] = date.today().isoformat()
-    
+
+    # Atomic write
     path = get_persistent_stats_path(username)
-    with open(path, 'w') as f:
-        json.dump(stats, f, indent=2)
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 def get_chat_path(username: str, chat_name: str, project: str = None) -> str:
     if project:
@@ -184,16 +213,16 @@ def validate_name(name: str) -> bool:
 
 def count_tokens(text: str) -> int:
     """Count tokens in text using tiktoken (cl100k_base encoding for GPT-4+)"""
-    enc = tiktoken.get_encoding("cl100k_base")
+    enc = get_token_encoder()
     return len(enc.encode(text))
 
 def calculate_context_window(messages: list, threshold: int = 275000, target: int = 225000) -> int:
     """
     Calculate context_start_index for rolling context window.
-    
+
     Returns the index of the first message to include in context (after system).
     Messages structure: [system, msg1, msg2, ..., msgN, new_user_msg]
-    
+
     Logic:
     - If total tokens <= threshold (275k), include everything (return 1)
     - If over threshold, find cut point to get back to target (225k)
@@ -203,34 +232,42 @@ def calculate_context_window(messages: list, threshold: int = 275000, target: in
     if len(messages) <= 2:
         # Just system + one user message, include everything
         return 1
-    
+
     # Count system tokens
     system_tokens = count_tokens(messages[0]["content"])
-    
-    # Count new user message tokens (last message)
-    new_user_tokens = messages[-1].get("total_tokens") or count_tokens(messages[-1]["content"])
-    
+
+    # Count new user message tokens (last message), including attached files
+    last_msg = messages[-1]
+    new_user_tokens = last_msg.get("total_tokens")
+    if new_user_tokens is None:
+        new_user_tokens = count_tokens(last_msg["content"])
+        # Add tokens for attached files if present (matching the API call format)
+        attached_files = last_msg.get("attached_files", [])
+        for f in attached_files:
+            wrapper_text = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
+            new_user_tokens += count_tokens(wrapper_text)
+
     # Base tokens that are always included
     base_tokens = system_tokens + new_user_tokens
-    
+
     # History is everything except system (index 0) and new user msg (index -1)
     history = messages[1:-1]
-    
+
     # First pass: count total to see if we exceed threshold
     total_tokens = base_tokens
     for msg in history:
         msg_tokens = msg.get("total_tokens") or count_tokens(msg["content"])
         total_tokens += msg_tokens
-    
+
     if total_tokens <= threshold:
         # Under threshold, include everything
         return 1
-    
+
     # We exceed threshold, need to find cut point to get to target
     # Count from newest to oldest until we hit target
     total_tokens = base_tokens
     included_from_end = 0
-    
+
     for msg in reversed(history):
         msg_tokens = msg.get("total_tokens") or count_tokens(msg["content"])
         if total_tokens + msg_tokens > target:
@@ -238,18 +275,19 @@ def calculate_context_window(messages: list, threshold: int = 275000, target: in
             break
         total_tokens += msg_tokens
         included_from_end += 1
-    
+
     # context_start_index: where we start including messages
     # history starts at index 1, so if we include N from end:
     # start = len(history) - included_from_end + 1
     context_start_index = len(history) - included_from_end + 1
-    
+
     # Ensure we cut on a user message boundary
-    # After system (index 0), user messages are at odd indices (1, 3, 5, ...)
-    # If we landed on an even index (assistant message), move forward to next user message
-    if context_start_index > 1 and context_start_index % 2 == 0:
-        context_start_index += 1
-    
+    # Check by role instead of index parity (handles missing assistant messages)
+    if context_start_index > 1 and context_start_index < len(messages):
+        # If we landed on an assistant message, move forward to next user message
+        while context_start_index < len(messages) - 1 and messages[context_start_index].get("role") == "assistant":
+            context_start_index += 1
+
     return context_start_index
 
 def load_chat(username: str, chat_name: str, project: str = None) -> dict:
@@ -303,18 +341,37 @@ def generate_txt_from_chat(data: dict) -> str:
     return "\n".join(lines)
 
 def save_chat(username: str, chat_name: str, data: dict, project: str = None):
+    """Save chat data atomically using write-to-temp-then-rename pattern"""
     path = get_chat_path(username, chat_name, project)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    
-    # Save JSON
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
-    
-    # Save TXT version
+
+    # Atomic write for JSON: write to temp file, then rename
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, path)  # Atomic on POSIX systems
+    except Exception:
+        # Clean up temp file if rename failed
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    # Save TXT version (non-critical, failure is logged but not fatal)
     txt_path = path.replace('.json', '.txt')
-    txt_content = generate_txt_from_chat(data)
-    with open(txt_path, 'w') as f:
-        f.write(txt_content)
+    txt_temp_path = txt_path + '.tmp'
+    try:
+        txt_content = generate_txt_from_chat(data)
+        with open(txt_temp_path, 'w') as f:
+            f.write(txt_content)
+        os.replace(txt_temp_path, txt_path)
+    except Exception as e:
+        logger.warning(f"Failed to save TXT version of chat {chat_name}: {e}")
+        if os.path.exists(txt_temp_path):
+            try:
+                os.remove(txt_temp_path)
+            except Exception:
+                pass
 
 def create_backup(username: str, chat_name: str, project: str = None):
     """Create timestamped backup before destructive operation"""
@@ -376,10 +433,17 @@ def load_daily_usage(username: str) -> dict:
     return {"date": today_utc, "tokens_used": 0}
 
 def save_daily_usage(username: str, data: dict):
-    """Save daily usage data"""
+    """Save daily usage data atomically"""
     path = get_daily_usage_path(username)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tuple[float, str]:
     """
@@ -480,10 +544,17 @@ def load_project_metadata(username: str, project: str) -> dict:
     return {"last_accessed": "1970-01-01T00:00:00"}
 
 def save_project_metadata(username: str, project: str, metadata: dict):
-    """Save project metadata"""
+    """Save project metadata atomically"""
     metadata_path = get_project_metadata_path(username, project)
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    temp_path = metadata_path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        os.replace(temp_path, metadata_path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 def update_project_last_accessed(username: str, project: str):
     """Update project's last_accessed timestamp"""
@@ -712,11 +783,16 @@ def get_chat(username: str, chat_name: str, project: str = None, limit: int = 30
     # Calculate slice for LAST N messages
     # offset=0 means "last 30 messages"
     # offset=30 means "30 messages before the last 30" (i.e., messages 30-60 from end)
-    start_idx = max(0, total_messages - limit - offset)
-    end_idx = total_messages - offset
-    
-    paginated_messages = all_messages[start_idx:end_idx]
-    has_more_messages = start_idx > 0
+    end_idx = max(0, total_messages - offset)  # Ensure non-negative
+    start_idx = max(0, end_idx - limit)
+
+    # Return empty list if offset is beyond all messages
+    if end_idx <= 0:
+        paginated_messages = []
+        has_more_messages = False
+    else:
+        paginated_messages = all_messages[start_idx:end_idx]
+        has_more_messages = start_idx > 0
     
     return ChatResponse(
         messages=paginated_messages,
@@ -877,9 +953,9 @@ def send_message(request: SendMessageRequest):
         if hasattr(usage, 'output_tokens_details') and usage.output_tokens_details:
             reasoning_tokens = getattr(usage.output_tokens_details, 'reasoning_tokens', 0) or 0
         
-        # Non-reasoning output tokens
-        text_output_tokens = output_tokens - reasoning_tokens
-        
+        # Non-reasoning output tokens (ensure non-negative in case of API inconsistency)
+        text_output_tokens = max(0, output_tokens - reasoning_tokens)
+
         total_tokens = input_tokens + output_tokens
         
         # Cost calculation (gpt-5.2 pricing)
@@ -933,10 +1009,24 @@ def send_message(request: SendMessageRequest):
             reasoning=reasoning_summary
         )
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is (they have sanitized messages)
+        data["messages"].pop()
+        raise
     except Exception as e:
         # Remove the user message we added since it failed
         data["messages"].pop()
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log full error for debugging, but return sanitized message to client
+        logger.error(f"Error in send_message for user {username}: {e}", exc_info=True)
+        # Provide user-friendly error without exposing internal details
+        error_msg = "Failed to get response from AI. Please try again."
+        if "api_key" in str(e).lower() or "authentication" in str(e).lower():
+            error_msg = "API key error. Please check your API key is valid."
+        elif "rate" in str(e).lower() or "limit" in str(e).lower():
+            error_msg = "Rate limit exceeded. Please wait a moment and try again."
+        elif "timeout" in str(e).lower():
+            error_msg = "Request timed out. Please try again."
+        raise HTTPException(status_code=500, detail=error_msg)
 
 class RenameChatRequest(BaseModel):
     username: str
@@ -1249,7 +1339,8 @@ def get_user_stats(username: str):
                 continue
             try:
                 msg_date = datetime.fromisoformat(msg["timestamp"]).date()
-            except:
+            except (ValueError, TypeError):
+                # Skip messages with malformed timestamps
                 continue
             
             # Track active days
@@ -1273,15 +1364,17 @@ def get_user_stats(username: str):
                 elif part.startswith("R:"):
                     msg_reasoning = int(part[2:])
             
-            # Parse cost string like "$0.0123" or "$0.0123 (free: $0.01)"
+            # Parse cost string like "$0.0123" or "$0.0123 (free: $0.01)" or "free"
             cost_str = msg.get("cost", "$0")
             msg_cost = 0.0
-            try:
-                # Extract just the first dollar amount
-                cost_part = cost_str.split()[0].replace("$", "")
-                msg_cost = float(cost_part)
-            except:
-                pass
+            if cost_str and cost_str != "free":
+                try:
+                    # Extract just the first dollar amount
+                    cost_part = cost_str.split()[0].replace("$", "")
+                    msg_cost = float(cost_part)
+                except (ValueError, IndexError, AttributeError):
+                    # Silently default to 0 for malformed cost strings
+                    pass
             
             # Add to monthly totals
             if msg_date >= current_month_start:
