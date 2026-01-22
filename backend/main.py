@@ -764,7 +764,8 @@ class ChatMessage(BaseModel):
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
 
 class ChatResponse(BaseModel):
-    messages: list[ChatMessage]
+    messages: list[ChatMessage]  # Current branch path (paginated, for display)
+    all_messages: list[ChatMessage] | None = None  # Full message tree (for branch navigation)
     stats: dict
     total_messages: int
     has_more_messages: bool
@@ -965,6 +966,7 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
 
     return ChatResponse(
         messages=paginated_messages,
+        all_messages=all_messages,  # Full tree for branch navigation
         stats=data.get("stats", create_empty_stats()),
         total_messages=total_messages,
         has_more_messages=has_more_messages,

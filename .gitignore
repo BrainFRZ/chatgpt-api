@@ -4,3 +4,4 @@
 !frontend/src/App.tsx
 !backend/main.py
 !backend/migrate_to_branching.py
+!backend/test_branching.py

@@ -571,7 +571,7 @@ function App() {
 
       const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
       setMessages(loadedMessages);
-      setAllMessages(chatData.messages);
+      setAllMessages(chatData.all_messages || chatData.messages);  // Full tree for branch navigation
       setTotalMessages(chatData.total_messages);
       setHasMoreMessages(chatData.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
@@ -1237,7 +1237,7 @@ function App() {
       
       const loadedMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
       setMessages(loadedMessages);
-      setAllMessages(data.messages);  // Store full message list for branching
+      setAllMessages(data.all_messages || data.messages);  // Full tree for branch navigation
       setCurrentLeafId(data.current_leaf_id || null);  // Track current branch
       setStats(data.stats);
       setContextStartIndex(1);
