@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 from typing import Optional, List
 from pathlib import Path
+from contextlib import contextmanager
 import os
 import json
 import shutil
@@ -15,12 +16,47 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import tiktoken
 import logging
+import fcntl
 
 # Configure logging for debugging
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# Configuration Constants
+# ============================================================
+
+# File storage
+DATA_DIR = Path("/home/chatgpt/data/users")
+
+# Context window management
+CONTEXT_WINDOW_THRESHOLD = 275_000  # Start trimming when exceeding this
+CONTEXT_WINDOW_TARGET = 225_000     # Trim down to this target
+
+# Free token allowance
+FREE_TOKENS_PER_DAY = 250_000
+
+# Output limits
+MAX_OUTPUT_TOKENS_FREE_CHAT = 1200  # Only applies to non-project chats
+
+# Model configuration
+MODEL_NAME = "gpt-5.2"
+PROMPT_CACHE_RETENTION = "24h"
+
+# Pricing (per million tokens)
+PRICING = {
+    "input_new": 1.75,
+    "input_cached": 0.175,
+    "output": 14.0,
+    "reasoning": 14.0,
+}
+
+# ============================================================
+# Utility Functions
+# ============================================================
+
 # Cache the tiktoken encoder for performance (avoid creating new instance on every call)
 _token_encoder = None
+
 
 def get_token_encoder():
     """Get cached tiktoken encoder instance"""
@@ -28,6 +64,77 @@ def get_token_encoder():
     if _token_encoder is None:
         _token_encoder = tiktoken.get_encoding("cl100k_base")
     return _token_encoder
+
+
+@contextmanager
+def file_lock(path: str, exclusive: bool = True):
+    """
+    Context manager for file locking to prevent race conditions.
+    Uses fcntl for POSIX file locking.
+
+    Args:
+        path: Path to the file to lock (creates .lock file)
+        exclusive: True for write lock, False for read lock
+    """
+    lock_path = path + '.lock'
+    lock_file = open(lock_path, 'w')
+    try:
+        if exclusive:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+        yield
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def atomic_write_json(path: str, data: dict, indent: int = 2) -> None:
+    """
+    Atomically write JSON data to a file using write-to-temp-then-rename.
+    This prevents file corruption if the process crashes mid-write.
+
+    Args:
+        path: Destination file path
+        data: Dictionary to serialize as JSON
+        indent: JSON indentation (default 2)
+    """
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            json.dump(data, f, indent=indent)
+        os.replace(temp_path, path)  # Atomic on POSIX systems
+    except Exception:
+        # Clean up temp file if write/rename failed
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
+
+
+def atomic_write_text(path: str, content: str) -> None:
+    """
+    Atomically write text content to a file using write-to-temp-then-rename.
+
+    Args:
+        path: Destination file path
+        content: Text content to write
+    """
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w') as f:
+            f.write(content)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
+
 
 app = FastAPI()
 
@@ -38,8 +145,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-DATA_DIR = Path("/home/chatgpt/data/users")
 
 # ============================================================
 # Helper Functions
@@ -146,17 +251,9 @@ def load_persistent_stats(username: str) -> dict:
                             except Exception as e:
                                 logger.warning(f"Failed to migrate stats from project chat {f}: {e}")
         
-        # Save migrated stats if we found any (atomic write)
+        # Save migrated stats if we found any
         if migrated["total_prompts"] > 0:
-            temp_path = path + '.tmp'
-            try:
-                with open(temp_path, 'w') as f:
-                    json.dump(migrated, f, indent=2)
-                os.replace(temp_path, path)
-            except Exception:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                raise
+            atomic_write_json(path, migrated)
             return migrated
     
     return {
@@ -169,30 +266,23 @@ def load_persistent_stats(username: str) -> dict:
     }
 
 def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int, output_tokens: int, reasoning_tokens: int, cost: float):
-    """Add to lifetime stats (never subtract)"""
-    stats = load_persistent_stats(username)
-    stats["total_prompts"] += 1
-    stats["total_input_tokens"] += input_tokens
-    stats["total_cached_tokens"] += cached_tokens
-    stats["total_output_tokens"] += output_tokens
-    stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + reasoning_tokens
-    stats["total_cost"] += cost
-    
-    # Track first prompt date
-    if stats["first_prompt_date"] is None:
-        stats["first_prompt_date"] = date.today().isoformat()
-
-    # Atomic write
+    """Add to lifetime stats (never subtract). Uses file locking for concurrent access safety."""
     path = get_persistent_stats_path(username)
-    temp_path = path + '.tmp'
-    try:
-        with open(temp_path, 'w') as f:
-            json.dump(stats, f, indent=2)
-        os.replace(temp_path, path)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
+
+    with file_lock(path):
+        stats = load_persistent_stats(username)
+        stats["total_prompts"] += 1
+        stats["total_input_tokens"] += input_tokens
+        stats["total_cached_tokens"] += cached_tokens
+        stats["total_output_tokens"] += output_tokens
+        stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + reasoning_tokens
+        stats["total_cost"] += cost
+
+        # Track first prompt date
+        if stats["first_prompt_date"] is None:
+            stats["first_prompt_date"] = date.today().isoformat()
+
+        atomic_write_json(path, stats)
 
 def get_chat_path(username: str, chat_name: str, project: str = None) -> str:
     if project:
@@ -216,7 +306,11 @@ def count_tokens(text: str) -> int:
     enc = get_token_encoder()
     return len(enc.encode(text))
 
-def calculate_context_window(messages: list, threshold: int = 275000, target: int = 225000) -> int:
+def calculate_context_window(
+    messages: list,
+    threshold: int = CONTEXT_WINDOW_THRESHOLD,
+    target: int = CONTEXT_WINDOW_TARGET
+) -> int:
     """
     Calculate context_start_index for rolling context window.
 
@@ -341,37 +435,20 @@ def generate_txt_from_chat(data: dict) -> str:
     return "\n".join(lines)
 
 def save_chat(username: str, chat_name: str, data: dict, project: str = None):
-    """Save chat data atomically using write-to-temp-then-rename pattern"""
+    """Save chat data atomically with file locking for concurrent access safety."""
     path = get_chat_path(username, chat_name, project)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # Atomic write for JSON: write to temp file, then rename
-    temp_path = path + '.tmp'
-    try:
-        with open(temp_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_path, path)  # Atomic on POSIX systems
-    except Exception:
-        # Clean up temp file if rename failed
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
+    with file_lock(path):
+        atomic_write_json(path, data)
 
-    # Save TXT version (non-critical, failure is logged but not fatal)
-    txt_path = path.replace('.json', '.txt')
-    txt_temp_path = txt_path + '.tmp'
-    try:
-        txt_content = generate_txt_from_chat(data)
-        with open(txt_temp_path, 'w') as f:
-            f.write(txt_content)
-        os.replace(txt_temp_path, txt_path)
-    except Exception as e:
-        logger.warning(f"Failed to save TXT version of chat {chat_name}: {e}")
-        if os.path.exists(txt_temp_path):
-            try:
-                os.remove(txt_temp_path)
-            except Exception:
-                pass
+        # Save TXT version (non-critical, failure is logged but not fatal)
+        txt_path = path.replace('.json', '.txt')
+        try:
+            txt_content = generate_txt_from_chat(data)
+            atomic_write_text(txt_path, txt_content)
+        except Exception as e:
+            logger.warning(f"Failed to save TXT version of chat {chat_name}: {e}")
 
 def create_backup(username: str, chat_name: str, project: str = None):
     """Create timestamped backup before destructive operation"""
@@ -433,25 +510,16 @@ def load_daily_usage(username: str) -> dict:
     return {"date": today_utc, "tokens_used": 0}
 
 def save_daily_usage(username: str, data: dict):
-    """Save daily usage data atomically"""
+    """Save daily usage data atomically with file locking."""
     path = get_daily_usage_path(username)
-    temp_path = path + '.tmp'
-    try:
-        with open(temp_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_path, path)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
+    with file_lock(path):
+        atomic_write_json(path, data)
 
 def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tuple[float, str]:
     """
-    Apply free tokens (250k per day, resets at 0:00 UTC).
+    Apply free tokens (resets at 0:00 UTC).
     Returns: (actual_cost, cost_display_string)
     """
-    FREE_TOKENS_PER_DAY = 250_000
-    
     # Load current usage
     usage = load_daily_usage(username)
     tokens_used = usage["tokens_used"]
@@ -544,17 +612,9 @@ def load_project_metadata(username: str, project: str) -> dict:
     return {"last_accessed": "1970-01-01T00:00:00"}
 
 def save_project_metadata(username: str, project: str, metadata: dict):
-    """Save project metadata atomically"""
+    """Save project metadata atomically."""
     metadata_path = get_project_metadata_path(username, project)
-    temp_path = metadata_path + '.tmp'
-    try:
-        with open(temp_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        os.replace(temp_path, metadata_path)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise
+    atomic_write_json(metadata_path, metadata)
 
 def update_project_last_accessed(username: str, project: str):
     """Update project's last_accessed timestamp"""
@@ -903,10 +963,10 @@ def send_message(request: SendMessageRequest):
         
         # Set max_output_tokens for free chats only (no cap on project chats)
         api_params = {
-            "model": "gpt-5.2",
+            "model": MODEL_NAME,
             "input": messages_for_api,
             "store": False,
-            "prompt_cache_retention": "24h",
+            "prompt_cache_retention": PROMPT_CACHE_RETENTION,
             "prompt_cache_key": f"redvelveteer-86171435-{username}-{project_part}-{request.chat_name}",
             "reasoning": {
                 "effort": "medium",
@@ -916,7 +976,7 @@ def send_message(request: SendMessageRequest):
         
         # Add output token limit only for free chats (not in a project)
         if not request.project:
-            api_params["max_output_tokens"] = 1200
+            api_params["max_output_tokens"] = MAX_OUTPUT_TOKENS_FREE_CHAT
         
         response = client.responses.create(**api_params)
         
@@ -958,14 +1018,14 @@ def send_message(request: SendMessageRequest):
 
         total_tokens = input_tokens + output_tokens
         
-        # Cost calculation (gpt-5.2 pricing)
-        input_cost = new_input_tokens * 1.75 / 1_000_000
-        cached_cost = cached_tokens * 0.175 / 1_000_000
-        output_cost = text_output_tokens * 14 / 1_000_000
-        reasoning_cost = reasoning_tokens * 14 / 1_000_000  # Same rate as output for now
+        # Cost calculation using configured pricing
+        input_cost = new_input_tokens * PRICING["input_new"] / 1_000_000
+        cached_cost = cached_tokens * PRICING["input_cached"] / 1_000_000
+        output_cost = text_output_tokens * PRICING["output"] / 1_000_000
+        reasoning_cost = reasoning_tokens * PRICING["reasoning"] / 1_000_000
         total_cost = input_cost + cached_cost + output_cost + reasoning_cost
-        
-        # Apply free tokens (250k/day, resets 0:00 UTC)
+
+        # Apply free tokens (resets 0:00 UTC)
         actual_cost, cost_str = apply_free_tokens(username, total_tokens, total_cost)
         
         tokens_str = f"I:{new_input_tokens} C:{cached_tokens} O:{text_output_tokens} R:{reasoning_tokens} T:{total_tokens}"
@@ -1478,7 +1538,6 @@ def get_user_stats(username: str):
 @app.get("/api/free-tokens/{username}")
 def get_free_tokens(username: str):
     """Get remaining free tokens for today"""
-    FREE_TOKENS_PER_DAY = 250_000
     usage = load_daily_usage(username)
     tokens_used = usage["tokens_used"]
     remaining = max(0, FREE_TOKENS_PER_DAY - tokens_used)
