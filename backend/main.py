@@ -1094,14 +1094,15 @@ def send_message(request: SendMessageRequest):
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
 
-        # Build user content, prepending attached files and updates
+        # Build user content, prepending attached files and appending updates
         user_content = build_message_content(branch_path[-1])
 
-        # Prepend updates if present
-        # This keeps updates in the uncached portion while history stays cached
+        # Append updates if present
+        # This keeps updates in the uncached portion while allowing history to cache properly
+        # (Appending rather than prepending ensures the user message prefix matches history)
         updates_text = data.get("updates", "").strip()
         if updates_text:
-            user_content = f"[CONTEXT UPDATES - Reference as needed, respond to the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n{user_content}"
+            user_content = f"{user_content}\n\n[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
 
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
