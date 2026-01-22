@@ -1,0 +1,4 @@
+*
+!.gitignore
+!frontend/App.tsx
+!backend/main.py
