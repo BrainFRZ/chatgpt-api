@@ -1094,19 +1094,20 @@ def send_message(request: SendMessageRequest):
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
 
-        # Build user content, prepending attached files and appending updates
+        # Build user content (with attached files only, no updates)
         user_content = build_message_content(branch_path[-1])
-
-        # Append updates if present
-        # This keeps updates in the uncached portion while allowing history to cache properly
-        # (Appending rather than prepending ensures the user message prefix matches history)
-        updates_text = data.get("updates", "").strip()
-        if updates_text:
-            user_content = f"{user_content}\n\n[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
-
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
+        # Build messages list
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
+
+        # Add updates as a separate trailing message if present
+        # This keeps the user message content identical between when sent and when in history,
+        # allowing the cache to match at message boundaries rather than mid-content
+        updates_text = data.get("updates", "").strip()
+        if updates_text:
+            updates_msg = {"role": "user", "content": f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"}
+            messages_for_api.append(updates_msg)
         
         # Include project in cache key to avoid collisions between same-named chats in different projects
         # Sanitize project name for cache key (replace spaces and special chars with hyphens)
