@@ -44,6 +44,8 @@ interface LoginResponse {
 }
 
 interface ChatMessage {
+  id?: string;  // Unique message ID (for branching)
+  parent_id?: string | null;  // ID of parent message (for branching)
   role: string;
   content: string;
   timestamp?: string;
@@ -274,7 +276,9 @@ function App() {
   const [editingName, setEditingName] = useState('');
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [editingProjectName, setEditingProjectName] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);  // Current branch path (displayed messages)
+  const [allMessages, setAllMessages] = useState<ChatMessage[]>([]);  // Full message tree (for branch navigation)
+  const [currentLeafId, setCurrentLeafId] = useState<string | null>(null);  // Current branch leaf
   const [totalMessages, setTotalMessages] = useState(0); // Track total messages in full conversation
   const [contextStartIndex, setContextStartIndex] = useState(1); // Index of first message in context (1 = all in context)
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
@@ -389,10 +393,12 @@ function App() {
   // Reset chat-specific state (called when switching/closing chats)
   const resetChatState = () => {
     clearPendingTimeouts();
-    
+
     setCurrentChat(null);
     currentChatRef.current = null;
     setMessages([]);
+    setAllMessages([]);
+    setCurrentLeafId(null);
     setTotalMessages(0);
     setContextStartIndex(1);
     setHasMoreMessages(false);
@@ -477,6 +483,103 @@ function App() {
       isProjectStale: () => currentProjectRef.current !== project,
       isStale: () => currentChatRef.current !== chat || currentProjectRef.current !== project,
     };
+  };
+
+  // ============================================================================
+  // BRANCHING HELPER FUNCTIONS
+  // Tree traversal utilities for branch navigation
+  // ============================================================================
+
+  // Build an index of messages by ID for O(1) lookup
+  const buildMessageIndex = (msgs: ChatMessage[]): Map<string, ChatMessage> => {
+    const index = new Map<string, ChatMessage>();
+    for (const msg of msgs) {
+      if (msg.id) index.set(msg.id, msg);
+    }
+    return index;
+  };
+
+  // Get siblings of a message (messages with the same parent)
+  const getSiblings = (msgs: ChatMessage[], messageId: string): ChatMessage[] => {
+    const index = buildMessageIndex(msgs);
+    const target = index.get(messageId);
+    if (!target) return [];
+
+    const parentId = target.parent_id;
+    const siblings = msgs.filter(m => m.parent_id === parentId);
+
+    // Sort by timestamp for consistent ordering
+    siblings.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    return siblings;
+  };
+
+  // Get the path from root to a specific message
+  const getPathToMessage = (msgs: ChatMessage[], leafId: string): ChatMessage[] => {
+    if (!msgs.length || !leafId) return [];
+
+    const index = buildMessageIndex(msgs);
+    const path: ChatMessage[] = [];
+    let currentId: string | null | undefined = leafId;
+
+    while (currentId) {
+      const msg = index.get(currentId);
+      if (!msg) break;
+      path.unshift(msg);
+      currentId = msg.parent_id;
+    }
+
+    return path;
+  };
+
+  // Switch to a different branch by selecting a sibling message
+  const switchBranch = async (targetMessageId: string) => {
+    if (!user || !currentChat) return;
+
+    const ctx = createContextGuard();
+
+    try {
+      const projectParam = ctx.project ? `&project=${encodeURIComponent(ctx.project)}` : '';
+      const response = await fetch(
+        `/api/switch-branch/${encodeURIComponent(user.username)}/${encodeURIComponent(ctx.chat!)}?target_message_id=${encodeURIComponent(targetMessageId)}${projectParam}`,
+        { method: 'POST' }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        setError(data.detail || 'Failed to switch branch');
+        return;
+      }
+
+      const data = await response.json();
+
+      if (ctx.isStale()) return;
+
+      // Update current leaf and fetch the new branch
+      setCurrentLeafId(data.new_leaf_id);
+
+      // Fetch the updated chat to get the new branch path
+      const chatUrl = ctx.project
+        ? `/api/chat/${user.username}/${ctx.chat}?project=${ctx.project}&leaf_id=${data.new_leaf_id}&limit=30&offset=0`
+        : `/api/chat/${user.username}/${ctx.chat}?leaf_id=${data.new_leaf_id}&limit=30&offset=0`;
+
+      const chatResponse = await fetch(chatUrl);
+      if (!chatResponse.ok) return;
+
+      const chatData = await chatResponse.json();
+
+      if (ctx.isStale()) return;
+
+      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
+      setMessages(loadedMessages);
+      setAllMessages(chatData.messages);
+      setTotalMessages(chatData.total_messages);
+      setHasMoreMessages(chatData.has_more_messages || false);
+      setMessageOffset(loadedMessages.length);
+
+    } catch (err) {
+      console.error('Error switching branch:', err);
+      setError('Could not switch branch');
+    }
   };
 
   // ============================================================================
@@ -1134,10 +1237,12 @@ function App() {
       
       const loadedMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
       setMessages(loadedMessages);
+      setAllMessages(data.messages);  // Store full message list for branching
+      setCurrentLeafId(data.current_leaf_id || null);  // Track current branch
       setStats(data.stats);
       setContextStartIndex(1);
       setExpandedReasoning(new Set());
-      
+
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
         console.error('Backend returned invalid total_messages:', data.total_messages);
@@ -1433,60 +1538,45 @@ function App() {
 
   const saveEditedMessage = async () => {
     if (!user || !currentChat || editingMessageIndex === null || !editingMessageContent.trim()) return;
-    
+
     // Bounds check - messages array might have changed since edit started
     if (editingMessageIndex < 0 || editingMessageIndex >= messages.length) {
       setError('Message index out of bounds. Please cancel and try again.');
       cancelEditMessage();
       return;
     }
-    
+
     const ctx = createContextGuard();
-    
+
     // Save original state for rollback
     const originalMessages = [...messages];
-    const originalEditingIndex = editingMessageIndex;
-    const originalEditingContent = editingMessageContent;
-    
+    const originalAllMessages = [...allMessages];
+    const originalLeafId = currentLeafId;
+
     setIsLoading(prev => new Set(prev).add(ctx.chat!));
-    
+
     try {
-      // Get original message to preserve attached files
+      // Get original message to preserve attached files and find parent
       const originalMessage = messages[editingMessageIndex];
-      
-      // Truncate messages array to edited message (inclusive)
+
+      // For branching: the new message becomes a sibling of the original
+      // So its parent is the same as the original message's parent
+      const parentId = originalMessage.parent_id || null;
+
+      // Optimistically show truncated messages + placeholder for new edit
       const truncatedMessages = messages.slice(0, editingMessageIndex);
-      
-      // Add edited message, preserving attached files
       const editedMessage: ChatMessage = {
         role: 'user',
         content: editingMessageContent.trim(),
         attached_files: originalMessage.attached_files
       };
-      
       const newMessages = [...truncatedMessages, editedMessage];
       setMessages(newMessages);
-      
+
       // Clear editing state
-      const displayIndexToEdit = editingMessageIndex;
       setEditingMessageIndex(null);
       setEditingMessageContent('');
-      
-      // Calculate actual index in the FULL conversation
-      const firstMessageActualIndex = totalMessages - messageOffset;
-      const actualIndexInFullConversation = firstMessageActualIndex + displayIndexToEdit;
-      
-      // Validation
-      if (actualIndexInFullConversation < 1 || actualIndexInFullConversation >= totalMessages) {
-        const errorMsg = `Invalid truncation index: ${actualIndexInFullConversation}. Please refresh and try again.`;
-        console.error(errorMsg);
-        setError(errorMsg);
-        setMessages(originalMessages);
-        setEditingMessageIndex(originalEditingIndex);
-        setEditingMessageContent(originalEditingContent);
-        return; // finally block will clean up isLoading
-      }
-      
+
       const response = await fetch('/api/send-message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1495,45 +1585,62 @@ function App() {
           chat_name: ctx.chat,
           message: editedMessage.content,
           project: ctx.project,
-          truncate_to_index: actualIndexInFullConversation,
+          parent_id: parentId,  // Use parent_id for branching instead of truncate_to_index
           attached_files: originalMessage.attached_files || undefined
         })
       });
 
       if (response.ok) {
         const data = await response.json();
-        
+
         // Defensive check for malformed response
         if (!data.assistant_message) {
           console.error('Invalid API response: missing assistant_message', data);
           setError('Server returned invalid response');
           if (!ctx.isStale()) {
             setMessages(originalMessages);
+            setAllMessages(originalAllMessages);
+            setCurrentLeafId(originalLeafId);
           }
           return;
         }
-        
+
+        // Build complete new user and assistant messages with IDs from response
+        const newUserMessage: ChatMessage = {
+          id: data.user_message_id,
+          parent_id: parentId,
+          role: 'user',
+          content: editedMessage.content,
+          timestamp: new Date().toISOString(),
+          attached_files: originalMessage.attached_files
+        };
+
         const assistantMessage: ChatMessage = {
+          id: data.assistant_message_id,
+          parent_id: data.user_message_id,
           role: 'assistant',
           content: data.assistant_message,
+          timestamp: new Date().toISOString(),
           tokens: data.tokens,
           cost: data.cost,
           reasoning: data.reasoning
         };
-        
+
         if (!ctx.isStale()) {
-          const finalMessages = [...newMessages, assistantMessage];
+          // Update displayed messages (the new branch path)
+          const finalMessages = [...truncatedMessages, newUserMessage, assistantMessage];
           setMessages(finalMessages);
+
+          // Add the new messages to the full tree
+          setAllMessages(prev => [...prev, newUserMessage, assistantMessage]);
+
+          // Update current leaf to the new assistant message
+          setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
-          // Calculate new total: backend truncated to truncate_to_index, then added user + assistant
-          const newTotalMessages = actualIndexInFullConversation + 2;
-          setTotalMessages(newTotalMessages);
-          // There may still be older messages before the truncation point
-          // hasMoreMessages is true if there are messages before what we're displaying
-          // After edit, we display from the edit point onward, so check if there are messages before that
-          const hasOlderMessages = actualIndexInFullConversation > 1; // > 1 because index 0 is system
-          setHasMoreMessages(hasOlderMessages);
+          setTotalMessages(finalMessages.length + 1); // +1 for system message
+          setHasMoreMessages(truncatedMessages.length > 0);
           setMessageOffset(finalMessages.length);
           requestAnimationFrame(() => scrollToBottom());
         }
@@ -1542,6 +1649,8 @@ function App() {
         setError(data.detail || 'Failed to regenerate response');
         if (!ctx.isStale()) {
           setMessages(originalMessages);
+          setAllMessages(originalAllMessages);
+          setCurrentLeafId(originalLeafId);
         }
       }
     } catch (err) {
@@ -1549,6 +1658,8 @@ function App() {
       setError('Could not save edited message');
       if (!ctx.isStale()) {
         setMessages(originalMessages);
+        setAllMessages(originalAllMessages);
+        setCurrentLeafId(originalLeafId);
       }
     } finally {
       setIsLoading(prev => {
@@ -1643,18 +1754,19 @@ function App() {
     const ctx = createContextGuard();
     const messageText = newMessage;
     const filesToSend = [...stagedFiles];
-    
+
     setNewMessage('');
     setStagedFiles([]);
     setIsLoading(prev => new Set(prev).add(ctx.chat!));
 
-    // Optimistically add user message
-    setMessages(prev => [...prev, {
+    // Optimistically add user message (without ID yet - will be updated from response)
+    const optimisticUserMsg: ChatMessage = {
       role: 'user',
       content: messageText,
       timestamp: new Date().toISOString(),
       attached_files: filesToSend.length > 0 ? filesToSend : undefined
-    }]);
+    };
+    setMessages(prev => [...prev, optimisticUserMsg]);
     setTotalMessages(prev => prev + 1);
     requestAnimationFrame(() => scrollToBottom());
 
@@ -1684,15 +1796,34 @@ function App() {
             setStagedFiles(filesToSend);
             return;
           }
-          
-          setMessages(prev => [...prev, {
+
+          // Build complete messages with IDs from response
+          const userMsgWithId: ChatMessage = {
+            ...optimisticUserMsg,
+            id: data.user_message_id,
+            parent_id: currentLeafId  // Parent is the previous leaf
+          };
+
+          const assistantMessage: ChatMessage = {
+            id: data.assistant_message_id,
+            parent_id: data.user_message_id,
             role: 'assistant',
             content: data.assistant_message,
             timestamp: new Date().toISOString(),
             tokens: data.tokens,
             cost: data.cost,
             reasoning: data.reasoning
-          }]);
+          };
+
+          // Update displayed messages - replace optimistic user msg with complete one
+          setMessages(prev => [...prev.slice(0, -1), userMsgWithId, assistantMessage]);
+
+          // Add to the full message tree
+          setAllMessages(prev => [...prev, userMsgWithId, assistantMessage]);
+
+          // Update current leaf
+          setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+
           setTotalMessages(prev => prev + 1);
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
@@ -2500,6 +2631,43 @@ function App() {
                               {msg.tokens && (
                                 <span style={styles.messageTokens}>{msg.tokens} | {msg.cost}</span>
                               )}
+                              {/* Branch navigation - show only for user messages with siblings */}
+                              {msg.role === 'user' && msg.id && (() => {
+                                const siblings = getSiblings(allMessages, msg.id);
+                                if (siblings.length <= 1) return null;
+                                const currentIndex = siblings.findIndex(s => s.id === msg.id);
+                                const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
+                                const nextSibling = currentIndex < siblings.length - 1 ? siblings[currentIndex + 1] : null;
+                                return (
+                                  <span style={styles.branchNav}>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); if (prevSibling?.id) switchBranch(prevSibling.id); }}
+                                      disabled={!prevSibling}
+                                      style={{
+                                        ...styles.branchNavButton,
+                                        opacity: prevSibling ? 1 : 0.3,
+                                        cursor: prevSibling ? 'pointer' : 'default'
+                                      }}
+                                      title="Previous edit"
+                                    >
+                                      ◀
+                                    </button>
+                                    <span style={styles.branchNavText}>{currentIndex + 1}/{siblings.length}</span>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); if (nextSibling?.id) switchBranch(nextSibling.id); }}
+                                      disabled={!nextSibling}
+                                      style={{
+                                        ...styles.branchNavButton,
+                                        opacity: nextSibling ? 1 : 0.3,
+                                        cursor: nextSibling ? 'pointer' : 'default'
+                                      }}
+                                      title="Next edit"
+                                    >
+                                      ▶
+                                    </button>
+                                  </span>
+                                );
+                              })()}
                               {msg.timestamp && (
                                 <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
                               )}
@@ -3418,6 +3586,27 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '0.75rem',
     color: '#666',
     marginLeft: 'auto',
+  },
+  branchNav: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '0.75rem',
+    color: '#888',
+  },
+  branchNavButton: {
+    background: 'none',
+    border: 'none',
+    color: '#888',
+    cursor: 'pointer',
+    padding: '2px 4px',
+    fontSize: '0.7rem',
+    borderRadius: '3px',
+    transition: 'background-color 0.2s, color 0.2s',
+  },
+  branchNavText: {
+    minWidth: '30px',
+    textAlign: 'center' as const,
   },
   reasoningContainer: {
     backgroundColor: '#252540',
