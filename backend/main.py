@@ -536,6 +536,76 @@ def save_chat(username: str, chat_name: str, data: dict, project: str = None):
     with file_lock(path):
         atomic_write_json(path, data)
 
+    # Update the chat index with last_accessed timestamp
+    last_accessed = data.get("stats", {}).get("last_accessed", datetime.now().isoformat())
+    update_chat_index(username, chat_name, last_accessed, project)
+
+
+def get_chat_index_path(username: str, project: str = None) -> str:
+    """Get path to the chat index file for a user or project."""
+    if project:
+        return os.path.join(get_project_dir(username, project), "chat_index.json")
+    return os.path.join(get_user_dir(username), "chat_index.json")
+
+
+def load_chat_index(username: str, project: str = None) -> dict:
+    """Load the chat index, returning empty dict if not found."""
+    path = get_chat_index_path(username, project)
+    if os.path.exists(path):
+        try:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_chat_index(username: str, index: dict, project: str = None):
+    """Save the chat index atomically."""
+    path = get_chat_index_path(username, project)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path):
+        atomic_write_json(path, index)
+
+
+def update_chat_index(username: str, chat_name: str, last_accessed: str, project: str = None):
+    """Update a single chat's entry in the index."""
+    index = load_chat_index(username, project)
+    index[chat_name] = {"last_accessed": last_accessed}
+    save_chat_index(username, index, project)
+
+
+def remove_from_chat_index(username: str, chat_name: str, project: str = None):
+    """Remove a chat from the index (when deleted)."""
+    index = load_chat_index(username, project)
+    if chat_name in index:
+        del index[chat_name]
+        save_chat_index(username, index, project)
+
+
+def rebuild_chat_index(username: str, project: str = None) -> dict:
+    """Rebuild the chat index by scanning all chat files. Used as fallback."""
+    if project:
+        chat_dir = get_project_dir(username, project)
+    else:
+        chat_dir = get_user_dir(username)
+
+    if not os.path.exists(chat_dir):
+        return {}
+
+    index = {}
+    for f in os.listdir(chat_dir):
+        if f.startswith("chat_") and f.endswith(".json"):
+            chat_name = f[5:-5]
+            chat_data = load_chat(username, chat_name, project)
+            if chat_data:
+                last_accessed = chat_data.get("stats", {}).get("last_accessed", "1970-01-01T00:00:00")
+                index[chat_name] = {"last_accessed": last_accessed}
+
+    save_chat_index(username, index, project)
+    return index
+
+
 def create_backup(username: str, chat_name: str, project: str = None):
     """Create timestamped backup before destructive operation"""
     # Load current chat
@@ -738,6 +808,18 @@ class ProjectChatsResponse(BaseModel):
     total: int
     has_more: bool
 
+class ChatSummary(BaseModel):
+    name: str
+    last_message: str
+    last_active: str
+    message_count: int
+    cost: float
+
+class ProjectChatsDetailedResponse(BaseModel):
+    chats: list[ChatSummary]
+    total: int
+    has_more: bool
+
 class AttachedFile(BaseModel):
     filename: str
     content: str
@@ -835,26 +917,35 @@ def set_api_key(request: ApiKeyRequest):
 @app.get("/api/chats/{username}", response_model=ChatListResponse)
 def list_chats(username: str, limit: int = 20, offset: int = 0):
     user_dir = get_user_dir(username)
-    
+
     if not os.path.exists(user_dir):
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Get chats with their last_accessed timestamps
-    chats_with_time = []
+
+    # Get actual chat files on disk
+    chat_files = set()
     for f in os.listdir(user_dir):
         if f.startswith("chat_") and f.endswith(".json"):
-            # Strip prefix: chat_name.json -> name
-            chat_name = f[5:-5]  # Remove "chat_" prefix and ".json" suffix
-            chat_data = load_chat(username, chat_name, None)
-            if chat_data:
-                # Get last_accessed from stats, default to epoch if not found
-                last_accessed = chat_data.get("stats", {}).get("last_accessed", "1970-01-01T00:00:00")
-                chats_with_time.append((chat_name, last_accessed))
-    
+            chat_files.add(f[5:-5])  # Remove "chat_" prefix and ".json" suffix
+
+    # Try to use the index for efficiency
+    index = load_chat_index(username, None)
+
+    # Rebuild index if it's missing entries or has stale entries
+    indexed_chats = set(index.keys())
+    if chat_files != indexed_chats:
+        index = rebuild_chat_index(username, None)
+
+    # Build sorted list from index
+    chats_with_time = [
+        (name, data.get("last_accessed", "1970-01-01T00:00:00"))
+        for name, data in index.items()
+        if name in chat_files  # Only include chats that still exist
+    ]
+
     # Sort by last_accessed (most recent first)
     chats_with_time.sort(key=lambda x: x[1], reverse=True)
     all_chats = [name for name, _ in chats_with_time]
-    
+
     # Apply pagination
     total = len(all_chats)
     paginated_chats = all_chats[offset:offset + limit]
@@ -1444,24 +1535,30 @@ class UserStatsResponse(BaseModel):
 @app.post("/api/rename-chat")
 def rename_chat(request: RenameChatRequest):
     username = request.username.strip().lower()
-    
+
     if not validate_name(request.new_name):
         raise HTTPException(status_code=400, detail="Invalid chat name. Names cannot contain / \\ or control characters.")
-    
+
     old_path = get_chat_path(username, request.old_name, request.project)
     new_path = get_chat_path(username, request.new_name, request.project)
-    
+
     if not os.path.exists(old_path):
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     if os.path.exists(new_path):
         raise HTTPException(status_code=400, detail="A chat with that name already exists")
-    
+
     # Create backup before rename
     create_backup(username, request.old_name, request.project)
-    
+
     # Rename JSON file
     os.rename(old_path, new_path)
+
+    # Update chat index: remove old name, add new name with same timestamp
+    index = load_chat_index(username, request.project)
+    old_entry = index.pop(request.old_name, {"last_accessed": datetime.now().isoformat()})
+    index[request.new_name] = old_entry
+    save_chat_index(username, index, request.project)
 
     return {"status": "ok"}
 
@@ -1469,15 +1566,18 @@ def rename_chat(request: RenameChatRequest):
 def delete_chat(request: DeleteChatRequest):
     username = request.username.strip().lower()
     path = get_chat_path(username, request.chat_name, request.project)
-    
+
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     # Create backup before deletion
     create_backup(username, request.chat_name, request.project)
-    
+
     # Delete JSON file
     os.remove(path)
+
+    # Remove from chat index
+    remove_from_chat_index(username, request.chat_name, request.project)
 
     return {"status": "ok"}
 
@@ -1562,35 +1662,108 @@ def create_project(request: CreateProjectRequest):
 @app.get("/api/project-chats/{username}/{project}", response_model=ProjectChatsResponse)
 def list_project_chats(username: str, project: str, limit: int = 20, offset: int = 0):
     project_dir = get_project_dir(username, project)
-    
+
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
     # Update project's last_accessed timestamp
     update_project_last_accessed(username, project)
-    
-    # Get chats with their last_accessed timestamps
-    chats_with_time = []
+
+    # Get actual chat files on disk
+    chat_files = set()
     for f in os.listdir(project_dir):
         if f.startswith("chat_") and f.endswith(".json"):
-            # Strip prefix: chat_name.json -> name
-            chat_name = f[5:-5]  # Remove "chat_" prefix and ".json" suffix
-            chat_data = load_chat(username, chat_name, project)
-            if chat_data:
-                # Get last_accessed from stats, default to epoch if not found
-                last_accessed = chat_data.get("stats", {}).get("last_accessed", "1970-01-01T00:00:00")
-                chats_with_time.append((chat_name, last_accessed))
-    
+            chat_files.add(f[5:-5])
+
+    # Try to use the index for efficiency
+    index = load_chat_index(username, project)
+
+    # Rebuild index if it's missing entries or has stale entries
+    indexed_chats = set(index.keys())
+    if chat_files != indexed_chats:
+        index = rebuild_chat_index(username, project)
+
+    # Build sorted list from index
+    chats_with_time = [
+        (name, data.get("last_accessed", "1970-01-01T00:00:00"))
+        for name, data in index.items()
+        if name in chat_files
+    ]
+
     # Sort by last_accessed (most recent first)
     chats_with_time.sort(key=lambda x: x[1], reverse=True)
     all_chats = [name for name, _ in chats_with_time]
-    
+
     # Apply pagination
     total = len(all_chats)
     paginated_chats = all_chats[offset:offset + limit]
     has_more = (offset + limit) < total
     
     return ProjectChatsResponse(chats=paginated_chats, total=total, has_more=has_more)
+
+@app.get("/api/project-chats-detailed/{username}/{project}", response_model=ProjectChatsDetailedResponse)
+def list_project_chats_detailed(username: str, project: str, limit: int = 50, offset: int = 0):
+    """
+    Get detailed chat summaries for a project in a single request.
+    Returns chat name, last message preview, last active time, message count, and cost.
+    """
+    project_dir = get_project_dir(username, project)
+
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Update project's last_accessed timestamp
+    update_project_last_accessed(username, project)
+
+    # Get detailed info for each chat
+    chat_summaries = []
+    for f in os.listdir(project_dir):
+        if f.startswith("chat_") and f.endswith(".json"):
+            chat_name = f[5:-5]  # Remove "chat_" prefix and ".json" suffix
+            chat_data = load_chat(username, chat_name, project)
+            if chat_data:
+                stats = chat_data.get("stats", {})
+                last_accessed = stats.get("last_accessed", "1970-01-01T00:00:00")
+
+                # Get last non-system message for preview
+                all_messages = chat_data.get("messages", [])
+                current_leaf = chat_data.get("current_leaf_id")
+
+                # Get branch messages if migrated, else use linear order
+                if current_leaf and is_migrated(chat_data):
+                    branch_messages = get_path_to_root(all_messages, current_leaf)
+                else:
+                    branch_messages = all_messages
+
+                # Find last non-system message
+                last_message = ""
+                for msg in reversed(branch_messages):
+                    if msg.get("role") != "system":
+                        content = msg.get("content", "")
+                        last_message = content[:100] if content else ""
+                        break
+
+                chat_summaries.append({
+                    "name": chat_name,
+                    "last_message": last_message,
+                    "last_active": last_accessed,
+                    "message_count": len(branch_messages) - 1,  # Exclude system message
+                    "cost": stats.get("total_cost", 0.0)
+                })
+
+    # Sort by last_active (most recent first)
+    chat_summaries.sort(key=lambda x: x["last_active"], reverse=True)
+
+    # Apply pagination
+    total = len(chat_summaries)
+    paginated = chat_summaries[offset:offset + limit]
+    has_more = (offset + limit) < total
+
+    return ProjectChatsDetailedResponse(
+        chats=[ChatSummary(**c) for c in paginated],
+        total=total,
+        has_more=has_more
+    )
 
 @app.get("/api/user-stats/{username}", response_model=UserStatsResponse)
 def get_user_stats(username: str):

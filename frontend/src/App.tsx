@@ -1123,51 +1123,23 @@ function App() {
     if (!user) return;
 
     try {
-      const response = await fetch(`/api/project-chats/${user.username}/${projectName}`);
-      // Check if we're still on the same project after await
+      // Use the detailed endpoint to get all chat summaries in one request
+      const response = await fetch(`/api/project-chats-detailed/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
-      
+
       if (response.ok) {
         const data = await response.json();
-        // Double-check after second await
         if (currentProjectRef.current !== projectName) return;
-        
-        // Fetch details for each chat
-        const detailedChats: ChatCardInfo[] = [];
-        for (const chatName of data.chats) {
-          // Check at start of each iteration
-          if (currentProjectRef.current !== projectName) return;
-          
-          try {
-            const chatResponse = await fetch(`/api/chat/${user.username}/${chatName}?project=${projectName}&limit=1&offset=0`);
-            // Check after each await in loop
-            if (currentProjectRef.current !== projectName) return;
-            
-            if (chatResponse.ok) {
-              const chatData = await chatResponse.json();
-              if (currentProjectRef.current !== projectName) return;
-              
-              // Skip if malformed response
-              if (!chatData.messages || !Array.isArray(chatData.messages)) continue;
-              
-              const messages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
-              const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-              
-              detailedChats.push({
-                name: chatName,
-                lastMessage: lastMsg?.content?.substring(0, 100) || '',
-                lastActive: chatData.stats?.last_accessed || '',
-                messageCount: (chatData.total_messages || 1) - 1, // Subtract system message
-                cost: chatData.stats?.total_cost || 0
-              });
-            }
-          } catch {
-            // Skip chats we can't load
-          }
-        }
-        
-        // Final check before setting state
-        if (currentProjectRef.current !== projectName) return;
+
+        // Map backend response to frontend ChatCardInfo format
+        const detailedChats: ChatCardInfo[] = data.chats.map((chat: any) => ({
+          name: chat.name,
+          lastMessage: chat.last_message || '',
+          lastActive: chat.last_active || '',
+          messageCount: chat.message_count || 0,
+          cost: chat.cost || 0
+        }));
+
         setProjectChatsDetailed(detailedChats);
       }
     } catch (err) {
