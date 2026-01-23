@@ -1077,8 +1077,20 @@ function App() {
 
       if (response.ok) {
         const data = await response.json();
+        // Build status message
+        const messages: string[] = [];
+        if (data.total_overwritten > 0) {
+          const overwrittenNames = data.uploaded
+            .filter((f: any) => f.overwritten)
+            .map((f: any) => f.filename)
+            .join(', ');
+          messages.push(`Overwrote existing file${data.total_overwritten > 1 ? 's' : ''}: ${overwrittenNames}`);
+        }
         if (data.errors && data.errors.length > 0) {
-          setError(`Some files failed: ${data.errors.join(', ')}`);
+          messages.push(`Some files failed: ${data.errors.join(', ')}`);
+        }
+        if (messages.length > 0) {
+          setError(messages.join('. '));
         }
         await fetchProjectFiles(ctx.project!);
       } else {
@@ -1123,51 +1135,23 @@ function App() {
     if (!user) return;
 
     try {
-      const response = await fetch(`/api/project-chats/${user.username}/${projectName}`);
-      // Check if we're still on the same project after await
+      // Use the detailed endpoint to get all chat summaries in one request
+      const response = await fetch(`/api/project-chats-detailed/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
-      
+
       if (response.ok) {
         const data = await response.json();
-        // Double-check after second await
         if (currentProjectRef.current !== projectName) return;
-        
-        // Fetch details for each chat
-        const detailedChats: ChatCardInfo[] = [];
-        for (const chatName of data.chats) {
-          // Check at start of each iteration
-          if (currentProjectRef.current !== projectName) return;
-          
-          try {
-            const chatResponse = await fetch(`/api/chat/${user.username}/${chatName}?project=${projectName}&limit=1&offset=0`);
-            // Check after each await in loop
-            if (currentProjectRef.current !== projectName) return;
-            
-            if (chatResponse.ok) {
-              const chatData = await chatResponse.json();
-              if (currentProjectRef.current !== projectName) return;
-              
-              // Skip if malformed response
-              if (!chatData.messages || !Array.isArray(chatData.messages)) continue;
-              
-              const messages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
-              const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-              
-              detailedChats.push({
-                name: chatName,
-                lastMessage: lastMsg?.content?.substring(0, 100) || '',
-                lastActive: chatData.stats?.last_accessed || '',
-                messageCount: (chatData.total_messages || 1) - 1, // Subtract system message
-                cost: chatData.stats?.total_cost || 0
-              });
-            }
-          } catch {
-            // Skip chats we can't load
-          }
-        }
-        
-        // Final check before setting state
-        if (currentProjectRef.current !== projectName) return;
+
+        // Map backend response to frontend ChatCardInfo format
+        const detailedChats: ChatCardInfo[] = data.chats.map((chat: any) => ({
+          name: chat.name,
+          lastMessage: chat.last_message || '',
+          lastActive: chat.last_active || '',
+          messageCount: chat.message_count || 0,
+          cost: chat.cost || 0
+        }));
+
         setProjectChatsDetailed(detailedChats);
       }
     } catch (err) {
@@ -1261,7 +1245,9 @@ function App() {
 
       setTotalMessages(data.total_messages);
       setHasMoreMessages(data.has_more_messages || false);
-      setMessageOffset(loadedMessages.length);
+      // Use backend's message count for offset (includes system message)
+      // This keeps offset in sync with backend pagination expectations
+      setMessageOffset(data.messages.length);
       
       // Fetch updates for this chat
       try {
@@ -1433,7 +1419,9 @@ function App() {
       
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
-      setMessageOffset(prev => prev + olderMessages.length);
+      // Use backend's message count for offset (may include system message on oldest page)
+      // This keeps offset in sync with backend pagination expectations
+      setMessageOffset(prev => prev + data.messages.length);
 
       requestAnimationFrame(() => {
         if (container) {
@@ -1648,9 +1636,16 @@ function App() {
 
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
-          setTotalMessages(finalMessages.length + 1); // +1 for system message
-          setHasMoreMessages(truncatedMessages.length > 0);
+
+          // Use backend's total_messages for accurate pagination after edit
+          // Backend returns total messages in the new branch (including system message)
+          const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
+          setTotalMessages(branchTotalMessages);
+          // Check if branch has more messages than we're displaying (+1 accounts for system message)
+          setHasMoreMessages(branchTotalMessages > finalMessages.length + 1);
+          // Offset = count of messages loaded from end (for next pagination request)
           setMessageOffset(finalMessages.length);
+
           fetchUserStats();
           fetchFreeTokens();
           requestAnimationFrame(() => scrollToBottom());
@@ -1836,6 +1831,9 @@ function App() {
           setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
 
           setTotalMessages(prev => prev + 1);
+          // Update offset to account for the 2 new messages we've added locally
+          // This prevents duplicates when scrolling up to load older messages
+          setMessageOffset(prev => prev + 2);
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
           fetchUserStats();
