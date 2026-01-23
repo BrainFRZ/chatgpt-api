@@ -1581,6 +1581,95 @@ def delete_chat(request: DeleteChatRequest):
 
     return {"status": "ok"}
 
+
+class VerifyStatsRequest(BaseModel):
+    username: str
+    chat_name: str
+    project: str | None = None
+    fix: bool = False  # If True, fix any mismatches
+
+
+@app.post("/api/verify-chat-stats")
+def verify_chat_stats(request: VerifyStatsRequest):
+    """
+    Verify that chat stats match the sum of individual message tokens.
+
+    If fix=True, recalculates stats from messages and saves the corrected values.
+    Returns a report of any discrepancies found.
+    """
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    messages = data.get("messages", [])
+    stored_stats = data.get("stats", {})
+
+    # Calculate stats from messages
+    calculated = {
+        "total_input_tokens": 0,
+        "total_cached_tokens": 0,
+        "total_output_tokens": 0,
+        "total_reasoning_tokens": 0,
+        "total_prompts": 0,
+    }
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+
+        tokens_str = msg.get("tokens", "")
+        if not tokens_str:
+            continue
+
+        for part in tokens_str.split():
+            if part.startswith("I:"):
+                calculated["total_input_tokens"] += int(part[2:])
+            elif part.startswith("C:"):
+                calculated["total_cached_tokens"] += int(part[2:])
+            elif part.startswith("O:"):
+                calculated["total_output_tokens"] += int(part[2:])
+            elif part.startswith("R:"):
+                calculated["total_reasoning_tokens"] += int(part[2:])
+
+        calculated["total_prompts"] += 1
+
+    # Compare
+    discrepancies = {}
+    fields = ["total_input_tokens", "total_cached_tokens", "total_output_tokens",
+              "total_reasoning_tokens", "total_prompts"]
+
+    for field in fields:
+        stored_val = stored_stats.get(field, 0)
+        calc_val = calculated[field]
+        if stored_val != calc_val:
+            discrepancies[field] = {
+                "stored": stored_val,
+                "calculated": calc_val,
+                "difference": stored_val - calc_val
+            }
+
+    result = {
+        "chat_name": request.chat_name,
+        "project": request.project,
+        "stored_stats": {k: stored_stats.get(k, 0) for k in fields},
+        "calculated_stats": calculated,
+        "discrepancies": discrepancies,
+        "is_valid": len(discrepancies) == 0
+    }
+
+    # Fix if requested
+    if request.fix and discrepancies:
+        for field in fields:
+            stored_stats[field] = calculated[field]
+        data["stats"] = stored_stats
+        save_chat(username, request.chat_name, data, request.project)
+        result["fixed"] = True
+
+    return result
+
+
 @app.post("/api/reload-chat")
 def reload_chat(request: ReloadChatRequest):
     """Reload instructions and project files, rebuilding the system prompt"""
