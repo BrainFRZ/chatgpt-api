@@ -1261,7 +1261,9 @@ function App() {
 
       setTotalMessages(data.total_messages);
       setHasMoreMessages(data.has_more_messages || false);
-      setMessageOffset(loadedMessages.length);
+      // Use backend's message count for offset (includes system message)
+      // This keeps offset in sync with backend pagination expectations
+      setMessageOffset(data.messages.length);
       
       // Fetch updates for this chat
       try {
@@ -1433,7 +1435,9 @@ function App() {
       
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
-      setMessageOffset(prev => prev + olderMessages.length);
+      // Use backend's message count for offset (may include system message on oldest page)
+      // This keeps offset in sync with backend pagination expectations
+      setMessageOffset(prev => prev + data.messages.length);
 
       requestAnimationFrame(() => {
         if (container) {
@@ -1648,9 +1652,16 @@ function App() {
 
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
-          setTotalMessages(finalMessages.length + 1); // +1 for system message
-          setHasMoreMessages(truncatedMessages.length > 0);
+
+          // Use backend's total_messages for accurate pagination after edit
+          // Backend returns total messages in the new branch (including system message)
+          const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
+          setTotalMessages(branchTotalMessages);
+          // Check if branch has more messages than we're displaying (+1 accounts for system message)
+          setHasMoreMessages(branchTotalMessages > finalMessages.length + 1);
+          // Offset = count of messages loaded from end (for next pagination request)
           setMessageOffset(finalMessages.length);
+
           fetchUserStats();
           fetchFreeTokens();
           requestAnimationFrame(() => scrollToBottom());
@@ -1836,6 +1847,9 @@ function App() {
           setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
 
           setTotalMessages(prev => prev + 1);
+          // Update offset to account for the 2 new messages we've added locally
+          // This prevents duplicates when scrolling up to load older messages
+          setMessageOffset(prev => prev + 2);
           setStats(data.stats);
           setContextStartIndex(data.context_start_index || 1);
           fetchUserStats();

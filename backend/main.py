@@ -781,6 +781,7 @@ class MessageResponse(BaseModel):
     user_message_id: Optional[str] = None  # ID of the user message (for branching)
     assistant_message_id: Optional[str] = None  # ID of the assistant message (for branching)
     current_leaf_id: Optional[str] = None  # ID of the new current leaf
+    total_messages: Optional[int] = None  # Total messages in the new branch (for pagination after edits)
 
 class ProjectFileInfo(BaseModel):
     filename: str
@@ -1218,6 +1219,10 @@ def send_message(request: SendMessageRequest):
 
         save_chat(username, request.chat_name, data, request.project)
 
+        # Calculate total messages in the new branch for frontend pagination
+        branch_path = get_path_to_root(data["messages"], assistant_msg_id)
+        branch_total_messages = len(branch_path)
+
         return MessageResponse(
             assistant_message=assistant_message,
             tokens=tokens_str,
@@ -1227,7 +1232,8 @@ def send_message(request: SendMessageRequest):
             reasoning=reasoning_summary,
             user_message_id=user_msg_id,
             assistant_message_id=assistant_msg_id,
-            current_leaf_id=assistant_msg_id
+            current_leaf_id=assistant_msg_id,
+            total_messages=branch_total_messages
         )
         
     except HTTPException:
