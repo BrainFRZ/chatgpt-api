@@ -1077,8 +1077,20 @@ function App() {
 
       if (response.ok) {
         const data = await response.json();
+        // Build status message
+        const messages: string[] = [];
+        if (data.total_overwritten > 0) {
+          const overwrittenNames = data.uploaded
+            .filter((f: any) => f.overwritten)
+            .map((f: any) => f.filename)
+            .join(', ');
+          messages.push(`Overwrote existing file${data.total_overwritten > 1 ? 's' : ''}: ${overwrittenNames}`);
+        }
         if (data.errors && data.errors.length > 0) {
-          setError(`Some files failed: ${data.errors.join(', ')}`);
+          messages.push(`Some files failed: ${data.errors.join(', ')}`);
+        }
+        if (messages.length > 0) {
+          setError(messages.join('. '));
         }
         await fetchProjectFiles(ctx.project!);
       } else {

@@ -2070,26 +2070,29 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
             errors.append(f"{file.filename}: Could not read file - {str(e)}")
             continue
         
-        # Save file (overwrites if exists)
+        # Save file (check if overwriting)
         filepath = os.path.join(uploads_dir, file.filename)
+        was_overwritten = os.path.exists(filepath)
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(text_content)
-            
+
             tokens = count_tokens(text_content)
             uploaded.append({
                 "filename": file.filename,
                 "tokens": tokens,
-                "size_bytes": len(content)
+                "size_bytes": len(content),
+                "overwritten": was_overwritten
             })
         except Exception as e:
             errors.append(f"{file.filename}: Could not save file - {str(e)}")
             continue
-    
+
     return {
         "uploaded": uploaded,
         "errors": errors,
-        "total_uploaded": len(uploaded)
+        "total_uploaded": len(uploaded),
+        "total_overwritten": sum(1 for f in uploaded if f.get("overwritten", False))
     }
 
 @app.delete("/api/project-files/{username}/{project}/{filename}")
