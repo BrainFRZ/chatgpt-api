@@ -1757,7 +1757,7 @@ def list_project_chats_detailed(username: str, project: str, limit: int = 50, of
                     "name": chat_name,
                     "last_message": last_message,
                     "last_active": last_accessed,
-                    "message_count": len(branch_messages) - 1,  # Exclude system message
+                    "message_count": stats.get("total_prompts", 0),
                     "cost": stats.get("total_cost", 0.0)
                 })
 
