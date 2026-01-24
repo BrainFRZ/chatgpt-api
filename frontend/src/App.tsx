@@ -778,38 +778,44 @@ function App() {
 
   const enterProject = async (projectName: string) => {
     if (!user) return;
-    
+
+    // Check if we're re-entering the same project (e.g., clicking project name while in a chat)
+    const isSameProject = currentProject === projectName;
+
     // Reset previous state
     resetChatState();
     resetUIState();
-    
-    // Clear project-specific state (but don't call resetProjectState since we're entering a new one)
-    setProjectFiles([]);
-    setProjectFilesTotalTokens(0);
-    setProjectInstructions('');
-    setProjectInstructionsTokens(0);
-    setShowInstructionsModal(false);
-    setEditingInstructions('');
-    setInstructionsSaving(false);
-    setFilesUploading(false);
-    setProjectChatsDetailed([]);
+
+    // Clear project-specific state only when entering a different project
+    // When re-entering the same project, preserve existing data to avoid flash of empty content
+    if (!isSameProject) {
+      setProjectFiles([]);
+      setProjectFilesTotalTokens(0);
+      setProjectInstructions('');
+      setProjectInstructionsTokens(0);
+      setShowInstructionsModal(false);
+      setEditingInstructions('');
+      setInstructionsSaving(false);
+      setFilesUploading(false);
+      setProjectChatsDetailed([]);
+    }
     setChatSearchQuery('');
     setViewMode('chat');
-    
+
     // Set new project
     setCurrentProject(projectName);
     currentProjectRef.current = projectName;
-    
+
     // If we have cached chats for this project, use them immediately
     if (projectChatsCache[projectName]) {
       setChats(projectChatsCache[projectName]);
     }
-    
-    // Fetch project files and instructions
+
+    // Fetch project files and instructions (refresh in background)
     fetchProjectFiles(projectName);
     fetchProjectInstructions(projectName);
     fetchProjectChatsDetailed(projectName);
-    
+
     // Fetch chat list (uses refreshProjectChats which has built-in stale check)
     const chatList = await refreshProjectChats(projectName);
     if (!chatList && currentProjectRef.current === projectName) {
