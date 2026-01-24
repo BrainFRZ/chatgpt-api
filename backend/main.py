@@ -187,7 +187,7 @@ def load_persistent_stats(username: str) -> dict:
         
         # Process root chats
         for f in os.listdir(user_dir):
-            if f.startswith("chat_") and f.endswith(".json"):
+            if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
                 chat_path = os.path.join(user_dir, f)
                 try:
                     with open(chat_path, 'r') as cf:
@@ -212,7 +212,7 @@ def load_persistent_stats(username: str) -> dict:
                 project_path = os.path.join(projects_dir, project)
                 if os.path.isdir(project_path):
                     for f in os.listdir(project_path):
-                        if f.startswith("chat_") and f.endswith(".json"):
+                        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
                             chat_path = os.path.join(project_path, f)
                             try:
                                 with open(chat_path, 'r') as cf:
@@ -277,6 +277,10 @@ def validate_name(name: str) -> bool:
         return False
     # Block control characters (anything below space)
     if any(ord(c) < 32 for c in name):
+        return False
+    # Block reserved names that would collide with internal files
+    # "index" would create chat_index.json which is the chat index file
+    if name.lower() == "index":
         return False
     return True
 
@@ -516,6 +520,9 @@ def migrate_chat_inline(data: dict) -> dict:
 
 
 def load_chat(username: str, chat_name: str, project: str = None) -> dict:
+    # Block reserved names that collide with internal files
+    if chat_name.lower() == "index":
+        return None
     path = get_chat_path(username, chat_name, project)
     if os.path.exists(path):
         with open(path, 'r') as f:
@@ -530,6 +537,9 @@ def load_chat(username: str, chat_name: str, project: str = None) -> dict:
 
 def save_chat(username: str, chat_name: str, data: dict, project: str = None):
     """Save chat data atomically with file locking for concurrent access safety."""
+    # Block reserved names that collide with internal files
+    if chat_name.lower() == "index":
+        return
     path = get_chat_path(username, chat_name, project)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -595,7 +605,7 @@ def rebuild_chat_index(username: str, project: str = None) -> dict:
 
     index = {}
     for f in os.listdir(chat_dir):
-        if f.startswith("chat_") and f.endswith(".json"):
+        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
             chat_name = f[5:-5]
             chat_data = load_chat(username, chat_name, project)
             if chat_data:
@@ -924,7 +934,7 @@ def list_chats(username: str, limit: int = 20, offset: int = 0):
     # Get actual chat files on disk
     chat_files = set()
     for f in os.listdir(user_dir):
-        if f.startswith("chat_") and f.endswith(".json"):
+        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
             chat_files.add(f[5:-5])  # Remove "chat_" prefix and ".json" suffix
 
     # Try to use the index for efficiency
@@ -1672,7 +1682,7 @@ def list_project_chats(username: str, project: str, limit: int = 20, offset: int
     # Get actual chat files on disk
     chat_files = set()
     for f in os.listdir(project_dir):
-        if f.startswith("chat_") and f.endswith(".json"):
+        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
             chat_files.add(f[5:-5])
 
     # Try to use the index for efficiency
@@ -1718,7 +1728,7 @@ def list_project_chats_detailed(username: str, project: str, limit: int = 50, of
     # Get detailed info for each chat
     chat_summaries = []
     for f in os.listdir(project_dir):
-        if f.startswith("chat_") and f.endswith(".json"):
+        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
             chat_name = f[5:-5]  # Remove "chat_" prefix and ".json" suffix
             chat_data = load_chat(username, chat_name, project)
             if chat_data:
@@ -1872,12 +1882,12 @@ def get_user_stats(username: str):
     
     # Process root chats
     for f in os.listdir(user_dir):
-        if f.startswith("chat_") and f.endswith(".json"):
+        if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
             chat_name = f[5:-5]
             chat_data = load_chat(username, chat_name, None)
             if chat_data:
                 process_chat(chat_data)
-    
+
     # Process project chats
     projects_dir = os.path.join(user_dir, "projects")
     if os.path.exists(projects_dir):
@@ -1885,7 +1895,7 @@ def get_user_stats(username: str):
             project_path = os.path.join(projects_dir, project_name)
             if os.path.isdir(project_path):
                 for f in os.listdir(project_path):
-                    if f.startswith("chat_") and f.endswith(".json"):
+                    if f.startswith("chat_") and f.endswith(".json") and f != "chat_index.json":
                         chat_name = f[5:-5]
                         chat_data = load_chat(username, chat_name, project_name)
                         if chat_data:
