@@ -10,3 +10,5 @@
 !backend/providers/__init__.py
 !backend/providers/openai_provider.py
 !backend/providers/anthropic_provider.py
+!backend/tests/
+!backend/tests/test_multi_model.py
