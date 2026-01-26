@@ -342,7 +342,8 @@ def count_tokens(text: str) -> int:
 def calculate_context_window(
     messages: list,
     threshold: int = CONTEXT_WINDOW_THRESHOLD,
-    target: int = CONTEXT_WINDOW_TARGET
+    target: int = CONTEXT_WINDOW_TARGET,
+    count_tokens_fn: callable = None
 ) -> int:
     """
     Calculate context_start_index for rolling context window.
@@ -350,29 +351,38 @@ def calculate_context_window(
     Returns the index of the first message to include in context (after system).
     Messages structure: [system, msg1, msg2, ..., msgN, new_user_msg]
 
+    Args:
+        messages: List of messages with system first, new user message last
+        threshold: Token count to trigger trimming
+        target: Token count to trim down to
+        count_tokens_fn: Provider-specific token counting function (defaults to global)
+
     Logic:
     - If total tokens <= threshold (275k), include everything (return 1)
     - If over threshold, find cut point to get back to target (225k)
     - Count from newest messages backwards, include as many as fit in target
     - Always cut on user message boundaries (never leave orphaned assistant responses)
     """
+    # Use provider's token counter if provided, else fall back to global
+    token_counter = count_tokens_fn or count_tokens
+
     if len(messages) <= 2:
         # Just system + one user message, include everything
         return 1
 
     # Count system tokens
-    system_tokens = count_tokens(messages[0]["content"])
+    system_tokens = token_counter(messages[0]["content"])
 
     # Count new user message tokens (last message), including attached files
     last_msg = messages[-1]
     new_user_tokens = last_msg.get("total_tokens")
     if new_user_tokens is None:
-        new_user_tokens = count_tokens(last_msg["content"])
+        new_user_tokens = token_counter(last_msg["content"])
         # Add tokens for attached files if present (matching the API call format)
         attached_files = last_msg.get("attached_files", [])
         for f in attached_files:
             wrapper_text = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
-            new_user_tokens += count_tokens(wrapper_text)
+            new_user_tokens += token_counter(wrapper_text)
 
     # Base tokens that are always included
     base_tokens = system_tokens + new_user_tokens
@@ -383,7 +393,7 @@ def calculate_context_window(
     # First pass: count total to see if we exceed threshold
     total_tokens = base_tokens
     for msg in history:
-        msg_tokens = msg.get("total_tokens") or count_tokens(msg["content"])
+        msg_tokens = msg.get("total_tokens") or token_counter(msg["content"])
         total_tokens += msg_tokens
 
     if total_tokens <= threshold:
@@ -396,7 +406,7 @@ def calculate_context_window(
     included_from_end = 0
 
     for msg in reversed(history):
-        msg_tokens = msg.get("total_tokens") or count_tokens(msg["content"])
+        msg_tokens = msg.get("total_tokens") or token_counter(msg["content"])
         if total_tokens + msg_tokens > target:
             # Including this message would exceed target, stop here
             break
@@ -1351,12 +1361,13 @@ def send_message(request: SendMessageRequest):
         # This is the linear conversation that will be sent to the API
         branch_path = get_path_to_root(data["messages"], user_msg_id)
 
-        # Calculate context window using provider-specific limits
+        # Calculate context window using provider-specific limits and tokenizer
         context_limits = provider.context_limits
         context_start_index = calculate_context_window(
             branch_path,
             threshold=context_limits.threshold,
-            target=context_limits.target
+            target=context_limits.target,
+            count_tokens_fn=provider.count_tokens
         )
 
         # Helper to build message content with FILE wrappers
