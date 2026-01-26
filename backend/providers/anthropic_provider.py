@@ -73,14 +73,16 @@ class AnthropicProvider(ModelProvider):
 
         for msg in messages:
             if msg["role"] == "system":
-                # System message with cache control
-                system_content = [
-                    {
-                        "type": "text",
-                        "text": msg["content"],
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
+                # Only set system with cache_control if content is non-empty
+                content = msg.get("content", "").strip()
+                if content:
+                    system_content = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
             else:
                 conversation_messages.append(msg)
 
@@ -90,13 +92,16 @@ class AnthropicProvider(ModelProvider):
         params = {
             "model": self.MODEL_NAME,
             "max_tokens": self.MAX_TOKENS,
-            "system": system_content,
             "messages": anthropic_messages,
             "thinking": {
                 "type": "enabled",
                 "budget_tokens": self.THINKING_BUDGET
             }
         }
+
+        # Only include system if it has content
+        if system_content:
+            params["system"] = system_content
 
         return params
 
