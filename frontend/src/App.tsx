@@ -53,6 +53,7 @@ interface ChatMessage {
   cost?: string;
   reasoning?: string;
   attached_files?: {filename: string, content: string}[];
+  model?: string;  // Model used for this response (assistant messages only)
 }
 
 interface ChatStats {
@@ -1793,7 +1794,8 @@ function App() {
           timestamp: new Date().toISOString(),
           tokens: data.tokens,
           cost: data.cost,
-          reasoning: data.reasoning
+          reasoning: data.reasoning,
+          model: data.model
         };
 
         if (!ctx.isStale()) {
@@ -1992,7 +1994,8 @@ function App() {
             timestamp: new Date().toISOString(),
             tokens: data.tokens,
             cost: data.cost,
-            reasoning: data.reasoning
+            reasoning: data.reasoning,
+            model: data.model
           };
 
           // Update displayed messages - replace optimistic user msg with complete one
@@ -2844,7 +2847,10 @@ function App() {
                             </div>
                             <div style={styles.messageFooter}>
                               {msg.tokens && (
-                                <span style={styles.messageTokens}>{msg.tokens} | {msg.cost}</span>
+                                <span style={styles.messageTokens}>
+                                  {msg.tokens} | {msg.cost}
+                                  {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model}`}
+                                </span>
                               )}
                               {/* Branch navigation - show only for user messages with siblings */}
                               {msg.role === 'user' && (() => {

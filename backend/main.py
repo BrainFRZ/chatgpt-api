@@ -952,6 +952,7 @@ class MessageResponse(BaseModel):
     assistant_message_id: Optional[str] = None  # ID of the assistant message (for branching)
     current_leaf_id: Optional[str] = None  # ID of the new current leaf
     total_messages: Optional[int] = None  # Total messages in the new branch (for pagination after edits)
+    model: Optional[str] = None  # Model used for this response
 
 class ProjectFileInfo(BaseModel):
     filename: str
@@ -1446,7 +1447,8 @@ def send_message(request: SendMessageRequest):
             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
             "tokens": tokens_str,
             "cost": cost_str,
-            "total_tokens": parsed.output_tokens
+            "total_tokens": parsed.output_tokens,
+            "model": model_id
         }
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
@@ -1472,7 +1474,8 @@ def send_message(request: SendMessageRequest):
             user_message_id=user_msg_id,
             assistant_message_id=assistant_msg_id,
             current_leaf_id=assistant_msg_id,
-            total_messages=branch_total_messages
+            total_messages=branch_total_messages,
+            model=model_id
         )
         
     except HTTPException:
