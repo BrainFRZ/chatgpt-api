@@ -1075,6 +1075,12 @@ function App() {
         } else {
           setError(data.detail || 'Could not switch model');
         }
+      } else {
+        // Success - update context window gray out effect
+        const data = await response.json().catch(() => ({}));
+        if (data.context_start_index !== undefined) {
+          setContextStartIndex(data.context_start_index);
+        }
       }
     } catch (err) {
       // Rollback on network error

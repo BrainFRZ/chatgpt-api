@@ -1082,10 +1082,43 @@ def set_chat_model(request: SetChatModelRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
+    old_model = data.get("model")
     data["model"] = request.model
+
+    # If model changed, recount all message tokens with new provider's tokenizer
+    if request.model != old_model:
+        for msg in data["messages"]:
+            if msg["role"] == "system":
+                msg["total_tokens"] = provider.count_tokens(msg.get("content", ""))
+            else:
+                content = msg.get("content", "")
+                tokens = provider.count_tokens(content)
+                for f in msg.get("attached_files", []):
+                    wrapper = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
+                    tokens += provider.count_tokens(wrapper)
+                msg["total_tokens"] = tokens
+
     save_chat(username, request.chat_name, data, request.project)
 
-    return {"status": "ok", "model": request.model}
+    # Calculate new context_start_index for the UI gray out effect
+    context_start_index = 1
+    if len(data["messages"]) > 1:
+        # Get the current branch path (from root to current leaf)
+        current_leaf_id = data.get("current_leaf_id")
+        if current_leaf_id:
+            branch_path = get_path_to_root(data["messages"], current_leaf_id)
+        else:
+            branch_path = data["messages"]
+
+        context_limits = provider.context_limits
+        context_start_index = calculate_context_window(
+            branch_path,
+            threshold=context_limits.threshold,
+            target=context_limits.target,
+            count_tokens_fn=provider.count_tokens
+        )
+
+    return {"status": "ok", "model": request.model, "context_start_index": context_start_index}
 
 @app.get("/api/chats/{username}", response_model=ChatListResponse)
 def list_chats(username: str, limit: int = 20, offset: int = 0):
