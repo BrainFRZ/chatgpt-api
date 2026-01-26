@@ -747,11 +747,17 @@ function App() {
         });
     }
 
-    // Fetch available models
+    // Fetch available models with fallback
     fetch('/api/models')
       .then(res => res.json())
       .then(data => setAvailableModels(data))
-      .catch(() => {});
+      .catch(() => {
+        // Fallback models if API fails
+        setAvailableModels([
+          { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },
+          { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } }
+        ]);
+      });
   }, []);
 
   const loadChatList = async () => {
@@ -922,7 +928,8 @@ function App() {
         body: JSON.stringify({
           username: user.username,
           chat_name: chatName,
-          project: projectForNewChat
+          project: projectForNewChat,
+          model: selectedModel
         })
       });
 
@@ -1034,10 +1041,11 @@ function App() {
   const completeModelSwitch = async (newModel: string) => {
     if (!user || !currentChat) return;
 
-    setSelectedModel(newModel);
+    const previousModel = selectedModel;
+    setSelectedModel(newModel);  // Optimistic update for responsive UI
 
     try {
-      await fetch('/api/set-chat-model', {
+      const response = await fetch('/api/set-chat-model', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1047,7 +1055,17 @@ function App() {
           model: newModel
         })
       });
+
+      if (!response.ok) {
+        // Rollback on server error
+        setSelectedModel(previousModel);
+        const data = await response.json().catch(() => ({}));
+        setError(data.detail || 'Could not switch model');
+      }
     } catch (err) {
+      // Rollback on network error
+      setSelectedModel(previousModel);
+      setError('Could not switch model - network error');
       console.error('Could not save model preference:', err);
     }
   };
@@ -2660,16 +2678,18 @@ function App() {
               <>
                 <div style={styles.chatHeader}>
                   <h2 style={styles.chatTitle}>{currentChat}</h2>
-                  <select
-                    value={selectedModel}
-                    onChange={(e) => handleModelChange(e.target.value)}
-                    style={styles.modelSelector}
-                    title="Select AI model"
-                  >
-                    {availableModels.map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
-                  </select>
+                  {availableModels.length > 0 && (
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      style={styles.modelSelector}
+                      title="Select AI model"
+                    >
+                      {availableModels.map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     onClick={handleReloadChat}
                     style={styles.reloadButton}

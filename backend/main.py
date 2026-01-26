@@ -883,6 +883,7 @@ class CreateChatRequest(BaseModel):
     username: str
     chat_name: str
     project: str | None = None
+    model: str | None = None  # Optional: inherit model selection when creating chat
 
 class CreateProjectRequest(BaseModel):
     username: str
@@ -1157,7 +1158,11 @@ def create_chat(request: CreateChatRequest):
         "messages": [{"role": "system", "content": system_content}],
         "stats": create_empty_stats()
     }
-    
+
+    # Set model if provided (inherit from current selection)
+    if request.model:
+        data["model"] = request.model
+
     save_chat(username, chat_name, data, request.project)
     return {"status": "ok"}
 
