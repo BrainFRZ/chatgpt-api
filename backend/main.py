@@ -1414,8 +1414,13 @@ def send_message(request: SendMessageRequest):
         total_cost = provider.calculate_cost(parsed)
         tokens_str = provider.format_token_string(parsed)
 
-        # Apply free tokens (resets 0:00 UTC)
-        actual_cost, cost_str = apply_free_tokens(username, total_tokens, total_cost)
+        # Apply free tokens only for GPT (resets 0:00 UTC)
+        # Claude/Anthropic usage is always billed at full cost
+        if model_id.startswith('gpt'):
+            actual_cost, cost_str = apply_free_tokens(username, total_tokens, total_cost)
+        else:
+            actual_cost = total_cost
+            cost_str = f"${actual_cost:.6f}"
 
         # Update stats
         stats = data.get("stats", create_empty_stats())
