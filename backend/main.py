@@ -1268,8 +1268,23 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=400, detail=f"API key for {required_key_type} not set")
 
     # Save the model choice to the chat if it was specified in the request
-    if request.model and request.model != data.get("model"):
+    # When switching models, re-count all message tokens with new provider's tokenizer
+    # This ensures context window calculation uses consistent token counts
+    old_model = data.get("model")
+    if request.model and request.model != old_model:
         data["model"] = request.model
+        # Re-count tokens for all messages with the new provider's tokenizer
+        for msg in data["messages"]:
+            if msg["role"] == "system":
+                msg["total_tokens"] = provider.count_tokens(msg.get("content", ""))
+            else:
+                content = msg.get("content", "")
+                tokens = provider.count_tokens(content)
+                # Include attached files in token count if present
+                for f in msg.get("attached_files", []):
+                    wrapper = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
+                    tokens += provider.count_tokens(wrapper)
+                msg["total_tokens"] = tokens
 
     all_messages = data["messages"]
 
@@ -1324,8 +1339,9 @@ def send_message(request: SendMessageRequest):
             parent_id = None
 
     # Add user message with branching fields
-    user_message_tokens = count_tokens(request.message)
-    
+    # Use provider's tokenizer for consistent token counting
+    user_message_tokens = provider.count_tokens(request.message)
+
     # Include attached files if present, and add their tokens to the count
     attached_files_data = None
     if request.attached_files:
@@ -1336,7 +1352,7 @@ def send_message(request: SendMessageRequest):
         # Count tokens for attached files (including the wrapper text)
         for f in request.attached_files:
             wrapper_text = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
-            user_message_tokens += count_tokens(wrapper_text)
+            user_message_tokens += provider.count_tokens(wrapper_text)
     
     user_msg_id = generate_message_id()
     user_msg_data = {
