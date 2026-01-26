@@ -283,7 +283,11 @@ function App() {
   const [error, setError] = useState('');
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('gpt-5.2');
-  
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null);
+  const [modalApiKey, setModalApiKey] = useState('');
+  const [savingApiKey, setSavingApiKey] = useState(false);
+
   // Ref to prevent saving to localStorage during restoration
   // Start as true to prevent clearing on initial mount
   const isRestoringRef = useRef(true);
@@ -1017,9 +1021,18 @@ function App() {
     const hasKey = requiredKey === 'anthropic' ? apiKeysStatus.has_anthropic : apiKeysStatus.has_openai;
 
     if (!hasKey) {
-      setError(`Please configure your ${requiredKey === 'anthropic' ? 'Anthropic' : 'OpenAI'} API key first`);
+      // Show modal to enter the missing API key
+      setPendingModelSwitch(newModel);
+      setModalApiKey('');
+      setShowApiKeyModal(true);
       return;
     }
+
+    await completeModelSwitch(newModel);
+  };
+
+  const completeModelSwitch = async (newModel: string) => {
+    if (!user || !currentChat) return;
 
     setSelectedModel(newModel);
 
@@ -1037,6 +1050,47 @@ function App() {
     } catch (err) {
       console.error('Could not save model preference:', err);
     }
+  };
+
+  const handleApiKeyModalSave = async () => {
+    if (!user || !pendingModelSwitch || !modalApiKey.trim()) return;
+
+    setSavingApiKey(true);
+    const isAnthropic = pendingModelSwitch.startsWith('claude');
+
+    try {
+      const response = await fetch('/api/set-api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          openai_key: isAnthropic ? null : modalApiKey.trim(),
+          anthropic_key: isAnthropic ? modalApiKey.trim() : null
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setApiKeysStatus(data);
+        setShowApiKeyModal(false);
+        setModalApiKey('');
+        // Now complete the model switch
+        await completeModelSwitch(pendingModelSwitch);
+        setPendingModelSwitch(null);
+      } else {
+        setError('Could not save API key');
+      }
+    } catch (err) {
+      setError('Could not save API key');
+    } finally {
+      setSavingApiKey(false);
+    }
+  };
+
+  const handleApiKeyModalCancel = () => {
+    setShowApiKeyModal(false);
+    setModalApiKey('');
+    setPendingModelSwitch(null);
   };
 
   const fetchUserStats = async () => {
@@ -3146,6 +3200,42 @@ function App() {
                             {instructionsSaving ? 'Saving...' : 'Save'}
                           </button>
                         </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* API Key modal for model switching */}
+                {showApiKeyModal && pendingModelSwitch && (
+                  <div style={styles.modalOverlay} onClick={handleApiKeyModalCancel}>
+                    <div style={{...styles.modal, maxWidth: '400px'}} onClick={e => e.stopPropagation()}>
+                      <h3 style={styles.modalTitle}>
+                        {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API Key Required
+                      </h3>
+                      <p style={styles.modalDescription}>
+                        To use {availableModels.find(m => m.id === pendingModelSwitch)?.name || pendingModelSwitch},
+                        please enter your {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API key.
+                      </p>
+                      <input
+                        type="password"
+                        placeholder={pendingModelSwitch.startsWith('claude') ? 'sk-ant-...' : 'sk-...'}
+                        value={modalApiKey}
+                        onChange={(e) => setModalApiKey(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleApiKeyModalSave()}
+                        style={{...styles.input, width: '100%', marginBottom: '16px'}}
+                        autoFocus
+                      />
+                      <div style={styles.modalActions}>
+                        <button onClick={handleApiKeyModalCancel} style={styles.modalCancelButton}>
+                          Cancel
+                        </button>
+                        <button
+                          onClick={handleApiKeyModalSave}
+                          disabled={savingApiKey || !modalApiKey.trim()}
+                          style={styles.modalSaveButton}
+                        >
+                          {savingApiKey ? 'Saving...' : 'Save & Switch'}
+                        </button>
                       </div>
                     </div>
                   </div>
