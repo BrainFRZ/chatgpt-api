@@ -151,11 +151,8 @@ class AnthropicProvider(ModelProvider):
         return result
 
     def send_request(self, client: Any, request_params: dict) -> Any:
-        """Send request to Anthropic API with beta headers."""
-        return client.messages.create(
-            **request_params,
-            betas=self.BETA_HEADERS
-        )
+        """Send request to Anthropic API."""
+        return client.messages.create(**request_params)
 
     def parse_response(self, response: Any) -> ParsedResponse:
         """Parse Anthropic response into standardized format."""
