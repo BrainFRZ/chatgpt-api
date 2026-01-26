@@ -3238,41 +3238,6 @@ function App() {
                   </div>
                 )}
 
-                {/* API Key modal for model switching */}
-                {showApiKeyModal && pendingModelSwitch && (
-                  <div style={styles.modalOverlay} onClick={handleApiKeyModalCancel}>
-                    <div style={{...styles.modal, maxWidth: '400px'}} onClick={e => e.stopPropagation()}>
-                      <h3 style={styles.modalTitle}>
-                        {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API Key Required
-                      </h3>
-                      <p style={styles.modalDescription}>
-                        To use {availableModels.find(m => m.id === pendingModelSwitch)?.name || pendingModelSwitch},
-                        please enter your {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API key.
-                      </p>
-                      <input
-                        type="password"
-                        placeholder={pendingModelSwitch.startsWith('claude') ? 'sk-ant-...' : 'sk-...'}
-                        value={modalApiKey}
-                        onChange={(e) => setModalApiKey(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleApiKeyModalSave()}
-                        style={{...styles.input, width: '100%', marginBottom: '16px'}}
-                        autoFocus
-                      />
-                      <div style={styles.modalActions}>
-                        <button onClick={handleApiKeyModalCancel} style={styles.modalCancelButton}>
-                          Cancel
-                        </button>
-                        <button
-                          onClick={handleApiKeyModalSave}
-                          disabled={savingApiKey || !modalApiKey.trim()}
-                          style={styles.modalSaveButton}
-                        >
-                          {savingApiKey ? 'Saving...' : 'Save & Switch'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             ) : (
               <div style={styles.noChat}>
@@ -3549,6 +3514,42 @@ function App() {
         </div>
       )}
       
+      {/* API Key modal for model switching - at root level so it's always visible */}
+      {showApiKeyModal && pendingModelSwitch && (
+        <div style={styles.modalOverlay} onClick={handleApiKeyModalCancel}>
+          <div style={{...styles.modal, maxWidth: '400px'}} onClick={e => e.stopPropagation()}>
+            <h3 style={styles.modalTitle}>
+              {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API Key Required
+            </h3>
+            <p style={styles.modalDescription}>
+              To use {availableModels.find(m => m.id === pendingModelSwitch)?.name || pendingModelSwitch},
+              please enter your {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API key.
+            </p>
+            <input
+              type="password"
+              placeholder={pendingModelSwitch.startsWith('claude') ? 'sk-ant-...' : 'sk-...'}
+              value={modalApiKey}
+              onChange={(e) => setModalApiKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleApiKeyModalSave()}
+              style={{...styles.input, width: '100%', marginBottom: '16px'}}
+              autoFocus
+            />
+            <div style={styles.modalActions}>
+              <button onClick={handleApiKeyModalCancel} style={styles.modalCancelButton}>
+                Cancel
+              </button>
+              <button
+                onClick={handleApiKeyModalSave}
+                disabled={savingApiKey || !modalApiKey.trim()}
+                style={styles.modalSaveButton}
+              >
+                {savingApiKey ? 'Saving...' : 'Save & Switch'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div style={styles.errorBanner}>
           {error}
