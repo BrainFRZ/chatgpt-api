@@ -98,6 +98,26 @@ interface UserStats {
   days_since_first: number;
 }
 
+interface ModelInfo {
+  id: string;
+  name: string;
+  pricing: {
+    input_new: number;
+    input_cached: number;
+    output: number;
+    reasoning: number;
+  };
+  context_limits: {
+    threshold: number;
+    target: number;
+  };
+}
+
+interface ApiKeysStatus {
+  has_openai: boolean;
+  has_anthropic: boolean;
+}
+
 interface FreeTokens {
   total_free: number;
   used: number;
@@ -257,8 +277,12 @@ function App() {
   
   const [user, setUser] = useState<LoginResponse | null>(null);
   const [apiKey, setApiKey] = useState('');
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [apiKeysStatus, setApiKeysStatus] = useState<ApiKeysStatus>({ has_openai: false, has_anthropic: false });
   const [needsApiKey, setNeedsApiKey] = useState(false);
   const [error, setError] = useState('');
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-5.2');
   
   // Ref to prevent saving to localStorage during restoration
   // Start as true to prevent clearing on initial mount
@@ -705,6 +729,11 @@ function App() {
             if (!data.has_api_key) {
               setNeedsApiKey(true);
             }
+            // Fetch API keys status
+            fetch(`/api/api-keys/${data.username}`)
+              .then(res => res.json())
+              .then(keysData => setApiKeysStatus(keysData))
+              .catch(() => {});
           }
         })
         .catch(() => {
@@ -713,6 +742,12 @@ function App() {
           localStorage.removeItem('chatgpt-current-chat');
         });
     }
+
+    // Fetch available models
+    fetch('/api/models')
+      .then(res => res.json())
+      .then(data => setAvailableModels(data))
+      .catch(() => {});
   }, []);
 
   const loadChatList = async () => {
@@ -942,21 +977,65 @@ function App() {
   };
 
   const handleSaveApiKey = async () => {
-    if (!apiKey.trim() || !user) return;
-    
+    if (!user) return;
+    // Allow saving if at least one key is provided
+    if (!apiKey.trim() && !anthropicKey.trim()) return;
+
     try {
-      const response = await fetch('/api/set-api-key', {
+      const response = await fetch('/api/set-api-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: user.username, api_key: apiKey.trim() })
+        body: JSON.stringify({
+          username: user.username,
+          openai_key: apiKey.trim() || null,
+          anthropic_key: anthropicKey.trim() || null
+        })
       });
-      
+
       if (response.ok) {
-        setNeedsApiKey(false);
-        setUser({ ...user, has_api_key: true });
+        const data = await response.json();
+        setApiKeysStatus(data);
+        // Consider API key set if at least OpenAI key is configured
+        if (data.has_openai) {
+          setNeedsApiKey(false);
+          setUser({ ...user, has_api_key: true });
+        }
+        // Clear the input fields after saving
+        setApiKey('');
+        setAnthropicKey('');
       }
     } catch (err) {
-      setError('Could not save API key');
+      setError('Could not save API keys');
+    }
+  };
+
+  const handleModelChange = async (newModel: string) => {
+    if (!user || !currentChat) return;
+
+    // Check if user has the required API key for this model
+    const requiredKey = newModel.startsWith('claude') ? 'anthropic' : 'openai';
+    const hasKey = requiredKey === 'anthropic' ? apiKeysStatus.has_anthropic : apiKeysStatus.has_openai;
+
+    if (!hasKey) {
+      setError(`Please configure your ${requiredKey === 'anthropic' ? 'Anthropic' : 'OpenAI'} API key first`);
+      return;
+    }
+
+    setSelectedModel(newModel);
+
+    try {
+      await fetch('/api/set-chat-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          chat_name: currentChat,
+          project: currentProject,
+          model: newModel
+        })
+      });
+    } catch (err) {
+      console.error('Could not save model preference:', err);
     }
   };
 
@@ -1241,6 +1320,9 @@ function App() {
       setStats(data.stats);
       setContextStartIndex(1);
       setExpandedReasoning(new Set());
+
+      // Set model selection from chat data (default to gpt-5.2)
+      setSelectedModel(data.model || 'gpt-5.2');
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -1791,7 +1873,8 @@ function App() {
           chat_name: ctx.chat,
           message: messageText,
           project: ctx.project,
-          attached_files: filesToSend.length > 0 ? filesToSend : undefined
+          attached_files: filesToSend.length > 0 ? filesToSend : undefined,
+          model: selectedModel
         })
       });
 
@@ -2104,17 +2187,37 @@ function App() {
       <div style={styles.container}>
         <div style={styles.loginBox}>
           <h1 style={styles.title}>Welcome, {user.username}!</h1>
-          <p style={styles.subtitle}>Enter your OpenAI API key to continue:</p>
-          <input
-            type="password"
-            placeholder="sk-..."
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSaveApiKey()}
-            style={styles.input}
-          />
+          <p style={styles.subtitle}>Enter your API keys (at least OpenAI required):</p>
+
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
+              OpenAI API Key {apiKeysStatus.has_openai && <span style={{ color: '#4ade80' }}>(configured)</span>}
+            </label>
+            <input
+              type="password"
+              placeholder="sk-..."
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              style={styles.input}
+            />
+          </div>
+
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
+              Anthropic API Key (optional) {apiKeysStatus.has_anthropic && <span style={{ color: '#4ade80' }}>(configured)</span>}
+            </label>
+            <input
+              type="password"
+              placeholder="sk-ant-..."
+              value={anthropicKey}
+              onChange={(e) => setAnthropicKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSaveApiKey()}
+              style={styles.input}
+            />
+          </div>
+
           <button onClick={handleSaveApiKey} style={styles.button}>
-            Save API Key
+            Save API Keys
           </button>
           {error && <p style={styles.error}>{error}</p>}
         </div>
@@ -2503,7 +2606,17 @@ function App() {
               <>
                 <div style={styles.chatHeader}>
                   <h2 style={styles.chatTitle}>{currentChat}</h2>
-                  <button 
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => handleModelChange(e.target.value)}
+                    style={styles.modelSelector}
+                    title="Select AI model"
+                  >
+                    {availableModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                  <button
                     onClick={handleReloadChat}
                     style={styles.reloadButton}
                     title="Reload instructions and files"
@@ -3536,6 +3649,16 @@ const styles: { [key: string]: React.CSSProperties } = {
     margin: 0,
     fontSize: '1.1rem',
     flex: 1,
+  },
+  modelSelector: {
+    background: '#2a2a4e',
+    color: '#fff',
+    border: '1px solid #4a4a6e',
+    borderRadius: '6px',
+    padding: '6px 10px',
+    fontSize: '0.9rem',
+    cursor: 'pointer',
+    marginRight: '8px',
   },
   reloadButton: {
     background: 'none',

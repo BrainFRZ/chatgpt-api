@@ -5,7 +5,6 @@ ChatGPT Web Interface - Backend API
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI
 from typing import Optional, List
 from pathlib import Path
 from contextlib import contextmanager
@@ -18,6 +17,11 @@ import tiktoken
 import logging
 import fcntl
 import uuid
+
+# Provider imports
+from providers import ProviderRegistry, ModelProvider
+from providers.openai_provider import OpenAIProvider, add_updates_to_messages as openai_add_updates
+from providers.anthropic_provider import AnthropicProvider, add_updates_to_messages as anthropic_add_updates
 
 # Configure logging for debugging
 logger = logging.getLogger(__name__)
@@ -43,13 +47,24 @@ MAX_OUTPUT_TOKENS_FREE_CHAT = 1200  # Only applies to non-project chats
 MODEL_NAME = "gpt-5.2"
 PROMPT_CACHE_RETENTION = "24h"
 
-# Pricing (per million tokens)
+# Pricing (per million tokens) - DEPRECATED: Now managed by providers
 PRICING = {
     "input_new": 1.75,
     "input_cached": 0.175,
     "output": 14.0,
     "reasoning": 14.0,
 }
+
+# ============================================================
+# Provider Registration
+# ============================================================
+
+# Register available model providers
+ProviderRegistry.register(OpenAIProvider())
+ProviderRegistry.register(AnthropicProvider())
+
+# Default model for new chats
+DEFAULT_MODEL = "gpt-5.2"
 
 # ============================================================
 # Utility Functions
@@ -150,17 +165,52 @@ def ensure_user_exists(username: str) -> bool:
     
     return is_new
 
-def get_api_key(username: str) -> str | None:
-    key_path = os.path.join(get_user_dir(username), "api_key.txt")
-    if os.path.exists(key_path):
-        with open(key_path, 'r') as f:
-            return f.read().strip()
-    return None
+def get_api_keys_path(username: str) -> str:
+    """Get path to the API keys JSON file."""
+    return os.path.join(get_user_dir(username), "api_keys.json")
+
+def load_api_keys(username: str) -> dict:
+    """
+    Load API keys from api_keys.json, with auto-migration from legacy api_key.txt.
+
+    Returns dict like {"openai": "sk-...", "anthropic": "sk-ant-..."}
+    """
+    keys_path = get_api_keys_path(username)
+    user_dir = get_user_dir(username)
+    legacy_path = os.path.join(user_dir, "api_key.txt")
+
+    # Check for existing api_keys.json
+    if os.path.exists(keys_path):
+        with open(keys_path, 'r') as f:
+            return json.load(f)
+
+    # Auto-migrate from legacy api_key.txt
+    if os.path.exists(legacy_path):
+        with open(legacy_path, 'r') as f:
+            openai_key = f.read().strip()
+        if openai_key:
+            keys = {"openai": openai_key, "anthropic": ""}
+            save_api_keys(username, keys)
+            return keys
+
+    return {"openai": "", "anthropic": ""}
+
+def save_api_keys(username: str, keys: dict):
+    """Save API keys to api_keys.json."""
+    keys_path = get_api_keys_path(username)
+    atomic_write_json(keys_path, keys)
+
+def get_api_key(username: str, provider: str = "openai") -> str | None:
+    """Get API key for a specific provider."""
+    keys = load_api_keys(username)
+    key = keys.get(provider, "")
+    return key if key else None
 
 def save_api_key(username: str, api_key: str):
-    key_path = os.path.join(get_user_dir(username), "api_key.txt")
-    with open(key_path, 'w') as f:
-        f.write(api_key)
+    """Legacy function for backwards compatibility - saves OpenAI key."""
+    keys = load_api_keys(username)
+    keys["openai"] = api_key
+    save_api_keys(username, keys)
 
 def get_persistent_stats_path(username: str) -> str:
     return os.path.join(get_user_dir(username), "lifetime_stats.json")
@@ -798,6 +848,31 @@ class ApiKeyRequest(BaseModel):
     username: str
     api_key: str
 
+class ApiKeysRequest(BaseModel):
+    """Request to set multiple API keys."""
+    username: str
+    openai_key: str | None = None
+    anthropic_key: str | None = None
+
+class ApiKeysResponse(BaseModel):
+    """Response showing which API keys are configured."""
+    has_openai: bool
+    has_anthropic: bool
+
+class SetChatModelRequest(BaseModel):
+    """Request to change a chat's model."""
+    username: str
+    chat_name: str
+    project: str | None = None
+    model: str
+
+class ModelInfo(BaseModel):
+    """Information about an available model."""
+    id: str
+    name: str
+    pricing: dict
+    context_limits: dict
+
 class ChatListResponse(BaseModel):
     chats: list[str]
     projects: list[str]
@@ -842,6 +917,7 @@ class SendMessageRequest(BaseModel):
     parent_id: str | None = None  # If provided, create message as child of this parent (for branching edits)
     truncate_to_index: int | None = None  # DEPRECATED: kept for backwards compatibility, prefer parent_id
     attached_files: list[AttachedFile] | None = None  # Optional list of files to attach to this message
+    model: str | None = None  # Model to use (defaults to chat's saved model or gpt-5.2)
 
 class ChatMessage(BaseModel):
     id: str | None = None  # Unique message ID (for branching)
@@ -862,6 +938,7 @@ class ChatResponse(BaseModel):
     total_messages: int
     has_more_messages: bool
     current_leaf_id: str | None = None  # ID of the current leaf message (for branching)
+    model: str | None = None  # Model used for this chat (gpt-5.2 or claude-sonnet-4.5)
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -915,14 +992,88 @@ def login(request: LoginRequest):
     return LoginResponse(username=username, has_api_key=has_key, is_new_user=is_new)
 
 @app.post("/api/set-api-key")
-def set_api_key(request: ApiKeyRequest):
+def set_api_key_endpoint(request: ApiKeyRequest):
+    """Legacy endpoint for backwards compatibility - sets OpenAI key only."""
     username = request.username.strip().lower()
-    
+
     if not os.path.exists(get_user_dir(username)):
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     save_api_key(username, request.api_key)
     return {"status": "ok"}
+
+@app.post("/api/set-api-keys", response_model=ApiKeysResponse)
+def set_api_keys(request: ApiKeysRequest):
+    """Set API keys for multiple providers."""
+    username = request.username.strip().lower()
+
+    if not os.path.exists(get_user_dir(username)):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    keys = load_api_keys(username)
+
+    # Update only the keys that were provided
+    if request.openai_key is not None:
+        keys["openai"] = request.openai_key
+    if request.anthropic_key is not None:
+        keys["anthropic"] = request.anthropic_key
+
+    save_api_keys(username, keys)
+
+    return ApiKeysResponse(
+        has_openai=bool(keys.get("openai")),
+        has_anthropic=bool(keys.get("anthropic"))
+    )
+
+@app.get("/api/api-keys/{username}", response_model=ApiKeysResponse)
+def get_api_keys_status(username: str):
+    """Get which API keys are configured (not the keys themselves)."""
+    username = username.strip().lower()
+
+    if not os.path.exists(get_user_dir(username)):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    keys = load_api_keys(username)
+    return ApiKeysResponse(
+        has_openai=bool(keys.get("openai")),
+        has_anthropic=bool(keys.get("anthropic"))
+    )
+
+@app.get("/api/models", response_model=list[ModelInfo])
+def list_models():
+    """List all available AI models."""
+    return ProviderRegistry.list_models()
+
+@app.post("/api/set-chat-model")
+def set_chat_model(request: SetChatModelRequest):
+    """Set the model for a specific chat."""
+    username = request.username.strip().lower()
+
+    if not os.path.exists(get_user_dir(username)):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Validate model exists
+    provider = ProviderRegistry.get(request.model)
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {request.model}")
+
+    # Check if user has the required API key
+    required_key = ProviderRegistry.get_required_api_key(request.model)
+    if not get_api_key(username, required_key):
+        raise HTTPException(
+            status_code=400,
+            detail=f"API key for {required_key} not configured"
+        )
+
+    # Load and update chat
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    data["model"] = request.model
+    save_chat(username, request.chat_name, data, request.project)
+
+    return {"status": "ok", "model": request.model}
 
 @app.get("/api/chats/{username}", response_model=ChatListResponse)
 def list_chats(username: str, limit: int = 20, offset: int = 0):
@@ -1072,20 +1223,37 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         stats=data.get("stats", create_empty_stats()),
         total_messages=total_messages,
         has_more_messages=has_more_messages,
-        current_leaf_id=data.get("current_leaf_id")
+        current_leaf_id=data.get("current_leaf_id"),
+        model=data.get("model", DEFAULT_MODEL)
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
 def send_message(request: SendMessageRequest):
     username = request.username.strip().lower()
-    api_key = get_api_key(username)
 
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API key not set")
-
+    # Determine which model to use
+    # Priority: request.model > chat.model > DEFAULT_MODEL
     data = load_chat(username, request.chat_name, request.project)
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
+
+    model_id = request.model or data.get("model", DEFAULT_MODEL)
+
+    # Get the provider for this model
+    provider = ProviderRegistry.get(model_id)
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+
+    # Get the appropriate API key for this provider
+    required_key_type = ProviderRegistry.get_required_api_key(model_id)
+    api_key = get_api_key(username, required_key_type)
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail=f"API key for {required_key_type} not set")
+
+    # Save the model choice to the chat if it was specified in the request
+    if request.model and request.model != data.get("model"):
+        data["model"] = request.model
 
     all_messages = data["messages"]
 
@@ -1169,16 +1337,21 @@ def send_message(request: SendMessageRequest):
 
     data["messages"].append(user_msg_data)
 
-    # Call OpenAI
-    client = OpenAI(api_key=api_key)
+    # Get provider client
+    client = provider.get_client(api_key)
 
     try:
         # Get the branch path from root to new user message
         # This is the linear conversation that will be sent to the API
         branch_path = get_path_to_root(data["messages"], user_msg_id)
 
-        # Calculate context window based on branch path (not full message tree)
-        context_start_index = calculate_context_window(branch_path)
+        # Calculate context window using provider-specific limits
+        context_limits = provider.context_limits
+        context_start_index = calculate_context_window(
+            branch_path,
+            threshold=context_limits.threshold,
+            target=context_limits.target
+        )
 
         # Helper to build message content with FILE wrappers
         def build_message_content(msg):
@@ -1192,112 +1365,67 @@ def send_message(request: SendMessageRequest):
                 content = f"{files_text}\n\n{content}"
             return content
 
-        # Build messages for API: system + in-context history + new user message (with updates prepended)
+        # Build messages for API: system + in-context history + new user message
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
 
-        # Build user content (with attached files only, no updates)
+        # Build user content (with attached files only, no updates yet)
         user_content = build_message_content(branch_path[-1])
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
         # Build messages list
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
 
-        # Add updates as a separate trailing message if present
-        # This keeps the user message content identical between when sent and when in history,
-        # allowing the cache to match at message boundaries rather than mid-content
+        # Add updates using provider-specific method
+        # OpenAI: separate trailing user message (allowed)
+        # Claude: concatenate into last user message (no consecutive user messages)
         updates_text = data.get("updates", "").strip()
         if updates_text:
-            updates_msg = {"role": "user", "content": f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"}
-            messages_for_api.append(updates_msg)
-        
-        # Include project in cache key to avoid collisions between same-named chats in different projects
-        # Sanitize project name for cache key (replace spaces and special chars with hyphens)
-        project_part = (request.project or "root").replace(" ", "-").replace("/", "-").replace("\\", "-")
-        
-        # Set max_output_tokens for free chats only (no cap on project chats)
-        api_params = {
-            "model": MODEL_NAME,
-            "input": messages_for_api,
-            "store": False,
-            "prompt_cache_retention": PROMPT_CACHE_RETENTION,
-            "prompt_cache_key": f"redvelveteer-86171435-{username}-{project_part}-{request.chat_name}",
-            "reasoning": {
-                "effort": "medium",
-                "summary": "auto"
-            }
-        }
-        
-        # Add output token limit only for free chats (not in a project)
-        if not request.project:
-            api_params["max_output_tokens"] = MAX_OUTPUT_TOKENS_FREE_CHAT
-        
-        response = client.responses.create(**api_params)
-        
-        # Parse the response
-        assistant_message = None
-        reasoning_summary = None
-        for item in response.output:
-            if item.type == "message":
-                if item.status == "completed":
-                    for content_item in item.content:
-                        if content_item.type == "output_text":
-                            assistant_message = content_item.text
-                            break
-            elif item.type == "reasoning":
-                # Capture reasoning summary if available
-                if hasattr(item, 'summary') and item.summary:
-                    for summary_item in item.summary:
-                        if hasattr(summary_item, 'text'):
-                            reasoning_summary = summary_item.text
-                            break
-        
-        if assistant_message is None:
-            raise HTTPException(status_code=500, detail="No message in response")
-        
-        # Token tracking
-        usage = response.usage
-        input_tokens = usage.input_tokens
-        cached_tokens = usage.input_tokens_details.cached_tokens if hasattr(usage, 'input_tokens_details') and hasattr(usage.input_tokens_details, 'cached_tokens') else 0
-        new_input_tokens = input_tokens - cached_tokens
-        output_tokens = usage.output_tokens
-        
-        # Extract reasoning tokens (separate from output tokens for cost tracking)
-        reasoning_tokens = 0
-        if hasattr(usage, 'output_tokens_details') and usage.output_tokens_details:
-            reasoning_tokens = getattr(usage.output_tokens_details, 'reasoning_tokens', 0) or 0
-        
-        # Non-reasoning output tokens (ensure non-negative in case of API inconsistency)
-        text_output_tokens = max(0, output_tokens - reasoning_tokens)
+            if model_id.startswith("claude"):
+                messages_for_api = anthropic_add_updates(messages_for_api, updates_text)
+            else:
+                messages_for_api = openai_add_updates(messages_for_api, updates_text)
 
-        total_tokens = input_tokens + output_tokens
-        
-        # Cost calculation using configured pricing
-        input_cost = new_input_tokens * PRICING["input_new"] / 1_000_000
-        cached_cost = cached_tokens * PRICING["input_cached"] / 1_000_000
-        output_cost = text_output_tokens * PRICING["output"] / 1_000_000
-        reasoning_cost = reasoning_tokens * PRICING["reasoning"] / 1_000_000
-        total_cost = input_cost + cached_cost + output_cost + reasoning_cost
+        # Build provider-specific request
+        is_free_chat = not request.project
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=is_free_chat
+        )
+
+        # Send request and parse response
+        response = provider.send_request(client, request_params)
+        parsed = provider.parse_response(response)
+
+        assistant_message = parsed.content
+        reasoning_summary = parsed.reasoning
+
+        # Calculate tokens and cost using provider pricing
+        new_input_tokens = parsed.input_tokens - parsed.cached_tokens
+        total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+        total_cost = provider.calculate_cost(parsed)
+        tokens_str = provider.format_token_string(parsed)
 
         # Apply free tokens (resets 0:00 UTC)
         actual_cost, cost_str = apply_free_tokens(username, total_tokens, total_cost)
-        
-        tokens_str = f"I:{new_input_tokens} C:{cached_tokens} O:{text_output_tokens} R:{reasoning_tokens} T:{total_tokens}"
-        
+
         # Update stats
         stats = data.get("stats", create_empty_stats())
         stats["total_input_tokens"] += new_input_tokens
-        stats["total_cached_tokens"] += cached_tokens
-        stats["total_output_tokens"] += text_output_tokens
-        stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + reasoning_tokens
+        stats["total_cached_tokens"] += parsed.cached_tokens
+        stats["total_output_tokens"] += parsed.output_tokens
+        stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
         stats["total_cost"] += actual_cost  # Use actual cost after free tokens
         stats["total_prompts"] += 1
         stats["last_accessed"] = datetime.now().isoformat()
         data["stats"] = stats
-        
+
         # Update persistent lifetime stats (survives chat deletion)
-        update_persistent_stats(username, new_input_tokens, cached_tokens, text_output_tokens, reasoning_tokens, actual_cost)
-        
+        update_persistent_stats(username, new_input_tokens, parsed.cached_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
+
         # Add assistant message with branching fields
         assistant_msg_id = generate_message_id()
         assistant_msg_data = {
@@ -1308,7 +1436,7 @@ def send_message(request: SendMessageRequest):
             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
             "tokens": tokens_str,
             "cost": cost_str,
-            "total_tokens": text_output_tokens
+            "total_tokens": parsed.output_tokens
         }
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
