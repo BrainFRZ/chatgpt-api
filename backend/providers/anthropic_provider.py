@@ -11,7 +11,7 @@ from . import ModelProvider, ParsedResponse, Pricing, ContextLimits
 class AnthropicProvider(ModelProvider):
     """Provider for Claude Sonnet 4.5 with extended thinking."""
 
-    MODEL_NAME = "claude-sonnet-4-5-20250514"
+    MODEL_NAME = "claude-sonnet-4-5-20250929"
     THINKING_BUDGET = 3000
     MAX_TOKENS = 16000  # Max output tokens (including thinking)
 
