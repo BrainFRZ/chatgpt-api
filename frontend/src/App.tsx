@@ -1060,7 +1060,20 @@ function App() {
         // Rollback on server error
         setSelectedModel(previousModel);
         const data = await response.json().catch(() => ({}));
-        setError(data.detail || 'Could not switch model');
+
+        // If error is about missing API key, show the modal instead of error
+        if (data.detail && data.detail.includes('API key')) {
+          setPendingModelSwitch(newModel);
+          setModalApiKey('');
+          setShowApiKeyModal(true);
+          // Refresh API keys status since it may be stale
+          fetch(`/api/api-keys/${user.username}`)
+            .then(res => res.json())
+            .then(keysData => setApiKeysStatus(keysData))
+            .catch(() => {});
+        } else {
+          setError(data.detail || 'Could not switch model');
+        }
       }
     } catch (err) {
       // Rollback on network error
