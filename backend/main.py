@@ -903,6 +903,12 @@ class SetChatModelRequest(BaseModel):
     project: str | None = None
     model: str
 
+class SetProjectModelRequest(BaseModel):
+    """Request to change a project's default model."""
+    username: str
+    project: str
+    model: str
+
 class ModelInfo(BaseModel):
     """Information about an available model."""
     id: str
@@ -1230,9 +1236,14 @@ def create_chat(request: CreateChatRequest):
         "stats": create_empty_stats()
     }
 
-    # Set model if provided (inherit from current selection)
+    # Set model: priority is request.model > project.model > DEFAULT_MODEL
     if request.model:
         data["model"] = request.model
+    elif request.project:
+        # Inherit from project's default model if set
+        project_metadata = load_project_metadata(username, request.project)
+        if project_metadata.get("model"):
+            data["model"] = project_metadata["model"]
 
     save_chat(username, chat_name, data, request.project)
     return {"status": "ok"}
@@ -1549,6 +1560,29 @@ def send_message(request: SendMessageRequest):
         data["current_leaf_id"] = assistant_msg_id
 
         save_chat(username, request.chat_name, data, request.project)
+
+        # Update user message with accurate token count from API (no latency impact)
+        # The 3.8 estimator was used initially; now update with exact count for future context calculations
+        if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
+            try:
+                # Get accurate token count for user message
+                accurate_tokens = provider.count_tokens_api(request.message, api_key)
+
+                # Include attached files in count
+                if request.attached_files:
+                    for f in request.attached_files:
+                        wrapper = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
+                        accurate_tokens += provider.count_tokens_api(wrapper, api_key)
+
+                # Update stored user message if count differs
+                if accurate_tokens != user_message_tokens:
+                    for msg in data["messages"]:
+                        if msg.get("id") == user_msg_id:
+                            msg["total_tokens"] = accurate_tokens
+                            break
+                    save_chat(username, request.chat_name, data, request.project)
+            except Exception as e:
+                logger.warning(f"Failed to update accurate token count: {e}")
 
         # Calculate total messages in the new branch for frontend pagination
         branch_path = get_path_to_root(data["messages"], assistant_msg_id)
@@ -2221,23 +2255,41 @@ def get_free_tokens(username: str):
 ALLOWED_FILE_EXTENSIONS = {'.txt', '.md'}
 
 @app.get("/api/project-files/{username}/{project}", response_model=ProjectFilesResponse)
-def list_project_files(username: str, project: str):
+def list_project_files(username: str, project: str, model: str = None):
     """List all files in a project's uploads folder with token counts"""
     username = username.strip().lower()
     project_dir = get_project_dir(username, project)
-    
+
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
+    # Determine which tokenizer to use
+    # Priority: query param > project metadata > DEFAULT_MODEL
+    if not model:
+        metadata = load_project_metadata(username, project)
+        model = metadata.get("model", DEFAULT_MODEL)
+
+    provider = ProviderRegistry.get(model)
+    use_api_counting = model.startswith("claude")
+
+    # Get API key for Claude API-based counting
+    api_key = None
+    if use_api_counting:
+        api_key = get_api_key(username, "anthropic")
+
+    # Load token cache
+    tokens_cache = load_file_tokens_cache(username, project)
+    cache_updated = False
+
     uploads_dir = os.path.join(project_dir, "uploads")
-    
+
     # Create uploads dir if it doesn't exist
     if not os.path.exists(uploads_dir):
         os.makedirs(uploads_dir)
-    
+
     files = []
     total_tokens = 0
-    
+
     for filename in sorted(os.listdir(uploads_dir)):
         filepath = os.path.join(uploads_dir, filename)
         if os.path.isfile(filepath):
@@ -2245,62 +2297,128 @@ def list_project_files(username: str, project: str):
             ext = os.path.splitext(filename)[1].lower()
             if ext not in ALLOWED_FILE_EXTENSIONS:
                 continue
-            
-            # Read file and count tokens
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                tokens = count_tokens(content)
-                size_bytes = os.path.getsize(filepath)
-                
-                files.append(ProjectFileInfo(
-                    filename=filename,
-                    tokens=tokens,
-                    size_bytes=size_bytes
-                ))
-                total_tokens += tokens
-            except Exception as e:
-                # Skip files we can't read
-                print(f"Could not read file {filename}: {e}")
-                continue
-    
+
+            size_bytes = os.path.getsize(filepath)
+
+            # Check cache for this file and model
+            cached = tokens_cache.get(filename)
+            if cached and cached.get("model") == model and cached.get("size_bytes") == size_bytes:
+                # Cache hit - use cached token count
+                tokens = cached["tokens"]
+            else:
+                # Cache miss - need to count tokens
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    # Use API counting for Claude, estimator for others
+                    if use_api_counting and api_key and hasattr(provider, 'count_tokens_api'):
+                        try:
+                            tokens = provider.count_tokens_api(content, api_key)
+                        except Exception as e:
+                            logger.warning(f"API token count failed for {filename}, using estimator: {e}")
+                            tokens = provider.count_tokens(content) if provider else count_tokens(content)
+                    else:
+                        tokens = provider.count_tokens(content) if provider else count_tokens(content)
+
+                    # Update cache
+                    tokens_cache[filename] = {
+                        "tokens": tokens,
+                        "model": model,
+                        "size_bytes": size_bytes
+                    }
+                    cache_updated = True
+
+                except Exception as e:
+                    # Skip files we can't read
+                    print(f"Could not read file {filename}: {e}")
+                    continue
+
+            files.append(ProjectFileInfo(
+                filename=filename,
+                tokens=tokens,
+                size_bytes=size_bytes
+            ))
+            total_tokens += tokens
+
+    # Save cache if updated
+    if cache_updated:
+        save_file_tokens_cache(username, project, tokens_cache)
+
     return ProjectFilesResponse(files=files, total_tokens=total_tokens)
+
+def get_file_tokens_cache_path(username: str, project: str) -> str:
+    """Get path to file tokens cache for a project."""
+    return os.path.join(get_project_dir(username, project), "file_tokens.json")
+
+
+def load_file_tokens_cache(username: str, project: str) -> dict:
+    """Load cached file token counts."""
+    cache_path = get_file_tokens_cache_path(username, project)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_file_tokens_cache(username: str, project: str, cache: dict):
+    """Save file token counts to cache."""
+    cache_path = get_file_tokens_cache_path(username, project)
+    atomic_write_json(cache_path, cache)
+
 
 @app.post("/api/project-files/{username}/{project}")
 async def upload_project_files(username: str, project: str, files: List[UploadFile] = File(...)):
     """Upload one or more files to a project's uploads folder"""
     username = username.strip().lower()
     project_dir = get_project_dir(username, project)
-    
+
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
     uploads_dir = os.path.join(project_dir, "uploads")
-    
+
     # Create uploads dir if it doesn't exist
     if not os.path.exists(uploads_dir):
         os.makedirs(uploads_dir)
-    
+
+    # Get project model and API key for accurate Claude token counting
+    metadata = load_project_metadata(username, project)
+    project_model = metadata.get("model", DEFAULT_MODEL)
+    provider = ProviderRegistry.get(project_model)
+
+    # For Claude models, use API-based token counting
+    use_api_counting = project_model.startswith("claude")
+    api_key = None
+    if use_api_counting:
+        api_key = get_api_key(username, "anthropic")
+
+    # Load existing token cache
+    tokens_cache = load_file_tokens_cache(username, project)
+
     uploaded = []
     errors = []
-    
+
     for file in files:
         # Validate filename
         if not file.filename:
             errors.append("Empty filename")
             continue
-        
+
         # Check extension
         ext = os.path.splitext(file.filename)[1].lower()
         if ext not in ALLOWED_FILE_EXTENSIONS:
             errors.append(f"{file.filename}: Only .txt and .md files are allowed")
             continue
-        
+
         # Validate filename doesn't have path separators
         if '/' in file.filename or '\\' in file.filename:
             errors.append(f"{file.filename}: Invalid filename")
             continue
-        
+
         # Read file content
         try:
             content = await file.read()
@@ -2312,7 +2430,7 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
         except Exception as e:
             errors.append(f"{file.filename}: Could not read file - {str(e)}")
             continue
-        
+
         # Save file (check if overwriting)
         filepath = os.path.join(uploads_dir, file.filename)
         was_overwritten = os.path.exists(filepath)
@@ -2320,7 +2438,23 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(text_content)
 
-            tokens = count_tokens(text_content)
+            # Count tokens - use API for Claude, estimator for others
+            if use_api_counting and api_key and hasattr(provider, 'count_tokens_api'):
+                try:
+                    tokens = provider.count_tokens_api(text_content, api_key)
+                except Exception as e:
+                    logger.warning(f"API token count failed for {file.filename}, using estimator: {e}")
+                    tokens = provider.count_tokens(text_content) if provider else count_tokens(text_content)
+            else:
+                tokens = provider.count_tokens(text_content) if provider else count_tokens(text_content)
+
+            # Cache the token count with model info
+            tokens_cache[file.filename] = {
+                "tokens": tokens,
+                "model": project_model,
+                "size_bytes": len(content)
+            }
+
             uploaded.append({
                 "filename": file.filename,
                 "tokens": tokens,
@@ -2330,6 +2464,10 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
         except Exception as e:
             errors.append(f"{file.filename}: Could not save file - {str(e)}")
             continue
+
+    # Save updated token cache
+    if uploaded:
+        save_file_tokens_cache(username, project, tokens_cache)
 
     return {
         "uploaded": uploaded,
@@ -2364,44 +2502,178 @@ def delete_project_file(username: str, project: str, filename: str):
     os.remove(filepath)
     return {"status": "ok", "deleted": filename}
 
+def get_instructions_tokens_cache_path(username: str, project: str) -> str:
+    """Get path to instructions tokens cache for a project."""
+    return os.path.join(get_project_dir(username, project), "instructions_tokens.json")
+
+
+def load_instructions_tokens_cache(username: str, project: str) -> dict:
+    """Load cached instructions token count."""
+    cache_path = get_instructions_tokens_cache_path(username, project)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_instructions_tokens_cache(username: str, project: str, cache: dict):
+    """Save instructions token count to cache."""
+    cache_path = get_instructions_tokens_cache_path(username, project)
+    atomic_write_json(cache_path, cache)
+
+
 @app.get("/api/project-instructions/{username}/{project}", response_model=ProjectInstructionsResponse)
-def get_project_instructions(username: str, project: str):
+def get_project_instructions(username: str, project: str, model: str = None):
     """Get the instructions.di content for a project"""
     username = username.strip().lower()
     project_dir = get_project_dir(username, project)
-    
+
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
+    # Determine which tokenizer to use
+    # Priority: query param > project metadata > DEFAULT_MODEL
+    if not model:
+        metadata = load_project_metadata(username, project)
+        model = metadata.get("model", DEFAULT_MODEL)
+
+    provider = ProviderRegistry.get(model)
+    use_api_counting = model.startswith("claude")
+
     instructions_path = os.path.join(project_dir, "instructions.di")
-    
+
     if os.path.exists(instructions_path):
         with open(instructions_path, 'r', encoding='utf-8') as f:
             instructions = f.read()
     else:
         instructions = "You are a helpful assistant."
-    
-    tokens = count_tokens(instructions)
-    
+
+    # Check cache for token count
+    content_hash = hash(instructions)
+    cache = load_instructions_tokens_cache(username, project)
+
+    if cache.get("model") == model and cache.get("content_hash") == content_hash:
+        # Cache hit
+        tokens = cache["tokens"]
+    else:
+        # Cache miss - count tokens
+        if use_api_counting:
+            api_key = get_api_key(username, "anthropic")
+            if api_key and hasattr(provider, 'count_tokens_api'):
+                try:
+                    tokens = provider.count_tokens_api(instructions, api_key)
+                except Exception as e:
+                    logger.warning(f"API token count failed for instructions, using estimator: {e}")
+                    tokens = provider.count_tokens(instructions) if provider else count_tokens(instructions)
+            else:
+                tokens = provider.count_tokens(instructions) if provider else count_tokens(instructions)
+        else:
+            tokens = provider.count_tokens(instructions) if provider else count_tokens(instructions)
+
+        # Update cache
+        save_instructions_tokens_cache(username, project, {
+            "tokens": tokens,
+            "model": model,
+            "content_hash": content_hash
+        })
+
     return ProjectInstructionsResponse(instructions=instructions, tokens=tokens)
+
 
 @app.put("/api/project-instructions/{username}/{project}")
 def update_project_instructions(username: str, project: str, request: UpdateInstructionsRequest):
     """Update the instructions.di content for a project"""
     username = username.strip().lower()
     project_dir = get_project_dir(username, project)
-    
+
     if not os.path.exists(project_dir):
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
+    # Get project model for token counting
+    metadata = load_project_metadata(username, project)
+    model = metadata.get("model", DEFAULT_MODEL)
+    provider = ProviderRegistry.get(model)
+    use_api_counting = model.startswith("claude")
+
     instructions_path = os.path.join(project_dir, "instructions.di")
-    
+
     with open(instructions_path, 'w', encoding='utf-8') as f:
         f.write(request.instructions)
-    
-    tokens = count_tokens(request.instructions)
-    
+
+    # Count tokens using API for Claude, estimator for others
+    if use_api_counting:
+        api_key = get_api_key(username, "anthropic")
+        if api_key and hasattr(provider, 'count_tokens_api'):
+            try:
+                tokens = provider.count_tokens_api(request.instructions, api_key)
+            except Exception as e:
+                logger.warning(f"API token count failed for instructions update, using estimator: {e}")
+                tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+        else:
+            tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+    else:
+        tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+
+    # Update cache
+    save_instructions_tokens_cache(username, project, {
+        "tokens": tokens,
+        "model": model,
+        "content_hash": hash(request.instructions)
+    })
+
     return {"status": "ok", "tokens": tokens}
+
+
+@app.post("/api/set-project-model")
+def set_project_model(request: SetProjectModelRequest):
+    """Set the default model for a project."""
+    username = request.username.strip().lower()
+
+    if not os.path.exists(get_user_dir(username)):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    project_dir = get_project_dir(username, request.project)
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate model exists
+    provider = ProviderRegistry.get(request.model)
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {request.model}")
+
+    # Check if user has the required API key
+    required_key = ProviderRegistry.get_required_api_key(request.model)
+    if not get_api_key(username, required_key):
+        raise HTTPException(
+            status_code=400,
+            detail=f"API key for {required_key} not configured"
+        )
+
+    # Update project metadata with new model
+    metadata = load_project_metadata(username, request.project)
+    metadata["model"] = request.model
+    save_project_metadata(username, request.project, metadata)
+
+    return {"status": "ok", "model": request.model}
+
+
+@app.get("/api/project-metadata/{username}/{project}")
+def get_project_metadata_endpoint(username: str, project: str):
+    """Get project metadata including default model."""
+    username = username.strip().lower()
+    project_dir = get_project_dir(username, project)
+
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    metadata = load_project_metadata(username, project)
+    return {
+        "last_accessed": metadata.get("last_accessed"),
+        "model": metadata.get("model", DEFAULT_MODEL)
+    }
 
 
 @app.get("/health")
