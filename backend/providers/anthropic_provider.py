@@ -41,8 +41,8 @@ class AnthropicProvider(ModelProvider):
     @property
     def context_limits(self) -> ContextLimits:
         return ContextLimits(
-            threshold=180_000,  # Start trimming at this token count
-            target=140_000      # Trim down to this target
+            threshold=195_000,  # Tighter threshold with accurate counting
+            target=160_000      # More context retained
         )
 
     def get_client(self, api_key: str) -> Any:
@@ -214,12 +214,35 @@ class AnthropicProvider(ModelProvider):
         """
         Count tokens for Claude using character-based estimation.
 
-        Based on empirical testing against Claude's actual API token counts,
-        ~3.8 characters per token provides the closest approximation.
-        This is more accurate than tiktoken (20% error) or third-party
-        tokenizers (~10% error) for Claude Sonnet 4.5.
+        Uses ~3.8 characters per token which works well for conversational
+        content (~4% error). For dense content like project files, use
+        count_tokens_api() for accurate counts.
         """
         return int(len(text) / 3.8)
+
+    def count_tokens_api(self, text: str, api_key: str) -> int:
+        """
+        Count tokens using Claude's actual token counting API.
+
+        This is accurate but requires an API call. Use for:
+        - Project file uploads (dense content)
+        - System instructions updates
+
+        Args:
+            text: The text to count tokens for
+            api_key: Anthropic API key
+
+        Returns:
+            Exact token count from Claude API
+        """
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        response = client.messages.count_tokens(
+            model=self.MODEL_NAME,
+            messages=[{"role": "user", "content": text}]
+        )
+        return response.input_tokens
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:

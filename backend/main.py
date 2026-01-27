@@ -1412,7 +1412,15 @@ def send_message(request: SendMessageRequest):
 
     # Add user message with branching fields
     # Use provider's tokenizer for consistent token counting
-    user_message_tokens = provider.count_tokens(request.message)
+    # For Claude, use accurate API counting (adds ~150-200ms but enables tighter thresholds)
+    if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
+        try:
+            user_message_tokens = provider.count_tokens_api(request.message, api_key)
+        except Exception as e:
+            logger.warning(f"API token count failed, using estimator: {e}")
+            user_message_tokens = provider.count_tokens(request.message)
+    else:
+        user_message_tokens = provider.count_tokens(request.message)
 
     # Include attached files if present, and add their tokens to the count
     attached_files_data = None
@@ -1424,7 +1432,13 @@ def send_message(request: SendMessageRequest):
         # Count tokens for attached files (including the wrapper text)
         for f in request.attached_files:
             wrapper_text = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
-            user_message_tokens += provider.count_tokens(wrapper_text)
+            if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
+                try:
+                    user_message_tokens += provider.count_tokens_api(wrapper_text, api_key)
+                except Exception:
+                    user_message_tokens += provider.count_tokens(wrapper_text)
+            else:
+                user_message_tokens += provider.count_tokens(wrapper_text)
     
     user_msg_id = generate_message_id()
     user_msg_data = {
@@ -1560,29 +1574,6 @@ def send_message(request: SendMessageRequest):
         data["current_leaf_id"] = assistant_msg_id
 
         save_chat(username, request.chat_name, data, request.project)
-
-        # Update user message with accurate token count from API (no latency impact)
-        # The 3.8 estimator was used initially; now update with exact count for future context calculations
-        if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
-            try:
-                # Get accurate token count for user message
-                accurate_tokens = provider.count_tokens_api(request.message, api_key)
-
-                # Include attached files in count
-                if request.attached_files:
-                    for f in request.attached_files:
-                        wrapper = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
-                        accurate_tokens += provider.count_tokens_api(wrapper, api_key)
-
-                # Update stored user message if count differs
-                if accurate_tokens != user_message_tokens:
-                    for msg in data["messages"]:
-                        if msg.get("id") == user_msg_id:
-                            msg["total_tokens"] = accurate_tokens
-                            break
-                    save_chat(username, request.chat_name, data, request.project)
-            except Exception as e:
-                logger.warning(f"Failed to update accurate token count: {e}")
 
         # Calculate total messages in the new branch for frontend pagination
         branch_path = get_path_to_root(data["messages"], assistant_msg_id)
