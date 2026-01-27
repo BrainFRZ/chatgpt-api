@@ -282,6 +282,77 @@ class TestSetChatModel:
         })
         assert response.status_code == 404
 
+    def test_model_switch_trims_to_target(self, client, test_user, temp_data_dir):
+        """Switching models should trim context to target, not threshold.
+
+        This ensures cache stability: trimming to target on switch means
+        the first message won't cause an immediate re-trim on the second message.
+        """
+        # Create a chat with messages that have token counts
+        # We'll create enough "tokens" to exceed Claude's target (140k) but stay under threshold (180k)
+        chat_data = {
+            "messages": [
+                {"id": "sys", "role": "system", "content": "You are helpful.", "total_tokens": 100},
+            ],
+            "model": "gpt-5.2",
+            "current_leaf_id": None,
+            "stats": {}
+        }
+
+        # Add messages totaling ~150k tokens (between Claude's target=140k and threshold=180k)
+        parent_id = "sys"
+        for i in range(15):
+            msg_id = f"msg{i}"
+            chat_data["messages"].append({
+                "id": msg_id,
+                "parent_id": parent_id,
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": "x" * 1000,  # Content for token counting
+                "total_tokens": 10000  # Each message is 10k tokens
+            })
+            parent_id = msg_id
+
+        chat_data["current_leaf_id"] = parent_id
+
+        # Write the chat file
+        chat_path = Path(temp_data_dir) / test_user / "chat_token_test.json"
+        with open(chat_path, 'w') as f:
+            json.dump(chat_data, f)
+
+        # Set up API key for Claude
+        client.post("/api/set-api-keys", json={
+            "username": test_user,
+            "anthropic_key": "sk-ant-test"
+        })
+
+        # Mock the Anthropic provider's count_tokens to return the pre-set total_tokens
+        # This ensures calculate_context_window uses our intended token counts
+        from providers.anthropic_provider import AnthropicProvider
+        original_count_tokens = AnthropicProvider.count_tokens
+
+        def mock_count_tokens(self, text):
+            # Return a fixed high count to ensure we're over the target
+            return 10000  # Each call returns 10k tokens
+
+        with patch.object(AnthropicProvider, 'count_tokens', mock_count_tokens):
+            # Switch to Claude
+            response = client.post("/api/set-chat-model", json={
+                "username": test_user,
+                "chat_name": "token_test",
+                "model": "claude-sonnet-4.5"
+            })
+
+        assert response.status_code == 200
+        result = response.json()
+
+        # The context_start_index should reflect trimming to TARGET (140k), not THRESHOLD (180k)
+        # With 16 messages at ~10k tokens each = 160k total
+        # Trimming to 140k target means we should drop at least 2-3 messages
+        # context_start_index > 1 means some messages are grayed out
+        assert "context_start_index" in result
+        # We expect trimming since 160k > 140k target
+        assert result["context_start_index"] > 1, "Should trim to target (140k), not keep everything up to threshold (180k)"
+
 
 class TestGetChatModel:
     """Tests for GET /api/chat/{user}/{chat} model field."""

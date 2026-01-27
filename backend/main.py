@@ -24,7 +24,9 @@ from providers.openai_provider import OpenAIProvider, add_updates_to_messages as
 from providers.anthropic_provider import AnthropicProvider, add_updates_to_messages as anthropic_add_updates
 
 # Configure logging for debugging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # ============================================================
 # Configuration Constants
@@ -115,7 +117,9 @@ def atomic_write_json(path: str, data: dict, indent: int = 2) -> None:
         data: Dictionary to serialize as JSON
         indent: JSON indentation (default 2)
     """
-    temp_path = path + '.tmp'
+    # Use unique temp file name to prevent race conditions when multiple
+    # requests try to update the same file simultaneously
+    temp_path = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
     try:
         with open(temp_path, 'w') as f:
             json.dump(data, f, indent=indent)
@@ -300,6 +304,7 @@ def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int
 
     with file_lock(path):
         stats = load_persistent_stats(username)
+        old_prompts = stats["total_prompts"]
         stats["total_prompts"] += 1
         stats["total_input_tokens"] += input_tokens
         stats["total_cached_tokens"] += cached_tokens
@@ -312,6 +317,7 @@ def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int
             stats["first_prompt_date"] = date.today().isoformat()
 
         atomic_write_json(path, stats)
+        logger.info(f"update_persistent_stats: user={username}, prompts {old_prompts} -> {stats['total_prompts']}, cost={cost}")
 
 def get_chat_path(username: str, chat_name: str, project: str = None) -> str:
     if project:
@@ -714,20 +720,35 @@ def get_daily_usage_path(username: str) -> str:
     """Get path to daily usage tracking file"""
     return os.path.join(get_user_dir(username), "daily_usage.json")
 
-def load_daily_usage(username: str) -> dict:
-    """Load daily usage data, reset if new day (UTC)"""
+def load_daily_usage(username: str, save_if_reset: bool = False) -> dict:
+    """Load daily usage data, reset if new day (UTC)
+
+    Args:
+        username: The user
+        save_if_reset: If True, immediately save reset data to disk when day changes.
+                       This prevents race conditions where concurrent requests might
+                       read stale data before the caller saves.
+    """
     path = get_daily_usage_path(username)
     today_utc = datetime.now(ZoneInfo('UTC')).date().isoformat()
-    
+
     if os.path.exists(path):
         with open(path, 'r') as f:
             data = json.load(f)
             # Reset if new day
             if data.get("date") != today_utc:
                 data = {"date": today_utc, "tokens_used": 0}
+                if save_if_reset:
+                    # Immediately persist the reset to prevent stale reads
+                    save_daily_usage(username, data)
+                    logger.info(f"load_daily_usage: reset to new day {today_utc} for user {username}")
             return data
-    
-    return {"date": today_utc, "tokens_used": 0}
+
+    data = {"date": today_utc, "tokens_used": 0}
+    if save_if_reset:
+        save_daily_usage(username, data)
+        logger.info(f"load_daily_usage: created new usage file for user {username}")
+    return data
 
 def save_daily_usage(username: str, data: dict):
     """Save daily usage data atomically with file locking."""
@@ -740,11 +761,15 @@ def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tup
     Apply free tokens (resets at 0:00 UTC).
     Returns: (actual_cost, cost_display_string)
     """
-    # Load current usage
-    usage = load_daily_usage(username)
-    tokens_used = usage["tokens_used"]
-    remaining_free = max(0, FREE_TOKENS_PER_DAY - tokens_used)
-    
+    # Load current usage (save immediately if day reset to prevent race conditions)
+    usage = load_daily_usage(username, save_if_reset=True)
+    tokens_used_before = usage["tokens_used"]
+    remaining_free = max(0, FREE_TOKENS_PER_DAY - tokens_used_before)
+
+    logger.info(f"apply_free_tokens: user={username}, total_tokens={total_tokens}, "
+                f"tokens_used_before={tokens_used_before}, remaining_free={remaining_free}, "
+                f"usage_date={usage.get('date')}")
+
     # Apply free tokens
     if total_tokens <= remaining_free:
         # Entirely free
@@ -759,11 +784,13 @@ def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tup
         # No free tokens left
         actual_cost = full_cost
         cost_str = f"${actual_cost:.6f}"
-    
+
     # Update usage
-    usage["tokens_used"] = tokens_used + total_tokens
+    usage["tokens_used"] = tokens_used_before + total_tokens
     save_daily_usage(username, usage)
-    
+
+    logger.info(f"apply_free_tokens: saved tokens_used={usage['tokens_used']}, cost_str={cost_str}")
+
     return actual_cost, cost_str
 
 def get_instructions(username: str, project: str = None) -> str:
@@ -1113,7 +1140,7 @@ def set_chat_model(request: SetChatModelRequest):
         context_limits = provider.context_limits
         context_start_index = calculate_context_window(
             branch_path,
-            threshold=context_limits.threshold,
+            threshold=context_limits.target,  # Use target as threshold on switch to avoid immediate re-trim
             target=context_limits.target,
             count_tokens_fn=provider.count_tokens
         )
@@ -1304,7 +1331,8 @@ def send_message(request: SendMessageRequest):
     # When switching models, re-count all message tokens with new provider's tokenizer
     # This ensures context window calculation uses consistent token counts
     old_model = data.get("model")
-    if request.model and request.model != old_model:
+    model_switched = request.model and request.model != old_model
+    if model_switched:
         data["model"] = request.model
         # Re-count tokens for all messages with the new provider's tokenizer
         for msg in data["messages"]:
@@ -1411,10 +1439,12 @@ def send_message(request: SendMessageRequest):
         branch_path = get_path_to_root(data["messages"], user_msg_id)
 
         # Calculate context window using provider-specific limits and tokenizer
+        # On model switch, use target as threshold to avoid immediate re-trim on next message
         context_limits = provider.context_limits
+        threshold = context_limits.target if model_switched else context_limits.threshold
         context_start_index = calculate_context_window(
             branch_path,
-            threshold=context_limits.threshold,
+            threshold=threshold,
             target=context_limits.target,
             count_tokens_fn=provider.count_tokens
         )
@@ -2168,13 +2198,15 @@ def get_free_tokens(username: str):
     usage = load_daily_usage(username)
     tokens_used = usage["tokens_used"]
     remaining = max(0, FREE_TOKENS_PER_DAY - tokens_used)
-    
+
+    logger.info(f"get_free_tokens: user={username}, date={usage.get('date')}, used={tokens_used}, remaining={remaining}")
+
     # Calculate next UTC midnight and convert to Eastern Time
     from datetime import timedelta
     today_utc = datetime.now(ZoneInfo('UTC')).date()
     next_midnight_utc = datetime.combine(today_utc + timedelta(days=1), datetime.min.time(), tzinfo=ZoneInfo('UTC'))
     next_midnight_eastern = next_midnight_utc.astimezone(ZoneInfo('America/New_York'))
-    
+
     return {
         "total_free": FREE_TOKENS_PER_DAY,
         "used": tokens_used,
