@@ -974,6 +974,7 @@ class ChatMessage(BaseModel):
     reasoning: str | None = None
     total_tokens: int | None = None
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
+    model: str | None = None  # Model used for this message (for multi-model chats)
 
 class ChatResponse(BaseModel):
     messages: list[ChatMessage]  # Current branch path (paginated, for display)

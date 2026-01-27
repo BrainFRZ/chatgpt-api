@@ -1852,7 +1852,8 @@ function App() {
           message: editedMessage.content,
           project: ctx.project,
           parent_id: parentId,  // Use parent_id for branching instead of truncate_to_index
-          attached_files: originalMessage.attached_files || undefined
+          attached_files: originalMessage.attached_files || undefined,
+          model: selectedModel
         })
       });
 
