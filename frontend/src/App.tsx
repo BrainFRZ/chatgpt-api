@@ -390,6 +390,7 @@ function App() {
   const [viewMode, setViewMode] = useState<'chat' | 'projectList' | 'chatList'>('chat');
   const [projectChatsCache, setProjectChatsCache] = useState<{[key: string]: string[]}>({});
   const [rootChatsCache, setRootChatsCache] = useState<string[] | null>(null);
+  const [projectModel, setProjectModel] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -456,7 +457,7 @@ function App() {
   const resetProjectState = () => {
     resetChatState();
     resetUIState();
-    
+
     setCurrentProject(null);
     currentProjectRef.current = null;
     setProjectFiles([]);
@@ -470,6 +471,7 @@ function App() {
     setProjectChatsDetailed([]);
     setChatSearchQuery('');
     setViewMode('chat');
+    setProjectModel(null);
   };
 
   // Reset all user session state (called on logout)
@@ -844,6 +846,7 @@ function App() {
       setInstructionsSaving(false);
       setFilesUploading(false);
       setProjectChatsDetailed([]);
+      setProjectModel(null);
     }
     setChatSearchQuery('');
     setViewMode('chat');
@@ -855,6 +858,20 @@ function App() {
     // If we have cached chats for this project, use them immediately
     if (projectChatsCache[projectName]) {
       setChats(projectChatsCache[projectName]);
+    }
+
+    // Fetch project metadata to get the project's default model
+    try {
+      const metadataResponse = await fetch(`/api/project-metadata/${user.username}/${projectName}`);
+      if (currentProjectRef.current !== projectName) return;
+
+      if (metadataResponse.ok) {
+        const metadataData = await metadataResponse.json();
+        if (currentProjectRef.current !== projectName) return;
+        setProjectModel(metadataData.model || 'gpt-5.2');
+      }
+    } catch (err) {
+      console.error('Could not fetch project metadata:', err);
     }
 
     // Fetch project files and instructions (refresh in background)
@@ -922,6 +939,11 @@ function App() {
     const projectForNewChat = currentProject;
     const chatName = newItemName.trim();
 
+    // When in a project, use project's model; otherwise use selectedModel
+    // Note: backend will also inherit from project if model is not passed,
+    // but passing it explicitly ensures UI consistency
+    const modelForNewChat = projectForNewChat ? (projectModel || selectedModel) : selectedModel;
+
     try {
       const response = await fetch('/api/create-chat', {
         method: 'POST',
@@ -930,7 +952,7 @@ function App() {
           username: user.username,
           chat_name: chatName,
           project: projectForNewChat,
-          model: selectedModel
+          model: modelForNewChat
         })
       });
 
@@ -1129,6 +1151,72 @@ function App() {
     setShowApiKeyModal(false);
     setModalApiKey('');
     setPendingModelSwitch(null);
+  };
+
+  const handleProjectModelChange = async (newModel: string) => {
+    if (!user || !currentProject) return;
+
+    // Check if user has the required API key for this model
+    const requiredKey = newModel.startsWith('claude') ? 'anthropic' : 'openai';
+    const hasKey = requiredKey === 'anthropic' ? apiKeysStatus.has_anthropic : apiKeysStatus.has_openai;
+
+    if (!hasKey) {
+      // Show modal to enter the missing API key
+      setPendingModelSwitch(newModel);
+      setModalApiKey('');
+      setShowApiKeyModal(true);
+      return;
+    }
+
+    await completeProjectModelSwitch(newModel);
+  };
+
+  const completeProjectModelSwitch = async (newModel: string) => {
+    if (!user || !currentProject) return;
+
+    const previousModel = projectModel;
+    setProjectModel(newModel);  // Optimistic update for responsive UI
+
+    try {
+      const response = await fetch('/api/set-project-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          project: currentProject,
+          model: newModel
+        })
+      });
+
+      if (!response.ok) {
+        // Rollback on server error
+        setProjectModel(previousModel);
+        const data = await response.json().catch(() => ({}));
+
+        // If error is about missing API key, show the modal instead of error
+        if (data.detail && data.detail.includes('API key')) {
+          setPendingModelSwitch(newModel);
+          setModalApiKey('');
+          setShowApiKeyModal(true);
+          // Refresh API keys status since it may be stale
+          fetch(`/api/api-keys/${user.username}`)
+            .then(res => res.json())
+            .then(keysData => setApiKeysStatus(keysData))
+            .catch(() => {});
+        } else {
+          setError(data.detail || 'Could not switch project model');
+        }
+      } else {
+        // Success - re-fetch project files and instructions with new tokenizer
+        fetchProjectFiles(currentProject);
+        fetchProjectInstructions(currentProject);
+      }
+    } catch (err) {
+      // Rollback on network error
+      setProjectModel(previousModel);
+      setError('Could not switch project model - network error');
+      console.error('Could not save project model preference:', err);
+    }
   };
 
   const fetchUserStats = async () => {
@@ -1413,8 +1501,9 @@ function App() {
       setContextStartIndex(1);
       setExpandedReasoning(new Set());
 
-      // Set model selection from chat data (default to gpt-5.2)
-      setSelectedModel(data.model || 'gpt-5.2');
+      // Set model selection from chat data
+      // Priority: chat's model > project's model > 'gpt-5.2'
+      setSelectedModel(data.model || projectModel || 'gpt-5.2');
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -3146,8 +3235,25 @@ function App() {
                     </div>
                   </div>
                   
-                  {/* Right column: Instructions + Files */}
+                  {/* Right column: Model + Instructions + Files */}
                   <div style={styles.projectConfigColumn}>
+                    {/* Default Model section */}
+                    <div style={styles.projectSection}>
+                      <div style={styles.projectSectionHeader}>
+                        <h3 style={styles.projectSectionTitle}>Default Model</h3>
+                      </div>
+                      <select
+                        value={projectModel || 'gpt-5.2'}
+                        onChange={(e) => handleProjectModelChange(e.target.value)}
+                        style={styles.projectModelSelector}
+                      >
+                        {availableModels.map(model => (
+                          <option key={model.id} value={model.id}>{model.name}</option>
+                        ))}
+                      </select>
+                      <p style={styles.projectModelHelperText}>New chats will use this model by default</p>
+                    </div>
+
                     {/* Instructions section */}
                     <div style={styles.projectSection}>
                       <div style={styles.projectSectionHeader}>
@@ -4398,6 +4504,22 @@ const styles: { [key: string]: React.CSSProperties } = {
     color: '#4a4ae8',
     cursor: 'pointer',
     width: '100%',
+  },
+  projectModelSelector: {
+    padding: '8px 12px',
+    backgroundColor: '#2a2a4e',
+    border: '1px solid #3a3a5e',
+    borderRadius: '4px',
+    color: '#e0e0e0',
+    fontSize: '14px',
+    width: '100%',
+    marginBottom: '8px',
+    cursor: 'pointer',
+  },
+  projectModelHelperText: {
+    fontSize: '0.8rem',
+    color: '#888',
+    margin: 0,
   },
   filesList: {
     marginBottom: '12px',
