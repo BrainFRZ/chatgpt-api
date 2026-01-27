@@ -39,8 +39,9 @@ class OpenAIProvider(ModelProvider):
     @property
     def pricing(self) -> Pricing:
         return Pricing(
-            input_new=1.75,      # $/1M tokens (cache miss)
-            input_cached=0.175,  # $/1M tokens (cache hit)
+            input_base=1.75,     # $/1M tokens (non-cached input)
+            cache_write=1.75,    # $/1M tokens (OpenAI doesn't differentiate)
+            cache_read=0.175,    # $/1M tokens (cache hit)
             output=14.0,         # $/1M tokens
             reasoning=14.0       # $/1M tokens
         )
@@ -138,7 +139,8 @@ class OpenAIProvider(ModelProvider):
             content=content,
             reasoning=reasoning,
             input_tokens=input_tokens,
-            cached_tokens=cached_tokens,
+            cache_read_tokens=cached_tokens,
+            cache_creation_tokens=0,  # OpenAI doesn't report this separately
             output_tokens=text_output_tokens,
             reasoning_tokens=reasoning_tokens
         )

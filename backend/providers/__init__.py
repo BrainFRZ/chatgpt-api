@@ -16,7 +16,8 @@ class ParsedResponse:
     content: str
     reasoning: Optional[str]
     input_tokens: int
-    cached_tokens: int
+    cache_read_tokens: int       # Cache hit tokens
+    cache_creation_tokens: int   # Tokens written to cache
     output_tokens: int
     reasoning_tokens: int
 
@@ -24,8 +25,9 @@ class ParsedResponse:
 @dataclass
 class Pricing:
     """Pricing per million tokens."""
-    input_new: float      # Cache miss / new input
-    input_cached: float   # Cache hit / cached input
+    input_base: float     # Non-cached input (base rate)
+    cache_write: float    # Cache write tokens
+    cache_read: float     # Cache hit tokens
     output: float         # Output text tokens
     reasoning: float      # Reasoning/thinking tokens
 
@@ -111,19 +113,20 @@ class ModelProvider(ABC):
     def calculate_cost(self, parsed: ParsedResponse) -> float:
         """Calculate the total cost for a response."""
         p = self.pricing
-        new_input = parsed.input_tokens - parsed.cached_tokens
+        non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
         return (
-            new_input * p.input_new / 1_000_000 +
-            parsed.cached_tokens * p.input_cached / 1_000_000 +
+            non_cached * p.input_base / 1_000_000 +
+            parsed.cache_creation_tokens * p.cache_write / 1_000_000 +
+            parsed.cache_read_tokens * p.cache_read / 1_000_000 +
             parsed.output_tokens * p.output / 1_000_000 +
             parsed.reasoning_tokens * p.reasoning / 1_000_000
         )
 
     def format_token_string(self, parsed: ParsedResponse) -> str:
         """Format tokens as 'I:X C:Y O:Z R:W T:N' string."""
-        new_input = parsed.input_tokens - parsed.cached_tokens
+        non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
         total = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
-        return f"I:{new_input} C:{parsed.cached_tokens} O:{parsed.output_tokens} R:{parsed.reasoning_tokens} T:{total}"
+        return f"I:{non_cached} C:{parsed.cache_read_tokens} O:{parsed.output_tokens} R:{parsed.reasoning_tokens} T:{total}"
 
     def get_metadata(self) -> dict:
         """Return model metadata for the /api/models endpoint."""
@@ -131,8 +134,9 @@ class ModelProvider(ABC):
             "id": self.model_id,
             "name": self.display_name,
             "pricing": {
-                "input_new": self.pricing.input_new,
-                "input_cached": self.pricing.input_cached,
+                "input_base": self.pricing.input_base,
+                "cache_write": self.pricing.cache_write,
+                "cache_read": self.pricing.cache_read,
                 "output": self.pricing.output,
                 "reasoning": self.pricing.reasoning,
             },

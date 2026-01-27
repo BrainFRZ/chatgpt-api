@@ -15,10 +15,11 @@ class AnthropicProvider(ModelProvider):
     THINKING_BUDGET = 3000
     MAX_TOKENS = 16000  # Max output tokens (including thinking)
 
-    # Beta headers for extended context and context management
+    # Beta headers for extended context, context management, and 1hr caching
     BETA_HEADERS = [
         "context-1m-2025-08-07",           # Enables 1M token context
-        "context-management-2025-06-27"    # Clears old thought blocks from history
+        "context-management-2025-06-27",   # Clears old thought blocks from history
+        "extended-cache-ttl-2025-04-11"    # Enables 1hr cache TTL
     ]
 
     @property
@@ -32,8 +33,9 @@ class AnthropicProvider(ModelProvider):
     @property
     def pricing(self) -> Pricing:
         return Pricing(
-            input_new=6.00,      # $/1M tokens (cache miss/write)
-            input_cached=0.30,   # $/1M tokens (cache hit/read)
+            input_base=3.00,     # $/1M tokens (non-cached input)
+            cache_write=6.00,    # $/1M tokens (1hr cache write, 2x base)
+            cache_read=0.30,     # $/1M tokens (cache hit, 0.1x base)
             output=15.0,         # $/1M tokens
             reasoning=15.0       # $/1M tokens (thinking)
         )
@@ -80,7 +82,7 @@ class AnthropicProvider(ModelProvider):
                         {
                             "type": "text",
                             "text": content,
-                            "cache_control": {"type": "ephemeral"}
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
                         }
                     ]
             else:
@@ -140,7 +142,7 @@ class AnthropicProvider(ModelProvider):
                         {
                             "type": "text",
                             "text": content,
-                            "cache_control": {"type": "ephemeral"}
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
                         }
                     ]
                 }
@@ -157,7 +159,7 @@ class AnthropicProvider(ModelProvider):
 
     def send_request(self, client: Any, request_params: dict) -> Any:
         """Send request to Anthropic API."""
-        return client.messages.create(**request_params)
+        return client.messages.create(**request_params, betas=self.BETA_HEADERS)
 
     def parse_response(self, response: Any) -> ParsedResponse:
         """Parse Anthropic response into standardized format."""
@@ -179,15 +181,14 @@ class AnthropicProvider(ModelProvider):
         input_tokens = usage.input_tokens
         output_tokens = usage.output_tokens
 
-        # Cache tokens (cache_read_input_tokens for hits)
-        cached_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
+        # Cache tokens
+        cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
+        cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
 
-        # With extended thinking, the API provides thinking tokens in cache_creation_input_tokens
-        # when thinking is included, but the primary way to get thinking token count
-        # is from the thinking block's token count if available
+        # With extended thinking, the API provides thinking tokens
+        # Try to get from the thinking block's token count if available
         thinking_tokens = 0
 
-        # Try to get thinking tokens from the response content blocks
         for block in response.content:
             if block.type == "thinking":
                 # Some API versions include token count on the block
@@ -205,9 +206,40 @@ class AnthropicProvider(ModelProvider):
             content=content,
             reasoning=reasoning,
             input_tokens=input_tokens,
-            cached_tokens=cached_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             output_tokens=text_output_tokens,
             reasoning_tokens=thinking_tokens
+        )
+
+    def calculate_cost(self, parsed: ParsedResponse) -> float:
+        """Calculate cost with extended context pricing for >200K tokens."""
+        p = self.pricing
+
+        # Check if extended context pricing applies
+        if parsed.input_tokens > 200_000:
+            # Extended context: 2x input, 1.5x output
+            input_base = p.input_base * 2        # $6
+            cache_write = p.cache_write * 2      # $12
+            cache_read = p.cache_read * 2        # $0.60
+            output = p.output * 1.5              # $22.50
+            reasoning = p.reasoning * 1.5        # $22.50
+        else:
+            input_base = p.input_base
+            cache_write = p.cache_write
+            cache_read = p.cache_read
+            output = p.output
+            reasoning = p.reasoning
+
+        # Non-cached = total - cache_read - cache_creation
+        non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+
+        return (
+            non_cached * input_base / 1_000_000 +
+            parsed.cache_creation_tokens * cache_write / 1_000_000 +
+            parsed.cache_read_tokens * cache_read / 1_000_000 +
+            parsed.output_tokens * output / 1_000_000 +
+            parsed.reasoning_tokens * reasoning / 1_000_000
         )
 
     def count_tokens(self, text: str) -> int:

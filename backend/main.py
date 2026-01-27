@@ -1525,7 +1525,7 @@ def send_message(request: SendMessageRequest):
         reasoning_summary = parsed.reasoning
 
         # Calculate tokens and cost using provider pricing
-        new_input_tokens = parsed.input_tokens - parsed.cached_tokens
+        new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens
         total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
         total_cost = provider.calculate_cost(parsed)
         tokens_str = provider.format_token_string(parsed)
@@ -1541,7 +1541,7 @@ def send_message(request: SendMessageRequest):
         # Update stats
         stats = data.get("stats", create_empty_stats())
         stats["total_input_tokens"] += new_input_tokens
-        stats["total_cached_tokens"] += parsed.cached_tokens
+        stats["total_cached_tokens"] += parsed.cache_read_tokens
         stats["total_output_tokens"] += parsed.output_tokens
         stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
         stats["total_cost"] += actual_cost  # Use actual cost after free tokens
@@ -1550,7 +1550,7 @@ def send_message(request: SendMessageRequest):
         data["stats"] = stats
 
         # Update persistent lifetime stats (survives chat deletion)
-        update_persistent_stats(username, new_input_tokens, parsed.cached_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
+        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
 
         # Add assistant message with branching fields
         assistant_msg_id = generate_message_id()
