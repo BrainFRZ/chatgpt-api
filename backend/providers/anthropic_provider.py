@@ -252,6 +252,15 @@ class AnthropicProvider(ModelProvider):
         """
         return int(len(text) / 3.8)
 
+    def count_tokens_buffered(self, text: str) -> int:
+        """
+        Estimate tokens with 15% buffer for trimming decisions.
+
+        Uses chars/3.3 (~15% higher than 3.8) to avoid undercounting.
+        Safe margin ensures we don't exceed 200k when estimating 160-195k.
+        """
+        return int(len(text) / 3.3)
+
     def count_tokens_api(self, text: str, api_key: str) -> int:
         """
         Count tokens using Claude's actual token counting API.

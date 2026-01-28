@@ -1413,13 +1413,10 @@ def send_message(request: SendMessageRequest):
 
     # Add user message with branching fields
     # Use provider's tokenizer for consistent token counting
-    # For Claude, use accurate API counting (adds ~150-200ms but enables tighter thresholds)
-    if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
-        try:
-            user_message_tokens = provider.count_tokens_api(request.message, api_key)
-        except Exception as e:
-            logger.warning(f"API token count failed, using estimator: {e}")
-            user_message_tokens = provider.count_tokens(request.message)
+    # For Claude, use buffered estimation (fast, conservative for trimming decisions)
+    # Accurate count will be calculated after API response
+    if model_id.startswith("claude") and hasattr(provider, 'count_tokens_buffered'):
+        user_message_tokens = provider.count_tokens_buffered(request.message)
     else:
         user_message_tokens = provider.count_tokens(request.message)
 
@@ -1433,11 +1430,8 @@ def send_message(request: SendMessageRequest):
         # Count tokens for attached files (including the wrapper text)
         for f in request.attached_files:
             wrapper_text = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
-            if model_id.startswith("claude") and hasattr(provider, 'count_tokens_api'):
-                try:
-                    user_message_tokens += provider.count_tokens_api(wrapper_text, api_key)
-                except Exception:
-                    user_message_tokens += provider.count_tokens(wrapper_text)
+            if model_id.startswith("claude") and hasattr(provider, 'count_tokens_buffered'):
+                user_message_tokens += provider.count_tokens_buffered(wrapper_text)
             else:
                 user_message_tokens += provider.count_tokens(wrapper_text)
     
@@ -1524,6 +1518,26 @@ def send_message(request: SendMessageRequest):
 
         assistant_message = parsed.content
         reasoning_summary = parsed.reasoning
+
+        # Calculate accurate user message tokens from API response for Claude
+        # input_tokens = system + history + user message
+        # We know system and history tokens, so: user_actual = input - known
+        if model_id.startswith("claude"):
+            known_tokens = 0
+            # System message tokens (index 0) - use unbuffered estimate
+            known_tokens += provider.count_tokens(branch_path[0]["content"])
+            # History messages in context (from context_start_index to second-to-last)
+            for msg in branch_path[context_start_index:-1]:
+                known_tokens += msg.get("total_tokens") or 0
+
+            # Calculate actual user message tokens
+            user_message_tokens_actual = parsed.input_tokens - known_tokens
+
+            # Update the user message in data["messages"] with accurate count
+            for msg in data["messages"]:
+                if msg.get("id") == user_msg_id:
+                    msg["total_tokens"] = user_message_tokens_actual
+                    break
 
         # Calculate tokens and cost using provider pricing
         new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens
