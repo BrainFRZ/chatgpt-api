@@ -17,6 +17,7 @@ import tiktoken
 import logging
 import fcntl
 import uuid
+import hashlib
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
@@ -387,16 +388,16 @@ def calculate_context_window(
         system_tokens = token_counter(system_msg.get("content", ""))
 
     # Count new user message tokens (last message), including attached files
+    # Build combined content first, then count once (BPE tokenizers are non-additive)
     last_msg = messages[-1]
     new_user_tokens = last_msg.get("total_tokens")
     if new_user_tokens is None:
-        new_user_tokens = token_counter(last_msg["content"])
-        # Add tokens for attached files if present (matching build_message_content format)
+        content = last_msg["content"]
         attached_files = last_msg.get("attached_files", [])
         if attached_files:
             file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached_files]
-            files_text = "\n\n".join(file_wrappers) + "\n\n"
-            new_user_tokens += token_counter(files_text)
+            content = "\n\n".join(file_wrappers) + "\n\n" + content
+        new_user_tokens = token_counter(content)
 
     # Base tokens that are always included
     base_tokens = system_tokens + new_user_tokens
@@ -1203,11 +1204,12 @@ def set_chat_model(request: SetChatModelRequest):
             branch_path = data["messages"]
 
         context_limits = provider.context_limits
+        token_counter = getattr(provider, 'count_tokens_buffered', provider.count_tokens)
         context_start_index = calculate_context_window(
             branch_path,
             threshold=context_limits.target,  # Use target as threshold on switch to avoid immediate re-trim
             target=context_limits.target,
-            count_tokens_fn=provider.count_tokens
+            count_tokens_fn=token_counter
         )
 
     return {"status": "ok", "model": request.model, "context_start_index": context_start_index}
@@ -1530,13 +1532,15 @@ def send_message(request: SendMessageRequest):
 
         # Calculate context window using provider-specific limits and tokenizer
         # On model switch, use target as threshold to avoid immediate re-trim on next message
+        # Use buffered estimator for trimming to avoid undercounting edge cases
         context_limits = provider.context_limits
         threshold = context_limits.target if model_switched else context_limits.threshold
+        token_counter = getattr(provider, 'count_tokens_buffered', provider.count_tokens)
         context_start_index = calculate_context_window(
             branch_path,
             threshold=threshold,
             target=context_limits.target,
-            count_tokens_fn=provider.count_tokens
+            count_tokens_fn=token_counter
         )
 
         # Helper to build message content with FILE wrappers
@@ -2482,10 +2486,12 @@ def list_project_files(username: str, project: str, model: str = None):
                 continue
 
             size_bytes = os.path.getsize(filepath)
+            mtime = os.path.getmtime(filepath)
 
-            # Check cache for this file and model
+            # Check cache for this file and model (include mtime to detect edits)
             cached = tokens_cache.get(filename)
-            if cached and cached.get("model") == model and cached.get("size_bytes") == size_bytes:
+            if (cached and cached.get("model") == model and
+                cached.get("size_bytes") == size_bytes and cached.get("mtime") == mtime):
                 # Cache hit - use cached token count
                 tokens = cached["tokens"]
             else:
@@ -2508,7 +2514,8 @@ def list_project_files(username: str, project: str, model: str = None):
                     tokens_cache[filename] = {
                         "tokens": tokens,
                         "model": model,
-                        "size_bytes": size_bytes
+                        "size_bytes": size_bytes,
+                        "mtime": mtime
                     }
                     cache_updated = True
 
@@ -2741,8 +2748,8 @@ def get_project_instructions(username: str, project: str, model: str = None):
     else:
         instructions = "You are a helpful assistant."
 
-    # Check cache for token count
-    content_hash = hash(instructions)
+    # Check cache for token count (use stable hash that persists across restarts)
+    content_hash = hashlib.sha256(instructions.encode()).hexdigest()
     cache = load_instructions_tokens_cache(username, project)
 
     if cache.get("model") == model and cache.get("content_hash") == content_hash:
@@ -2807,11 +2814,11 @@ def update_project_instructions(username: str, project: str, request: UpdateInst
     else:
         tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
 
-    # Update cache
+    # Update cache (use stable hash that persists across restarts)
     save_instructions_tokens_cache(username, project, {
         "tokens": tokens,
         "model": model,
-        "content_hash": hash(request.instructions)
+        "content_hash": hashlib.sha256(request.instructions.encode()).hexdigest()
     })
 
     return {"status": "ok", "tokens": tokens}
