@@ -235,6 +235,7 @@ def load_persistent_stats(username: str) -> dict:
             "total_input_tokens": 0,
             "total_cached_tokens": 0,
             "total_output_tokens": 0,
+            "total_reasoning_tokens": 0,
             "total_cost": 0.0,
             "first_prompt_date": None
         }
@@ -251,6 +252,7 @@ def load_persistent_stats(username: str) -> dict:
                     migrated["total_input_tokens"] += stats.get("total_input_tokens", 0)
                     migrated["total_cached_tokens"] += stats.get("total_cached_tokens", 0)
                     migrated["total_output_tokens"] += stats.get("total_output_tokens", 0)
+                    migrated["total_reasoning_tokens"] += stats.get("total_reasoning_tokens", 0)
                     migrated["total_cost"] += stats.get("total_cost", 0.0)
                     first_prompt = stats.get("first_prompt_date")
                     if first_prompt:
@@ -276,6 +278,7 @@ def load_persistent_stats(username: str) -> dict:
                                 migrated["total_input_tokens"] += stats.get("total_input_tokens", 0)
                                 migrated["total_cached_tokens"] += stats.get("total_cached_tokens", 0)
                                 migrated["total_output_tokens"] += stats.get("total_output_tokens", 0)
+                                migrated["total_reasoning_tokens"] += stats.get("total_reasoning_tokens", 0)
                                 migrated["total_cost"] += stats.get("total_cost", 0.0)
                                 first_prompt = stats.get("first_prompt_date")
                                 if first_prompt:
@@ -294,6 +297,7 @@ def load_persistent_stats(username: str) -> dict:
         "total_input_tokens": 0,
         "total_cached_tokens": 0,
         "total_output_tokens": 0,
+        "total_reasoning_tokens": 0,
         "total_cost": 0.0,
         "first_prompt_date": None
     }
@@ -376,19 +380,23 @@ def calculate_context_window(
         # Just system + one user message, include everything
         return 1
 
-    # Count system tokens
-    system_tokens = token_counter(messages[0]["content"])
+    # Count system tokens (use cached if available)
+    system_msg = messages[0]
+    system_tokens = system_msg.get("total_tokens")
+    if system_tokens is None:
+        system_tokens = token_counter(system_msg.get("content", ""))
 
     # Count new user message tokens (last message), including attached files
     last_msg = messages[-1]
     new_user_tokens = last_msg.get("total_tokens")
     if new_user_tokens is None:
         new_user_tokens = token_counter(last_msg["content"])
-        # Add tokens for attached files if present (matching the API call format)
+        # Add tokens for attached files if present (matching build_message_content format)
         attached_files = last_msg.get("attached_files", [])
-        for f in attached_files:
-            wrapper_text = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
-            new_user_tokens += token_counter(wrapper_text)
+        if attached_files:
+            file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached_files]
+            files_text = "\n\n".join(file_wrappers) + "\n\n"
+            new_user_tokens += token_counter(files_text)
 
     # Base tokens that are always included
     base_tokens = system_tokens + new_user_tokens
@@ -399,7 +407,16 @@ def calculate_context_window(
     # First pass: count total to see if we exceed threshold
     total_tokens = base_tokens
     for msg in history:
-        msg_tokens = msg.get("total_tokens") or token_counter(msg["content"])
+        # Use explicit None check since 0 is a valid token count
+        msg_tokens = msg.get("total_tokens")
+        if msg_tokens is None:
+            # Count content + attached files (matching build_message_content format)
+            content = msg.get("content", "")
+            attached = msg.get("attached_files", [])
+            if attached:
+                file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
+                content = "\n\n".join(file_wrappers) + "\n\n" + content
+            msg_tokens = token_counter(content)
         total_tokens += msg_tokens
 
     if total_tokens <= threshold:
@@ -412,7 +429,16 @@ def calculate_context_window(
     included_from_end = 0
 
     for msg in reversed(history):
-        msg_tokens = msg.get("total_tokens") or token_counter(msg["content"])
+        # Use explicit None check since 0 is a valid token count
+        msg_tokens = msg.get("total_tokens")
+        if msg_tokens is None:
+            # Count content + attached files (matching build_message_content format)
+            content = msg.get("content", "")
+            attached = msg.get("attached_files", [])
+            if attached:
+                file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
+                content = "\n\n".join(file_wrappers) + "\n\n" + content
+            msg_tokens = token_counter(content)
         if total_tokens + msg_tokens > target:
             # Including this message would exceed target, stop here
             break
@@ -710,6 +736,7 @@ def create_empty_stats() -> dict:
         "total_input_tokens": 0,
         "total_cached_tokens": 0,
         "total_output_tokens": 0,
+        "total_reasoning_tokens": 0,
         "total_cost": 0.0,
         "total_prompts": 0,
         "first_prompt_date": datetime.now(ZoneInfo('America/New_York')).date().isoformat(),
@@ -756,10 +783,18 @@ def save_daily_usage(username: str, data: dict):
     with file_lock(path):
         atomic_write_json(path, data)
 
-def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tuple[float, str]:
+def apply_free_tokens(username: str, total_tokens: int, full_cost: float, commit: bool = True) -> tuple[float, str, dict | None]:
     """
     Apply free tokens (resets at 0:00 UTC).
-    Returns: (actual_cost, cost_display_string)
+
+    Args:
+        username: User to apply free tokens for
+        total_tokens: Total tokens used in this request
+        full_cost: Full cost before free token discount
+        commit: If True, save usage immediately. If False, return usage dict for later commit.
+
+    Returns: (actual_cost, cost_display_string, usage_to_commit)
+        - usage_to_commit is None if commit=True, otherwise the usage dict to save later
     """
     # Load current usage (save immediately if day reset to prevent race conditions)
     usage = load_daily_usage(username, save_if_reset=True)
@@ -785,22 +820,25 @@ def apply_free_tokens(username: str, total_tokens: int, full_cost: float) -> tup
         actual_cost = full_cost
         cost_str = f"${actual_cost:.6f}"
 
-    # Update usage
+    # Update usage in memory
     usage["tokens_used"] = tokens_used_before + total_tokens
-    save_daily_usage(username, usage)
 
-    logger.info(f"apply_free_tokens: saved tokens_used={usage['tokens_used']}, cost_str={cost_str}")
-
-    return actual_cost, cost_str
+    if commit:
+        save_daily_usage(username, usage)
+        logger.info(f"apply_free_tokens: saved tokens_used={usage['tokens_used']}, cost_str={cost_str}")
+        return actual_cost, cost_str, None
+    else:
+        logger.info(f"apply_free_tokens: deferred save, tokens_used={usage['tokens_used']}, cost_str={cost_str}")
+        return actual_cost, cost_str, usage
 
 def get_instructions(username: str, project: str = None) -> str:
     if project:
         path = os.path.join(get_user_dir(username), "projects", project, "instructions.di")
     else:
         path = os.path.join(get_user_dir(username), "instructions.di")
-    
+
     if os.path.exists(path):
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return f.read()
     return "You are a helpful assistant."
 
@@ -817,7 +855,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
         os.makedirs(project_dir)
         os.makedirs(os.path.join(project_dir, "uploads"))
         # Create default instructions.di
-        with open(os.path.join(project_dir, "instructions.di"), 'w') as f:
+        with open(os.path.join(project_dir, "instructions.di"), 'w', encoding='utf-8') as f:
             f.write("You are a helpful assistant.")
         # Create initial metadata
         save_project_metadata(username, project, {"last_accessed": datetime.now().isoformat()})
@@ -972,7 +1010,9 @@ class ChatMessage(BaseModel):
     tokens: str | None = None
     cost: str | None = None
     reasoning: str | None = None
-    total_tokens: int | None = None
+    total_tokens: int | None = None  # Current model's token count (for backwards compat)
+    total_gpt_tokens: int | None = None  # Accurate GPT tokens (tiktoken)
+    total_claude_tokens: int | None = None  # Accurate Claude tokens (API tokenizer)
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
     model: str | None = None  # Model used for this message (for multi-model chats)
 
@@ -1119,18 +1159,36 @@ def set_chat_model(request: SetChatModelRequest):
     old_model = data.get("model")
     data["model"] = request.model
 
-    # If model changed, recount all message tokens with new provider's tokenizer
+    # If model changed, use cached dual tokens (or backfill if missing)
     if request.model != old_model:
+        model_id = request.model
+        token_field = "total_claude_tokens" if model_id.startswith("claude") else "total_gpt_tokens"
+
+        # Get API key for Claude API tokenizer if switching to Claude
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+
         for msg in data["messages"]:
-            if msg["role"] == "system":
-                msg["total_tokens"] = provider.count_tokens(msg.get("content", ""))
-            else:
-                content = msg.get("content", "")
-                tokens = provider.count_tokens(content)
-                for f in msg.get("attached_files", []):
-                    wrapper = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
-                    tokens += provider.count_tokens(wrapper)
-                msg["total_tokens"] = tokens
+            if msg.get(token_field) is None:
+                # Old message without this token field - count accurately and cache
+                # Build content in the same format as build_message_content (files before message)
+                base_content = msg.get("content", "")
+                attached = msg.get("attached_files", [])
+                if attached:
+                    file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
+                    content = "\n\n".join(file_wrappers) + "\n\n" + base_content
+                else:
+                    content = base_content
+
+                if model_id.startswith("claude"):
+                    # Use API tokenizer for Claude (accurate)
+                    tokens = provider.count_tokens_api(content, api_key)
+                else:
+                    # Use tiktoken for GPT (accurate)
+                    tokens = provider.count_tokens(content)
+                msg[token_field] = tokens
+
+            # Update total_tokens to point to current model's count
+            msg["total_tokens"] = msg.get(token_field)
 
     save_chat(username, request.chat_name, data, request.project)
 
@@ -1340,24 +1398,36 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=400, detail=f"API key for {required_key_type} not set")
 
     # Save the model choice to the chat if it was specified in the request
-    # When switching models, re-count all message tokens with new provider's tokenizer
-    # This ensures context window calculation uses consistent token counts
+    # When switching models, use cached dual tokens (or backfill if missing)
     old_model = data.get("model")
     model_switched = request.model and request.model != old_model
     if model_switched:
         data["model"] = request.model
-        # Re-count tokens for all messages with the new provider's tokenizer
+        # Determine which token field to use for the new model
+        token_field = "total_claude_tokens" if model_id.startswith("claude") else "total_gpt_tokens"
+
         for msg in data["messages"]:
-            if msg["role"] == "system":
-                msg["total_tokens"] = provider.count_tokens(msg.get("content", ""))
-            else:
-                content = msg.get("content", "")
-                tokens = provider.count_tokens(content)
-                # Include attached files in token count if present
-                for f in msg.get("attached_files", []):
-                    wrapper = f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====\n\n"
-                    tokens += provider.count_tokens(wrapper)
-                msg["total_tokens"] = tokens
+            if msg.get(token_field) is None:
+                # Old message without this token field - count accurately and cache
+                # Build content in the same format as build_message_content (files before message)
+                base_content = msg.get("content", "")
+                attached = msg.get("attached_files", [])
+                if attached:
+                    file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
+                    content = "\n\n".join(file_wrappers) + "\n\n" + base_content
+                else:
+                    content = base_content
+
+                if model_id.startswith("claude"):
+                    # Use API tokenizer for Claude (accurate)
+                    tokens = provider.count_tokens_api(content, api_key)
+                else:
+                    # Use tiktoken for GPT (accurate)
+                    tokens = provider.count_tokens(content)
+                msg[token_field] = tokens
+
+            # Update total_tokens to point to current model's count
+            msg["total_tokens"] = msg.get(token_field)
 
     all_messages = data["messages"]
 
@@ -1427,13 +1497,13 @@ def send_message(request: SendMessageRequest):
             {"filename": f.filename, "content": f.content}
             for f in request.attached_files
         ]
-        # Count tokens for attached files (including the wrapper text)
-        for f in request.attached_files:
-            wrapper_text = f"====FILE: {f.filename}====\n{f.content}\n====END FILE====\n\n"
-            if model_id.startswith("claude") and hasattr(provider, 'count_tokens_buffered'):
-                user_message_tokens += provider.count_tokens_buffered(wrapper_text)
-            else:
-                user_message_tokens += provider.count_tokens(wrapper_text)
+        # Count tokens for attached files (matching build_message_content format)
+        file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
+        files_text = "\n\n".join(file_wrappers) + "\n\n"
+        if model_id.startswith("claude") and hasattr(provider, 'count_tokens_buffered'):
+            user_message_tokens += provider.count_tokens_buffered(files_text)
+        else:
+            user_message_tokens += provider.count_tokens(files_text)
     
     user_msg_id = generate_message_id()
     user_msg_data = {
@@ -1519,25 +1589,114 @@ def send_message(request: SendMessageRequest):
         assistant_message = parsed.content
         reasoning_summary = parsed.reasoning
 
-        # Calculate accurate user message tokens from API response for Claude
-        # input_tokens = system + history + user message
-        # We know system and history tokens, so: user_actual = input - known
+        # Post-response: Calculate and store dual token counts for both models
+        # This enables instant model switching without recounting
+
+        # Get cross-model providers for token counting
+        gpt_provider = ProviderRegistry.get("gpt-5.2")
+        claude_provider = ProviderRegistry.get("claude-sonnet-4.5")
+        claude_api_key = get_api_key(username, "anthropic")
+
+        # Build user content (with attached files) for cross-model counting
+        # Use same format as build_message_content (files before message)
+        if request.attached_files:
+            file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
+            user_content_for_counting = "\n\n".join(file_wrappers) + "\n\n" + request.message
+        else:
+            user_content_for_counting = request.message
+
+        # Ensure system message has accurate dual tokens cached
+        # branch_path[0] is a reference to the system message in data["messages"]
+        system_msg = branch_path[0]
+        system_content = system_msg.get("content", "")
+        if system_msg.get("total_gpt_tokens") is None:
+            system_msg["total_gpt_tokens"] = gpt_provider.count_tokens(system_content)
+        if system_msg.get("total_claude_tokens") is None and claude_api_key:
+            # Only cache Claude tokens if we have API key - don't cache estimates
+            system_msg["total_claude_tokens"] = claude_provider.count_tokens_api(system_content, claude_api_key)
+        # Update system's total_tokens to current model
         if model_id.startswith("claude"):
-            known_tokens = 0
-            # System message tokens (index 0) - use unbuffered estimate
-            known_tokens += provider.count_tokens(branch_path[0]["content"])
-            # History messages in context (from context_start_index to second-to-last)
+            system_msg["total_tokens"] = system_msg["total_claude_tokens"]
+        else:
+            system_msg["total_tokens"] = system_msg["total_gpt_tokens"]
+
+        # Count updates tokens if present (to subtract from native token calculation)
+        # Updates are added to API call but not stored with messages, so we need to
+        # exclude them from the cached user token count
+        # Must count the FULL wrapped text as sent to API, not just raw updates_text
+        updates_tokens = 0
+        if updates_text:
+            if model_id.startswith("claude"):
+                # Claude wraps updates and concatenates to last user message
+                updates_wrapped = f"\n\n[CONTEXT UPDATES - Reference as needed for the message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
+            else:
+                # GPT adds updates as separate message with wrapper
+                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                updates_tokens = gpt_provider.count_tokens(updates_wrapped)
+
+        if model_id.startswith("claude"):
+            # Claude response: We have accurate Claude tokens from API
+            # Calculate user message Claude tokens from API response (input - known - updates)
+            # Use cached accurate tokens for system and history
+            known_tokens = system_msg["total_claude_tokens"]
             for msg in branch_path[context_start_index:-1]:
-                known_tokens += msg.get("total_tokens") or 0
+                # Prefer model-specific field, fall back to total_tokens
+                # Use explicit None check (not `or`) since 0 is a valid token count
+                claude_tokens = msg.get("total_claude_tokens")
+                known_tokens += claude_tokens if claude_tokens is not None else (msg.get("total_tokens") or 0)
+            # Ensure non-negative (old cached estimates may be inaccurate)
+            user_claude_tokens = max(0, parsed.input_tokens - known_tokens - updates_tokens)
 
-            # Calculate actual user message tokens
-            user_message_tokens_actual = parsed.input_tokens - known_tokens
+            # GPT tokens: use tiktoken (accurate, fast)
+            user_gpt_tokens = gpt_provider.count_tokens(user_content_for_counting)
 
-            # Update the user message in data["messages"] with accurate count
+            # Update user message with dual token counts
             for msg in data["messages"]:
                 if msg.get("id") == user_msg_id:
-                    msg["total_tokens"] = user_message_tokens_actual
+                    msg["total_claude_tokens"] = user_claude_tokens
+                    msg["total_gpt_tokens"] = user_gpt_tokens
+                    msg["total_tokens"] = user_claude_tokens  # Current model
                     break
+
+            # Assistant message tokens
+            assistant_claude_tokens = parsed.output_tokens
+            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
+        else:
+            # GPT response: We have accurate GPT tokens from API
+            # Calculate user message GPT tokens from API response (input - known - updates)
+            # Use cached accurate tokens for system and history
+            known_tokens = system_msg["total_gpt_tokens"]
+            for msg in branch_path[context_start_index:-1]:
+                # Prefer model-specific field, fall back to total_tokens
+                # Use explicit None check (not `or`) since 0 is a valid token count
+                gpt_tokens = msg.get("total_gpt_tokens")
+                known_tokens += gpt_tokens if gpt_tokens is not None else (msg.get("total_tokens") or 0)
+            # Ensure non-negative (old cached estimates may be inaccurate)
+            user_gpt_tokens = max(0, parsed.input_tokens - known_tokens - updates_tokens)
+
+            # Claude tokens: use API tokenizer (accurate, post-response so no latency impact)
+            # Only cache if we have API key - don't cache estimates so they'll be
+            # recounted accurately when user adds API key and switches to Claude
+            if claude_api_key:
+                user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, claude_api_key)
+                assistant_claude_tokens = claude_provider.count_tokens_api(assistant_message, claude_api_key)
+            else:
+                # No API key - don't cache, will be backfilled on first switch to Claude
+                user_claude_tokens = None
+                assistant_claude_tokens = None
+
+            # Update user message with dual token counts
+            for msg in data["messages"]:
+                if msg.get("id") == user_msg_id:
+                    msg["total_gpt_tokens"] = user_gpt_tokens
+                    if user_claude_tokens is not None:
+                        msg["total_claude_tokens"] = user_claude_tokens
+                    msg["total_tokens"] = user_gpt_tokens  # Current model
+                    break
+
+            # Assistant message tokens
+            assistant_gpt_tokens = parsed.output_tokens
 
         # Calculate tokens and cost using provider pricing
         new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens
@@ -1547,11 +1706,13 @@ def send_message(request: SendMessageRequest):
 
         # Apply free tokens only for GPT (resets 0:00 UTC)
         # Claude/Anthropic usage is always billed at full cost
+        # Defer commit until after save_chat to prevent consuming tokens if save fails
         if model_id.startswith('gpt'):
-            actual_cost, cost_str = apply_free_tokens(username, total_tokens, total_cost)
+            actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
         else:
             actual_cost = total_cost
             cost_str = f"${actual_cost:.6f}"
+            pending_usage = None
 
         # Update stats
         stats = data.get("stats", create_empty_stats())
@@ -1564,10 +1725,7 @@ def send_message(request: SendMessageRequest):
         stats["last_accessed"] = datetime.now().isoformat()
         data["stats"] = stats
 
-        # Update persistent lifetime stats (survives chat deletion)
-        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
-
-        # Add assistant message with branching fields
+        # Add assistant message with branching fields and dual token counts
         assistant_msg_id = generate_message_id()
         assistant_msg_data = {
             "id": assistant_msg_id,
@@ -1577,9 +1735,13 @@ def send_message(request: SendMessageRequest):
             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
             "tokens": tokens_str,
             "cost": cost_str,
-            "total_tokens": parsed.output_tokens,
+            "total_tokens": assistant_claude_tokens if model_id.startswith("claude") else assistant_gpt_tokens,
+            "total_gpt_tokens": assistant_gpt_tokens,
             "model": model_id
         }
+        # Only store Claude tokens if we have accurate count (not estimation)
+        if assistant_claude_tokens is not None:
+            assistant_msg_data["total_claude_tokens"] = assistant_claude_tokens
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
 
@@ -1589,6 +1751,11 @@ def send_message(request: SendMessageRequest):
         data["current_leaf_id"] = assistant_msg_id
 
         save_chat(username, request.chat_name, data, request.project)
+
+        # Commit deferred updates AFTER save succeeds (prevents double-counting on retry)
+        if pending_usage is not None:
+            save_daily_usage(username, pending_usage)
+        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
 
         # Calculate total messages in the new branch for frontend pagination
         branch_path = get_path_to_root(data["messages"], assistant_msg_id)
@@ -1883,9 +2050,15 @@ def reload_chat(request: ReloadChatRequest):
     else:
         system_content = get_instructions(username, None)
     
-    # Replace the first message (system message) with rebuilt version
-    data["messages"][0] = {"role": "system", "content": system_content}
-    
+    # Update the system message content while preserving other fields (id, parent_id, tokens)
+    # This maintains the tree structure and cached token counts
+    old_system_msg = data["messages"][0]
+    old_system_msg["content"] = system_content
+    # Clear cached token counts since content changed - will be recalculated on next message
+    old_system_msg.pop("total_tokens", None)
+    old_system_msg.pop("total_gpt_tokens", None)
+    old_system_msg.pop("total_claude_tokens", None)
+
     # Save updated chat
     save_chat(username, request.chat_name, data, request.project)
     
@@ -2111,15 +2284,19 @@ def get_user_stats(username: str):
             # Parse tokens string like "I:123 C:456 O:789 R:100 T:1468"
             tokens_str = msg.get("tokens", "")
             msg_input = msg_cached = msg_output = msg_reasoning = 0
-            for part in tokens_str.split():
-                if part.startswith("I:"):
-                    msg_input = int(part[2:])
-                elif part.startswith("C:"):
-                    msg_cached = int(part[2:])
-                elif part.startswith("O:"):
-                    msg_output = int(part[2:])
-                elif part.startswith("R:"):
-                    msg_reasoning = int(part[2:])
+            try:
+                for part in tokens_str.split():
+                    if part.startswith("I:"):
+                        msg_input = int(part[2:])
+                    elif part.startswith("C:"):
+                        msg_cached = int(part[2:])
+                    elif part.startswith("O:"):
+                        msg_output = int(part[2:])
+                    elif part.startswith("R:"):
+                        msg_reasoning = int(part[2:])
+            except (ValueError, AttributeError):
+                # Silently default to 0 for malformed token strings
+                msg_input = msg_cached = msg_output = msg_reasoning = 0
             
             # Parse cost string like "$0.0123" or "$0.0123 (free: $0.01)" or "free"
             cost_str = msg.get("cost", "$0")
@@ -2506,6 +2683,13 @@ def delete_project_file(username: str, project: str, filename: str):
         raise HTTPException(status_code=400, detail="Not a file")
     
     os.remove(filepath)
+
+    # Remove from token cache
+    tokens_cache = load_file_tokens_cache(username, project)
+    if filename in tokens_cache:
+        del tokens_cache[filename]
+        save_file_tokens_cache(username, project, tokens_cache)
+
     return {"status": "ok", "deleted": filename}
 
 def get_instructions_tokens_cache_path(username: str, project: str) -> str:
