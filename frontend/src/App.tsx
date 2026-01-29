@@ -348,6 +348,9 @@ function App() {
   const [filesUploading, setFilesUploading] = useState(false);
   const [projectChatsDetailed, setProjectChatsDetailed] = useState<ChatCardInfo[]>([]);
   const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [hoveredFilename, setHoveredFilename] = useState<string | null>(null);
+  const [filenameTooltipPos, setFilenameTooltipPos] = useState<{x: number, y: number}>({x: 0, y: 0});
+  const filenameTooltipTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Chat file attachment state
@@ -3289,7 +3292,28 @@ function App() {
                         ) : (
                           projectFiles.map(file => (
                             <div key={file.filename} style={styles.fileItem}>
-                              <span style={styles.fileName}>📄 {file.filename}</span>
+                              <span
+                                style={styles.fileName}
+                                onMouseEnter={(e) => {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setFilenameTooltipPos({x: rect.left, y: rect.bottom + 4});
+                                  filenameTooltipTimeoutRef.current = setTimeout(() => {
+                                    setHoveredFilename(file.filename);
+                                  }, 200);
+                                }}
+                                onMouseLeave={() => {
+                                  if (filenameTooltipTimeoutRef.current) {
+                                    clearTimeout(filenameTooltipTimeoutRef.current);
+                                    filenameTooltipTimeoutRef.current = null;
+                                  }
+                                  setHoveredFilename(null);
+                                }}
+                              >📄 {file.filename}</span>
+                              {hoveredFilename === file.filename && (
+                                <div style={{...styles.filenameTooltip, left: filenameTooltipPos.x, top: filenameTooltipPos.y}}>
+                                  {file.filename}
+                                </div>
+                              )}
                               <span style={styles.fileTokens}>{file.tokens.toLocaleString()}</span>
                               <button
                                 onClick={() => handleDeleteProjectFile(file.filename)}
@@ -4539,6 +4563,19 @@ const styles: { [key: string]: React.CSSProperties } = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap' as const,
+  },
+  filenameTooltip: {
+    position: 'fixed' as const,
+    backgroundColor: '#2a2a4e',
+    border: '1px solid #4a4ae8',
+    borderRadius: '6px',
+    padding: '6px 10px',
+    zIndex: 1001,
+    fontSize: '0.85rem',
+    color: '#eee',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+    maxWidth: '400px',
+    wordBreak: 'break-all' as const,
   },
   fileTokens: {
     fontSize: '0.8rem',
