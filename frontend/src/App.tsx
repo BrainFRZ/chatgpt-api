@@ -62,12 +62,18 @@ interface ChatStats {
   total_output_tokens: number;
   total_cost: number;
   total_prompts: number;
+  gpt_prompts?: number;
+  sonnet_prompts?: number;
+  avg_gpt_context_growth?: number;
+  avg_sonnet_context_growth?: number;
   first_prompt_date?: string;
   last_accessed?: string;
 }
 
 interface UserStats {
   lifetime_prompts: number;
+  lifetime_gpt_prompts: number;
+  lifetime_sonnet_prompts: number;
   lifetime_input_tokens: number;
   lifetime_cached_tokens: number;
   lifetime_output_tokens: number;
@@ -76,6 +82,8 @@ interface UserStats {
   lifetime_cache_miss_percent: number;
   monthly_active_days: number;
   monthly_prompts: number;
+  monthly_gpt_prompts: number;
+  monthly_sonnet_prompts: number;
   monthly_input_tokens: number;
   monthly_cached_tokens: number;
   monthly_output_tokens: number;
@@ -83,6 +91,8 @@ interface UserStats {
   monthly_total_tokens: number;
   monthly_cost: number;
   today_prompts: number;
+  today_gpt_prompts: number;
+  today_sonnet_prompts: number;
   today_input_tokens: number;
   today_cached_tokens: number;
   today_output_tokens: number;
@@ -90,12 +100,16 @@ interface UserStats {
   today_total_tokens: number;
   today_cost: number;
   avg_prompts_per_day: number;
+  avg_gpt_prompts_per_day: number;
+  avg_sonnet_prompts_per_day: number;
   avg_input_per_day: number;
   avg_cached_per_day: number;
   avg_output_per_day: number;
   avg_reasoning_per_day: number;
   avg_total_per_day: number;
   avg_cost_per_day: number;
+  avg_gpt_context_growth: number;
+  avg_sonnet_context_growth: number;
   days_since_first: number;
 }
 
@@ -2475,7 +2489,7 @@ function App() {
                   )}
                   <div style={styles.statsSection}>
                     <div style={styles.statsSectionTitle}>Lifetime</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.lifetime_prompts.toLocaleString()}</div>
+                    <div style={styles.statsRow}>Prompts: {userStats.lifetime_gpt_prompts.toLocaleString()} GPT | {userStats.lifetime_sonnet_prompts.toLocaleString()} Sonnet | {userStats.lifetime_prompts.toLocaleString()} Total</div>
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.lifetime_input_tokens.toLocaleString()} C:{userStats.lifetime_cached_tokens.toLocaleString()} O:{userStats.lifetime_output_tokens.toLocaleString()} R:{userStats.lifetime_reasoning_tokens.toLocaleString()}
                     </div>
@@ -2486,7 +2500,7 @@ function App() {
                   <div style={styles.statsSection}>
                     <div style={styles.statsSectionTitle}>Current Month</div>
                     <div style={styles.statsRow}>Active Days: {userStats.monthly_active_days}</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.monthly_prompts.toLocaleString()}</div>
+                    <div style={styles.statsRow}>Prompts: {userStats.monthly_gpt_prompts.toLocaleString()} GPT | {userStats.monthly_sonnet_prompts.toLocaleString()} Sonnet | {userStats.monthly_prompts.toLocaleString()} Total</div>
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.monthly_input_tokens.toLocaleString()} C:{userStats.monthly_cached_tokens.toLocaleString()} O:{userStats.monthly_output_tokens.toLocaleString()} R:{userStats.monthly_reasoning_tokens.toLocaleString()}
                     </div>
@@ -2495,7 +2509,7 @@ function App() {
                   <div style={styles.statsSeparator} />
                   <div style={styles.statsSection}>
                     <div style={styles.statsSectionTitle}>Today</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.today_prompts.toLocaleString()}</div>
+                    <div style={styles.statsRow}>Prompts: {userStats.today_gpt_prompts.toLocaleString()} GPT | {userStats.today_sonnet_prompts.toLocaleString()} Sonnet | {userStats.today_prompts.toLocaleString()} Total</div>
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.today_input_tokens.toLocaleString()} C:{userStats.today_cached_tokens.toLocaleString()} O:{userStats.today_output_tokens.toLocaleString()} R:{userStats.today_reasoning_tokens.toLocaleString()}
                     </div>
@@ -2504,11 +2518,17 @@ function App() {
                   <div style={styles.statsSeparator} />
                   <div style={styles.statsSection}>
                     <div style={styles.statsSectionTitle}>Daily Averages ({userStats.days_since_first} days)</div>
-                    <div style={styles.statsRow}>Prompts/day: {userStats.avg_prompts_per_day.toFixed(1)}</div>
+                    <div style={styles.statsRow}>Prompts/day: {userStats.avg_gpt_prompts_per_day.toFixed(1)} GPT | {userStats.avg_sonnet_prompts_per_day.toFixed(1)} Sonnet | {userStats.avg_prompts_per_day.toFixed(1)} Total</div>
                     <div style={styles.statsRow}>
                       TPD: I:{userStats.avg_input_per_day.toFixed(0)} C:{userStats.avg_cached_per_day.toFixed(0)} O:{userStats.avg_output_per_day.toFixed(0)} R:{userStats.avg_reasoning_per_day.toFixed(0)}
                     </div>
                     <div style={styles.statsRow}>Cost/day: ${userStats.avg_cost_per_day.toFixed(4)}</div>
+                  </div>
+                  <div style={styles.statsSeparator} />
+                  <div style={styles.statsSection}>
+                    <div style={styles.statsSectionTitle}>Avg Context Growth</div>
+                    <div style={styles.statsRow}>GPT: {Math.round(userStats.avg_gpt_context_growth).toLocaleString()} tokens</div>
+                    <div style={styles.statsRow}>Sonnet: {Math.round(userStats.avg_sonnet_context_growth).toLocaleString()} tokens</div>
                   </div>
                 </div>
               )}
@@ -2752,7 +2772,7 @@ function App() {
 
           {stats && (
             <div style={styles.statsBox}>
-              <p style={styles.statsText}>Prompts: {stats.total_prompts}</p>
+              <p style={styles.statsText}>Prompts: {stats.gpt_prompts ?? 0} GPT | {stats.sonnet_prompts ?? 0} Sonnet | {stats.total_prompts} Total</p>
               <p style={styles.statsText}>Cost: ${stats.total_cost.toFixed(4)}</p>
               {stats.first_prompt_date && (() => {
                 const firstDate = new Date(stats.first_prompt_date);
@@ -2763,12 +2783,13 @@ function App() {
                 const cacheMisses = stats.total_input_tokens || 0;
                 const totalInputToAPI = cacheMisses + (stats.total_cached_tokens || 0);
                 const missPercent = totalInputToAPI > 0 ? (cacheMisses / totalInputToAPI) * 100 : 0;
-                
+
                 return (
                   <>
                     <p style={styles.statsText}>Cache Misses: {cacheMisses.toLocaleString()} ({missPercent.toFixed(1)}%)</p>
                     <p style={styles.statsText}>Avg TPD: {avgTPD.toFixed(0)}</p>
                     <p style={styles.statsText}>Days: {daysSinceStart}</p>
+                    <p style={styles.statsText}>Avg Context: {Math.round(stats.avg_gpt_context_growth ?? 0).toLocaleString()} GPT | {Math.round(stats.avg_sonnet_context_growth ?? 0).toLocaleString()} Sonnet</p>
                   </>
                 );
               })()}

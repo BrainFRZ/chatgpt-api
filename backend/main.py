@@ -295,15 +295,19 @@ def load_persistent_stats(username: str) -> dict:
     
     return {
         "total_prompts": 0,
+        "total_gpt_prompts": 0,
+        "total_sonnet_prompts": 0,
         "total_input_tokens": 0,
         "total_cached_tokens": 0,
         "total_output_tokens": 0,
         "total_reasoning_tokens": 0,
         "total_cost": 0.0,
-        "first_prompt_date": None
+        "first_prompt_date": None,
+        "total_gpt_context_tokens": 0,
+        "total_sonnet_context_tokens": 0
     }
 
-def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int, output_tokens: int, reasoning_tokens: int, cost: float):
+def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int, output_tokens: int, reasoning_tokens: int, cost: float, model: str = None, context_tokens: int = 0):
     """Add to lifetime stats (never subtract). Uses file locking for concurrent access safety."""
     path = get_persistent_stats_path(username)
 
@@ -316,6 +320,15 @@ def update_persistent_stats(username: str, input_tokens: int, cached_tokens: int
         stats["total_output_tokens"] += output_tokens
         stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + reasoning_tokens
         stats["total_cost"] += cost
+
+        # Track model-specific prompts and context tokens
+        is_sonnet = model and model.startswith("claude")
+        if is_sonnet:
+            stats["total_sonnet_prompts"] = stats.get("total_sonnet_prompts", 0) + 1
+            stats["total_sonnet_context_tokens"] = stats.get("total_sonnet_context_tokens", 0) + context_tokens
+        else:
+            stats["total_gpt_prompts"] = stats.get("total_gpt_prompts", 0) + 1
+            stats["total_gpt_context_tokens"] = stats.get("total_gpt_context_tokens", 0) + context_tokens
 
         # Track first prompt date
         if stats["first_prompt_date"] is None:
@@ -1365,10 +1378,46 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
 
     save_chat(username, chat_name, data, project)
 
+    # Calculate model-specific stats from messages
+    chat_stats = data.get("stats", create_empty_stats()).copy()
+    gpt_prompts = 0
+    sonnet_prompts = 0
+    gpt_context_tokens = 0
+    sonnet_context_tokens = 0
+    all_chat_messages = data.get("messages", [])
+    messages_by_id = {m.get("id"): m for m in all_chat_messages if m.get("id")}
+    for msg in all_chat_messages:
+        if msg.get("role") == "assistant":
+            model = msg.get("model", "")
+            is_sonnet = model.startswith("claude")
+            parent_id = msg.get("parent_id")
+            if is_sonnet:
+                sonnet_prompts += 1
+                # Use Claude token counts
+                assistant_tokens = msg.get("total_claude_tokens") or msg.get("total_tokens", 0) or 0
+                user_tokens = 0
+                if parent_id and parent_id in messages_by_id:
+                    parent = messages_by_id[parent_id]
+                    user_tokens = parent.get("total_claude_tokens") or parent.get("total_tokens", 0) or 0
+                sonnet_context_tokens += user_tokens + assistant_tokens
+            else:
+                gpt_prompts += 1
+                # Use GPT token counts
+                assistant_tokens = msg.get("total_gpt_tokens") or msg.get("total_tokens", 0) or 0
+                user_tokens = 0
+                if parent_id and parent_id in messages_by_id:
+                    parent = messages_by_id[parent_id]
+                    user_tokens = parent.get("total_gpt_tokens") or parent.get("total_tokens", 0) or 0
+                gpt_context_tokens += user_tokens + assistant_tokens
+    chat_stats["gpt_prompts"] = gpt_prompts
+    chat_stats["sonnet_prompts"] = sonnet_prompts
+    chat_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
+    chat_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
+
     return ChatResponse(
         messages=paginated_messages,
         all_messages=all_messages,  # Full tree for branch navigation
-        stats=data.get("stats", create_empty_stats()),
+        stats=chat_stats,
         total_messages=total_messages,
         has_more_messages=has_more_messages,
         current_leaf_id=data.get("current_leaf_id"),
@@ -1640,17 +1689,10 @@ def send_message(request: SendMessageRequest):
                 updates_tokens = gpt_provider.count_tokens(updates_wrapped)
 
         if model_id.startswith("claude"):
-            # Claude response: We have accurate Claude tokens from API
-            # Calculate user message Claude tokens from API response (input - known - updates)
-            # Use cached accurate tokens for system and history
-            known_tokens = system_msg["total_claude_tokens"]
-            for msg in branch_path[context_start_index:-1]:
-                # Prefer model-specific field, fall back to total_tokens
-                # Use explicit None check (not `or`) since 0 is a valid token count
-                claude_tokens = msg.get("total_claude_tokens")
-                known_tokens += claude_tokens if claude_tokens is not None else (msg.get("total_tokens") or 0)
-            # Ensure non-negative (old cached estimates may be inaccurate)
-            user_claude_tokens = max(0, parsed.input_tokens - known_tokens - updates_tokens)
+            # Claude response: count user tokens directly via API (accurate)
+            # Don't derive from input_tokens - known_tokens, as known_tokens may be
+            # inaccurate when switching models (older msgs may have GPT counts only)
+            user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, api_key)
 
             # GPT tokens: use tiktoken (accurate, fast)
             user_gpt_tokens = gpt_provider.count_tokens(user_content_for_counting)
@@ -1759,17 +1801,59 @@ def send_message(request: SendMessageRequest):
         # Commit deferred updates AFTER save succeeds (prevents double-counting on retry)
         if pending_usage is not None:
             save_daily_usage(username, pending_usage)
-        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost)
+        # Calculate context tokens (user + assistant) for this prompt
+        if model_id.startswith("claude"):
+            user_total = user_claude_tokens if user_claude_tokens is not None else 0
+            assistant_total = assistant_claude_tokens if assistant_claude_tokens is not None else 0
+        else:
+            user_total = user_gpt_tokens if user_gpt_tokens is not None else 0
+            assistant_total = assistant_gpt_tokens if assistant_gpt_tokens is not None else 0
+        context_tokens = user_total + assistant_total
+        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost, model=model_id, context_tokens=context_tokens)
 
         # Calculate total messages in the new branch for frontend pagination
         branch_path = get_path_to_root(data["messages"], assistant_msg_id)
         branch_total_messages = len(branch_path)
 
+        # Calculate model-specific stats for response
+        response_stats = stats.copy()
+        gpt_prompts = 0
+        sonnet_prompts = 0
+        gpt_context_tokens = 0
+        sonnet_context_tokens = 0
+        all_chat_messages = data.get("messages", [])
+        messages_by_id = {m.get("id"): m for m in all_chat_messages if m.get("id")}
+        for msg in all_chat_messages:
+            if msg.get("role") == "assistant":
+                msg_model = msg.get("model", "")
+                is_sonnet = msg_model.startswith("claude")
+                parent_id = msg.get("parent_id")
+                if is_sonnet:
+                    sonnet_prompts += 1
+                    assistant_tokens = msg.get("total_claude_tokens") or msg.get("total_tokens", 0) or 0
+                    user_tokens = 0
+                    if parent_id and parent_id in messages_by_id:
+                        parent = messages_by_id[parent_id]
+                        user_tokens = parent.get("total_claude_tokens") or parent.get("total_tokens", 0) or 0
+                    sonnet_context_tokens += user_tokens + assistant_tokens
+                else:
+                    gpt_prompts += 1
+                    assistant_tokens = msg.get("total_gpt_tokens") or msg.get("total_tokens", 0) or 0
+                    user_tokens = 0
+                    if parent_id and parent_id in messages_by_id:
+                        parent = messages_by_id[parent_id]
+                        user_tokens = parent.get("total_gpt_tokens") or parent.get("total_tokens", 0) or 0
+                    gpt_context_tokens += user_tokens + assistant_tokens
+        response_stats["gpt_prompts"] = gpt_prompts
+        response_stats["sonnet_prompts"] = sonnet_prompts
+        response_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
+        response_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
+
         return MessageResponse(
             assistant_message=assistant_message,
             tokens=tokens_str,
             cost=cost_str,
-            stats=stats,
+            stats=response_stats,
             context_start_index=context_start_index,
             reasoning=reasoning_summary,
             user_message_id=user_msg_id,
@@ -1950,38 +2034,49 @@ def count_tokens_endpoint(request: CountTokensRequest):
 
 class UserStatsResponse(BaseModel):
     lifetime_prompts: int
+    lifetime_gpt_prompts: int
+    lifetime_sonnet_prompts: int
     lifetime_input_tokens: int
     lifetime_cached_tokens: int
     lifetime_output_tokens: int
     lifetime_reasoning_tokens: int
     lifetime_cost: float
     lifetime_cache_miss_percent: float
-    
+
     monthly_active_days: int
     monthly_prompts: int
+    monthly_gpt_prompts: int
+    monthly_sonnet_prompts: int
     monthly_input_tokens: int
     monthly_cached_tokens: int
     monthly_output_tokens: int
     monthly_reasoning_tokens: int
     monthly_total_tokens: int
     monthly_cost: float
-    
+
     today_prompts: int
+    today_gpt_prompts: int
+    today_sonnet_prompts: int
     today_input_tokens: int
     today_cached_tokens: int
     today_output_tokens: int
     today_reasoning_tokens: int
     today_total_tokens: int
     today_cost: float
-    
+
     avg_prompts_per_day: float
+    avg_gpt_prompts_per_day: float
+    avg_sonnet_prompts_per_day: float
     avg_input_per_day: float
     avg_cached_per_day: float
     avg_output_per_day: float
     avg_reasoning_per_day: float
     avg_total_per_day: float
     avg_cost_per_day: float
-    
+
+    avg_gpt_context_growth: float
+    avg_sonnet_context_growth: float
+
     days_since_first: int
 
 @app.post("/api/rename-chat")
@@ -2234,27 +2329,35 @@ def get_user_stats(username: str):
     # Load persistent lifetime stats (survives chat deletion)
     lifetime = load_persistent_stats(username)
     total_prompts = lifetime["total_prompts"]
+    total_gpt_prompts = lifetime.get("total_gpt_prompts", 0)
+    total_sonnet_prompts = lifetime.get("total_sonnet_prompts", 0)
+    total_gpt_context_tokens = lifetime.get("total_gpt_context_tokens", 0)
+    total_sonnet_context_tokens = lifetime.get("total_sonnet_context_tokens", 0)
     total_input_tokens = lifetime["total_input_tokens"]
     total_cached_tokens = lifetime["total_cached_tokens"]
     total_output_tokens = lifetime["total_output_tokens"]
     total_reasoning_tokens = lifetime.get("total_reasoning_tokens", 0)
     total_cost = lifetime["total_cost"]
     earliest_date = date.fromisoformat(lifetime["first_prompt_date"]) if lifetime["first_prompt_date"] else None
-    
+
     # Track daily activity for current month (Eastern Time)
     eastern = ZoneInfo('America/New_York')
     today = datetime.now(eastern).date()
     current_month_start = today.replace(day=1)
     monthly_days = set()  # Track which days had activity
     monthly_prompts = 0
+    monthly_gpt_prompts = 0
+    monthly_sonnet_prompts = 0
     monthly_input = 0
     monthly_cached = 0
     monthly_output = 0
     monthly_reasoning = 0
     monthly_cost = 0.0
-    
+
     # Track today's activity
     today_prompts = 0
+    today_gpt_prompts = 0
+    today_sonnet_prompts = 0
     today_input = 0
     today_cached = 0
     today_output = 0
@@ -2263,9 +2366,11 @@ def get_user_stats(username: str):
     
     # Helper to process a chat's stats (only for monthly/today, not lifetime)
     def process_chat(chat_data):
-        nonlocal monthly_days, monthly_prompts, monthly_input, monthly_cached, monthly_output, monthly_reasoning, monthly_cost
-        nonlocal today_prompts, today_input, today_cached, today_output, today_reasoning, today_cost
-        
+        nonlocal monthly_days, monthly_prompts, monthly_gpt_prompts, monthly_sonnet_prompts
+        nonlocal monthly_input, monthly_cached, monthly_output, monthly_reasoning, monthly_cost
+        nonlocal today_prompts, today_gpt_prompts, today_sonnet_prompts
+        nonlocal today_input, today_cached, today_output, today_reasoning, today_cost
+
         # Process individual messages to get today/monthly breakdowns
         messages = chat_data.get("messages", [])
         for msg in messages:
@@ -2276,15 +2381,19 @@ def get_user_stats(username: str):
             except (ValueError, TypeError):
                 # Skip messages with malformed timestamps
                 continue
-            
+
             # Track active days
             if msg_date >= current_month_start:
                 monthly_days.add(msg_date)
-            
+
             # Only assistant messages have token/cost data
             if msg.get("role") != "assistant" or not msg.get("tokens"):
                 continue
-            
+
+            # Determine model: claude = Sonnet, else = GPT
+            model = msg.get("model", "")
+            is_sonnet = model.startswith("claude")
+
             # Parse tokens string like "I:123 C:456 O:789 R:100 T:1468"
             tokens_str = msg.get("tokens", "")
             msg_input = msg_cached = msg_output = msg_reasoning = 0
@@ -2301,7 +2410,7 @@ def get_user_stats(username: str):
             except (ValueError, AttributeError):
                 # Silently default to 0 for malformed token strings
                 msg_input = msg_cached = msg_output = msg_reasoning = 0
-            
+
             # Parse cost string like "$0.0123" or "$0.0123 (free: $0.01)" or "free"
             cost_str = msg.get("cost", "$0")
             msg_cost = 0.0
@@ -2313,19 +2422,27 @@ def get_user_stats(username: str):
                 except (ValueError, IndexError, AttributeError):
                     # Silently default to 0 for malformed cost strings
                     pass
-            
+
             # Add to monthly totals
             if msg_date >= current_month_start:
                 monthly_prompts += 1
+                if is_sonnet:
+                    monthly_sonnet_prompts += 1
+                else:
+                    monthly_gpt_prompts += 1
                 monthly_input += msg_input
                 monthly_cached += msg_cached
                 monthly_output += msg_output
                 monthly_reasoning += msg_reasoning
                 monthly_cost += msg_cost
-            
+
             # Add to today totals
             if msg_date == today:
                 today_prompts += 1
+                if is_sonnet:
+                    today_sonnet_prompts += 1
+                else:
+                    today_gpt_prompts += 1
                 today_input += msg_input
                 today_cached += msg_cached
                 today_output += msg_output
@@ -2369,47 +2486,64 @@ def get_user_stats(username: str):
     
     # Calculate daily averages
     avg_prompts = total_prompts / days_since_first
+    avg_gpt_prompts = total_gpt_prompts / days_since_first
+    avg_sonnet_prompts = total_sonnet_prompts / days_since_first
     avg_input = total_input_tokens / days_since_first
     avg_cached = total_cached_tokens / days_since_first
     avg_output = total_output_tokens / days_since_first
     avg_reasoning = total_reasoning_tokens / days_since_first
     avg_total = total_total_tokens / days_since_first
     avg_cost = total_cost / days_since_first
+
+    # Calculate average context growth per model
+    avg_gpt_context = total_gpt_context_tokens / total_gpt_prompts if total_gpt_prompts > 0 else 0.0
+    avg_sonnet_context = total_sonnet_context_tokens / total_sonnet_prompts if total_sonnet_prompts > 0 else 0.0
     
     return UserStatsResponse(
         lifetime_prompts=total_prompts,
+        lifetime_gpt_prompts=total_gpt_prompts,
+        lifetime_sonnet_prompts=total_sonnet_prompts,
         lifetime_input_tokens=total_input_tokens,
         lifetime_cached_tokens=total_cached_tokens,
         lifetime_output_tokens=total_output_tokens,
         lifetime_reasoning_tokens=total_reasoning_tokens,
         lifetime_cost=total_cost,
         lifetime_cache_miss_percent=cache_miss_percent,
-        
+
         monthly_active_days=len(monthly_days),
         monthly_prompts=monthly_prompts,
+        monthly_gpt_prompts=monthly_gpt_prompts,
+        monthly_sonnet_prompts=monthly_sonnet_prompts,
         monthly_input_tokens=monthly_input,
         monthly_cached_tokens=monthly_cached,
         monthly_output_tokens=monthly_output,
         monthly_reasoning_tokens=monthly_reasoning,
         monthly_total_tokens=monthly_total,
         monthly_cost=monthly_cost,
-        
+
         today_prompts=today_prompts,
+        today_gpt_prompts=today_gpt_prompts,
+        today_sonnet_prompts=today_sonnet_prompts,
         today_input_tokens=today_input,
         today_cached_tokens=today_cached,
         today_output_tokens=today_output,
         today_reasoning_tokens=today_reasoning,
         today_total_tokens=today_input + today_cached + today_output + today_reasoning,
         today_cost=today_cost,
-        
+
         avg_prompts_per_day=avg_prompts,
+        avg_gpt_prompts_per_day=avg_gpt_prompts,
+        avg_sonnet_prompts_per_day=avg_sonnet_prompts,
         avg_input_per_day=avg_input,
         avg_cached_per_day=avg_cached,
         avg_output_per_day=avg_output,
         avg_reasoning_per_day=avg_reasoning,
         avg_total_per_day=avg_total,
         avg_cost_per_day=avg_cost,
-        
+
+        avg_gpt_context_growth=avg_gpt_context,
+        avg_sonnet_context_growth=avg_sonnet_context,
+
         days_since_first=days_since_first
     )
 

@@ -159,7 +159,7 @@ class AnthropicProvider(ModelProvider):
 
     def send_request(self, client: Any, request_params: dict) -> Any:
         """Send request to Anthropic API."""
-        return client.messages.create(**request_params, betas=self.BETA_HEADERS)
+        return client.beta.messages.create(**request_params, betas=self.BETA_HEADERS)
 
     def parse_response(self, response: Any) -> ParsedResponse:
         """Parse Anthropic response into standardized format."""
@@ -276,6 +276,10 @@ class AnthropicProvider(ModelProvider):
         Returns:
             Exact token count from Claude API
         """
+        # Handle empty text - API requires non-empty content
+        if not text or not text.strip():
+            return 0
+
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
 
