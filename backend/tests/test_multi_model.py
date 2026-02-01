@@ -61,7 +61,7 @@ def test_user(temp_data_dir):
         "stats": {
             "prompt_count": 1,
             "total_input_tokens": 10,
-            "total_cached_tokens": 0,
+            "total_cache_read_tokens": 0,
             "total_output_tokens": 5,
             "total_reasoning_tokens": 0,
             "total_cost": 0.001,
@@ -486,8 +486,8 @@ class TestOpenAIProvider:
 
         assert provider.model_id == "gpt-5.2"
         assert provider.display_name == "GPT-5.2"
-        assert provider.pricing.input_new == 1.75
-        assert provider.pricing.input_cached == 0.175
+        assert provider.pricing.input_base == 1.75
+        assert provider.pricing.cache_read == 0.175
         assert provider.pricing.output == 14.0
         assert provider.pricing.reasoning == 14.0
         assert provider.context_limits.threshold == 275000
@@ -560,7 +560,8 @@ class TestOpenAIProvider:
             content="Hello",
             reasoning="Thinking...",
             input_tokens=1000,
-            cached_tokens=800,
+            cache_read_tokens=800,
+            cache_creation_tokens=0,
             output_tokens=100,
             reasoning_tokens=50
         )
@@ -581,13 +582,14 @@ class TestOpenAIProvider:
             content="Hello",
             reasoning=None,
             input_tokens=1000,
-            cached_tokens=800,
+            cache_read_tokens=800,
+            cache_creation_tokens=0,
             output_tokens=100,
             reasoning_tokens=50
         )
 
         result = provider.format_token_string(parsed)
-        # new_input = 1000 - 800 = 200
+        # new_input = 1000 - 800 - 0 = 200
         # total = 1000 + 100 + 50 = 1150
         assert result == "I:200 C:800 O:100 R:50 T:1150"
 
@@ -616,12 +618,12 @@ class TestAnthropicProvider:
 
         assert provider.model_id == "claude-sonnet-4.5"
         assert provider.display_name == "Claude Sonnet 4.5"
-        assert provider.pricing.input_new == 6.0
-        assert provider.pricing.input_cached == 0.3
+        assert provider.pricing.input_base == 3.0
+        assert provider.pricing.cache_read == 0.3
         assert provider.pricing.output == 15.0
         assert provider.pricing.reasoning == 15.0
-        assert provider.context_limits.threshold == 180000
-        assert provider.context_limits.target == 140000
+        assert provider.context_limits.threshold == 195000
+        assert provider.context_limits.target == 160000
 
     def test_build_request_structure(self):
         """Test build_request creates correct Anthropic structure."""
@@ -646,10 +648,10 @@ class TestAnthropicProvider:
         assert params["model"] == "claude-sonnet-4-5-20250929"
         assert params["max_tokens"] == 16000
         assert "system" in params
-        assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert params["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
         assert "thinking" in params
         assert params["thinking"]["type"] == "enabled"
-        assert params["thinking"]["budget_tokens"] == 3000
+        assert params["thinking"]["budget_tokens"] == 24000
 
     def test_build_request_separates_system(self):
         """System message should be extracted to separate field."""
@@ -718,13 +720,14 @@ class TestAnthropicProvider:
             content="Hello",
             reasoning="Extended thinking...",
             input_tokens=1000,
-            cached_tokens=600,
+            cache_read_tokens=600,
+            cache_creation_tokens=0,
             output_tokens=100,
             reasoning_tokens=200
         )
 
-        # Cost = (400 new * 6.0 + 600 cached * 0.3 + 100 output * 15 + 200 reasoning * 15) / 1M
-        expected = (400 * 6.0 + 600 * 0.3 + 100 * 15.0 + 200 * 15.0) / 1_000_000
+        # Cost = (400 new * 3.0 + 600 cached * 0.30 + 100 output * 15 + 200 reasoning * 15) / 1M
+        expected = (400 * 3.0 + 600 * 0.3 + 100 * 15.0 + 200 * 15.0) / 1_000_000
         cost = provider.calculate_cost(parsed)
 
         assert abs(cost - expected) < 0.0000001
@@ -739,13 +742,14 @@ class TestAnthropicProvider:
             content="Response",
             reasoning="Thinking",
             input_tokens=500,
-            cached_tokens=300,
+            cache_read_tokens=300,
+            cache_creation_tokens=0,
             output_tokens=50,
             reasoning_tokens=100
         )
 
         result = provider.format_token_string(parsed)
-        # new_input = 500 - 300 = 200
+        # new_input = 500 - 300 - 0 = 200
         # total = 500 + 50 + 100 = 650
         assert result == "I:200 C:300 O:50 R:100 T:650"
 

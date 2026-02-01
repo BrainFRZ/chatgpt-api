@@ -2042,6 +2042,36 @@ function App() {
     setStagedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Parse SSE events from a chunk of text
+  const parseSSEEvents = (text: string): Array<{type: string, data: any}> => {
+    const events: Array<{type: string, data: any}> = [];
+    const lines = text.split('\n');
+    let currentEvent: string | null = null;
+    let currentData: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith('event: ')) {
+        currentEvent = line.slice(7);
+      } else if (line.startsWith('data: ')) {
+        currentData.push(line.slice(6));
+      } else if (line === '' && currentEvent && currentData.length > 0) {
+        try {
+          const dataStr = currentData.join('\n');
+          events.push({
+            type: currentEvent,
+            data: JSON.parse(dataStr)
+          });
+        } catch (e) {
+          console.error('Failed to parse SSE data:', e);
+        }
+        currentEvent = null;
+        currentData = [];
+      }
+    }
+
+    return events;
+  };
+
   const sendMessage = async () => {
     if (!newMessage.trim() || !user || !currentChat || isLoading.has(currentChat)) return;
 
@@ -2062,10 +2092,28 @@ function App() {
     };
     setMessages(prev => [...prev, optimisticUserMsg]);
     setTotalMessages(prev => prev + 1);
+
+    // Add placeholder for streaming assistant message
+    const streamingAssistantMsg: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString()
+    };
+    setMessages(prev => [...prev, streamingAssistantMsg]);
+    // Scroll to show the start of the new message, then stop auto-scrolling
+    // so user can read from the top as it streams
     requestAnimationFrame(() => scrollToBottom());
 
+    // Track accumulated content for the streaming message
+    let accumulatedContent = '';
+    let accumulatedThinking = '';
+    let userMsgId: string | null = null;
+
+    // Create AbortController for cancellation
+    const abortController = new AbortController();
+
     try {
-      const response = await fetch('/api/send-message', {
+      const response = await fetch('/api/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2075,78 +2123,144 @@ function App() {
           project: ctx.project,
           attached_files: filesToSend.length > 0 ? filesToSend : undefined,
           model: selectedModel
-        })
+        }),
+        signal: abortController.signal
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (!ctx.isStale()) {
-          // Defensive check for malformed response
-          if (!data.assistant_message) {
-            console.error('Invalid API response: missing assistant_message', data);
-            setError('Server returned invalid response');
-            setMessages(prev => prev.slice(0, -1));
-            setTotalMessages(prev => prev - 1);
-            setNewMessage(messageText);
-            setStagedFiles(filesToSend);
-            return;
-          }
-
-          // Build complete messages with IDs from response
-          const userMsgWithId: ChatMessage = {
-            ...optimisticUserMsg,
-            id: data.user_message_id,
-            parent_id: currentLeafId  // Parent is the previous leaf
-          };
-
-          const assistantMessage: ChatMessage = {
-            id: data.assistant_message_id,
-            parent_id: data.user_message_id,
-            role: 'assistant',
-            content: data.assistant_message,
-            timestamp: new Date().toISOString(),
-            tokens: data.tokens,
-            cost: data.cost,
-            reasoning: data.reasoning,
-            model: data.model
-          };
-
-          // Update displayed messages - replace optimistic user msg with complete one
-          setMessages(prev => [...prev.slice(0, -1), userMsgWithId, assistantMessage]);
-
-          // Add to the full message tree
-          setAllMessages(prev => [...prev, userMsgWithId, assistantMessage]);
-
-          // Update current leaf
-          setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
-
-          setTotalMessages(prev => prev + 1);
-          // Update offset to account for the 2 new messages we've added locally
-          // This prevents duplicates when scrolling up to load older messages
-          setMessageOffset(prev => prev + 2);
-          setStats(data.stats);
-          setContextStartIndex(data.context_start_index || 1);
-          fetchUserStats();
-          fetchFreeTokens();
-          requestAnimationFrame(() => scrollToBottom());
-        }
-      } else {
+      if (!response.ok) {
         const data = await response.json();
         setError(data.detail || 'Failed to send message');
         if (!ctx.isStale()) {
-          setMessages(prev => prev.slice(0, -1));
+          // Remove both optimistic messages
+          setMessages(prev => prev.slice(0, -2));
           setTotalMessages(prev => prev - 1);
           setNewMessage(messageText);
           setStagedFiles(filesToSend);
         }
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete events from buffer
+        const events = parseSSEEvents(buffer);
+
+        // Keep any incomplete event data in the buffer
+        const lastNewline = buffer.lastIndexOf('\n\n');
+        if (lastNewline !== -1) {
+          buffer = buffer.slice(lastNewline + 2);
+        }
+
+        for (const event of events) {
+          if (ctx.isStale()) break;
+
+          if (event.type === 'init') {
+            userMsgId = event.data.user_message_id;
+          } else if (event.type === 'content') {
+            accumulatedContent += event.data.delta;
+            // Update the streaming message with new content
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastIdx = newMessages.length - 1;
+              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                newMessages[lastIdx] = {
+                  ...newMessages[lastIdx],
+                  content: accumulatedContent
+                };
+              }
+              return newMessages;
+            });
+            // Don't auto-scroll during streaming - let user read from the top
+          } else if (event.type === 'thinking') {
+            accumulatedThinking += event.data.delta;
+            // Update reasoning in real-time
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastIdx = newMessages.length - 1;
+              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                newMessages[lastIdx] = {
+                  ...newMessages[lastIdx],
+                  reasoning: accumulatedThinking
+                };
+              }
+              return newMessages;
+            });
+          } else if (event.type === 'done') {
+            const data = event.data;
+
+            // Build complete messages with IDs from response
+            const userMsgWithId: ChatMessage = {
+              ...optimisticUserMsg,
+              id: data.user_message_id,
+              parent_id: currentLeafId
+            };
+
+            const assistantMessage: ChatMessage = {
+              id: data.assistant_message_id,
+              parent_id: data.user_message_id,
+              role: 'assistant',
+              content: data.assistant_message,
+              timestamp: new Date().toISOString(),
+              tokens: data.tokens,
+              cost: data.cost,
+              reasoning: data.reasoning,
+              model: data.model
+            };
+
+            // Replace optimistic messages with complete ones
+            setMessages(prev => [...prev.slice(0, -2), userMsgWithId, assistantMessage]);
+
+            // Add to the full message tree
+            setAllMessages(prev => [...prev, userMsgWithId, assistantMessage]);
+
+            // Update current leaf
+            setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+
+            setTotalMessages(prev => prev + 1);
+            setMessageOffset(prev => prev + 2);
+            setStats(data.stats);
+            setContextStartIndex(data.context_start_index || 1);
+            fetchUserStats();
+            fetchFreeTokens();
+            // Don't scroll on done - let user stay where they were reading
+          } else if (event.type === 'error') {
+            setError(event.data.detail || 'Failed to send message');
+            if (!ctx.isStale()) {
+              setMessages(prev => prev.slice(0, -2));
+              setTotalMessages(prev => prev - 1);
+              setNewMessage(messageText);
+              setStagedFiles(filesToSend);
+            }
+          }
+        }
       }
     } catch (err) {
-      setError('Could not send message');
-      if (!ctx.isStale()) {
-        setMessages(prev => prev.slice(0, -1));
-        setTotalMessages(prev => prev - 1);
-        setNewMessage(messageText);
-        setStagedFiles(filesToSend);
+      if ((err as Error).name === 'AbortError') {
+        // Request was cancelled - clean up
+        if (!ctx.isStale()) {
+          setMessages(prev => prev.slice(0, -2));
+          setTotalMessages(prev => prev - 1);
+        }
+      } else {
+        setError('Could not send message');
+        if (!ctx.isStale()) {
+          setMessages(prev => prev.slice(0, -2));
+          setTotalMessages(prev => prev - 1);
+          setNewMessage(messageText);
+          setStagedFiles(filesToSend);
+        }
       }
     } finally {
       setIsLoading(prev => {

@@ -7,7 +7,7 @@ to manage available providers.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Iterator
 
 
 @dataclass
@@ -37,6 +37,15 @@ class ContextLimits:
     """Context window management limits."""
     threshold: int  # Start trimming at this token count
     target: int     # Trim down to this token count
+
+
+@dataclass
+class StreamEvent:
+    """Event emitted during streaming response."""
+    event_type: str  # 'content_delta', 'thinking_delta', 'done', 'error'
+    content: Optional[str] = None
+    usage: Optional[dict] = None
+    error: Optional[str] = None
 
 
 class ModelProvider(ABC):
@@ -110,8 +119,17 @@ class ModelProvider(ABC):
         """Count the number of tokens in the given text."""
         pass
 
+    @abstractmethod
+    def send_request_stream(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
+        """Stream response events from the API."""
+        pass
+
     def calculate_cost(self, parsed: ParsedResponse) -> float:
-        """Calculate the total cost for a response."""
+        """Calculate the total cost for a response.
+
+        ParsedResponse.input_tokens should be TOTAL input tokens (including cache).
+        non_cached = input_tokens - cache_read - cache_creation
+        """
         p = self.pricing
         non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
         return (
@@ -123,7 +141,13 @@ class ModelProvider(ABC):
         )
 
     def format_token_string(self, parsed: ParsedResponse) -> str:
-        """Format tokens as 'I:X C:Y O:Z R:W T:N' string."""
+        """Format tokens as 'I:X C:Y O:Z R:W T:N' string.
+
+        ParsedResponse.input_tokens should be TOTAL input tokens (including cache).
+        I = non-cached input (input_tokens - cache_read - cache_creation)
+        C = cache_read_tokens
+        T = total tokens in request/response
+        """
         non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
         total = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
         return f"I:{non_cached} C:{parsed.cache_read_tokens} O:{parsed.output_tokens} R:{parsed.reasoning_tokens} T:{total}"

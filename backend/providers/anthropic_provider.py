@@ -2,18 +2,18 @@
 Anthropic Claude Sonnet 4.5 provider implementation with extended thinking.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Iterator
 import anthropic
 
-from . import ModelProvider, ParsedResponse, Pricing, ContextLimits
+from . import ModelProvider, ParsedResponse, Pricing, ContextLimits, StreamEvent
 
 
 class AnthropicProvider(ModelProvider):
     """Provider for Claude Sonnet 4.5 with extended thinking."""
 
     MODEL_NAME = "claude-sonnet-4-5-20250929"
-    THINKING_BUDGET = 3000
-    MAX_TOKENS = 16000  # Max output tokens (including thinking)
+    THINKING_BUDGET = 10000
+    MAX_TOKENS = 16000  # Max output tokens (must be > THINKING_BUDGET)
 
     # Beta headers for extended context, context management, and 1hr caching
     BETA_HEADERS = [
@@ -161,6 +161,54 @@ class AnthropicProvider(ModelProvider):
         """Send request to Anthropic API."""
         return client.beta.messages.create(**request_params, betas=self.BETA_HEADERS)
 
+    def send_request_stream(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
+        """Stream response events from Anthropic API."""
+        with client.beta.messages.stream(**request_params, betas=self.BETA_HEADERS) as stream:
+            for event in stream:
+                if event.type == "content_block_delta":
+                    if hasattr(event.delta, 'text'):
+                        yield StreamEvent('content_delta', content=event.delta.text)
+                    elif hasattr(event.delta, 'thinking'):
+                        yield StreamEvent('thinking_delta', content=event.delta.thinking)
+                elif event.type == "message_stop":
+                    message = stream.get_final_message()
+                    yield StreamEvent('done', usage=self._extract_usage(message))
+
+    def _extract_usage(self, response: Any) -> dict:
+        """Extract usage information from Anthropic response for streaming."""
+        usage = response.usage
+        raw_input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
+        cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
+        cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+        input_tokens = raw_input_tokens + cache_read_tokens + cache_creation_tokens
+
+        # Extract thinking tokens
+        thinking_tokens = 0
+        reasoning = None
+        content = None
+        for block in response.content:
+            if block.type == "thinking":
+                reasoning = block.thinking
+                if hasattr(block, 'thinking_tokens'):
+                    thinking_tokens = block.thinking_tokens
+                elif reasoning:
+                    thinking_tokens = len(reasoning) // 4
+            elif block.type == "text":
+                content = block.text
+
+        text_output_tokens = max(0, output_tokens - thinking_tokens)
+
+        return {
+            'input_tokens': input_tokens,
+            'cache_read_tokens': cache_read_tokens,
+            'cache_creation_tokens': cache_creation_tokens,
+            'output_tokens': text_output_tokens,
+            'reasoning_tokens': thinking_tokens,
+            'content': content,
+            'reasoning': reasoning
+        }
+
     def parse_response(self, response: Any) -> ParsedResponse:
         """Parse Anthropic response into standardized format."""
         content = None
@@ -178,12 +226,16 @@ class AnthropicProvider(ModelProvider):
 
         # Extract token usage
         usage = response.usage
-        input_tokens = usage.input_tokens
+        raw_input_tokens = usage.input_tokens  # Anthropic returns non-cached only
         output_tokens = usage.output_tokens
 
         # Cache tokens
         cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
         cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+
+        # Normalize input_tokens to TOTAL (including cache) for consistency with OpenAI
+        # This ensures base class calculate_cost and format_token_string work correctly
+        input_tokens = raw_input_tokens + cache_read_tokens + cache_creation_tokens
 
         # With extended thinking, the API provides thinking tokens
         # Try to get from the thinking block's token count if available
@@ -216,6 +268,7 @@ class AnthropicProvider(ModelProvider):
         """Calculate cost with extended context pricing for >200K tokens."""
         p = self.pricing
 
+        # parsed.input_tokens is normalized to TOTAL (including cache)
         # Check if extended context pricing applies
         if parsed.input_tokens > 200_000:
             # Extended context: 2x input, 1.5x output
@@ -231,7 +284,7 @@ class AnthropicProvider(ModelProvider):
             output = p.output
             reasoning = p.reasoning
 
-        # Non-cached = total - cache_read - cache_creation
+        # non_cached = total - cache_read - cache_creation
         non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
 
         return (

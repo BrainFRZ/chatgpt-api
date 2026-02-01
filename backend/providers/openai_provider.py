@@ -2,11 +2,11 @@
 OpenAI GPT-5.2 provider implementation.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Iterator
 from openai import OpenAI
 import tiktoken
 
-from . import ModelProvider, ParsedResponse, Pricing, ContextLimits
+from . import ModelProvider, ParsedResponse, Pricing, ContextLimits, StreamEvent
 
 
 # Cache the tiktoken encoder for performance
@@ -95,6 +95,74 @@ class OpenAIProvider(ModelProvider):
     def send_request(self, client: Any, request_params: dict) -> Any:
         """Send request to OpenAI API."""
         return client.responses.create(**request_params)
+
+    def send_request_stream(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
+        """Stream response events from OpenAI API."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        request_params['stream'] = True
+        stream = client.responses.create(**request_params)
+        last_event_type = None
+        final_response = None
+        for event in stream:
+            last_event_type = event.type
+            if event.type == "response.output_text.delta":
+                yield StreamEvent('content_delta', content=event.delta)
+            elif event.type == "response.completed":
+                logger.info(f"OpenAI stream: got response.completed event")
+                yield StreamEvent('done', usage=self._extract_usage(event.response))
+                final_response = event.response
+            elif event.type == "response.incomplete":
+                # Handle incomplete responses (e.g., hit token limit)
+                logger.warning(f"OpenAI stream: got response.incomplete event")
+                yield StreamEvent('done', usage=self._extract_usage(event.response))
+                final_response = event.response
+
+        logger.info(f"OpenAI stream: loop ended, last event was {last_event_type}")
+
+    def _extract_usage(self, response: Any) -> dict:
+        """Extract usage information from OpenAI response for streaming."""
+        # Extract message content and reasoning
+        content = None
+        reasoning = None
+
+        for item in response.output:
+            if item.type == "message":
+                # Extract content regardless of status (may be "completed" or "incomplete")
+                for content_item in item.content:
+                    if content_item.type == "output_text":
+                        content = content_item.text
+                        break
+            elif item.type == "reasoning":
+                if hasattr(item, 'summary') and item.summary:
+                    for summary_item in item.summary:
+                        if hasattr(summary_item, 'text'):
+                            reasoning = summary_item.text
+                            break
+
+        usage = response.usage
+        input_tokens = usage.input_tokens
+        cached_tokens = 0
+        if hasattr(usage, 'input_tokens_details') and hasattr(usage.input_tokens_details, 'cached_tokens'):
+            cached_tokens = usage.input_tokens_details.cached_tokens or 0
+
+        output_tokens = usage.output_tokens
+        reasoning_tokens = 0
+        if hasattr(usage, 'output_tokens_details') and usage.output_tokens_details:
+            reasoning_tokens = getattr(usage.output_tokens_details, 'reasoning_tokens', 0) or 0
+
+        text_output_tokens = max(0, output_tokens - reasoning_tokens)
+
+        return {
+            'input_tokens': input_tokens,
+            'cache_read_tokens': cached_tokens,
+            'cache_creation_tokens': 0,
+            'output_tokens': text_output_tokens,
+            'reasoning_tokens': reasoning_tokens,
+            'content': content,
+            'reasoning': reasoning
+        }
 
     def parse_response(self, response: Any) -> ParsedResponse:
         """Parse OpenAI response into standardized format."""
