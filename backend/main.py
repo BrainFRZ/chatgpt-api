@@ -884,25 +884,32 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 def load_project_files(username: str, project: str) -> str:
-    """Load all .md files from project's uploads folder"""
+    """Load all staged .md files from project's uploads folder"""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
-    
+
     if not os.path.exists(uploads_dir):
         return ""
-    
+
+    # Load token cache to check staged status
+    tokens_cache = load_file_tokens_cache(username, project)
+
     md_files = [f for f in os.listdir(uploads_dir) if f.endswith('.md')]
     if not md_files:
         return ""
-    
+
     combined = ""
     for filename in sorted(md_files):
+        # Skip files that are not staged (default to True for backward compat)
+        if not tokens_cache.get(filename, {}).get("staged", True):
+            continue
+
         filepath = os.path.join(uploads_dir, filename)
         with open(filepath, 'r', encoding='utf-8') as f:
             combined += f"\n\n{'='*60}\n"
             combined += f"FILE: {filename}\n"
             combined += f"{'='*60}\n\n"
             combined += f.read()
-    
+
     return combined
 
 def get_project_metadata_path(username: str, project: str) -> str:
@@ -1063,10 +1070,12 @@ class ProjectFileInfo(BaseModel):
     filename: str
     tokens: int
     size_bytes: int
+    staged: bool = True
 
 class ProjectFilesResponse(BaseModel):
     files: List[ProjectFileInfo]
     total_tokens: int
+    staged_tokens: int
 
 class ProjectInstructionsResponse(BaseModel):
     instructions: str
@@ -3094,6 +3103,7 @@ def list_project_files(username: str, project: str, model: str = None):
 
     files = []
     total_tokens = 0
+    staged_tokens = 0
 
     for filename in sorted(os.listdir(uploads_dir)):
         filepath = os.path.join(uploads_dir, filename)
@@ -3112,6 +3122,16 @@ def list_project_files(username: str, project: str, model: str = None):
                 cached.get("size_bytes") == size_bytes and cached.get("mtime") == mtime):
                 # Cache hit - use cached token count
                 tokens = cached["tokens"]
+                # Ensure staged field exists and is a proper boolean (migration for old cache entries)
+                if "staged" not in cached or cached.get("staged") is None:
+                    cached["staged"] = True
+                    cache_updated = True
+                staged = cached.get("staged", True)
+                # Extra safety: ensure staged is actually True/False
+                if staged is not True and staged is not False:
+                    staged = True
+                    cached["staged"] = True
+                    cache_updated = True
             else:
                 # Cache miss - need to count tokens
                 try:
@@ -3128,14 +3148,19 @@ def list_project_files(username: str, project: str, model: str = None):
                     else:
                         tokens = provider.count_tokens(content) if provider else count_tokens(content)
 
-                    # Update cache
+                    # Update cache (preserve staged if it exists, but ensure it's a proper boolean)
+                    existing_staged = cached.get("staged") if cached else None
+                    if existing_staged is not True and existing_staged is not False:
+                        existing_staged = True
                     tokens_cache[filename] = {
                         "tokens": tokens,
                         "model": model,
                         "size_bytes": size_bytes,
-                        "mtime": mtime
+                        "mtime": mtime,
+                        "staged": existing_staged
                     }
                     cache_updated = True
+                    staged = existing_staged
 
                 except Exception as e:
                     # Skip files we can't read
@@ -3145,15 +3170,18 @@ def list_project_files(username: str, project: str, model: str = None):
             files.append(ProjectFileInfo(
                 filename=filename,
                 tokens=tokens,
-                size_bytes=size_bytes
+                size_bytes=size_bytes,
+                staged=staged
             ))
             total_tokens += tokens
+            if staged:
+                staged_tokens += tokens
 
     # Save cache if updated
     if cache_updated:
         save_file_tokens_cache(username, project, tokens_cache)
 
-    return ProjectFilesResponse(files=files, total_tokens=total_tokens)
+    return ProjectFilesResponse(files=files, total_tokens=total_tokens, staged_tokens=staged_tokens)
 
 def get_file_tokens_cache_path(username: str, project: str) -> str:
     """Get path to file tokens cache for a project."""
@@ -3316,6 +3344,37 @@ def delete_project_file(username: str, project: str, filename: str):
         save_file_tokens_cache(username, project, tokens_cache)
 
     return {"status": "ok", "deleted": filename}
+
+class UpdateStagedRequest(BaseModel):
+    staged: bool
+
+@app.patch("/api/project-files/{username}/{project}/staged/{filename:path}")
+def update_file_staged(username: str, project: str, filename: str, request: UpdateStagedRequest):
+    """Update the staged status of a project file"""
+    username = username.strip().lower()
+    project_dir = get_project_dir(username, project)
+
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    uploads_dir = os.path.join(project_dir, "uploads")
+    filepath = os.path.join(uploads_dir, filename)
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Update the staged field in the token cache
+    tokens_cache = load_file_tokens_cache(username, project)
+
+    if filename in tokens_cache:
+        tokens_cache[filename]["staged"] = request.staged
+    else:
+        # File exists but not in cache - add a minimal entry
+        tokens_cache[filename] = {"staged": request.staged}
+
+    save_file_tokens_cache(username, project, tokens_cache)
+
+    return {"status": "ok", "filename": filename, "staged": request.staged}
 
 def get_instructions_tokens_cache_path(username: str, project: str) -> str:
     """Get path to instructions tokens cache for a project."""

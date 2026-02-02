@@ -145,11 +145,13 @@ interface ProjectFileInfo {
   filename: string;
   tokens: number;
   size_bytes: number;
+  staged: boolean;
 }
 
 interface ProjectFilesResponse {
   files: ProjectFileInfo[];
   total_tokens: number;
+  staged_tokens: number;
 }
 
 interface ProjectInstructions {
@@ -1279,7 +1281,7 @@ function App() {
         // Double-check after second await
         if (currentProjectRef.current !== projectName) return;
         setProjectFiles(data.files || []);
-        setProjectFilesTotalTokens(data.total_tokens || 0);
+        setProjectFilesTotalTokens(data.staged_tokens || 0);
       }
     } catch (err) {
       console.error('Could not fetch project files:', err);
@@ -1412,6 +1414,58 @@ function App() {
       }
     } catch (err) {
       setError('Could not delete file');
+    }
+  };
+
+  const handleToggleFileStaged = async (filename: string, currentStaged: boolean) => {
+    const ctx = createContextGuard();
+    if (!user || !ctx.project) return;
+
+    const newStaged = !currentStaged;
+
+    // Find the file to get its token count
+    const file = projectFiles.find(f => f.filename === filename);
+    if (!file) return;
+
+    // Optimistically update local state
+    setProjectFiles(prev => prev.map(f =>
+      f.filename === filename ? { ...f, staged: newStaged } : f
+    ));
+
+    // Optimistically update token count
+    setProjectFilesTotalTokens(prev =>
+      newStaged ? prev + file.tokens : prev - file.tokens
+    );
+
+    try {
+      const response = await fetch(`/api/project-files/${user.username}/${ctx.project}/staged/${encodeURIComponent(filename)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staged: newStaged })
+      });
+
+      if (ctx.isProjectStale()) return;
+
+      if (!response.ok) {
+        // Revert on failure
+        setProjectFiles(prev => prev.map(f =>
+          f.filename === filename ? { ...f, staged: currentStaged } : f
+        ));
+        setProjectFilesTotalTokens(prev =>
+          newStaged ? prev - file.tokens : prev + file.tokens
+        );
+        const data = await response.json();
+        setError(data.detail || 'Failed to update file staged status');
+      }
+    } catch (err) {
+      // Revert on error
+      setProjectFiles(prev => prev.map(f =>
+        f.filename === filename ? { ...f, staged: currentStaged } : f
+      ));
+      setProjectFilesTotalTokens(prev =>
+        newStaged ? prev - file.tokens : prev + file.tokens
+      );
+      setError('Could not update file staged status');
     }
   };
 
@@ -3430,9 +3484,22 @@ function App() {
                           <p style={styles.mutedSmall}>No files uploaded</p>
                         ) : (
                           projectFiles.map(file => (
-                            <div key={file.filename} style={styles.fileItem}>
+                            <div key={file.filename} style={{
+                              ...styles.fileItem,
+                              opacity: file.staged ? 1 : 0.5
+                            }}>
+                              <input
+                                type="checkbox"
+                                checked={file.staged}
+                                onChange={() => handleToggleFileStaged(file.filename, file.staged)}
+                                style={styles.fileCheckbox}
+                                title={file.staged ? "Uncheck to exclude from chats" : "Check to include in chats"}
+                              />
                               <span
-                                style={styles.fileName}
+                                style={{
+                                  ...styles.fileName,
+                                  textDecoration: file.staged ? 'none' : 'line-through'
+                                }}
                                 onMouseEnter={(e) => {
                                   const rect = e.currentTarget.getBoundingClientRect();
                                   setFilenameTooltipPos({x: rect.left, y: rect.bottom + 4});
@@ -3447,7 +3514,7 @@ function App() {
                                   }
                                   setHoveredFilename(null);
                                 }}
-                              >📄 {file.filename}</span>
+                              >{file.filename}</span>
                               {hoveredFilename === file.filename && (
                                 <div style={{...styles.filenameTooltip, left: filenameTooltipPos.x, top: filenameTooltipPos.y}}>
                                   {file.filename}
@@ -4558,7 +4625,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     minWidth: 0,
   },
   projectConfigColumn: {
-    width: '320px',
+    width: '380px',
     flexShrink: 0,
     display: 'flex',
     flexDirection: 'column' as const,
@@ -4729,6 +4796,13 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '0.85rem',
     opacity: 0.6,
     flexShrink: 0,
+  },
+  fileCheckbox: {
+    width: '16px',
+    height: '16px',
+    cursor: 'pointer',
+    flexShrink: 0,
+    accentColor: '#4a4ae8',
   },
   uploadButton: {
     padding: '8px 16px',
