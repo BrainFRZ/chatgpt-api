@@ -2061,9 +2061,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # Send init event with user message ID
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
 
-            # Stream the response
+            # Stream the response (use flex fallback for GPT-5.2)
             event_count = 0
-            for stream_event in provider.send_request_stream(client, request_params):
+            if model_id == "gpt-5.2":
+                stream_iter = provider.send_request_stream_with_fallback(client, request_params)
+            else:
+                stream_iter = provider.send_request_stream(client, request_params)
+            for stream_event in stream_iter:
                 event_count += 1
                 # Check for client disconnect (but not on done event - we must save)
                 if stream_event.event_type != 'done' and await http_request.is_disconnected():
@@ -2173,7 +2177,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                     new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
                     total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
-                    total_cost = provider.calculate_cost(parsed)
+
+                    # Extract service tier for GPT-5.2 (flex vs standard)
+                    service_tier = usage.get('service_tier')
+
+                    # Calculate cost using tier-aware pricing for GPT-5.2
+                    if model_id == "gpt-5.2" and service_tier:
+                        total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                    else:
+                        total_cost = provider.calculate_cost(parsed)
                     tokens_str = provider.format_token_string(parsed)
 
                     # Apply free tokens
@@ -2213,6 +2225,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         assistant_msg_data["total_claude_tokens"] = assistant_claude_tokens
                     if reasoning_summary:
                         assistant_msg_data["reasoning"] = reasoning_summary
+                    if service_tier:
+                        assistant_msg_data["service_tier"] = service_tier
 
                     data["messages"].append(assistant_msg_data)
                     data["current_leaf_id"] = assistant_msg_id
@@ -2285,6 +2299,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         'total_messages': branch_total_messages,
                         'model': model_id
                     }
+                    if service_tier:
+                        done_data['service_tier'] = service_tier
                     yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
             logger.info(f"Stream loop completed after {event_count} events for user {username}")

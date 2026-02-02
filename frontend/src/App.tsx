@@ -54,6 +54,7 @@ interface ChatMessage {
   reasoning?: string;
   attached_files?: {filename: string, content: string}[];
   model?: string;  // Model used for this response (assistant messages only)
+  service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
 }
 
 interface ChatStats {
@@ -2216,7 +2217,8 @@ function App() {
               tokens: data.tokens,
               cost: data.cost,
               reasoning: data.reasoning,
-              model: data.model
+              model: data.model,
+              service_tier: data.service_tier
             };
 
             // Replace optimistic messages with complete ones
@@ -3083,6 +3085,7 @@ function App() {
                               {msg.tokens && (
                                 <span style={styles.messageTokens}>
                                   {msg.tokens} | {msg.cost}
+                                  {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
                                   {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model}`}
                                 </span>
                               )}

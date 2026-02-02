@@ -21,6 +21,20 @@ def get_token_encoder():
     return _token_encoder
 
 
+class FlexTimeoutError(Exception):
+    """Raised when flex mode TTFB timeout is exceeded."""
+    pass
+
+
+# Pricing constants for GPT-5.2 service tiers
+FLEX_PRICING = Pricing(
+    input_base=0.875, cache_write=0.875, cache_read=0.0875, output=7.0, reasoning=7.0
+)
+STANDARD_PRICING = Pricing(
+    input_base=1.75, cache_write=1.75, cache_read=0.175, output=14.0, reasoning=14.0
+)
+
+
 class OpenAIProvider(ModelProvider):
     """Provider for OpenAI GPT-5.2 model."""
 
@@ -63,7 +77,8 @@ class OpenAIProvider(ModelProvider):
         username: str,
         project: Optional[str],
         chat_name: str,
-        is_free_chat: bool
+        is_free_chat: bool,
+        service_tier: str = "flex"
     ) -> dict:
         """
         Build OpenAI API request parameters.
@@ -83,7 +98,8 @@ class OpenAIProvider(ModelProvider):
             "reasoning": {
                 "effort": "medium",
                 "summary": "auto"
-            }
+            },
+            "service_tier": service_tier
         }
 
         # Add output token limit only for free chats
@@ -120,6 +136,89 @@ class OpenAIProvider(ModelProvider):
                 final_response = event.response
 
         logger.info(f"OpenAI stream: loop ended, last event was {last_event_type}")
+
+    def send_request_stream_with_fallback(
+        self, client: Any, request_params: dict, ttfb_timeout: float = 15.0
+    ) -> Iterator[StreamEvent]:
+        """
+        Stream with flex mode, auto-fallback to standard on timeout/error.
+
+        If TTFB exceeds ttfb_timeout seconds before receiving content,
+        cancels the stream and retries with standard tier.
+        """
+        import logging
+        import time
+        logger = logging.getLogger(__name__)
+
+        # Ensure flex mode for initial attempt
+        request_params['service_tier'] = 'flex'
+        request_params['stream'] = True
+
+        try:
+            stream = client.responses.create(**request_params)
+            start_time = time.time()
+            first_content = False
+
+            for event in stream:
+                if not first_content:
+                    if event.type == "response.output_text.delta":
+                        first_content = True
+                    elif time.time() - start_time > ttfb_timeout:
+                        logger.warning(f"Flex mode TTFB timeout ({ttfb_timeout}s) exceeded, falling back to standard")
+                        stream.close()
+                        raise FlexTimeoutError()
+
+                if event.type == "response.output_text.delta":
+                    yield StreamEvent('content_delta', content=event.delta)
+                elif event.type == "response.completed":
+                    logger.info(f"OpenAI stream (flex): got response.completed event")
+                    usage = self._extract_usage(event.response)
+                    usage['service_tier'] = 'flex'
+                    yield StreamEvent('done', usage=usage)
+                elif event.type == "response.incomplete":
+                    logger.warning(f"OpenAI stream (flex): got response.incomplete event")
+                    usage = self._extract_usage(event.response)
+                    usage['service_tier'] = 'flex'
+                    yield StreamEvent('done', usage=usage)
+
+        except FlexTimeoutError:
+            # Retry with standard tier
+            logger.info("Retrying request with standard tier")
+            request_params['service_tier'] = 'auto'
+            for stream_event in self._stream_standard(client, request_params):
+                yield stream_event
+
+        except Exception as e:
+            # Check if it's a 429 or similar recoverable error
+            if hasattr(e, 'status_code') and e.status_code == 429:
+                logger.warning(f"Flex mode got 429, falling back to standard")
+                request_params['service_tier'] = 'auto'
+                for stream_event in self._stream_standard(client, request_params):
+                    yield stream_event
+            else:
+                raise
+
+    def _stream_standard(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
+        """Stream with standard tier (used as fallback)."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        request_params['stream'] = True
+        stream = client.responses.create(**request_params)
+
+        for event in stream:
+            if event.type == "response.output_text.delta":
+                yield StreamEvent('content_delta', content=event.delta)
+            elif event.type == "response.completed":
+                logger.info(f"OpenAI stream (standard): got response.completed event")
+                usage = self._extract_usage(event.response)
+                usage['service_tier'] = 'standard'
+                yield StreamEvent('done', usage=usage)
+            elif event.type == "response.incomplete":
+                logger.warning(f"OpenAI stream (standard): got response.incomplete event")
+                usage = self._extract_usage(event.response)
+                usage['service_tier'] = 'standard'
+                yield StreamEvent('done', usage=usage)
 
     def _extract_usage(self, response: Any) -> dict:
         """Extract usage information from OpenAI response for streaming."""
@@ -217,6 +316,22 @@ class OpenAIProvider(ModelProvider):
         """Count tokens using tiktoken."""
         encoder = get_token_encoder()
         return len(encoder.encode(text))
+
+    def get_pricing_for_tier(self, tier: str) -> Pricing:
+        """Get pricing based on service tier."""
+        return FLEX_PRICING if tier == 'flex' else STANDARD_PRICING
+
+    def calculate_cost_with_tier(self, parsed: ParsedResponse, tier: str) -> float:
+        """Calculate cost using tier-specific pricing."""
+        p = self.get_pricing_for_tier(tier)
+        non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+        return (
+            non_cached * p.input_base +
+            parsed.cache_creation_tokens * p.cache_write +
+            parsed.cache_read_tokens * p.cache_read +
+            parsed.output_tokens * p.output +
+            parsed.reasoning_tokens * p.reasoning
+        ) / 1_000_000
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:
