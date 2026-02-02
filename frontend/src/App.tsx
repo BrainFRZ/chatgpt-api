@@ -776,7 +776,8 @@ function App() {
         // Fallback models if API fails
         setAvailableModels([
           { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },
-          { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } }
+          { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } },
+          { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', pricing: { input_new: 5, input_cached: 0.5, output: 25, reasoning: 25 }, context_limits: { threshold: 80000, target: 55000 } }
         ]);
       });
   }, []);
@@ -3086,7 +3087,7 @@ function App() {
                                 <span style={styles.messageTokens}>
                                   {msg.tokens} | {msg.cost}
                                   {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
-                                  {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model}`}
+                                  {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model}`}
                                 </span>
                               )}
                               {/* Branch navigation - show only for user messages with siblings */}

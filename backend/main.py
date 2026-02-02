@@ -23,7 +23,7 @@ import hashlib
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider, add_updates_to_messages as openai_add_updates
-from providers.anthropic_provider import AnthropicProvider, add_updates_to_messages as anthropic_add_updates
+from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider, add_updates_to_messages as anthropic_add_updates
 
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +66,7 @@ PRICING = {
 # Register available model providers
 ProviderRegistry.register(OpenAIProvider())
 ProviderRegistry.register(AnthropicProvider())
+ProviderRegistry.register(AnthropicOpusProvider())
 
 # Default model for new chats
 DEFAULT_MODEL = "gpt-5.2"
@@ -84,6 +85,11 @@ def get_token_encoder():
     if _token_encoder is None:
         _token_encoder = tiktoken.get_encoding("cl100k_base")
     return _token_encoder
+
+
+def get_claude_provider():
+    """Get any Claude provider for token counting (they use the same tokenizer)."""
+    return ProviderRegistry.get("claude-sonnet-4.5") or ProviderRegistry.get("claude-opus-4.5")
 
 
 @contextmanager
@@ -1648,7 +1654,7 @@ def send_message(request: SendMessageRequest):
 
         # Get cross-model providers for token counting
         gpt_provider = ProviderRegistry.get("gpt-5.2")
-        claude_provider = ProviderRegistry.get("claude-sonnet-4.5")
+        claude_provider = get_claude_provider()
         claude_api_key = get_api_key(username, "anthropic")
 
         # Build user content (with attached files) for cross-model counting
@@ -2093,7 +2099,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                     # Get cross-model providers for token counting
                     gpt_provider = ProviderRegistry.get("gpt-5.2")
-                    claude_provider = ProviderRegistry.get("claude-sonnet-4.5")
+                    claude_provider = get_claude_provider()
                     claude_api_key = get_api_key(username, "anthropic")
 
                     # Build user content for cross-model counting

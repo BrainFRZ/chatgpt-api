@@ -101,9 +101,13 @@ class AnthropicProvider(ModelProvider):
             }
         }
 
-        # Only include system if it has content
+        # Inject model identity - Claude models are trained before release, so don't know themselves
+        model_identity = f"You are {self.display_name}, made by Anthropic."
         if system_content:
+            system_content[0]["text"] = model_identity + "\n\n" + system_content[0]["text"]
             params["system"] = system_content
+        else:
+            params["system"] = [{"type": "text", "text": model_identity}]
 
         return params
 
@@ -341,6 +345,45 @@ class AnthropicProvider(ModelProvider):
             messages=[{"role": "user", "content": text}]
         )
         return response.input_tokens
+
+
+class AnthropicOpusProvider(AnthropicProvider):
+    """Provider for Claude Opus 4.5 with extended thinking."""
+
+    MODEL_NAME = "claude-opus-4-5"
+    THINKING_BUDGET = 10000   # Same as Sonnet to avoid SDK timeout limits
+    MAX_TOKENS = 16000        # Same as Sonnet (SDK requires streaming for higher values)
+
+    # Opus uses beta headers for context management and cache TTL, but NOT 1M context (only 200K supported)
+    BETA_HEADERS = [
+        "context-management-2025-06-27",   # Clears old thought blocks from history
+        "extended-cache-ttl-2025-04-11"    # Enables 1hr cache TTL
+    ]
+
+    @property
+    def model_id(self) -> str:
+        return "claude-opus-4.5"
+
+    @property
+    def display_name(self) -> str:
+        return "Claude Opus 4.5"
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing(
+            input_base=5.00,     # $5/1M tokens
+            cache_write=10.00,   # 2x base for 1hr cache write
+            cache_read=0.50,     # 90% discount
+            output=25.0,         # $25/1M tokens
+            reasoning=25.0       # $25/1M tokens
+        )
+
+    @property
+    def context_limits(self) -> ContextLimits:
+        return ContextLimits(
+            threshold=80_000,    # User-specified rolling window
+            target=55_000
+        )
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:
