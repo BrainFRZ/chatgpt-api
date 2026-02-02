@@ -1309,12 +1309,12 @@ def create_chat(request: CreateChatRequest):
     if os.path.exists(path):
         raise HTTPException(status_code=400, detail="Chat already exists")
     
-    # Build system message (project files first, then instructions)
+    # Build system message (instructions first, then project files)
     if request.project:
         instructions = get_instructions(username, request.project)
         project_files = load_project_files(username, request.project)
         if project_files:
-            system_content = project_files + "\n\n" + instructions
+            system_content = instructions + "\n\n" + project_files
         else:
             system_content = instructions
     else:
@@ -1696,12 +1696,12 @@ def send_message(request: SendMessageRequest):
         updates_tokens = 0
         if updates_text:
             if model_id.startswith("claude"):
-                # Claude wraps updates and concatenates to last user message
-                updates_wrapped = f"\n\n[CONTEXT UPDATES - Reference as needed for the message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                # Claude wraps updates and prepends to last user message
+                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
                 updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
             else:
-                # GPT adds updates as separate message with wrapper
-                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                # GPT adds updates as separate message before the user message
+                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
                 updates_tokens = gpt_provider.count_tokens(updates_wrapped)
 
         if model_id.startswith("claude"):
@@ -2134,10 +2134,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     updates_tokens = 0
                     if updates_text:
                         if model_id.startswith("claude"):
-                            updates_wrapped = f"\n\n[CONTEXT UPDATES - Reference as needed for the message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                            updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
                             updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
                         else:
-                            updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+                            updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
                             updates_tokens = gpt_provider.count_tokens(updates_wrapped)
 
                     # Calculate dual token counts
@@ -2625,12 +2625,12 @@ def reload_chat(request: ReloadChatRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Rebuild system message (project files first, then instructions)
+    # Rebuild system message (instructions first, then project files)
     if request.project:
         instructions = get_instructions(username, request.project)
         project_files = load_project_files(username, request.project)
         if project_files:
-            system_content = project_files + "\n\n" + instructions
+            system_content = instructions + "\n\n" + project_files
         else:
             system_content = instructions
     else:

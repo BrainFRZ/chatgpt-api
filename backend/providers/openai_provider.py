@@ -339,13 +339,17 @@ def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dic
     Add context updates to the message list for OpenAI.
 
     OpenAI allows consecutive user messages, so updates are added
-    as a separate trailing user message.
+    as a separate user message before the last user message.
     """
     if not updates_text.strip():
         return messages
 
     updates_msg = {
         "role": "user",
-        "content": f"[CONTEXT UPDATES - Reference as needed for the user message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+        "content": f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
     }
-    return messages + [updates_msg]
+
+    # Insert before the last message (which should be the user's new message)
+    if messages:
+        return messages[:-1] + [updates_msg, messages[-1]]
+    return [updates_msg]

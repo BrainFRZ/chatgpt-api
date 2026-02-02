@@ -391,7 +391,8 @@ def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dic
     Add context updates to the message list for Claude.
 
     Claude does NOT allow consecutive user messages, so updates must be
-    concatenated INTO the last user message (preserving the wrapper format).
+    concatenated INTO the last user message. Updates are prepended so they
+    appear before the user's message content.
     """
     if not updates_text.strip():
         return messages
@@ -403,12 +404,12 @@ def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dic
     result = messages.copy()
     for i in range(len(result) - 1, -1, -1):
         if result[i]["role"] == "user":
-            # Append updates to this user message's content
+            # Prepend updates to this user message's content
             original_content = result[i]["content"]
-            updates_block = f"\n\n[CONTEXT UPDATES - Reference as needed for the message above]\n{updates_text}\n[/CONTEXT UPDATES]"
+            updates_block = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
             result[i] = {
                 **result[i],
-                "content": original_content + updates_block
+                "content": updates_block + original_content
             }
             break
 
