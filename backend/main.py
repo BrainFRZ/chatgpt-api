@@ -1309,16 +1309,16 @@ def create_chat(request: CreateChatRequest):
     if os.path.exists(path):
         raise HTTPException(status_code=400, detail="Chat already exists")
     
-    # Build system message
+    # Build system message (project files first, then instructions)
     if request.project:
         instructions = get_instructions(username, request.project)
         project_files = load_project_files(username, request.project)
         if project_files:
-            system_content = instructions + "\n\n" + project_files
+            system_content = project_files + "\n\n" + instructions
         else:
             system_content = instructions
     else:
-        # Free chats also check for instructions.di
+        # Free chats also check for instructions
         system_content = get_instructions(username, None)
     
     data = {
@@ -2625,12 +2625,12 @@ def reload_chat(request: ReloadChatRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Rebuild system message with current instructions and files
+    # Rebuild system message (project files first, then instructions)
     if request.project:
         instructions = get_instructions(username, request.project)
         project_files = load_project_files(username, request.project)
         if project_files:
-            system_content = instructions + "\n\n" + project_files
+            system_content = project_files + "\n\n" + instructions
         else:
             system_content = instructions
     else:
