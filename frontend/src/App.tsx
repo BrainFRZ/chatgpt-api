@@ -1802,7 +1802,12 @@ function App() {
       if (ctx.isChatStale()) return;
 
       if (response.ok) {
-        openChat(ctx.chat, ctx.project);
+        const data = await response.json();
+        await openChat(ctx.chat, ctx.project);
+        // Update context graying based on new system prompt size
+        if (data.context_start_index !== undefined) {
+          setContextStartIndex(data.context_start_index);
+        }
         setError('Instructions and files reloaded ✓');
         setTimeout(() => setError(''), 2000);
       } else {

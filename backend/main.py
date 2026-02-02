@@ -2619,12 +2619,12 @@ def delete_chat(request: DeleteChatRequest):
 def reload_chat(request: ReloadChatRequest):
     """Reload instructions and project files, rebuilding the system prompt"""
     username = request.username.strip().lower()
-    
+
     # Load the chat
     data = load_chat(username, request.chat_name, request.project)
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     # Rebuild system message with current instructions and files
     if request.project:
         instructions = get_instructions(username, request.project)
@@ -2635,7 +2635,7 @@ def reload_chat(request: ReloadChatRequest):
             system_content = instructions
     else:
         system_content = get_instructions(username, None)
-    
+
     # Update the system message content while preserving other fields (id, parent_id, tokens)
     # This maintains the tree structure and cached token counts
     old_system_msg = data["messages"][0]
@@ -2647,8 +2647,27 @@ def reload_chat(request: ReloadChatRequest):
 
     # Save updated chat
     save_chat(username, request.chat_name, data, request.project)
-    
-    return {"status": "ok", "message": "System prompt reloaded"}
+
+    # Calculate new context_start_index based on updated system message
+    model = data.get("model", DEFAULT_MODEL)
+    provider = ProviderRegistry.get(model)
+    context_limits = provider.context_limits
+
+    # Build the current branch path for context calculation
+    current_leaf_id = data.get("current_leaf_id")
+    if current_leaf_id:
+        branch_path = get_path_to_root(data["messages"], current_leaf_id)
+    else:
+        branch_path = data["messages"]
+
+    context_start_index = calculate_context_window(
+        branch_path,
+        threshold=context_limits.target,  # Use target as threshold since no new message
+        target=context_limits.target,
+        count_tokens_fn=provider.count_tokens if provider else None
+    )
+
+    return {"status": "ok", "message": "System prompt reloaded", "context_start_index": context_start_index}
 
 @app.post("/api/rename-project")
 def rename_project(request: RenameProjectRequest):
