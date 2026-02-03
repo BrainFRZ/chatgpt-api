@@ -412,6 +412,13 @@ function App() {
   const [rootChatsCache, setRootChatsCache] = useState<string[] | null>(null);
   const [projectModel, setProjectModel] = useState<string | null>(null);
 
+  // Real-time sync state
+  const [viewerCount, setViewerCount] = useState(1);
+  const [needsSyncReload, setNeedsSyncReload] = useState(false);
+  const syncWsRef = useRef<WebSocket | null>(null);
+  const syncReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const syncHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
@@ -443,6 +450,22 @@ function App() {
   // Reset chat-specific state (called when switching/closing chats)
   const resetChatState = () => {
     clearPendingTimeouts();
+
+    // Close sync WebSocket
+    if (syncWsRef.current) {
+      syncWsRef.current.close();
+      syncWsRef.current = null;
+    }
+    if (syncReconnectTimeoutRef.current) {
+      clearTimeout(syncReconnectTimeoutRef.current);
+      syncReconnectTimeoutRef.current = null;
+    }
+    if (syncHeartbeatIntervalRef.current) {
+      clearInterval(syncHeartbeatIntervalRef.current);
+      syncHeartbeatIntervalRef.current = null;
+    }
+    setViewerCount(1);
+    setNeedsSyncReload(false);
 
     setCurrentChat(null);
     currentChatRef.current = null;
@@ -741,6 +764,183 @@ function App() {
     }
   }, [currentProject, currentChat, user]);
 
+  // Real-time sync WebSocket connection
+  useEffect(() => {
+    if (!user || !currentChat) {
+      // Clean up if no chat is open
+      if (syncWsRef.current) {
+        syncWsRef.current.close();
+        syncWsRef.current = null;
+      }
+      setViewerCount(1);
+      return;
+    }
+
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    const baseReconnectDelay = 1000;
+
+    const connect = () => {
+      // Build WebSocket URL
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const projectParam = currentProject ? `?project=${encodeURIComponent(currentProject)}` : '';
+      const wsUrl = `${protocol}//${window.location.host}/api/ws/chat/${encodeURIComponent(user.username)}/${encodeURIComponent(currentChat)}${projectParam}`;
+
+      const ws = new WebSocket(wsUrl);
+      syncWsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+
+        // Start heartbeat
+        syncHeartbeatIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000); // Ping every 30 seconds
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleSyncEvent(data);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      };
+
+      ws.onclose = (event) => {
+        // Clear heartbeat
+        if (syncHeartbeatIntervalRef.current) {
+          clearInterval(syncHeartbeatIntervalRef.current);
+          syncHeartbeatIntervalRef.current = null;
+        }
+
+        // Don't reconnect if intentionally closed or chat changed
+        if (event.code === 1000 || currentChatRef.current !== currentChat) {
+          return;
+        }
+
+        // Attempt reconnect with exponential backoff
+        if (reconnectAttempts < maxReconnectAttempts) {
+          const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts);
+          reconnectAttempts++;
+          syncReconnectTimeoutRef.current = setTimeout(connect, delay);
+        }
+      };
+
+      ws.onerror = () => {
+        // Error will trigger onclose
+      };
+    };
+
+    connect();
+
+    // Cleanup on unmount or chat change
+    return () => {
+      if (syncWsRef.current) {
+        syncWsRef.current.close(1000); // Normal closure
+        syncWsRef.current = null;
+      }
+      if (syncReconnectTimeoutRef.current) {
+        clearTimeout(syncReconnectTimeoutRef.current);
+        syncReconnectTimeoutRef.current = null;
+      }
+      if (syncHeartbeatIntervalRef.current) {
+        clearInterval(syncHeartbeatIntervalRef.current);
+        syncHeartbeatIntervalRef.current = null;
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.username, currentChat, currentProject]);
+
+  // Handle sync events from WebSocket
+  const handleSyncEvent = useCallback((event: { type: string; data: any }) => {
+    switch (event.type) {
+      case 'client_joined':
+      case 'client_left':
+        setViewerCount(event.data.connection_count);
+        break;
+
+      case 'user_message_added':
+        // Another client sent a message - add it to our view
+        setMessages(prev => [...prev, event.data.message]);
+        setAllMessages(prev => [...prev, event.data.message]);
+        setTotalMessages(prev => prev + 1);
+        setCurrentLeafId(event.data.current_leaf_id);
+        // Add streaming placeholder for the upcoming assistant response
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString()
+        }]);
+        break;
+
+      case 'stream_content':
+        // Append content delta to the streaming message
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastIdx = newMessages.length - 1;
+          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+            newMessages[lastIdx] = {
+              ...newMessages[lastIdx],
+              content: (newMessages[lastIdx].content || '') + event.data.delta
+            };
+          }
+          return newMessages;
+        });
+        break;
+
+      case 'stream_thinking':
+        // Append thinking delta to the streaming message
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastIdx = newMessages.length - 1;
+          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+            newMessages[lastIdx] = {
+              ...newMessages[lastIdx],
+              reasoning: (newMessages[lastIdx].reasoning || '') + event.data.delta
+            };
+          }
+          return newMessages;
+        });
+        break;
+
+      case 'stream_done':
+        // Replace streaming placeholder with complete message
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastIdx = newMessages.length - 1;
+          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+            newMessages[lastIdx] = event.data.assistant_message;
+          }
+          return newMessages;
+        });
+        setAllMessages(prev => [...prev, event.data.assistant_message]);
+        setTotalMessages(prev => prev + 1);
+        setCurrentLeafId(event.data.current_leaf_id);
+        setStats(event.data.stats);
+        setContextStartIndex(event.data.context_start_index || 1);
+        break;
+
+      case 'stream_error':
+        // Remove the streaming placeholder on error
+        setMessages(prev => {
+          if (prev.length > 0 && prev[prev.length - 1].role === 'assistant' && !prev[prev.length - 1].id) {
+            return prev.slice(0, -1);
+          }
+          return prev;
+        });
+        break;
+
+      case 'branch_switched':
+        // Another client switched branches - trigger a reload via state
+        // Using state instead of calling handleReloadChat directly avoids stale closure
+        setNeedsSyncReload(true);
+        break;
+    }
+  }, []);
+
   useEffect(() => {
     const savedUsername = localStorage.getItem('chatgpt-username');
     if (savedUsername) {
@@ -960,10 +1160,10 @@ function App() {
     const projectForNewChat = currentProject;
     const chatName = newItemName.trim();
 
-    // When in a project, use project's model; otherwise use selectedModel
+    // When in a project, use project's model; for free chats, always use gpt-5.2 default
     // Note: backend will also inherit from project if model is not passed,
     // but passing it explicitly ensures UI consistency
-    const modelForNewChat = projectForNewChat ? (projectModel || selectedModel) : selectedModel;
+    const modelForNewChat = projectForNewChat ? (projectModel || 'gpt-5.2') : 'gpt-5.2';
 
     try {
       const response = await fetch('/api/create-chat', {
@@ -1819,6 +2019,15 @@ function App() {
     }
   };
 
+  // Handle sync-triggered reload (when another client switches branches)
+  useEffect(() => {
+    if (needsSyncReload) {
+      setNeedsSyncReload(false);
+      handleReloadChat();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsSyncReload]);
+
   // Textarea resize handlers
   const handleResizeStart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -2540,7 +2749,7 @@ function App() {
     return (
       <div style={styles.container}>
         <div style={styles.loginBox}>
-          <h1 style={styles.title}>ChatGPT Interface</h1>
+          <h1 style={styles.title}>Chorus AI</h1>
           <input
             type="text"
             placeholder="Username"
@@ -2632,7 +2841,7 @@ function App() {
         }}>
           <div style={styles.sidebarHeader}>
             <div style={styles.sidebarHeaderRow}>
-              <h2 style={styles.sidebarTitle}>ChatGPT</h2>
+              <h2 style={styles.sidebarTitle}>Chorus AI</h2>
               {isMobile && (
                 <button 
                   onClick={() => setSidebarOpen(false)} 
@@ -2990,6 +3199,11 @@ function App() {
               <>
                 <div style={styles.chatHeader}>
                   <h2 style={styles.chatTitle}>{currentChat}</h2>
+                  {viewerCount > 1 && (
+                    <span style={styles.viewerCount} title={`${viewerCount} viewers connected`}>
+                      {viewerCount} viewing
+                    </span>
+                  )}
                   {availableModels.length > 0 && (
                     <select
                       value={selectedModel}
@@ -4127,6 +4341,14 @@ const styles: { [key: string]: React.CSSProperties } = {
     margin: 0,
     fontSize: '1.1rem',
     flex: 1,
+  },
+  viewerCount: {
+    fontSize: '0.8rem',
+    color: '#8f8fa0',
+    background: '#2a2a4e',
+    padding: '4px 10px',
+    borderRadius: '12px',
+    whiteSpace: 'nowrap' as const,
   },
   modelSelector: {
     background: '#2a2a4e',

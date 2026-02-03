@@ -1,10 +1,12 @@
 *
 !.gitignore
 !backend/
+!frontend/
 !frontend/App.tsx
 !frontend/src/
 !frontend/src/App.tsx
 !backend/main.py
+!backend/sync_manager.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_token_counting.py

@@ -2,7 +2,7 @@
 ChatGPT Web Interface - Backend API
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -24,6 +24,9 @@ import hashlib
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider, add_updates_to_messages as openai_add_updates
 from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider, add_updates_to_messages as anthropic_add_updates
+
+# Real-time sync imports
+from sync_manager import sync_manager, SyncEvent, SyncEventType
 
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
@@ -878,8 +881,11 @@ def ensure_project_exists(username: str, project: str) -> bool:
         # Create default instructions.di
         with open(os.path.join(project_dir, "instructions.di"), 'w', encoding='utf-8') as f:
             f.write("You are a helpful assistant.")
-        # Create initial metadata
-        save_project_metadata(username, project, {"last_accessed": datetime.now().isoformat()})
+        # Create initial metadata with default model
+        save_project_metadata(username, project, {
+            "last_accessed": datetime.now().isoformat(),
+            "model": DEFAULT_MODEL
+        })
     
     return is_new
 
@@ -1091,6 +1097,74 @@ class UpdateInstructionsRequest(BaseModel):
 @app.get("/")
 def root():
     return {"status": "ok", "message": "ChatGPT Web Interface API"}
+
+
+# ============================================================
+# WebSocket Endpoint for Real-Time Chat Sync
+# ============================================================
+
+@app.websocket("/api/ws/chat/{username}/{chat_name}")
+async def chat_websocket(websocket: WebSocket, username: str, chat_name: str, project: str = None):
+    """
+    WebSocket endpoint for real-time chat synchronization.
+
+    Enables multiple browser instances viewing the same chat to stay in sync.
+    Broadcasts events when messages are added, edited, or branches are switched.
+    """
+    username = username.strip().lower()
+
+    # Verify chat exists
+    data = load_chat(username, chat_name, project)
+    if not data:
+        await websocket.close(code=4004, reason="Chat not found")
+        return
+
+    await websocket.accept()
+
+    chat_key = sync_manager.make_chat_key(username, project, chat_name)
+    connection_id = await sync_manager.register_connection(chat_key, websocket)
+
+    try:
+        # Broadcast join event to other clients
+        count = await sync_manager.get_connection_count(chat_key)
+        await sync_manager.broadcast_to_chat(
+            chat_key,
+            SyncEvent(
+                type=SyncEventType.CLIENT_JOINED,
+                data={"connection_count": count}
+            ),
+            exclude_connection_id=None  # Send to all including the new client
+        )
+
+        # Handle incoming messages (ping/pong for keepalive)
+        while True:
+            try:
+                message = await websocket.receive_text()
+                data = json.loads(message)
+
+                if data.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+
+            except WebSocketDisconnect:
+                break
+            except json.JSONDecodeError:
+                # Ignore malformed messages
+                pass
+
+    finally:
+        # Unregister and broadcast leave event
+        remaining = await sync_manager.unregister_connection(chat_key, connection_id)
+
+        # Broadcast leave event to remaining clients
+        if remaining > 0:
+            await sync_manager.broadcast_to_chat(
+                chat_key,
+                SyncEvent(
+                    type=SyncEventType.CLIENT_LEFT,
+                    data={"connection_count": remaining}
+                )
+            )
+
 
 @app.post("/api/login", response_model=LoginResponse)
 def login(request: LoginRequest):
@@ -2020,6 +2094,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     data["messages"].append(user_msg_data)
 
+    # Create chat key for sync broadcasts
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+
     # Get provider client
     client = provider.get_client(api_key)
 
@@ -2076,6 +2153,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # Send init event with user message ID
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
 
+            # Broadcast user message to other clients viewing this chat
+            await sync_manager.broadcast_to_chat(
+                chat_key,
+                SyncEvent(
+                    type=SyncEventType.USER_MESSAGE_ADDED,
+                    data={
+                        "message": user_msg_data,
+                        "current_leaf_id": user_msg_id
+                    }
+                )
+            )
+
             # Stream the response (use flex fallback for GPT-5.2)
             event_count = 0
             if model_id == "gpt-5.2":
@@ -2094,10 +2183,26 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if stream_event.event_type == 'content_delta':
                     accumulated_content += stream_event.content
                     yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                    # Broadcast content delta to other clients
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(
+                            type=SyncEventType.STREAM_CONTENT,
+                            data={"delta": stream_event.content}
+                        )
+                    )
 
                 elif stream_event.event_type == 'thinking_delta':
                     accumulated_thinking += stream_event.content
                     yield f"event: thinking\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                    # Broadcast thinking delta to other clients
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(
+                            type=SyncEventType.STREAM_THINKING,
+                            data={"delta": stream_event.content}
+                        )
+                    )
 
                 elif stream_event.event_type == 'done':
                     logger.info(f"Stream done event received for user {username}")
@@ -2318,6 +2423,23 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         done_data['service_tier'] = service_tier
                     yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
+                    # Broadcast stream done to other clients
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(
+                            type=SyncEventType.STREAM_DONE,
+                            data={
+                                "assistant_message": assistant_msg_data,
+                                "user_message_id": user_msg_id,
+                                "assistant_message_id": assistant_msg_id,
+                                "current_leaf_id": assistant_msg_id,
+                                "total_messages": branch_total_messages,
+                                "stats": response_stats,
+                                "context_start_index": context_start_index
+                            }
+                        )
+                    )
+
             logger.info(f"Stream loop completed after {event_count} events for user {username}")
 
         except Exception as e:
@@ -2358,6 +2480,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 error_msg = "Request timed out. Please try again."
 
             yield f"event: error\ndata: {json.dumps({'detail': error_msg})}\n\n"
+
+            # Broadcast error to other clients
+            await sync_manager.broadcast_to_chat(
+                chat_key,
+                SyncEvent(
+                    type=SyncEventType.STREAM_ERROR,
+                    data={"detail": error_msg}
+                )
+            )
 
     return StreamingResponse(
         event_generator(),
@@ -2427,7 +2558,7 @@ def get_branch_info(username: str, chat_name: str, message_id: str, project: str
 
 
 @app.post("/api/switch-branch/{username}/{chat_name}")
-def switch_branch(username: str, chat_name: str, target_message_id: str, project: str = None):
+async def switch_branch(username: str, chat_name: str, target_message_id: str, project: str = None):
     """
     Switch to a different branch by navigating to a sibling message.
 
@@ -2449,6 +2580,19 @@ def switch_branch(username: str, chat_name: str, target_message_id: str, project
     # Update current_leaf_id
     data["current_leaf_id"] = new_leaf_id
     save_chat(username, chat_name, data, project)
+
+    # Broadcast branch switch to other clients
+    chat_key = sync_manager.make_chat_key(username, project, chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.BRANCH_SWITCHED,
+            data={
+                "new_leaf_id": new_leaf_id,
+                "target_message_id": target_message_id
+            }
+        )
+    )
 
     return {
         "status": "ok",
