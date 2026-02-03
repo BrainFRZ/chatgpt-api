@@ -30,6 +30,9 @@ class SyncEventType(Enum):
     BRANCH_SWITCHED = "branch_switched"
     CLIENT_JOINED = "client_joined"
     CLIENT_LEFT = "client_left"
+    # User-level events (chat list changes)
+    CHAT_CREATED = "chat_created"
+    CHAT_DELETED = "chat_deleted"
 
 
 @dataclass
@@ -62,6 +65,8 @@ class SyncManager:
     def __init__(self):
         # {chat_key: {connection_id: Connection}}
         self._connections: dict[str, dict[str, Connection]] = {}
+        # {username: {connection_id: Connection}} - for user-level events
+        self._user_connections: dict[str, dict[str, Connection]] = {}
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -71,9 +76,9 @@ class SyncManager:
             return f"{username}:{project}:{chat_name}"
         return f"{username}::{chat_name}"
 
-    async def register_connection(self, chat_key: str, websocket: WebSocket) -> str:
+    async def register_connection(self, chat_key: str, username: str, websocket: WebSocket) -> str:
         """
-        Register a new WebSocket connection for a chat.
+        Register a new WebSocket connection for a chat and user.
 
         Returns the connection ID.
         """
@@ -81,21 +86,28 @@ class SyncManager:
         connection = Connection(id=connection_id, websocket=websocket)
 
         async with self._lock:
+            # Register at chat level
             if chat_key not in self._connections:
                 self._connections[chat_key] = {}
             self._connections[chat_key][connection_id] = connection
             count = len(self._connections[chat_key])
 
+            # Register at user level (for user-wide events like chat created/deleted)
+            if username not in self._user_connections:
+                self._user_connections[username] = {}
+            self._user_connections[username][connection_id] = connection
+
         logger.info(f"Registered connection {connection_id} for chat {chat_key}, total: {count}")
         return connection_id
 
-    async def unregister_connection(self, chat_key: str, connection_id: str) -> int:
+    async def unregister_connection(self, chat_key: str, username: str, connection_id: str) -> int:
         """
-        Unregister a WebSocket connection.
+        Unregister a WebSocket connection from both chat and user levels.
 
         Returns the remaining connection count for the chat.
         """
         async with self._lock:
+            # Unregister from chat level
             if chat_key in self._connections:
                 self._connections[chat_key].pop(connection_id, None)
                 count = len(self._connections[chat_key])
@@ -104,8 +116,16 @@ class SyncManager:
                     logger.info(f"Removed empty chat_key {chat_key}")
                 else:
                     logger.info(f"Unregistered connection {connection_id} from {chat_key}, remaining: {count}")
-                return count
-        return 0
+            else:
+                count = 0
+
+            # Unregister from user level
+            if username in self._user_connections:
+                self._user_connections[username].pop(connection_id, None)
+                if len(self._user_connections[username]) == 0:
+                    del self._user_connections[username]
+
+            return count
 
     async def get_connection_count(self, chat_key: str) -> int:
         """Get the number of active connections for a chat."""
@@ -159,6 +179,54 @@ class SyncManager:
                 if chat_key in self._connections:
                     for conn_id in failed_connections:
                         self._connections[chat_key].pop(conn_id, None)
+
+        return sent_count
+
+    async def broadcast_to_user(
+        self,
+        username: str,
+        event: SyncEvent,
+        exclude_connection_id: Optional[str] = None
+    ) -> int:
+        """
+        Broadcast an event to all connections for a user (across all their chats).
+
+        Args:
+            username: The user to broadcast to
+            event: The event to broadcast
+            exclude_connection_id: Optional connection ID to exclude
+
+        Returns:
+            Number of clients the event was sent to
+        """
+        async with self._lock:
+            if username not in self._user_connections:
+                return 0
+            connections = list(self._user_connections[username].values())
+
+        if not connections:
+            return 0
+
+        message = event.to_json()
+        sent_count = 0
+        failed_connections = []
+
+        for conn in connections:
+            if exclude_connection_id and conn.id == exclude_connection_id:
+                continue
+            try:
+                await conn.websocket.send_text(message)
+                sent_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to send to user connection {conn.id}: {e}")
+                failed_connections.append(conn.id)
+
+        # Clean up failed connections
+        if failed_connections:
+            async with self._lock:
+                if username in self._user_connections:
+                    for conn_id in failed_connections:
+                        self._user_connections[username].pop(conn_id, None)
 
         return sent_count
 

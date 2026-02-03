@@ -1122,7 +1122,7 @@ async def chat_websocket(websocket: WebSocket, username: str, chat_name: str, pr
     await websocket.accept()
 
     chat_key = sync_manager.make_chat_key(username, project, chat_name)
-    connection_id = await sync_manager.register_connection(chat_key, websocket)
+    connection_id = await sync_manager.register_connection(chat_key, username, websocket)
 
     try:
         # Broadcast join event to other clients
@@ -1153,7 +1153,7 @@ async def chat_websocket(websocket: WebSocket, username: str, chat_name: str, pr
 
     finally:
         # Unregister and broadcast leave event
-        remaining = await sync_manager.unregister_connection(chat_key, connection_id)
+        remaining = await sync_manager.unregister_connection(chat_key, username, connection_id)
 
         # Broadcast leave event to remaining clients
         if remaining > 0:
@@ -1372,17 +1372,17 @@ def list_chats(username: str, limit: int = 20, offset: int = 0):
     return ChatListResponse(chats=paginated_chats, projects=projects, total=total, has_more=has_more)
 
 @app.post("/api/create-chat")
-def create_chat(request: CreateChatRequest):
+async def create_chat(request: CreateChatRequest):
     username = request.username.strip().lower()
     chat_name = request.chat_name.strip()
-    
+
     if not validate_name(chat_name):
         raise HTTPException(status_code=400, detail="Invalid chat name. Names cannot contain / \\ or control characters.")
-    
+
     path = get_chat_path(username, chat_name, request.project)
     if os.path.exists(path):
         raise HTTPException(status_code=400, detail="Chat already exists")
-    
+
     # Build system message (instructions first, then project files)
     if request.project:
         instructions = get_instructions(username, request.project)
@@ -1394,7 +1394,7 @@ def create_chat(request: CreateChatRequest):
     else:
         # Free chats also check for instructions
         system_content = get_instructions(username, None)
-    
+
     data = {
         "messages": [{"role": "system", "content": system_content}],
         "stats": create_empty_stats()
@@ -1410,6 +1410,19 @@ def create_chat(request: CreateChatRequest):
             data["model"] = project_metadata["model"]
 
     save_chat(username, chat_name, data, request.project)
+
+    # Broadcast chat creation to all user's connected clients
+    await sync_manager.broadcast_to_user(
+        username,
+        SyncEvent(
+            type=SyncEventType.CHAT_CREATED,
+            data={
+                "chat_name": chat_name,
+                "project": request.project
+            }
+        )
+    )
+
     return {"status": "ok"}
 
 @app.get("/api/chat/{username}/{chat_name}", response_model=ChatResponse)
@@ -2741,7 +2754,7 @@ def rename_chat(request: RenameChatRequest):
     return {"status": "ok"}
 
 @app.post("/api/delete-chat")
-def delete_chat(request: DeleteChatRequest):
+async def delete_chat(request: DeleteChatRequest):
     username = request.username.strip().lower()
     path = get_chat_path(username, request.chat_name, request.project)
 
@@ -2756,6 +2769,18 @@ def delete_chat(request: DeleteChatRequest):
 
     # Remove from chat index
     remove_from_chat_index(username, request.chat_name, request.project)
+
+    # Broadcast chat deletion to all user's connected clients
+    await sync_manager.broadcast_to_user(
+        username,
+        SyncEvent(
+            type=SyncEventType.CHAT_DELETED,
+            data={
+                "chat_name": request.chat_name,
+                "project": request.project
+            }
+        )
+    )
 
     return {"status": "ok"}
 

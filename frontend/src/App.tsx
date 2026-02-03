@@ -938,6 +938,50 @@ function App() {
         // Using state instead of calling handleReloadChat directly avoids stale closure
         setNeedsSyncReload(true);
         break;
+
+      case 'chat_created':
+        // Another client created a chat - update the chat list
+        // Add to appropriate list based on whether it's a project chat or root chat
+        if (event.data.project) {
+          setProjectChatsCache(prev => {
+            const projectChats = prev[event.data.project] || [];
+            if (!projectChats.includes(event.data.chat_name)) {
+              return { ...prev, [event.data.project]: [event.data.chat_name, ...projectChats] };
+            }
+            return prev;
+          });
+        } else {
+          setChats(prev => {
+            if (!prev.includes(event.data.chat_name)) {
+              return [event.data.chat_name, ...prev];
+            }
+            return prev;
+          });
+          setRootChatsCache(prev => {
+            if (prev && !prev.includes(event.data.chat_name)) {
+              return [event.data.chat_name, ...prev];
+            }
+            return prev;
+          });
+        }
+        break;
+
+      case 'chat_deleted':
+        // Another client deleted a chat - update the chat list
+        if (event.data.project) {
+          setProjectChatsCache(prev => {
+            const projectChats = prev[event.data.project] || [];
+            return { ...prev, [event.data.project]: projectChats.filter(c => c !== event.data.chat_name) };
+          });
+        } else {
+          setChats(prev => prev.filter(c => c !== event.data.chat_name));
+          setRootChatsCache(prev => prev ? prev.filter(c => c !== event.data.chat_name) : null);
+        }
+        // If the deleted chat is currently open, close it
+        if (currentChatRef.current === event.data.chat_name) {
+          resetChatState();
+        }
+        break;
     }
   }, []);
 
