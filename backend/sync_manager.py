@@ -100,6 +100,44 @@ class SyncManager:
         logger.info(f"Registered connection {connection_id} for chat {chat_key}, total: {count}")
         return connection_id
 
+    async def register_user_connection(self, username: str, websocket: WebSocket) -> str:
+        """
+        Register a user-level WebSocket connection (not tied to a specific chat).
+        Used for receiving user-wide events like chat created/deleted.
+
+        Returns the connection ID.
+        """
+        connection_id = str(uuid.uuid4())
+        connection = Connection(id=connection_id, websocket=websocket)
+
+        async with self._lock:
+            if username not in self._user_connections:
+                self._user_connections[username] = {}
+            self._user_connections[username][connection_id] = connection
+            count = len(self._user_connections[username])
+
+        logger.info(f"Registered user connection {connection_id} for {username}, total: {count}")
+        return connection_id
+
+    async def unregister_user_connection(self, username: str, connection_id: str) -> int:
+        """
+        Unregister a user-level WebSocket connection.
+
+        Returns the remaining connection count for the user.
+        """
+        async with self._lock:
+            if username in self._user_connections:
+                self._user_connections[username].pop(connection_id, None)
+                count = len(self._user_connections[username])
+                if count == 0:
+                    del self._user_connections[username]
+                    logger.info(f"Removed empty user {username}")
+                else:
+                    logger.info(f"Unregistered user connection {connection_id} from {username}, remaining: {count}")
+            else:
+                count = 0
+            return count
+
     async def unregister_connection(self, chat_key: str, username: str, connection_id: str) -> int:
         """
         Unregister a WebSocket connection from both chat and user levels.

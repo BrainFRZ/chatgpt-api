@@ -1103,6 +1103,40 @@ def root():
 # WebSocket Endpoint for Real-Time Chat Sync
 # ============================================================
 
+@app.websocket("/api/ws/user/{username}")
+async def user_websocket(websocket: WebSocket, username: str):
+    """
+    WebSocket endpoint for user-level events (chat list changes).
+
+    Receives events like chat_created and chat_deleted without needing
+    a specific chat open. Always connected when user is logged in.
+    """
+    username = username.strip().lower()
+
+    await websocket.accept()
+
+    connection_id = await sync_manager.register_user_connection(username, websocket)
+
+    try:
+        # Handle incoming messages (ping/pong for keepalive)
+        while True:
+            try:
+                message = await websocket.receive_text()
+                data = json.loads(message)
+
+                if data.get("type") == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+
+            except WebSocketDisconnect:
+                break
+            except json.JSONDecodeError:
+                # Ignore malformed messages
+                pass
+
+    finally:
+        await sync_manager.unregister_user_connection(username, connection_id)
+
+
 @app.websocket("/api/ws/chat/{username}/{chat_name}")
 async def chat_websocket(websocket: WebSocket, username: str, chat_name: str, project: str = None):
     """

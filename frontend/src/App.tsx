@@ -348,6 +348,9 @@ function App() {
   const [resizeStartY, setResizeStartY] = useState(0);
   const [resizeStartHeight, setResizeStartHeight] = useState(0);
   const [isLoading, setIsLoading] = useState<Set<string>>(new Set());
+  const isLoadingRef = useRef<Set<string>>(new Set());
+  // Keep ref in sync with state for use in useCallback with [] deps
+  useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [freeTokens, setFreeTokens] = useState<FreeTokens | null>(null);
   const [showStatsTooltip, setShowStatsTooltip] = useState(false);
@@ -418,6 +421,10 @@ function App() {
   const syncWsRef = useRef<WebSocket | null>(null);
   const syncReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const syncHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // User-level WebSocket for chat list sync (always connected when logged in)
+  const userWsRef = useRef<WebSocket | null>(null);
+  const userWsReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const userWsHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -803,6 +810,8 @@ function App() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          // Skip user-level events here - they're handled by the user-level WebSocket
+          if (data.type === 'chat_created' || data.type === 'chat_deleted') return;
           handleSyncEvent(data);
         } catch (e) {
           // Ignore parse errors
@@ -816,8 +825,11 @@ function App() {
           syncHeartbeatIntervalRef.current = null;
         }
 
-        // Don't reconnect if intentionally closed or chat changed
-        if (event.code === 1000 || currentChatRef.current !== currentChat) {
+        // Don't reconnect if:
+        // - Intentionally closed (1000)
+        // - Chat no longer exists (4004 from server)
+        // - Chat changed in the UI
+        if (event.code === 1000 || event.code === 4004 || currentChatRef.current !== currentChat) {
           return;
         }
 
@@ -854,8 +866,108 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.username, currentChat, currentProject]);
 
+  // User-level WebSocket for chat list sync (always connected when logged in)
+  useEffect(() => {
+    if (!user) {
+      // Clean up if not logged in
+      if (userWsRef.current) {
+        userWsRef.current.close();
+        userWsRef.current = null;
+      }
+      if (userWsReconnectTimeoutRef.current) {
+        clearTimeout(userWsReconnectTimeoutRef.current);
+        userWsReconnectTimeoutRef.current = null;
+      }
+      if (userWsHeartbeatIntervalRef.current) {
+        clearInterval(userWsHeartbeatIntervalRef.current);
+        userWsHeartbeatIntervalRef.current = null;
+      }
+      return;
+    }
+
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    const baseReconnectDelay = 1000;
+
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/api/ws/user/${encodeURIComponent(user.username)}`;
+
+      const ws = new WebSocket(wsUrl);
+      userWsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+
+        // Start heartbeat
+        userWsHeartbeatIntervalRef.current = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          // Only handle user-level events (chat_created, chat_deleted)
+          if (data.type === 'chat_created' || data.type === 'chat_deleted') {
+            handleSyncEvent(data);
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      };
+
+      ws.onclose = (event) => {
+        if (userWsHeartbeatIntervalRef.current) {
+          clearInterval(userWsHeartbeatIntervalRef.current);
+          userWsHeartbeatIntervalRef.current = null;
+        }
+
+        // Don't reconnect if intentionally closed
+        if (event.code === 1000) {
+          return;
+        }
+
+        // Attempt reconnect with exponential backoff
+        if (reconnectAttempts < maxReconnectAttempts) {
+          const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts);
+          reconnectAttempts++;
+          userWsReconnectTimeoutRef.current = setTimeout(connect, delay);
+        }
+      };
+
+      ws.onerror = () => {
+        // Error will trigger onclose
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (userWsRef.current) {
+        userWsRef.current.close(1000);
+        userWsRef.current = null;
+      }
+      if (userWsReconnectTimeoutRef.current) {
+        clearTimeout(userWsReconnectTimeoutRef.current);
+        userWsReconnectTimeoutRef.current = null;
+      }
+      if (userWsHeartbeatIntervalRef.current) {
+        clearInterval(userWsHeartbeatIntervalRef.current);
+        userWsHeartbeatIntervalRef.current = null;
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.username]);
+
   // Handle sync events from WebSocket
   const handleSyncEvent = useCallback((event: { type: string; data: any }) => {
+    // If we're currently streaming (loading) for the current chat, ignore streaming-related
+    // sync events since we're already handling them via SSE. This prevents duplicates.
+    const isCurrentlyStreaming = currentChatRef.current && isLoadingRef.current.has(currentChatRef.current);
+
     switch (event.type) {
       case 'client_joined':
       case 'client_left':
@@ -863,6 +975,8 @@ function App() {
         break;
 
       case 'user_message_added':
+        // Ignore if we're the one streaming - we already added our own message
+        if (isCurrentlyStreaming) break;
         // Another client sent a message - add it to our view
         setMessages(prev => [...prev, event.data.message]);
         setAllMessages(prev => [...prev, event.data.message]);
@@ -877,6 +991,8 @@ function App() {
         break;
 
       case 'stream_content':
+        // Ignore if we're the one streaming - we handle this via SSE
+        if (isCurrentlyStreaming) break;
         // Append content delta to the streaming message
         setMessages(prev => {
           const newMessages = [...prev];
@@ -892,6 +1008,8 @@ function App() {
         break;
 
       case 'stream_thinking':
+        // Ignore if we're the one streaming - we handle this via SSE
+        if (isCurrentlyStreaming) break;
         // Append thinking delta to the streaming message
         setMessages(prev => {
           const newMessages = [...prev];
@@ -907,6 +1025,8 @@ function App() {
         break;
 
       case 'stream_done':
+        // Ignore if we're the one streaming - we handle this via SSE
+        if (isCurrentlyStreaming) break;
         // Replace streaming placeholder with complete message
         setMessages(prev => {
           const newMessages = [...prev];
@@ -924,6 +1044,8 @@ function App() {
         break;
 
       case 'stream_error':
+        // Ignore if we're the one streaming - we handle this via SSE
+        if (isCurrentlyStreaming) break;
         // Remove the streaming placeholder on error
         setMessages(prev => {
           if (prev.length > 0 && prev[prev.length - 1].role === 'assistant' && !prev[prev.length - 1].id) {
@@ -977,8 +1099,9 @@ function App() {
           setChats(prev => prev.filter(c => c !== event.data.chat_name));
           setRootChatsCache(prev => prev ? prev.filter(c => c !== event.data.chat_name) : null);
         }
-        // If the deleted chat is currently open, close it
-        if (currentChatRef.current === event.data.chat_name) {
+        // If the deleted chat is currently open (same name AND same project), close it
+        if (currentChatRef.current === event.data.chat_name &&
+            (currentProjectRef.current || null) === (event.data.project || null)) {
           resetChatState();
         }
         break;
@@ -1772,6 +1895,12 @@ function App() {
       if (!response.ok) {
         const data = await response.json();
         setError(data.detail || 'Could not open chat');
+        // Reset ref since we failed to open
+        currentChatRef.current = null;
+        // For 404 (chat not found/deleted), clear localStorage so we don't keep retrying on refresh
+        if (response.status === 404) {
+          localStorage.removeItem('chatgpt-current-chat');
+        }
         return;
       }
       
@@ -2064,10 +2193,11 @@ function App() {
   };
 
   // Handle sync-triggered reload (when another client switches branches)
+  // Just reload messages, don't rebuild system prompt
   useEffect(() => {
-    if (needsSyncReload) {
+    if (needsSyncReload && currentChat) {
       setNeedsSyncReload(false);
-      handleReloadChat();
+      openChat(currentChat, currentProject);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsSyncReload]);
