@@ -84,17 +84,18 @@ def test_user(temp_data_dir):
 class TestGetModels:
     """Tests for GET /api/models endpoint."""
 
-    def test_returns_both_models(self, client):
-        """Verify both GPT-5.2 and Claude Sonnet 4.5 are returned."""
+    def test_returns_all_models(self, client):
+        """Verify GPT-5.2, Claude Sonnet 4.5, and Claude Opus 4.6 are returned."""
         response = client.get("/api/models")
         assert response.status_code == 200
 
         models = response.json()
-        assert len(models) == 2
+        assert len(models) == 3
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
         assert "claude-sonnet-4.5" in model_ids
+        assert "claude-opus-4.6" in model_ids
 
     def test_gpt52_metadata(self, client):
         """Verify GPT-5.2 has correct pricing and context limits."""
@@ -103,8 +104,8 @@ class TestGetModels:
 
         gpt = models["gpt-5.2"]
         assert gpt["name"] == "GPT-5.2"
-        assert gpt["pricing"]["input_new"] == 1.75
-        assert gpt["pricing"]["input_cached"] == 0.175
+        assert gpt["pricing"]["input_base"] == 1.75
+        assert gpt["pricing"]["cache_read"] == 0.175
         assert gpt["pricing"]["output"] == 14.0
         assert gpt["pricing"]["reasoning"] == 14.0
         assert gpt["context_limits"]["threshold"] == 275000
@@ -117,12 +118,12 @@ class TestGetModels:
 
         claude = models["claude-sonnet-4.5"]
         assert claude["name"] == "Claude Sonnet 4.5"
-        assert claude["pricing"]["input_new"] == 6.0
-        assert claude["pricing"]["input_cached"] == 0.3
+        assert claude["pricing"]["input_base"] == 3.0
+        assert claude["pricing"]["cache_read"] == 0.3
         assert claude["pricing"]["output"] == 15.0
         assert claude["pricing"]["reasoning"] == 15.0
-        assert claude["context_limits"]["threshold"] == 180000
-        assert claude["context_limits"]["target"] == 140000
+        assert claude["context_limits"]["threshold"] == 195000
+        assert claude["context_limits"]["target"] == 160000
 
 
 class TestApiKeys:
@@ -651,7 +652,7 @@ class TestAnthropicProvider:
         assert params["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
         assert "thinking" in params
         assert params["thinking"]["type"] == "enabled"
-        assert params["thinking"]["budget_tokens"] == 24000
+        assert params["thinking"]["budget_tokens"] == 10000
 
     def test_build_request_separates_system(self):
         """System message should be extracted to separate field."""
@@ -671,8 +672,9 @@ class TestAnthropicProvider:
             is_free_chat=False
         )
 
-        # System should be separate
-        assert params["system"][0]["text"] == "System prompt"
+        # System should be separate (includes model identity prefix)
+        assert "System prompt" in params["system"][0]["text"]
+        assert "Claude Sonnet 4.5" in params["system"][0]["text"]
 
         # Messages should not include system
         assert len(params["messages"]) == 1
@@ -779,11 +781,12 @@ class TestProviderRegistry:
         from providers import ProviderRegistry
 
         models = ProviderRegistry.list_models()
-        assert len(models) == 2
+        assert len(models) == 3
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
         assert "claude-sonnet-4.5" in model_ids
+        assert "claude-opus-4.6" in model_ids
 
     def test_get_required_api_key(self):
         """get_required_api_key should return correct provider."""
@@ -797,20 +800,26 @@ class TestAddUpdatesToMessages:
     """Tests for the add_updates_to_messages functions."""
 
     def test_openai_adds_separate_message(self):
-        """OpenAI version should add updates as separate user message."""
+        """OpenAI version should add updates as separate user message before last message."""
         from providers.openai_provider import add_updates_to_messages
 
+        # Simulate real flow: conversation + new user message to be sent
         messages = [
             {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"}
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "How are you?"}
         ]
 
         result = add_updates_to_messages(messages, "Some updates")
 
-        assert len(result) == 3
+        # Updates message is inserted before the last user message
+        assert len(result) == 4
+        assert result[-2]["role"] == "user"
+        assert "CONTEXT UPDATES" in result[-2]["content"]
+        assert "Some updates" in result[-2]["content"]
+        # Last message remains unchanged
         assert result[-1]["role"] == "user"
-        assert "CONTEXT UPDATES" in result[-1]["content"]
-        assert "Some updates" in result[-1]["content"]
+        assert result[-1]["content"] == "How are you?"
 
     def test_openai_empty_updates_unchanged(self):
         """Empty updates should not modify messages."""

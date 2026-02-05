@@ -348,25 +348,25 @@ class AnthropicProvider(ModelProvider):
 
 
 class AnthropicOpusProvider(AnthropicProvider):
-    """Provider for Claude Opus 4.5 with extended thinking."""
+    """Provider for Claude Opus 4.6 with adaptive thinking."""
 
-    MODEL_NAME = "claude-opus-4-5"
-    THINKING_BUDGET = 10000   # Same as Sonnet to avoid SDK timeout limits
+    MODEL_NAME = "claude-opus-4-6"
     MAX_TOKENS = 16000        # Same as Sonnet (SDK requires streaming for higher values)
 
-    # Opus uses beta headers for context management and cache TTL, but NOT 1M context (only 200K supported)
+    # Opus 4.6 now supports 1M context like Sonnet
     BETA_HEADERS = [
+        "context-1m-2025-08-07",           # Enables 1M token context (NEW for Opus 4.6)
         "context-management-2025-06-27",   # Clears old thought blocks from history
         "extended-cache-ttl-2025-04-11"    # Enables 1hr cache TTL
     ]
 
     @property
     def model_id(self) -> str:
-        return "claude-opus-4.5"
+        return "claude-opus-4.6"
 
     @property
     def display_name(self) -> str:
-        return "Claude Opus 4.5"
+        return "Claude Opus 4.6"
 
     @property
     def pricing(self) -> Pricing:
@@ -384,6 +384,29 @@ class AnthropicOpusProvider(AnthropicProvider):
             threshold=80_000,    # User-specified rolling window
             target=55_000
         )
+
+    def build_request(
+        self,
+        messages: list[dict],
+        username: str,
+        project: Optional[str],
+        chat_name: str,
+        is_free_chat: bool
+    ) -> dict:
+        """
+        Build Anthropic API request with adaptive thinking for Opus 4.6.
+
+        Opus 4.6 uses adaptive thinking with effort parameter instead of
+        explicit thinking budget.
+        """
+        # Call parent to get base params (system, messages, cache breakpoints)
+        params = super().build_request(messages, username, project, chat_name, is_free_chat)
+
+        # Override thinking to use adaptive mode with effort
+        params["thinking"] = {"type": "adaptive"}
+        params["output_config"] = {"effort": "high"}
+
+        return params
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:

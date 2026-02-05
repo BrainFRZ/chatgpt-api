@@ -92,7 +92,7 @@ def get_token_encoder():
 
 def get_claude_provider():
     """Get any Claude provider for token counting (they use the same tokenizer)."""
-    return ProviderRegistry.get("claude-sonnet-4.5") or ProviderRegistry.get("claude-opus-4.5")
+    return ProviderRegistry.get("claude-sonnet-4.5") or ProviderRegistry.get("claude-opus-4.6")
 
 
 @contextmanager
