@@ -1049,6 +1049,7 @@ class ChatMessage(BaseModel):
     total_claude_tokens: int | None = None  # Accurate Claude tokens (API tokenizer)
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
     model: str | None = None  # Model used for this message (for multi-model chats)
+    service_tier: str | None = None  # OpenAI service tier (flex or standard)
 
 class ChatResponse(BaseModel):
     messages: list[ChatMessage]  # Current branch path (paginated, for display)

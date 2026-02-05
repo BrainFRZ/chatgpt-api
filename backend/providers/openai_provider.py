@@ -138,7 +138,7 @@ class OpenAIProvider(ModelProvider):
         logger.info(f"OpenAI stream: loop ended, last event was {last_event_type}")
 
     def send_request_stream_with_fallback(
-        self, client: Any, request_params: dict, ttfb_timeout: float = 15.0
+        self, client: Any, request_params: dict, ttfb_timeout: float = 30.0
     ) -> Iterator[StreamEvent]:
         """
         Stream with flex mode, auto-fallback to standard on timeout/error.
