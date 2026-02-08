@@ -26,6 +26,7 @@ class SyncEventType(Enum):
     STREAM_THINKING = "stream_thinking"
     STREAM_DONE = "stream_done"
     STREAM_ERROR = "stream_error"
+    PIPELINE_STAGE = "pipeline_stage"
     MESSAGE_EDITED = "message_edited"
     BRANCH_SWITCHED = "branch_switched"
     CLIENT_JOINED = "client_joined"

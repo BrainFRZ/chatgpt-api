@@ -2303,6 +2303,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 ):
                     if event_type == "pipeline_stage":
                         yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.PIPELINE_STAGE, data=event_data)
+                        )
 
                     elif event_type == "content":
                         # Check for client disconnect during streaming (not on done - we must save)

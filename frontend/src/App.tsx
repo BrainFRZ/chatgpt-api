@@ -352,6 +352,7 @@ function App() {
   const isLoadingRef = useRef<Set<string>>(new Set());
   // Keep ref in sync with state for use in useCallback with [] deps
   useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
+  const [pipelineStage, setPipelineStage] = useState<Map<string, {stage: string, status: string}>>(new Map());
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [freeTokens, setFreeTokens] = useState<FreeTokens | null>(null);
   const [showStatsTooltip, setShowStatsTooltip] = useState(false);
@@ -1046,6 +1047,12 @@ function App() {
         setCurrentLeafId(event.data.current_leaf_id);
         setStats(event.data.stats);
         setContextStartIndex(event.data.context_start_index || 1);
+        setPipelineStage(prev => {
+          if (!currentChatRef.current) return prev;
+          const next = new Map(prev);
+          next.delete(currentChatRef.current);
+          return next;
+        });
         break;
 
       case 'stream_error':
@@ -1058,6 +1065,23 @@ function App() {
           }
           return prev;
         });
+        setPipelineStage(prev => {
+          if (!currentChatRef.current) return prev;
+          const next = new Map(prev);
+          next.delete(currentChatRef.current);
+          return next;
+        });
+        break;
+
+      case 'pipeline_stage':
+        if (isCurrentlyStreaming) break;
+        if (currentChatRef.current) {
+          setPipelineStage(prev => {
+            const next = new Map(prev);
+            next.set(currentChatRef.current!, event.data);
+            return next;
+          });
+        }
         break;
 
       case 'branch_switched':
@@ -2734,6 +2758,12 @@ function App() {
 
           if (event.type === 'init') {
             userMsgId = event.data.user_message_id;
+          } else if (event.type === 'pipeline_stage') {
+            setPipelineStage(prev => {
+              const next = new Map(prev);
+              next.set(ctx.chat!, { stage: event.data.stage, status: event.data.status });
+              return next;
+            });
           } else if (event.type === 'content') {
             accumulatedContent += event.data.delta;
             // Update the streaming message with new content
@@ -2832,6 +2862,11 @@ function App() {
     } finally {
       setIsLoading(prev => {
         const next = new Set(prev);
+        next.delete(ctx.chat!);
+        return next;
+      });
+      setPipelineStage(prev => {
+        const next = new Map(prev);
         next.delete(ctx.chat!);
         return next;
       });
@@ -3716,10 +3751,42 @@ function App() {
                       </div>
                     );
                   })}
-                  {isLoading.has(currentChat) && (
+                  {(isLoading.has(currentChat) || pipelineStage.has(currentChat)) &&
+                   !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && messages[messages.length - 1].content) && (
                     <div style={styles.message}>
                       <div style={styles.messageRole}>Assistant</div>
-                      <div style={styles.messageContent}>Thinking...</div>
+                      <div style={styles.messageContent}>
+                        {(() => {
+                          const ps = pipelineStage.get(currentChat);
+                          if (!ps) return 'Thinking...';
+                          const stages = ['events', 'mechanics', 'narration'];
+                          const currentIdx = stages.indexOf(ps.stage);
+                          return (
+                            <span>
+                              {stages.map((s, i) => {
+                                const label = s.charAt(0).toUpperCase() + s.slice(1);
+                                let icon: string;
+                                let color: string;
+                                if (i < currentIdx || (i === currentIdx && ps.status === 'complete')) {
+                                  icon = '✓';
+                                  color = '#4caf50';
+                                } else if (i === currentIdx) {
+                                  icon = '●';
+                                  color = '#e0e0e0';
+                                } else {
+                                  icon = '○';
+                                  color = '#666';
+                                }
+                                return (
+                                  <span key={s} style={{ color, marginRight: i < stages.length - 1 ? '12px' : '0' }}>
+                                    {icon} {label}
+                                  </span>
+                                );
+                              })}
+                            </span>
+                          );
+                        })()}
+                      </div>
                     </div>
                   )}
                   <div ref={messagesEndRef} />
@@ -3972,7 +4039,7 @@ function App() {
                         <h3 style={styles.projectSectionTitle}>Instructions</h3>
                         {isPipelineProject ? (
                           <span style={styles.tokenBadge}>
-                            {Object.values(agentInstructions).reduce((sum, a) => sum + (a.tokens || 0), 0).toLocaleString()} tokens (agents)
+                            {Object.values(agentInstructions).reduce((sum, a) => sum + (a.tokens || projectInstructionsTokens), 0).toLocaleString()} tokens (agents)
                           </span>
                         ) : (
                           <span style={styles.tokenBadge}>{projectInstructionsTokens.toLocaleString()} tokens</span>
