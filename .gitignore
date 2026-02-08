@@ -18,4 +18,5 @@
 !backend/pipeline.py
 !backend/tests/
 !backend/tests/test_multi_model.py
+!backend/tests/test_pipeline_phase2.py
 !PIPELINE_PLAN.md

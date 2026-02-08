@@ -146,6 +146,7 @@ interface ProjectFileInfo {
   tokens: number;
   size_bytes: number;
   staged: boolean;
+  agents: string[];
 }
 
 interface ProjectFilesResponse {
@@ -365,6 +366,9 @@ function App() {
   const [showInstructionsModal, setShowInstructionsModal] = useState(false);
   const [editingInstructions, setEditingInstructions] = useState('');
   const [instructionsSaving, setInstructionsSaving] = useState(false);
+  const [agentInstructions, setAgentInstructions] = useState<Record<string, {instructions: string, tokens: number}>>({});
+  const [activeInstructionsTab, setActiveInstructionsTab] = useState('events');
+  const [editingAgentInstructions, setEditingAgentInstructions] = useState<Record<string, string>>({});
   const [filesUploading, setFilesUploading] = useState(false);
   const [projectChatsDetailed, setProjectChatsDetailed] = useState<ChatCardInfo[]>([]);
   const [chatSearchQuery, setChatSearchQuery] = useState('');
@@ -414,6 +418,7 @@ function App() {
   const [projectChatsCache, setProjectChatsCache] = useState<{[key: string]: string[]}>({});
   const [rootChatsCache, setRootChatsCache] = useState<string[] | null>(null);
   const [projectModel, setProjectModel] = useState<string | null>(null);
+  const isPipelineProject = projectModel === 'gpt-5.2';
 
   // Real-time sync state
   const [viewerCount, setViewerCount] = useState(1);
@@ -1249,6 +1254,7 @@ function App() {
     }
 
     // Fetch project metadata to get the project's default model
+    let fetchedModel = 'gpt-5.2';
     try {
       const metadataResponse = await fetch(`/api/project-metadata/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
@@ -1256,7 +1262,8 @@ function App() {
       if (metadataResponse.ok) {
         const metadataData = await metadataResponse.json();
         if (currentProjectRef.current !== projectName) return;
-        setProjectModel(metadataData.model || 'gpt-5.2');
+        fetchedModel = metadataData.model || 'gpt-5.2';
+        setProjectModel(fetchedModel);
       }
     } catch (err) {
       console.error('Could not fetch project metadata:', err);
@@ -1265,6 +1272,10 @@ function App() {
     // Fetch project files and instructions (refresh in background)
     fetchProjectFiles(projectName);
     fetchProjectInstructions(projectName);
+    // Fetch per-agent instructions for pipeline projects
+    if (fetchedModel === 'gpt-5.2') {
+      fetchAgentInstructions(projectName);
+    }
     fetchProjectChatsDetailed(projectName);
 
     // Fetch chat list (uses refreshProjectChats which has built-in stale check)
@@ -1598,6 +1609,10 @@ function App() {
         // Success - re-fetch project files and instructions with new tokenizer
         fetchProjectFiles(currentProject);
         fetchProjectInstructions(currentProject);
+        // Fetch agent instructions if switching to pipeline model
+        if (newModel === 'gpt-5.2') {
+          fetchAgentInstructions(currentProject);
+        }
       }
     } catch (err) {
       // Rollback on network error
@@ -1833,6 +1848,113 @@ function App() {
         newStaged ? prev - file.tokens : prev + file.tokens
       );
       setError('Could not update file staged status');
+    }
+  };
+
+  const fetchAgentInstructions = async (projectName: string) => {
+    if (!user) return;
+
+    try {
+      const response = await fetch(`/api/project-instructions/${user.username}/${projectName}/agents`);
+      if (currentProjectRef.current !== projectName) return;
+
+      if (response.ok) {
+        const data = await response.json();
+        if (currentProjectRef.current !== projectName) return;
+        setAgentInstructions(data);
+      }
+    } catch (err) {
+      console.error('Could not fetch agent instructions:', err);
+    }
+  };
+
+  const updateAgentInstructions = async (agentName: string) => {
+    const ctx = createContextGuard();
+    if (!user || !ctx.project) return;
+
+    const instructionsToSave = editingAgentInstructions[agentName] || '';
+
+    try {
+      const response = await fetch(`/api/project-instructions/${user.username}/${ctx.project}/agents/${agentName}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instructions: instructionsToSave })
+      });
+
+      if (ctx.isProjectStale()) return;
+
+      if (response.ok) {
+        const data = await response.json();
+        setAgentInstructions(prev => ({
+          ...prev,
+          [agentName]: { instructions: instructionsToSave, tokens: data.tokens }
+        }));
+      }
+    } catch (err) {
+      console.error(`Could not save ${agentName} instructions:`, err);
+    }
+  };
+
+  const handleSaveAllAgentInstructions = async () => {
+    setInstructionsSaving(true);
+    try {
+      await Promise.all(
+        ['events', 'mechanics', 'narration'].map(agent => updateAgentInstructions(agent))
+      );
+      setShowInstructionsModal(false);
+    } catch (err) {
+      setError('Could not save agent instructions');
+    } finally {
+      setInstructionsSaving(false);
+    }
+  };
+
+  const handleToggleFileAgent = async (filename: string, agentName: string) => {
+    const ctx = createContextGuard();
+    if (!user || !ctx.project) return;
+
+    const file = projectFiles.find(f => f.filename === filename);
+    if (!file) return;
+
+    const currentAgents = file.agents || ['events', 'mechanics', 'narration'];
+    let newAgents: string[];
+
+    if (currentAgents.includes(agentName)) {
+      // Prevent removing the last agent
+      if (currentAgents.length <= 1) return;
+      newAgents = currentAgents.filter(a => a !== agentName);
+    } else {
+      newAgents = [...currentAgents, agentName];
+    }
+
+    // Optimistic update
+    setProjectFiles(prev => prev.map(f =>
+      f.filename === filename ? { ...f, agents: newAgents } : f
+    ));
+
+    try {
+      const response = await fetch(`/api/project-files/${user.username}/${ctx.project}/agents/${encodeURIComponent(filename)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agents: newAgents })
+      });
+
+      if (ctx.isProjectStale()) return;
+
+      if (!response.ok) {
+        // Revert on failure
+        setProjectFiles(prev => prev.map(f =>
+          f.filename === filename ? { ...f, agents: currentAgents } : f
+        ));
+        const data = await response.json();
+        setError(data.detail || 'Failed to update file agents');
+      }
+    } catch (err) {
+      // Revert on error
+      setProjectFiles(prev => prev.map(f =>
+        f.filename === filename ? { ...f, agents: currentAgents } : f
+      ));
+      setError('Could not update file agents');
     }
   };
 
@@ -3848,21 +3970,59 @@ function App() {
                     <div style={styles.projectSection}>
                       <div style={styles.projectSectionHeader}>
                         <h3 style={styles.projectSectionTitle}>Instructions</h3>
-                        <span style={styles.tokenBadge}>{projectInstructionsTokens.toLocaleString()} tokens</span>
+                        {isPipelineProject ? (
+                          <span style={styles.tokenBadge}>
+                            {Object.values(agentInstructions).reduce((sum, a) => sum + (a.tokens || 0), 0).toLocaleString()} tokens (agents)
+                          </span>
+                        ) : (
+                          <span style={styles.tokenBadge}>{projectInstructionsTokens.toLocaleString()} tokens</span>
+                        )}
                       </div>
-                      <div style={styles.instructionsPreview}>
-                        {projectInstructions.substring(0, 200)}
-                        {projectInstructions.length > 200 ? '...' : ''}
-                      </div>
-                      <button
-                        onClick={() => {
-                          setEditingInstructions(projectInstructions);
-                          setShowInstructionsModal(true);
-                        }}
-                        style={styles.editInstructionsButton}
-                      >
-                        Edit Instructions
-                      </button>
+                      {isPipelineProject ? (
+                        <>
+                          <div style={styles.instructionsPreview}>
+                            {['events', 'mechanics', 'narration'].map(agent => {
+                              const ai = agentInstructions[agent];
+                              const hasContent = ai && ai.instructions && ai.instructions.trim();
+                              return (
+                                <span key={agent} style={{ marginRight: 8, color: hasContent ? '#e0e0e0' : '#666' }}>
+                                  {agent.charAt(0).toUpperCase() + agent.slice(1)}: {hasContent ? `${ai.tokens} tok` : 'shared'}
+                                </span>
+                              );
+                            })}
+                          </div>
+                          <button
+                            onClick={() => {
+                              const editing: Record<string, string> = {};
+                              for (const agent of ['events', 'mechanics', 'narration']) {
+                                editing[agent] = agentInstructions[agent]?.instructions || '';
+                              }
+                              setEditingAgentInstructions(editing);
+                              setActiveInstructionsTab('events');
+                              setShowInstructionsModal(true);
+                            }}
+                            style={styles.editInstructionsButton}
+                          >
+                            Edit Agent Instructions
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <div style={styles.instructionsPreview}>
+                            {projectInstructions.substring(0, 200)}
+                            {projectInstructions.length > 200 ? '...' : ''}
+                          </div>
+                          <button
+                            onClick={() => {
+                              setEditingInstructions(projectInstructions);
+                              setShowInstructionsModal(true);
+                            }}
+                            style={styles.editInstructionsButton}
+                          >
+                            Edit Instructions
+                          </button>
+                        </>
+                      )}
                     </div>
                     
                     {/* Files section */}
@@ -3914,6 +4074,23 @@ function App() {
                                 </div>
                               )}
                               <span style={styles.fileTokens}>{file.tokens.toLocaleString()}</span>
+                              {isPipelineProject && file.staged && (
+                                <span style={styles.agentBadges}>
+                                  {[{key: 'events', label: 'E'}, {key: 'mechanics', label: 'M'}, {key: 'narration', label: 'N'}].map(({key, label}) => {
+                                    const active = (file.agents || ['events', 'mechanics', 'narration']).includes(key);
+                                    return (
+                                      <span
+                                        key={key}
+                                        onClick={() => handleToggleFileAgent(file.filename, key)}
+                                        style={active ? styles.agentBadgeActive : styles.agentBadgeInactive}
+                                        title={`${active ? 'Remove from' : 'Add to'} ${key} agent`}
+                                      >
+                                        {label}
+                                      </span>
+                                    );
+                                  })}
+                                </span>
+                              )}
                               <button
                                 onClick={() => handleDeleteProjectFile(file.filename)}
                                 style={styles.fileDeleteButton}
@@ -3949,33 +4126,85 @@ function App() {
                 {showInstructionsModal && (
                   <div style={styles.modalOverlay} onClick={() => setShowInstructionsModal(false)}>
                     <div style={styles.modal} onClick={e => e.stopPropagation()}>
-                      <h3 style={styles.modalTitle}>Edit Instructions</h3>
-                      <p style={styles.modalDescription}>
-                        These instructions are added to the system prompt for all chats in this project.
-                      </p>
-                      <textarea
-                        value={editingInstructions}
-                        onChange={(e) => setEditingInstructions(e.target.value)}
-                        style={styles.updatesTextarea}
-                        rows={12}
-                      />
-                      <div style={styles.modalFooter}>
-                        <span style={styles.tokenCount}>
-                          ~{editingInstructions ? Math.ceil(editingInstructions.length / 4) : 0} tokens (estimate)
-                        </span>
-                        <div style={styles.modalActions}>
-                          <button onClick={() => setShowInstructionsModal(false)} style={styles.modalCancelButton}>
-                            Cancel
-                          </button>
-                          <button
-                            onClick={updateProjectInstructions}
-                            disabled={instructionsSaving}
-                            style={styles.modalSaveButton}
-                          >
-                            {instructionsSaving ? 'Saving...' : 'Save'}
-                          </button>
-                        </div>
-                      </div>
+                      {isPipelineProject ? (
+                        <>
+                          <h3 style={styles.modalTitle}>Edit Agent Instructions</h3>
+                          <p style={styles.modalDescription}>
+                            Per-agent instructions. Leave empty to use the shared instructions.
+                          </p>
+                          <div style={styles.agentTabBar}>
+                            {['events', 'mechanics', 'narration'].map(agent => (
+                              <button
+                                key={agent}
+                                onClick={() => setActiveInstructionsTab(agent)}
+                                style={activeInstructionsTab === agent ? {...styles.agentTab, ...styles.agentTabActive} : styles.agentTab}
+                              >
+                                {agent.charAt(0).toUpperCase() + agent.slice(1)}
+                                <span style={styles.agentTabTokens}>
+                                  ~{editingAgentInstructions[agent] ? Math.ceil(editingAgentInstructions[agent].length / 4) : 0}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                          <textarea
+                            value={editingAgentInstructions[activeInstructionsTab] || ''}
+                            onChange={(e) => setEditingAgentInstructions(prev => ({
+                              ...prev,
+                              [activeInstructionsTab]: e.target.value
+                            }))}
+                            placeholder="Leave empty to use shared instructions"
+                            style={styles.updatesTextarea}
+                            rows={12}
+                          />
+                          <div style={styles.modalFooter}>
+                            <span style={styles.tokenCount}>
+                              Total: ~{Object.values(editingAgentInstructions).reduce((sum, t) => sum + (t ? Math.ceil(t.length / 4) : 0), 0)} tokens (estimate)
+                            </span>
+                            <div style={styles.modalActions}>
+                              <button onClick={() => setShowInstructionsModal(false)} style={styles.modalCancelButton}>
+                                Cancel
+                              </button>
+                              <button
+                                onClick={handleSaveAllAgentInstructions}
+                                disabled={instructionsSaving}
+                                style={styles.modalSaveButton}
+                              >
+                                {instructionsSaving ? 'Saving...' : 'Save All'}
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <h3 style={styles.modalTitle}>Edit Instructions</h3>
+                          <p style={styles.modalDescription}>
+                            These instructions are added to the system prompt for all chats in this project.
+                          </p>
+                          <textarea
+                            value={editingInstructions}
+                            onChange={(e) => setEditingInstructions(e.target.value)}
+                            style={styles.updatesTextarea}
+                            rows={12}
+                          />
+                          <div style={styles.modalFooter}>
+                            <span style={styles.tokenCount}>
+                              ~{editingInstructions ? Math.ceil(editingInstructions.length / 4) : 0} tokens (estimate)
+                            </span>
+                            <div style={styles.modalActions}>
+                              <button onClick={() => setShowInstructionsModal(false)} style={styles.modalCancelButton}>
+                                Cancel
+                              </button>
+                              <button
+                                onClick={updateProjectInstructions}
+                                disabled={instructionsSaving}
+                                style={styles.modalSaveButton}
+                              >
+                                {instructionsSaving ? 'Saving...' : 'Save'}
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
@@ -5214,6 +5443,70 @@ const styles: { [key: string]: React.CSSProperties } = {
     color: '#ccc',
     cursor: 'pointer',
     width: '100%',
+  },
+
+  // Agent badge styles (pipeline file routing)
+  agentBadges: {
+    display: 'inline-flex' as const,
+    gap: '3px',
+    marginLeft: '4px',
+    flexShrink: 0,
+  },
+  agentBadgeActive: {
+    display: 'inline-flex' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    width: '20px',
+    height: '18px',
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    borderRadius: '3px',
+    cursor: 'pointer',
+    backgroundColor: '#6b5ce7',
+    color: '#fff',
+    userSelect: 'none' as const,
+  },
+  agentBadgeInactive: {
+    display: 'inline-flex' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    width: '20px',
+    height: '18px',
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    borderRadius: '3px',
+    cursor: 'pointer',
+    backgroundColor: 'transparent',
+    color: '#666',
+    border: '1px solid #444',
+    userSelect: 'none' as const,
+  },
+  agentTabBar: {
+    display: 'flex' as const,
+    gap: '2px',
+    marginBottom: '12px',
+    borderBottom: '1px solid #333',
+    paddingBottom: '0',
+  },
+  agentTab: {
+    padding: '8px 16px',
+    fontSize: '0.9rem',
+    background: 'none',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    color: '#888',
+    cursor: 'pointer',
+    display: 'flex' as const,
+    alignItems: 'center' as const,
+    gap: '6px',
+  },
+  agentTabActive: {
+    color: '#e0e0e0',
+    borderBottomColor: '#6b5ce7',
+  },
+  agentTabTokens: {
+    fontSize: '0.75rem',
+    color: '#666',
   },
 
   // Chat file attachment styles

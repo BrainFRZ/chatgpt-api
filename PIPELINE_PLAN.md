@@ -80,6 +80,7 @@ No migration needed for existing chats. All pipeline fields (`pipeline_state`, `
     "beat_responses": 2,
     "notes": "This beat should resolve within 1-2 more exchanges"
   },
+  "time_passed": "2 minutes",
   "beats": [
     "Party approaches locked chest in abandoned temple.",
     "Faint clicking sounds come from within.",
@@ -113,6 +114,7 @@ No migration needed for existing chats. All pipeline fields (`pipeline_state`, `
 {
   "route": "output",
   "pacing": { ... },
+  "time_passed": "0 minutes",
   "content": "Sure! Resting is definitely an option here. When you're ready to continue, just let me know where the party wants to set up camp."
 }
 ```
@@ -122,35 +124,54 @@ No migration needed for existing chats. All pipeline fields (`pipeline_state`, `
 ```json
 {
   "route": "narration",
-  "outcome": "Aldric picks the lock successfully but triggers the ward. He takes 2d6 force damage. The chest opens revealing a healing potion and a scroll.",
-  "rolls": [
+  "beats": [
     {
-      "description": "Aldric Sleight of Hand",
-      "advantage": true,
-      "rolls": [14, 18],
-      "selected": 18,
-      "modifiers": [
-        {"name": "DEX", "value": 3},
-        {"name": "Proficiency", "value": 2},
-        {"name": "RS (friend)", "value": 1},
-        {"name": "RomS (flirting)", "value": 1}
+      "beat": "Aldric picks the lock on the cursed chest",
+      "outcome": "Lock pick succeeds (DC 15) but the ward triggers automatically — unavoidable",
+      "rolls": [
+        {
+          "description": "Aldric Sleight of Hand",
+          "advantage": true,
+          "rolls": [14, 18],
+          "selected": 18,
+          "modifiers": [
+            {"name": "DEX", "value": 3},
+            {"name": "Proficiency", "value": 2},
+            {"name": "RS (friend)", "value": 1},
+            {"name": "RomS (flirting)", "value": 1}
+          ],
+          "total": 24,
+          "dc": 15,
+          "result": "success"
+        }
       ],
-      "total": 24,
-      "dc": 15,
-      "result": "success"
+      "state_changes": []
     },
     {
-      "description": "Ward damage",
-      "rolls": [3, 4],
-      "modifiers": [],
-      "total": 7,
-      "details": "2d6 force damage"
+      "beat": "Ward triggers, blasting Aldric with force energy",
+      "outcome": "Aldric takes 7 force damage from the abjuration ward",
+      "rolls": [
+        {
+          "description": "Ward damage",
+          "rolls": [3, 4],
+          "modifiers": [],
+          "total": 7,
+          "details": "2d6 force damage"
+        }
+      ],
+      "state_changes": [
+        "Aldric takes 7 force damage (42→35 HP)"
+      ]
+    },
+    {
+      "beat": "Chest opens revealing contents",
+      "outcome": "Party finds a Potion of Healing and a Scroll of Fireball",
+      "rolls": [],
+      "state_changes": [
+        "Party gains: Potion of Healing, Scroll of Fireball",
+        "Aldric's poisoned condition: 1 turn remaining"
+      ]
     }
-  ],
-  "state_changes": [
-    "Aldric takes 7 force damage (42→35 HP)",
-    "Party gains: Potion of Healing, Scroll of Fireball",
-    "Aldric's poisoned condition: 1 turn remaining"
   ],
   "dramatic_notes": "The lock pick succeeded comfortably but the ward was unavoidable. Mix of triumph and pain.",
   "hud": "[Date: Cycle 47, Day 3 | Time: 1430 | Loc: Abandoned Temple, Inner Sanctum | Funds: 2,340 credits]",
@@ -165,6 +186,8 @@ No migration needed for existing chats. All pipeline fields (`pipeline_state`, `
   ]
 }
 ```
+
+Note: Mechanics' beats are the GROUND TRUTH — Events' beats are proposals, but Mechanics may drop, modify, or add beats based on roll outcomes. For example, if the lock pick had failed, Mechanics would drop the "chest opens" beat and potentially add a complication beat instead.
 
 ### Mechanics → Output (OOC mechanics short-circuit)
 
@@ -276,32 +299,43 @@ IMPORTANT:
 ```
 You are the MECHANICS AGENT in a multi-agent TTRPG game master pipeline. You are the second stage.
 
-YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebook and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what actually happens.
+YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebooks and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what ACTUALLY happens.
 
 YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, and character_states. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
+
+CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens. After adjudicating mechanics:
+- DROP beats that can't happen (lock pick failed → no hiding in the vault behind it)
+- MODIFY beats based on roll outcomes (partial success, unexpected complications)
+- ADD beats when mechanics create new events (nat 1 breaks tools, trap triggers, etc.)
+Your output beats are GROUND TRUTH that Narration writes from.
 
 YOU MUST OUTPUT VALID JSON matching one of these schemas:
 
 SCHEMA A - Route to Narration (default for in-character gameplay):
 {
   "route": "narration",
-  "outcome": "<description of what mechanically happens>",
-  "rolls": [
+  "beats": [
     {
-      "description": "<what this roll is for>",
-      "advantage": <true/false if applicable>,
-      "disadvantage": <true/false if applicable>,
-      "rolls": [<die result 1>, <die result 2 if adv/disadv>],
-      "selected": <which roll was used>,
-      "modifiers": [
-        {"name": "<modifier name>", "value": <number>}
+      "beat": "<what happens in this beat>",
+      "outcome": "<mechanical result and consequence>",
+      "rolls": [
+        {
+          "description": "<what this roll is for>",
+          "advantage": <true/false if applicable>,
+          "disadvantage": <true/false if applicable>,
+          "rolls": [<die result 1>, <die result 2 if adv/disadv>],
+          "selected": <which roll was used>,
+          "modifiers": [
+            {"name": "<modifier name>", "value": <number>}
+          ],
+          "total": <final total>,
+          "dc": <DC if applicable>,
+          "result": "<success/failure/hit/miss>"
+        }
       ],
-      "total": <final total>,
-      "dc": <DC if applicable>,
-      "result": "<success/failure/hit/miss>"
+      "state_changes": ["<change from this beat>", ...]
     }
   ],
-  "state_changes": ["<change 1>", "<change 2>", ...],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
   "score_changes": <pass through from Events JSON unchanged>
@@ -318,11 +352,17 @@ ROUTING RULES:
 - Route to "output" ONLY for OOC mechanics questions (e.g., "what's my AC?", "how does grappling work?")
 - When routing to "output", respond as a knowledgeable DM explaining rules directly and conversationally
 
+BEAT RULES:
+- Each beat in your output represents one discrete thing that happens, with its associated mechanics
+- Beats are ordered chronologically — Narration will write them in this sequence
+- A beat with no rolls still needs an empty "rolls": [] array
+- Include "state_changes" on each beat (e.g., HP changes, items gained/lost, conditions applied)
+- Beats that have no state changes should have an empty "state_changes": [] array
+
 ROLL RULES:
 - BEFORE rolling, identify ALL modifiers: base ability, proficiency, relationship/romance/faction, situational
 - If ANY modifier cannot be verified from your documents, note the uncertainty in the outcome
 - Show advantage/disadvantage with both rolls when applicable
-- The "rolls" array should be empty [] if no rolls were needed this turn
 - Include the "details" field for damage rolls (e.g., "2d6 force damage")
 
 HUD:
@@ -342,18 +382,19 @@ IMPORTANT:
 ```
 You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
-YOUR ROLE: Take the mechanical outcome from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
+YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
 
-YOU RECEIVE: JSON from the Mechanics Agent containing outcome, rolls, state_changes, dramatic_notes, hud, and score_changes.
+YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, and score_changes.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON). This is what the player sees directly.
 
 OUTPUT STRUCTURE:
-1. Narrative prose describing what happens (informed by the outcome and dramatic_notes)
-2. Roll breakdowns formatted in the text where narratively appropriate:
+1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened.
+2. Place roll breakdowns where they fit naturally within the beat they belong to:
    🎲 [Description]: [roll1, **selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
    For advantage: show both rolls, bold the selected one
    For disadvantage: show both rolls, bold the selected (lower) one
+   Use the exact modifier names and values from the beat's "rolls" array.
 3. If the Mechanics JSON contains non-empty "score_changes", format them as a brief OOC line just ABOVE the HUD:
    📊 **RS** [Name] [+/-N] ([total]) · [reason] | **FR** [Name] [+/-N] ([total]) · [reason]
    Example: 📊 **RS** Kira +2 (47) · Stood up for her | **FR** Chrome Syndicate -5 (30) · Refused their job
@@ -365,7 +406,7 @@ OUTPUT STRUCTURE:
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
 - Append the HUD exactly as provided - do not modify it.
-- Format roll breakdowns using the exact modifier names and values from the rolls JSON.
+- The beats array IS the ground truth. Do not invent outcomes that aren't in the beats.
 - You have access to the last 20 conversation pairs for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences.
 ```

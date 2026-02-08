@@ -35,6 +35,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
+  "time_passed": "<how much in-world time this turn covers, e.g. '1 minute', '10 minutes', '2 hours'>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": ["<triggered callback 1>", ...],
@@ -65,6 +66,14 @@ SCORE CHANGES (RS / RomS / FR):
 - If a tier boundary is crossed, note the new tier name in the reason
 - Reference RS pacing targets from the Relationship Systems document to avoid score inflation
 
+TIME PASSED:
+- Estimate how much in-world time this turn covers based on the full conversation context
+- Use natural language: "1 minute", "10 minutes", "2 hours", "overnight (8 hours)"
+- Quick actions (opening a door, a single exchange): "1 minute"
+- Conversations, short walks, searching a room: "5-15 minutes"
+- Travel, extended activities, resting: use your judgment from context
+- Mechanics uses this to advance the HUD clock
+
 SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mechanics):
 {
   "route": "output",
@@ -74,6 +83,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mec
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
+  "time_passed": "0 minutes",
   "content": "<your conversational OOC response>"
 }
 
@@ -90,36 +100,47 @@ IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
 - "character_states" should include all mechanically relevant info since Mechanics has NO conversation history.
-- Include ALL triggered callbacks - things promised/foreshadowed earlier that should now activate."""
+- Include ALL triggered callbacks - things directly related/promised/foreshadowed earlier that should now activate or be referenced."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game master pipeline. You are the second stage.
 
-YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebook and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what actually happens.
+YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebooks and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what ACTUALLY happens.
 
-YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, and character_states. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
+YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, character_states, and time_passed. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
+
+CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens. After adjudicating mechanics:
+- DROP beats that can't happen (lock pick failed → no hiding in the vault behind it)
+- MODIFY beats based on roll outcomes (partial success, unexpected complications)
+- ADD beats when mechanics create new events (nat 1 breaks tools, trap triggers, etc.)
+Your output beats are GROUND TRUTH that Narration writes from.
 
 YOU MUST OUTPUT VALID JSON matching one of these schemas:
 
 SCHEMA A - Route to Narration (default for in-character gameplay):
 {
   "route": "narration",
-  "outcome": "<description of what mechanically happens>",
-  "rolls": [
+  "beats": [
     {
-      "description": "<what this roll is for>",
-      "advantage": <true/false if applicable>,
-      "disadvantage": <true/false if applicable>,
-      "rolls": [<die result 1>, <die result 2 if adv/disadv>],
-      "selected": <which roll was used>,
-      "modifiers": [
-        {"name": "<modifier name>", "value": <number>}
+      "beat": "<what happens in this beat>",
+      "outcome": "<mechanical result and consequence>",
+      "rolls": [
+        {
+          "description": "<what this roll is for>",
+          "advantage": <true/false if applicable>,
+          "disadvantage": <true/false if applicable>,
+          "rolls": [<die result 1>, <die result 2 if adv/disadv>],
+          "selected": <which roll was used>,
+          "modifiers": [
+            {"name": "<modifier name>", "value": <number>}
+          ],
+          "total": <final total>,
+          "dc": <DC if applicable>,
+          "result": "<success/failure/hit/miss>"
+        }
       ],
-      "total": <final total>,
-      "dc": <DC if applicable>,
-      "result": "<success/failure/hit/miss>"
+      "state_changes": ["<change from this beat>", ...]
     }
   ],
-  "state_changes": ["<change 1>", "<change 2>", ...],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
   "score_changes": <pass through from Events JSON unchanged>
@@ -136,17 +157,24 @@ ROUTING RULES:
 - Route to "output" ONLY for OOC mechanics questions (e.g., "what's my AC?", "how does grappling work?")
 - When routing to "output", respond as a knowledgeable DM explaining rules directly and conversationally
 
+BEAT RULES:
+- Each beat in your output represents one discrete thing that happens, with its associated mechanics
+- Beats are ordered chronologically — Narration will write them in this sequence
+- A beat with no rolls still needs an empty "rolls": [] array
+- Include "state_changes" on each beat (e.g., HP changes, items gained/lost, conditions applied)
+- Beats that have no state changes should have an empty "state_changes": [] array
+
 ROLL RULES:
 - BEFORE rolling, identify ALL modifiers: base ability, proficiency, relationship/romance/faction, situational
 - If ANY modifier cannot be verified from your documents, note the uncertainty in the outcome
 - Show advantage/disadvantage with both rolls when applicable
-- The "rolls" array should be empty [] if no rolls were needed this turn
 - Include the "details" field for damage rolls (e.g., "2d6 force damage")
 
 HUD:
 - You MUST always include the "hud" field with the current game state line
 - Format: [Date: X | Time: XXXX | Loc: X | Funds: X]
-- Always update time realistically based on the action taken
+- Advance the HUD clock by the "time_passed" value from the Events JSON
+- Events has full conversation context to judge time; trust its estimate
 
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
@@ -156,18 +184,19 @@ IMPORTANT:
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
-YOUR ROLE: Take the mechanical outcome from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
+YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
 
-YOU RECEIVE: JSON from the Mechanics Agent containing outcome, rolls, state_changes, dramatic_notes, hud, and score_changes.
+YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, and score_changes.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON). This is what the player sees directly.
 
 OUTPUT STRUCTURE:
-1. Narrative prose describing what happens (informed by the outcome and dramatic_notes)
-2. Roll breakdowns formatted in the text where narratively appropriate:
+1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened.
+2. Place roll breakdowns where they fit naturally within the beat they belong to:
    🎲 [Description]: [roll1, **selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
    For advantage: show both rolls, bold the selected one
    For disadvantage: show both rolls, bold the selected (lower) one
+   Use the exact modifier names and values from the beat's "rolls" array.
 3. If the Mechanics JSON contains non-empty "score_changes", format them as a brief OOC line just ABOVE the HUD:
    📊 **RS** [Name] [+/-N] ([total]) · [reason] | **FR** [Name] [+/-N] ([total]) · [reason]
    Example: 📊 **RS** Kira +2 (47) · Stood up for her | **FR** Chrome Syndicate -5 (30) · Refused their job
@@ -179,7 +208,7 @@ OUTPUT STRUCTURE:
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
 - Append the HUD exactly as provided - do not modify it.
-- Format roll breakdowns using the exact modifier names and values from the rolls JSON.
+- The beats array IS the ground truth. Do not invent outcomes that aren't in the beats.
 - You have access to the last 20 conversation pairs for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences."""
 
@@ -362,6 +391,17 @@ def build_agent_system_prompt(contract: str, instructions: str, project_files: s
     return "\n\n".join(parts)
 
 
+def build_message_content(msg: dict) -> str:
+    """Build message content string, including any attached files."""
+    content = msg.get("content", "")
+    attached = msg.get("attached_files", [])
+    if attached:
+        file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
+        files_text = "\n\n".join(file_wrappers)
+        content = f"{files_text}\n\n{content}"
+    return content
+
+
 def get_recent_pairs(branch_path: list[dict], n_pairs: int = NARRATION_CONTEXT_PAIRS) -> list[dict]:
     """
     Extract the last N user-assistant message pairs from the branch path.
@@ -376,7 +416,7 @@ def get_recent_pairs(branch_path: list[dict], n_pairs: int = NARRATION_CONTEXT_P
     # Take the last n_pairs*2 messages (each pair = user + assistant)
     pair_messages = history[-(n_pairs * 2):]
 
-    return [{"role": msg["role"], "content": msg.get("content", "")} for msg in pair_messages]
+    return [{"role": msg["role"], "content": build_message_content(msg)} for msg in pair_messages]
 
 
 def run_pipeline_stage(
@@ -420,10 +460,6 @@ def run_pipeline_stage(
             if actual_tier == "auto":
                 actual_tier = "standard"
 
-            # For flex tier, mark it
-            if stage_config.service_tier == "flex":
-                actual_tier = "flex"
-
             parsed_json = None
             if stage_config.json_mode:
                 parsed_json = _parse_stage_json(content, stage_config.name)
@@ -456,8 +492,8 @@ def run_pipeline(
     chat_name: str,
     branch_path: list[dict],
     context_start_index: int,
-    instructions: str,
-    project_files: str,
+    agent_instructions: dict[str, str],
+    agent_files: dict[str, str],
     pipeline_state: Optional[dict],
     updates_text: str = ""
 ) -> Iterator[tuple[str, dict]]:
@@ -475,19 +511,10 @@ def run_pipeline(
     This is a generator that the event_generator in send_message_stream iterates over.
     """
 
-    def build_message_content(msg):
-        content = msg.get("content", "")
-        attached = msg.get("attached_files", [])
-        if attached:
-            file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-            files_text = "\n\n".join(file_wrappers)
-            content = f"{files_text}\n\n{content}"
-        return content
-
     # ---- STAGE 1: Events ----
     yield ("pipeline_stage", {"stage": "events", "status": "thinking"})
 
-    events_system = build_agent_system_prompt(EVENTS_CONTRACT, instructions, project_files)
+    events_system = build_agent_system_prompt(EVENTS_CONTRACT, agent_instructions["events"], agent_files["events"])
     history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
     events_messages = build_events_messages(events_system, history_msgs, user_msg, pipeline_state, updates_text)
@@ -534,7 +561,7 @@ def run_pipeline(
     # ---- STAGE 2: Mechanics ----
     yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
-    mechanics_system = build_agent_system_prompt(MECHANICS_CONTRACT, instructions, project_files)
+    mechanics_system = build_agent_system_prompt(MECHANICS_CONTRACT, agent_instructions["mechanics"], agent_files["mechanics"])
     mechanics_messages = build_mechanics_messages(mechanics_system, events_data, updates_text)
 
     mechanics_result = run_pipeline_stage(
@@ -572,7 +599,7 @@ def run_pipeline(
     # ---- STAGE 3: Narration (streaming) ----
     yield ("pipeline_stage", {"stage": "narration", "status": "thinking"})
 
-    narration_system = build_agent_system_prompt(NARRATION_CONTRACT, instructions, project_files)
+    narration_system = build_agent_system_prompt(NARRATION_CONTRACT, agent_instructions["narration"], agent_files["narration"])
     recent_pairs = get_recent_pairs(branch_path, NARRATION_CONTEXT_PAIRS)
     narration_messages = build_narration_messages(narration_system, recent_pairs, mechanics_data)
 

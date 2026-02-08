@@ -31,6 +31,9 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 # Pipeline imports
 from pipeline import run_pipeline, PipelineResult
 
+# Pipeline agent names (used for per-agent instructions and file routing)
+PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
+
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -869,6 +872,17 @@ def get_instructions(username: str, project: str = None) -> str:
             return f.read()
     return "You are a helpful assistant."
 
+def get_instructions_for_agent(username: str, project: str, agent_name: str) -> str:
+    """Load per-agent instructions file, falling back to shared instructions.di."""
+    agent_path = os.path.join(get_user_dir(username), "projects", project, f"instructions_{agent_name}.di")
+    if os.path.exists(agent_path):
+        with open(agent_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        if content.strip():
+            return content
+    # Fall back to shared instructions
+    return get_instructions(username, project)
+
 def get_project_dir(username: str, project: str) -> str:
     """Get path to a project directory"""
     return os.path.join(get_user_dir(username), "projects", project)
@@ -910,6 +924,39 @@ def load_project_files(username: str, project: str) -> str:
     for filename in sorted(md_files):
         # Skip files that are not staged (default to True for backward compat)
         if not tokens_cache.get(filename, {}).get("staged", True):
+            continue
+
+        filepath = os.path.join(uploads_dir, filename)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            combined += f"\n\n{'='*60}\n"
+            combined += f"FILE: {filename}\n"
+            combined += f"{'='*60}\n\n"
+            combined += f.read()
+
+    return combined
+
+def load_project_files_for_agent(username: str, project: str, agent_name: str) -> str:
+    """Load staged .md files filtered to a specific pipeline agent."""
+    uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
+
+    if not os.path.exists(uploads_dir):
+        return ""
+
+    tokens_cache = load_file_tokens_cache(username, project)
+
+    md_files = [f for f in os.listdir(uploads_dir) if f.endswith('.md')]
+    if not md_files:
+        return ""
+
+    combined = ""
+    for filename in sorted(md_files):
+        file_cache = tokens_cache.get(filename, {})
+        # Skip files that are not staged
+        if not file_cache.get("staged", True):
+            continue
+        # Skip files not assigned to this agent (default to all agents)
+        file_agents = file_cache.get("agents", PIPELINE_AGENT_NAMES)
+        if agent_name not in file_agents:
             continue
 
         filepath = os.path.join(uploads_dir, filename)
@@ -1083,6 +1130,10 @@ class ProjectFileInfo(BaseModel):
     tokens: int
     size_bytes: int
     staged: bool = True
+    agents: list[str] = PIPELINE_AGENT_NAMES
+
+class UpdateFileAgentsRequest(BaseModel):
+    agents: list[str]
 
 class ProjectFilesResponse(BaseModel):
     files: List[ProjectFileInfo]
@@ -2227,8 +2278,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # ============================================================
                 logger.info(f"Pipeline: starting for user {username}, project {request.project}")
 
-                instructions = get_instructions(username, request.project)
-                project_files_content = load_project_files(username, request.project)
+                # Build per-agent instructions and files for the pipeline
+                agent_instructions = {}
+                agent_files = {}
+                for agent_name in PIPELINE_AGENT_NAMES:
+                    agent_instructions[agent_name] = get_instructions_for_agent(username, request.project, agent_name)
+                    agent_files[agent_name] = load_project_files_for_agent(username, request.project, agent_name)
                 pipeline_state_prev = data.get("pipeline_state")
 
                 pipeline_result = None
@@ -2241,8 +2296,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     chat_name=request.chat_name,
                     branch_path=branch_path,
                     context_start_index=context_start_index,
-                    instructions=instructions,
-                    project_files=project_files_content,
+                    agent_instructions=agent_instructions,
+                    agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
                     updates_text=updates_text
                 ):
@@ -2250,6 +2305,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
 
                     elif event_type == "content":
+                        # Check for client disconnect during streaming (not on done - we must save)
+                        if await http_request.is_disconnected():
+                            logger.warning(f"Pipeline: client disconnected during streaming for user {username}")
+                            data["messages"].pop()
+                            return
                         accumulated_content += event_data["delta"]
                         yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
                         # Broadcast content delta to other clients
@@ -3627,12 +3687,14 @@ def list_project_files(username: str, project: str, model: str = None):
                     existing_staged = cached.get("staged") if cached else None
                     if existing_staged is not True and existing_staged is not False:
                         existing_staged = True
+                    existing_agents = cached.get("agents", PIPELINE_AGENT_NAMES) if cached else PIPELINE_AGENT_NAMES
                     tokens_cache[filename] = {
                         "tokens": tokens,
                         "model": model,
                         "size_bytes": size_bytes,
                         "mtime": mtime,
-                        "staged": existing_staged
+                        "staged": existing_staged,
+                        "agents": existing_agents
                     }
                     cache_updated = True
                     staged = existing_staged
@@ -3642,11 +3704,13 @@ def list_project_files(username: str, project: str, model: str = None):
                     print(f"Could not read file {filename}: {e}")
                     continue
 
+            agents = cached.get("agents", PIPELINE_AGENT_NAMES) if cached else PIPELINE_AGENT_NAMES
             files.append(ProjectFileInfo(
                 filename=filename,
                 tokens=tokens,
                 size_bytes=size_bytes,
-                staged=staged
+                staged=staged,
+                agents=agents
             ))
             total_tokens += tokens
             if staged:
@@ -3759,11 +3823,14 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
             else:
                 tokens = provider.count_tokens(text_content) if provider else count_tokens(text_content)
 
-            # Cache the token count with model info
+            # Cache the token count with model info (preserve existing staged/agents on overwrite)
+            existing_entry = tokens_cache.get(file.filename, {})
             tokens_cache[file.filename] = {
                 "tokens": tokens,
                 "model": project_model,
-                "size_bytes": len(content)
+                "size_bytes": len(content),
+                "staged": existing_entry.get("staged", True),
+                "agents": existing_entry.get("agents", PIPELINE_AGENT_NAMES)
             }
 
             uploaded.append({
@@ -3850,6 +3917,40 @@ def update_file_staged(username: str, project: str, filename: str, request: Upda
     save_file_tokens_cache(username, project, tokens_cache)
 
     return {"status": "ok", "filename": filename, "staged": request.staged}
+
+@app.put("/api/project-files/{username}/{project}/agents/{filename:path}")
+def update_file_agents(username: str, project: str, filename: str, request: UpdateFileAgentsRequest):
+    """Update which pipeline agents a project file is assigned to."""
+    username = username.strip().lower()
+    project_dir = get_project_dir(username, project)
+
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate agent names
+    for agent in request.agents:
+        if agent not in PIPELINE_AGENT_NAMES:
+            raise HTTPException(status_code=400, detail=f"Invalid agent name: {agent}")
+
+    if not request.agents:
+        raise HTTPException(status_code=400, detail="At least one agent is required")
+
+    uploads_dir = os.path.join(project_dir, "uploads")
+    filepath = os.path.join(uploads_dir, filename)
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    tokens_cache = load_file_tokens_cache(username, project)
+
+    if filename in tokens_cache:
+        tokens_cache[filename]["agents"] = request.agents
+    else:
+        tokens_cache[filename] = {"agents": request.agents}
+
+    save_file_tokens_cache(username, project, tokens_cache)
+
+    return {"status": "ok", "filename": filename, "agents": request.agents}
 
 def get_instructions_tokens_cache_path(username: str, project: str) -> str:
     """Get path to instructions tokens cache for a project."""
@@ -3972,6 +4073,116 @@ def update_project_instructions(username: str, project: str, request: UpdateInst
         "model": model,
         "content_hash": hashlib.sha256(request.instructions.encode()).hexdigest()
     })
+
+    return {"status": "ok", "tokens": tokens}
+
+
+@app.get("/api/project-instructions/{username}/{project}/agents")
+def get_agent_instructions(username: str, project: str):
+    """Get per-agent instructions for a pipeline project."""
+    username = username.strip().lower()
+    project_dir = get_project_dir(username, project)
+
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get project model for token counting
+    metadata = load_project_metadata(username, project)
+    model = metadata.get("model", DEFAULT_MODEL)
+    provider = ProviderRegistry.get(model)
+    use_api_counting = model.startswith("claude")
+
+    api_key = None
+    if use_api_counting:
+        api_key = get_api_key(username, "anthropic")
+
+    cache = load_instructions_tokens_cache(username, project)
+    cache_updated = False
+
+    result = {}
+    for agent_name in PIPELINE_AGENT_NAMES:
+        agent_path = os.path.join(project_dir, f"instructions_{agent_name}.di")
+        if os.path.exists(agent_path):
+            with open(agent_path, 'r', encoding='utf-8') as f:
+                instructions = f.read()
+        else:
+            instructions = ""
+
+        # Check cache with namespaced key
+        cache_key = f"agent_{agent_name}"
+        content_hash = hashlib.sha256(instructions.encode()).hexdigest()
+        cached = cache.get(cache_key, {})
+
+        if cached.get("model") == model and cached.get("content_hash") == content_hash:
+            tokens = cached["tokens"]
+        else:
+            if instructions.strip():
+                if use_api_counting and api_key and hasattr(provider, 'count_tokens_api'):
+                    try:
+                        tokens = provider.count_tokens_api(instructions, api_key)
+                    except Exception:
+                        tokens = provider.count_tokens(instructions) if provider else count_tokens(instructions)
+                else:
+                    tokens = provider.count_tokens(instructions) if provider else count_tokens(instructions)
+            else:
+                tokens = 0
+            cache[cache_key] = {"tokens": tokens, "model": model, "content_hash": content_hash}
+            cache_updated = True
+
+        result[agent_name] = {"instructions": instructions, "tokens": tokens}
+
+    if cache_updated:
+        save_instructions_tokens_cache(username, project, cache)
+
+    return result
+
+
+@app.put("/api/project-instructions/{username}/{project}/agents/{agent_name}")
+def update_agent_instructions(username: str, project: str, agent_name: str, request: UpdateInstructionsRequest):
+    """Update per-agent instructions for a pipeline project."""
+    username = username.strip().lower()
+
+    if agent_name not in PIPELINE_AGENT_NAMES:
+        raise HTTPException(status_code=400, detail=f"Invalid agent name: {agent_name}")
+
+    project_dir = get_project_dir(username, project)
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get project model for token counting
+    metadata = load_project_metadata(username, project)
+    model = metadata.get("model", DEFAULT_MODEL)
+    provider = ProviderRegistry.get(model)
+    use_api_counting = model.startswith("claude")
+
+    agent_path = os.path.join(project_dir, f"instructions_{agent_name}.di")
+    with open(agent_path, 'w', encoding='utf-8') as f:
+        f.write(request.instructions)
+
+    # Count tokens
+    if request.instructions.strip():
+        if use_api_counting:
+            api_key = get_api_key(username, "anthropic")
+            if api_key and hasattr(provider, 'count_tokens_api'):
+                try:
+                    tokens = provider.count_tokens_api(request.instructions, api_key)
+                except Exception:
+                    tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+            else:
+                tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+        else:
+            tokens = provider.count_tokens(request.instructions) if provider else count_tokens(request.instructions)
+    else:
+        tokens = 0
+
+    # Update cache with namespaced key
+    cache = load_instructions_tokens_cache(username, project)
+    cache[f"agent_{agent_name}"] = {
+        "tokens": tokens,
+        "model": model,
+        "content_hash": hashlib.sha256(request.instructions.encode()).hexdigest()
+    }
+    save_instructions_tokens_cache(username, project, cache)
 
     return {"status": "ok", "tokens": tokens}
 
