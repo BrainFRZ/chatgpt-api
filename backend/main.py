@@ -28,6 +28,9 @@ from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvide
 # Real-time sync imports
 from sync_manager import sync_manager, SyncEvent, SyncEventType
 
+# Pipeline imports
+from pipeline import run_pipeline, PipelineResult
+
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1050,6 +1053,8 @@ class ChatMessage(BaseModel):
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
     model: str | None = None  # Model used for this message (for multi-model chats)
     service_tier: str | None = None  # OpenAI service tier (flex or standard)
+    events_stage: str | None = None  # Pipeline: raw Events JSON (for debugging)
+    mechanics_stage: str | None = None  # Pipeline: raw Mechanics JSON (for debugging)
 
 class ChatResponse(BaseModel):
     messages: list[ChatMessage]  # Current branch path (paginated, for display)
@@ -2213,282 +2218,529 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 )
             )
 
-            # Stream the response (use flex fallback for GPT-5.2)
-            event_count = 0
-            if model_id == "gpt-5.2":
-                stream_iter = provider.send_request_stream_with_fallback(client, request_params)
+            # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
+            use_pipeline = model_id == "gpt-5.2" and request.project
+
+            if use_pipeline:
+                # ============================================================
+                # Multi-agent pipeline path (Events → Mechanics → Narration)
+                # ============================================================
+                logger.info(f"Pipeline: starting for user {username}, project {request.project}")
+
+                instructions = get_instructions(username, request.project)
+                project_files_content = load_project_files(username, request.project)
+                pipeline_state_prev = data.get("pipeline_state")
+
+                pipeline_result = None
+
+                for event_type, event_data in run_pipeline(
+                    provider=provider,
+                    client=client,
+                    username=username,
+                    project=request.project,
+                    chat_name=request.chat_name,
+                    branch_path=branch_path,
+                    context_start_index=context_start_index,
+                    instructions=instructions,
+                    project_files=project_files_content,
+                    pipeline_state=pipeline_state_prev,
+                    updates_text=updates_text
+                ):
+                    if event_type == "pipeline_stage":
+                        yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+
+                    elif event_type == "content":
+                        accumulated_content += event_data["delta"]
+                        yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
+                        # Broadcast content delta to other clients
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_CONTENT,
+                                data={"delta": event_data["delta"]}
+                            )
+                        )
+
+                    elif event_type == "pipeline_done":
+                        pipeline_result = event_data
+
+                if pipeline_result is None:
+                    raise Exception("Pipeline completed without producing a result")
+
+                # Process pipeline result (similar to single-agent done handler)
+                assistant_message = pipeline_result.final_content
+                reasoning_summary = "\n".join(pipeline_result.reasoning_summaries) if pipeline_result.reasoning_summaries else None
+                usage = pipeline_result.aggregate_usage
+                service_tier = pipeline_result.service_tier_label
+
+                # Save pipeline state for next turn
+                if pipeline_result.pipeline_state:
+                    data["pipeline_state"] = pipeline_result.pipeline_state
+
+                # Get cross-model providers for token counting
+                gpt_provider = ProviderRegistry.get("gpt-5.2")
+                claude_provider = get_claude_provider()
+                claude_api_key = get_api_key(username, "anthropic")
+
+                # Count tokens on final output only (for model switching)
+                assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
+                if claude_api_key:
+                    assistant_claude_tokens = claude_provider.count_tokens_api(assistant_message, claude_api_key)
+                else:
+                    assistant_claude_tokens = None
+
+                # Count user message tokens for cross-model
+                if request.attached_files:
+                    file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
+                    user_content_for_counting = "\n\n".join(file_wrappers) + "\n\n" + request.message
+                else:
+                    user_content_for_counting = request.message
+                user_gpt_tokens = gpt_provider.count_tokens(user_content_for_counting)
+                if claude_api_key:
+                    user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, claude_api_key)
+                else:
+                    user_claude_tokens = None
+
+                for msg in data["messages"]:
+                    if msg.get("id") == user_msg_id:
+                        msg["total_gpt_tokens"] = user_gpt_tokens
+                        if user_claude_tokens is not None:
+                            msg["total_claude_tokens"] = user_claude_tokens
+                        msg["total_tokens"] = user_gpt_tokens
+                        break
+
+                # Build aggregate ParsedResponse for cost/stats
+                from providers import ParsedResponse
+                parsed = ParsedResponse(
+                    content=assistant_message,
+                    reasoning=reasoning_summary,
+                    input_tokens=usage['input_tokens'],
+                    cache_read_tokens=usage['cache_read_tokens'],
+                    cache_creation_tokens=usage['cache_creation_tokens'],
+                    output_tokens=usage['output_tokens'],
+                    reasoning_tokens=usage['reasoning_tokens']
+                )
+
+                new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                total_cost = pipeline_result.aggregate_cost
+                tokens_str = provider.format_token_string(parsed)
+
+                # Apply free tokens
+                actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+                # Update stats (one prompt increment per pipeline turn)
+                stats = data.get("stats", create_empty_stats())
+                stats["total_input_tokens"] += new_input_tokens
+                stats["total_cached_tokens"] += parsed.cache_read_tokens
+                stats["total_output_tokens"] += parsed.output_tokens
+                stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                stats["total_cost"] += actual_cost
+                stats["total_prompts"] += 1
+                stats["last_accessed"] = datetime.now().isoformat()
+                data["stats"] = stats
+
+                # Add assistant message with pipeline stage data
+                assistant_msg_id = generate_message_id()
+                assistant_msg_data = {
+                    "id": assistant_msg_id,
+                    "parent_id": user_msg_id,
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                    "tokens": tokens_str,
+                    "cost": cost_str,
+                    "total_tokens": assistant_gpt_tokens,
+                    "total_gpt_tokens": assistant_gpt_tokens,
+                    "model": model_id,
+                    "service_tier": service_tier
+                }
+                if assistant_claude_tokens is not None:
+                    assistant_msg_data["total_claude_tokens"] = assistant_claude_tokens
+                if reasoning_summary:
+                    assistant_msg_data["reasoning"] = reasoning_summary
+                if pipeline_result.events_json:
+                    assistant_msg_data["events_stage"] = pipeline_result.events_json
+                if pipeline_result.mechanics_json:
+                    assistant_msg_data["mechanics_stage"] = pipeline_result.mechanics_json
+
+                data["messages"].append(assistant_msg_data)
+                data["current_leaf_id"] = assistant_msg_id
+
+                # Update system message tokens
+                system_msg_ref = branch_path[0]
+                system_content_val = system_msg_ref.get("content", "")
+                if system_msg_ref.get("total_gpt_tokens") is None:
+                    system_msg_ref["total_gpt_tokens"] = gpt_provider.count_tokens(system_content_val)
+                if system_msg_ref.get("total_claude_tokens") is None and claude_api_key:
+                    system_msg_ref["total_claude_tokens"] = claude_provider.count_tokens_api(system_content_val, claude_api_key)
+                system_msg_ref["total_tokens"] = system_msg_ref.get("total_gpt_tokens")
+
+                save_chat(username, request.chat_name, data, request.project)
+                logger.info(f"Pipeline: saved chat for user {username}")
+
+                # Commit deferred updates
+                if pending_usage is not None:
+                    save_daily_usage(username, pending_usage)
+
+                context_tokens = (user_gpt_tokens or 0) + (assistant_gpt_tokens or 0)
+                update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost, model=model_id, context_tokens=context_tokens)
+
+                # Calculate branch info
+                branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                branch_total_messages = len(branch_path_final)
+
+                # Calculate model-specific stats
+                response_stats = stats.copy()
+                gpt_prompts = 0
+                sonnet_prompts = 0
+                gpt_context_tokens = 0
+                sonnet_context_tokens = 0
+                all_chat_messages = data.get("messages", [])
+                messages_by_id = {m.get("id"): m for m in all_chat_messages if m.get("id")}
+                for msg in all_chat_messages:
+                    if msg.get("role") == "assistant":
+                        msg_model = msg.get("model", "")
+                        is_sonnet = msg_model.startswith("claude")
+                        p_id = msg.get("parent_id")
+                        if is_sonnet:
+                            sonnet_prompts += 1
+                            a_tokens = msg.get("total_claude_tokens") or msg.get("total_tokens", 0) or 0
+                            u_tokens = 0
+                            if p_id and p_id in messages_by_id:
+                                parent = messages_by_id[p_id]
+                                u_tokens = parent.get("total_claude_tokens") or parent.get("total_tokens", 0) or 0
+                            sonnet_context_tokens += u_tokens + a_tokens
+                        else:
+                            gpt_prompts += 1
+                            a_tokens = msg.get("total_gpt_tokens") or msg.get("total_tokens", 0) or 0
+                            u_tokens = 0
+                            if p_id and p_id in messages_by_id:
+                                parent = messages_by_id[p_id]
+                                u_tokens = parent.get("total_gpt_tokens") or parent.get("total_tokens", 0) or 0
+                            gpt_context_tokens += u_tokens + a_tokens
+                response_stats["gpt_prompts"] = gpt_prompts
+                response_stats["sonnet_prompts"] = sonnet_prompts
+                response_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
+                response_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
+
+                # Send done event
+                done_data = {
+                    'assistant_message': assistant_message,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': response_stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': reasoning_summary,
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': branch_total_messages,
+                    'model': model_id,
+                    'service_tier': service_tier,
+                    'pipeline_stages': pipeline_result.stages_run
+                }
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                # Broadcast stream done to other clients
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": branch_total_messages,
+                            "stats": response_stats,
+                            "context_start_index": context_start_index
+                        }
+                    )
+                )
+
+                logger.info(f"Pipeline: completed for user {username}, stages: {pipeline_result.stages_run}")
+
             else:
-                stream_iter = provider.send_request_stream(client, request_params)
-            for stream_event in stream_iter:
-                event_count += 1
-                # Check for client disconnect (but not on done event - we must save)
-                if stream_event.event_type != 'done' and await http_request.is_disconnected():
-                    # Client disconnected - clean up
-                    logger.warning(f"Client disconnected after {event_count} events for user {username}")
-                    data["messages"].pop()
-                    return
+                # ============================================================
+                # Standard single-agent path (existing behavior)
+                # ============================================================
+                event_count = 0
+                if model_id == "gpt-5.2":
+                    stream_iter = provider.send_request_stream_with_fallback(client, request_params)
+                else:
+                    stream_iter = provider.send_request_stream(client, request_params)
+                for stream_event in stream_iter:
+                    event_count += 1
+                    # Check for client disconnect (but not on done event - we must save)
+                    if stream_event.event_type != 'done' and await http_request.is_disconnected():
+                        # Client disconnected - clean up
+                        logger.warning(f"Client disconnected after {event_count} events for user {username}")
+                        data["messages"].pop()
+                        return
 
-                if stream_event.event_type == 'content_delta':
-                    accumulated_content += stream_event.content
-                    yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
-                    # Broadcast content delta to other clients
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(
-                            type=SyncEventType.STREAM_CONTENT,
-                            data={"delta": stream_event.content}
+                    if stream_event.event_type == 'content_delta':
+                        accumulated_content += stream_event.content
+                        yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                        # Broadcast content delta to other clients
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_CONTENT,
+                                data={"delta": stream_event.content}
+                            )
                         )
-                    )
 
-                elif stream_event.event_type == 'thinking_delta':
-                    accumulated_thinking += stream_event.content
-                    yield f"event: thinking\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
-                    # Broadcast thinking delta to other clients
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(
-                            type=SyncEventType.STREAM_THINKING,
-                            data={"delta": stream_event.content}
+                    elif stream_event.event_type == 'thinking_delta':
+                        accumulated_thinking += stream_event.content
+                        yield f"event: thinking\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                        # Broadcast thinking delta to other clients
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_THINKING,
+                                data={"delta": stream_event.content}
+                            )
                         )
-                    )
 
-                elif stream_event.event_type == 'done':
-                    logger.info(f"Stream done event received for user {username}")
-                    usage = stream_event.usage
-                    # Use accumulated content as primary (we streamed it), fallback to usage content
-                    assistant_message = accumulated_content or usage.get('content') or ''
-                    reasoning_summary = accumulated_thinking or usage.get('reasoning')
+                    elif stream_event.event_type == 'done':
+                        logger.info(f"Stream done event received for user {username}")
+                        usage = stream_event.usage
+                        # Use accumulated content as primary (we streamed it), fallback to usage content
+                        assistant_message = accumulated_content or usage.get('content') or ''
+                        reasoning_summary = accumulated_thinking or usage.get('reasoning')
 
-                    # Get cross-model providers for token counting
-                    gpt_provider = ProviderRegistry.get("gpt-5.2")
-                    claude_provider = get_claude_provider()
-                    claude_api_key = get_api_key(username, "anthropic")
+                        # Get cross-model providers for token counting
+                        gpt_provider = ProviderRegistry.get("gpt-5.2")
+                        claude_provider = get_claude_provider()
+                        claude_api_key = get_api_key(username, "anthropic")
 
-                    # Build user content for cross-model counting
-                    if request.attached_files:
-                        file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
-                        user_content_for_counting = "\n\n".join(file_wrappers) + "\n\n" + request.message
-                    else:
-                        user_content_for_counting = request.message
+                        # Build user content for cross-model counting
+                        if request.attached_files:
+                            file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
+                            user_content_for_counting = "\n\n".join(file_wrappers) + "\n\n" + request.message
+                        else:
+                            user_content_for_counting = request.message
 
-                    # Update system message tokens
-                    system_msg_ref = branch_path[0]
-                    system_content = system_msg_ref.get("content", "")
-                    if system_msg_ref.get("total_gpt_tokens") is None:
-                        system_msg_ref["total_gpt_tokens"] = gpt_provider.count_tokens(system_content)
-                    if system_msg_ref.get("total_claude_tokens") is None and claude_api_key:
-                        system_msg_ref["total_claude_tokens"] = claude_provider.count_tokens_api(system_content, claude_api_key)
-                    if model_id.startswith("claude"):
-                        system_msg_ref["total_tokens"] = system_msg_ref.get("total_claude_tokens")
-                    else:
-                        system_msg_ref["total_tokens"] = system_msg_ref.get("total_gpt_tokens")
-
-                    # Count updates tokens
-                    updates_tokens = 0
-                    if updates_text:
+                        # Update system message tokens
+                        system_msg_ref = branch_path[0]
+                        system_content = system_msg_ref.get("content", "")
+                        if system_msg_ref.get("total_gpt_tokens") is None:
+                            system_msg_ref["total_gpt_tokens"] = gpt_provider.count_tokens(system_content)
+                        if system_msg_ref.get("total_claude_tokens") is None and claude_api_key:
+                            system_msg_ref["total_claude_tokens"] = claude_provider.count_tokens_api(system_content, claude_api_key)
                         if model_id.startswith("claude"):
-                            updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
-                            updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
+                            system_msg_ref["total_tokens"] = system_msg_ref.get("total_claude_tokens")
                         else:
-                            updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
-                            updates_tokens = gpt_provider.count_tokens(updates_wrapped)
+                            system_msg_ref["total_tokens"] = system_msg_ref.get("total_gpt_tokens")
 
-                    # Calculate dual token counts
-                    if model_id.startswith("claude"):
-                        user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, api_key)
-                        user_gpt_tokens = gpt_provider.count_tokens(user_content_for_counting)
-
-                        for msg in data["messages"]:
-                            if msg.get("id") == user_msg_id:
-                                msg["total_claude_tokens"] = user_claude_tokens
-                                msg["total_gpt_tokens"] = user_gpt_tokens
-                                msg["total_tokens"] = user_claude_tokens
-                                break
-
-                        assistant_claude_tokens = usage['output_tokens']
-                        assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
-                    else:
-                        known_tokens = system_msg_ref.get("total_gpt_tokens", 0)
-                        for msg in branch_path[context_start_index:-1]:
-                            gpt_tokens = msg.get("total_gpt_tokens")
-                            known_tokens += gpt_tokens if gpt_tokens is not None else (msg.get("total_tokens") or 0)
-                        user_gpt_tokens = max(0, usage['input_tokens'] - known_tokens - updates_tokens)
-
-                        if claude_api_key:
-                            user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, claude_api_key)
-                            assistant_claude_tokens = claude_provider.count_tokens_api(assistant_message, claude_api_key)
-                        else:
-                            user_claude_tokens = None
-                            assistant_claude_tokens = None
-
-                        for msg in data["messages"]:
-                            if msg.get("id") == user_msg_id:
-                                msg["total_gpt_tokens"] = user_gpt_tokens
-                                if user_claude_tokens is not None:
-                                    msg["total_claude_tokens"] = user_claude_tokens
-                                msg["total_tokens"] = user_gpt_tokens
-                                break
-
-                        assistant_gpt_tokens = usage['output_tokens']
-
-                    # Create ParsedResponse for cost calculation
-                    from providers import ParsedResponse
-                    parsed = ParsedResponse(
-                        content=assistant_message,
-                        reasoning=reasoning_summary,
-                        input_tokens=usage['input_tokens'],
-                        cache_read_tokens=usage['cache_read_tokens'],
-                        cache_creation_tokens=usage['cache_creation_tokens'],
-                        output_tokens=usage['output_tokens'],
-                        reasoning_tokens=usage['reasoning_tokens']
-                    )
-
-                    new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
-                    total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
-
-                    # Extract service tier for GPT-5.2 (flex vs standard)
-                    service_tier = usage.get('service_tier')
-
-                    # Calculate cost using tier-aware pricing for GPT-5.2
-                    if model_id == "gpt-5.2" and service_tier:
-                        total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
-                    else:
-                        total_cost = provider.calculate_cost(parsed)
-                    tokens_str = provider.format_token_string(parsed)
-
-                    # Apply free tokens
-                    if model_id.startswith('gpt'):
-                        actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
-                    else:
-                        actual_cost = total_cost
-                        cost_str = f"${actual_cost:.6f}"
-                        pending_usage = None
-
-                    # Update stats
-                    stats = data.get("stats", create_empty_stats())
-                    stats["total_input_tokens"] += new_input_tokens
-                    stats["total_cached_tokens"] += parsed.cache_read_tokens
-                    stats["total_output_tokens"] += parsed.output_tokens
-                    stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
-                    stats["total_cost"] += actual_cost
-                    stats["total_prompts"] += 1
-                    stats["last_accessed"] = datetime.now().isoformat()
-                    data["stats"] = stats
-
-                    # Add assistant message
-                    assistant_msg_id = generate_message_id()
-                    assistant_msg_data = {
-                        "id": assistant_msg_id,
-                        "parent_id": user_msg_id,
-                        "role": "assistant",
-                        "content": assistant_message,
-                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
-                        "tokens": tokens_str,
-                        "cost": cost_str,
-                        "total_tokens": assistant_claude_tokens if model_id.startswith("claude") else assistant_gpt_tokens,
-                        "total_gpt_tokens": assistant_gpt_tokens,
-                        "model": model_id
-                    }
-                    if assistant_claude_tokens is not None:
-                        assistant_msg_data["total_claude_tokens"] = assistant_claude_tokens
-                    if reasoning_summary:
-                        assistant_msg_data["reasoning"] = reasoning_summary
-                    if service_tier:
-                        assistant_msg_data["service_tier"] = service_tier
-
-                    data["messages"].append(assistant_msg_data)
-                    data["current_leaf_id"] = assistant_msg_id
-
-                    save_chat(username, request.chat_name, data, request.project)
-                    logger.info(f"Stream: saved chat for user {username}")
-
-                    # Commit deferred updates
-                    if pending_usage is not None:
-                        save_daily_usage(username, pending_usage)
-
-                    if model_id.startswith("claude"):
-                        user_total = user_claude_tokens if user_claude_tokens is not None else 0
-                        assistant_total = assistant_claude_tokens if assistant_claude_tokens is not None else 0
-                    else:
-                        user_total = user_gpt_tokens if user_gpt_tokens is not None else 0
-                        assistant_total = assistant_gpt_tokens if assistant_gpt_tokens is not None else 0
-                    context_tokens = user_total + assistant_total
-                    update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost, model=model_id, context_tokens=context_tokens)
-
-                    # Calculate branch info
-                    branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
-                    branch_total_messages = len(branch_path_final)
-
-                    # Calculate model-specific stats
-                    response_stats = stats.copy()
-                    gpt_prompts = 0
-                    sonnet_prompts = 0
-                    gpt_context_tokens = 0
-                    sonnet_context_tokens = 0
-                    all_chat_messages = data.get("messages", [])
-                    messages_by_id = {m.get("id"): m for m in all_chat_messages if m.get("id")}
-                    for msg in all_chat_messages:
-                        if msg.get("role") == "assistant":
-                            msg_model = msg.get("model", "")
-                            is_sonnet = msg_model.startswith("claude")
-                            p_id = msg.get("parent_id")
-                            if is_sonnet:
-                                sonnet_prompts += 1
-                                a_tokens = msg.get("total_claude_tokens") or msg.get("total_tokens", 0) or 0
-                                u_tokens = 0
-                                if p_id and p_id in messages_by_id:
-                                    parent = messages_by_id[p_id]
-                                    u_tokens = parent.get("total_claude_tokens") or parent.get("total_tokens", 0) or 0
-                                sonnet_context_tokens += u_tokens + a_tokens
+                        # Count updates tokens
+                        updates_tokens = 0
+                        if updates_text:
+                            if model_id.startswith("claude"):
+                                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
+                                updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
                             else:
-                                gpt_prompts += 1
-                                a_tokens = msg.get("total_gpt_tokens") or msg.get("total_tokens", 0) or 0
-                                u_tokens = 0
-                                if p_id and p_id in messages_by_id:
-                                    parent = messages_by_id[p_id]
-                                    u_tokens = parent.get("total_gpt_tokens") or parent.get("total_tokens", 0) or 0
-                                gpt_context_tokens += u_tokens + a_tokens
-                    response_stats["gpt_prompts"] = gpt_prompts
-                    response_stats["sonnet_prompts"] = sonnet_prompts
-                    response_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
-                    response_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
+                                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
+                                updates_tokens = gpt_provider.count_tokens(updates_wrapped)
 
-                    # Send done event with all metadata
-                    done_data = {
-                        'assistant_message': assistant_message,
-                        'tokens': tokens_str,
-                        'cost': cost_str,
-                        'stats': response_stats,
-                        'context_start_index': context_start_index,
-                        'reasoning': reasoning_summary,
-                        'user_message_id': user_msg_id,
-                        'assistant_message_id': assistant_msg_id,
-                        'current_leaf_id': assistant_msg_id,
-                        'total_messages': branch_total_messages,
-                        'model': model_id
-                    }
-                    if service_tier:
-                        done_data['service_tier'] = service_tier
-                    yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+                        # Calculate dual token counts
+                        if model_id.startswith("claude"):
+                            user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, api_key)
+                            user_gpt_tokens = gpt_provider.count_tokens(user_content_for_counting)
 
-                    # Broadcast stream done to other clients
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(
-                            type=SyncEventType.STREAM_DONE,
-                            data={
-                                "assistant_message": assistant_msg_data,
-                                "user_message_id": user_msg_id,
-                                "assistant_message_id": assistant_msg_id,
-                                "current_leaf_id": assistant_msg_id,
-                                "total_messages": branch_total_messages,
-                                "stats": response_stats,
-                                "context_start_index": context_start_index
-                            }
+                            for msg in data["messages"]:
+                                if msg.get("id") == user_msg_id:
+                                    msg["total_claude_tokens"] = user_claude_tokens
+                                    msg["total_gpt_tokens"] = user_gpt_tokens
+                                    msg["total_tokens"] = user_claude_tokens
+                                    break
+
+                            assistant_claude_tokens = usage['output_tokens']
+                            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
+                        else:
+                            known_tokens = system_msg_ref.get("total_gpt_tokens", 0)
+                            for msg in branch_path[context_start_index:-1]:
+                                gpt_tokens = msg.get("total_gpt_tokens")
+                                known_tokens += gpt_tokens if gpt_tokens is not None else (msg.get("total_tokens") or 0)
+                            user_gpt_tokens = max(0, usage['input_tokens'] - known_tokens - updates_tokens)
+
+                            if claude_api_key:
+                                user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, claude_api_key)
+                                assistant_claude_tokens = claude_provider.count_tokens_api(assistant_message, claude_api_key)
+                            else:
+                                user_claude_tokens = None
+                                assistant_claude_tokens = None
+
+                            for msg in data["messages"]:
+                                if msg.get("id") == user_msg_id:
+                                    msg["total_gpt_tokens"] = user_gpt_tokens
+                                    if user_claude_tokens is not None:
+                                        msg["total_claude_tokens"] = user_claude_tokens
+                                    msg["total_tokens"] = user_gpt_tokens
+                                    break
+
+                            assistant_gpt_tokens = usage['output_tokens']
+
+                        # Create ParsedResponse for cost calculation
+                        from providers import ParsedResponse
+                        parsed = ParsedResponse(
+                            content=assistant_message,
+                            reasoning=reasoning_summary,
+                            input_tokens=usage['input_tokens'],
+                            cache_read_tokens=usage['cache_read_tokens'],
+                            cache_creation_tokens=usage['cache_creation_tokens'],
+                            output_tokens=usage['output_tokens'],
+                            reasoning_tokens=usage['reasoning_tokens']
                         )
-                    )
 
-            logger.info(f"Stream loop completed after {event_count} events for user {username}")
+                        new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                        total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                        # Extract service tier for GPT-5.2 (flex vs standard)
+                        service_tier = usage.get('service_tier')
+
+                        # Calculate cost using tier-aware pricing for GPT-5.2
+                        if model_id == "gpt-5.2" and service_tier:
+                            total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                        else:
+                            total_cost = provider.calculate_cost(parsed)
+                        tokens_str = provider.format_token_string(parsed)
+
+                        # Apply free tokens
+                        if model_id.startswith('gpt'):
+                            actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+                        else:
+                            actual_cost = total_cost
+                            cost_str = f"${actual_cost:.6f}"
+                            pending_usage = None
+
+                        # Update stats
+                        stats = data.get("stats", create_empty_stats())
+                        stats["total_input_tokens"] += new_input_tokens
+                        stats["total_cached_tokens"] += parsed.cache_read_tokens
+                        stats["total_output_tokens"] += parsed.output_tokens
+                        stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                        stats["total_cost"] += actual_cost
+                        stats["total_prompts"] += 1
+                        stats["last_accessed"] = datetime.now().isoformat()
+                        data["stats"] = stats
+
+                        # Add assistant message
+                        assistant_msg_id = generate_message_id()
+                        assistant_msg_data = {
+                            "id": assistant_msg_id,
+                            "parent_id": user_msg_id,
+                            "role": "assistant",
+                            "content": assistant_message,
+                            "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                            "tokens": tokens_str,
+                            "cost": cost_str,
+                            "total_tokens": assistant_claude_tokens if model_id.startswith("claude") else assistant_gpt_tokens,
+                            "total_gpt_tokens": assistant_gpt_tokens,
+                            "model": model_id
+                        }
+                        if assistant_claude_tokens is not None:
+                            assistant_msg_data["total_claude_tokens"] = assistant_claude_tokens
+                        if reasoning_summary:
+                            assistant_msg_data["reasoning"] = reasoning_summary
+                        if service_tier:
+                            assistant_msg_data["service_tier"] = service_tier
+
+                        data["messages"].append(assistant_msg_data)
+                        data["current_leaf_id"] = assistant_msg_id
+
+                        save_chat(username, request.chat_name, data, request.project)
+                        logger.info(f"Stream: saved chat for user {username}")
+
+                        # Commit deferred updates
+                        if pending_usage is not None:
+                            save_daily_usage(username, pending_usage)
+
+                        if model_id.startswith("claude"):
+                            user_total = user_claude_tokens if user_claude_tokens is not None else 0
+                            assistant_total = assistant_claude_tokens if assistant_claude_tokens is not None else 0
+                        else:
+                            user_total = user_gpt_tokens if user_gpt_tokens is not None else 0
+                            assistant_total = assistant_gpt_tokens if assistant_gpt_tokens is not None else 0
+                        context_tokens = user_total + assistant_total
+                        update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost, model=model_id, context_tokens=context_tokens)
+
+                        # Calculate branch info
+                        branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                        branch_total_messages = len(branch_path_final)
+
+                        # Calculate model-specific stats
+                        response_stats = stats.copy()
+                        gpt_prompts = 0
+                        sonnet_prompts = 0
+                        gpt_context_tokens = 0
+                        sonnet_context_tokens = 0
+                        all_chat_messages = data.get("messages", [])
+                        messages_by_id = {m.get("id"): m for m in all_chat_messages if m.get("id")}
+                        for msg in all_chat_messages:
+                            if msg.get("role") == "assistant":
+                                msg_model = msg.get("model", "")
+                                is_sonnet = msg_model.startswith("claude")
+                                p_id = msg.get("parent_id")
+                                if is_sonnet:
+                                    sonnet_prompts += 1
+                                    a_tokens = msg.get("total_claude_tokens") or msg.get("total_tokens", 0) or 0
+                                    u_tokens = 0
+                                    if p_id and p_id in messages_by_id:
+                                        parent = messages_by_id[p_id]
+                                        u_tokens = parent.get("total_claude_tokens") or parent.get("total_tokens", 0) or 0
+                                    sonnet_context_tokens += u_tokens + a_tokens
+                                else:
+                                    gpt_prompts += 1
+                                    a_tokens = msg.get("total_gpt_tokens") or msg.get("total_tokens", 0) or 0
+                                    u_tokens = 0
+                                    if p_id and p_id in messages_by_id:
+                                        parent = messages_by_id[p_id]
+                                        u_tokens = parent.get("total_gpt_tokens") or parent.get("total_tokens", 0) or 0
+                                    gpt_context_tokens += u_tokens + a_tokens
+                        response_stats["gpt_prompts"] = gpt_prompts
+                        response_stats["sonnet_prompts"] = sonnet_prompts
+                        response_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
+                        response_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
+
+                        # Send done event with all metadata
+                        done_data = {
+                            'assistant_message': assistant_message,
+                            'tokens': tokens_str,
+                            'cost': cost_str,
+                            'stats': response_stats,
+                            'context_start_index': context_start_index,
+                            'reasoning': reasoning_summary,
+                            'user_message_id': user_msg_id,
+                            'assistant_message_id': assistant_msg_id,
+                            'current_leaf_id': assistant_msg_id,
+                            'total_messages': branch_total_messages,
+                            'model': model_id
+                        }
+                        if service_tier:
+                            done_data['service_tier'] = service_tier
+                        yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                        # Broadcast stream done to other clients
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_DONE,
+                                data={
+                                    "assistant_message": assistant_msg_data,
+                                    "user_message_id": user_msg_id,
+                                    "assistant_message_id": assistant_msg_id,
+                                    "current_leaf_id": assistant_msg_id,
+                                    "total_messages": branch_total_messages,
+                                    "stats": response_stats,
+                                    "context_start_index": context_start_index
+                                }
+                            )
+                        )
+
+                logger.info(f"Stream loop completed for user {username}")
 
         except Exception as e:
             logger.error(f"Streaming error for user {username}: {e}", exc_info=True)

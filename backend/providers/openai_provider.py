@@ -163,10 +163,11 @@ class OpenAIProvider(ModelProvider):
                 if not first_content:
                     if event.type == "response.output_text.delta":
                         first_content = True
-                    elif time.time() - start_time > ttfb_timeout:
-                        logger.warning(f"Flex mode TTFB timeout ({ttfb_timeout}s) exceeded, falling back to standard")
-                        stream.close()
-                        raise FlexTimeoutError()
+                    # TTFB timeout disabled for pipeline - always use flex for the discount
+                    # elif time.time() - start_time > ttfb_timeout:
+                    #     logger.warning(f"Flex mode TTFB timeout ({ttfb_timeout}s) exceeded, falling back to standard")
+                    #     stream.close()
+                    #     raise FlexTimeoutError()
 
                 if event.type == "response.output_text.delta":
                     yield StreamEvent('content_delta', content=event.delta)
@@ -332,6 +333,59 @@ class OpenAIProvider(ModelProvider):
             parsed.output_tokens * p.output +
             parsed.reasoning_tokens * p.reasoning
         ) / 1_000_000
+
+
+    def build_pipeline_request(
+        self,
+        messages: list[dict],
+        username: str,
+        project: str,
+        chat_name: str,
+        stage_name: str = "default",
+        reasoning_effort: str = "medium",
+        service_tier: str = "flex",
+        json_mode: bool = True
+    ) -> dict:
+        """
+        Build request params for a pipeline stage.
+
+        Unlike build_request, this allows configuring reasoning effort,
+        service tier, and JSON response format per-stage.
+        Each stage gets its own cache key to avoid cache invalidation.
+        """
+        project_part = (project or "root").replace(" ", "-").replace("/", "-").replace("\\", "-")
+
+        params = {
+            "model": self.MODEL_NAME,
+            "input": messages,
+            "store": False,
+            "prompt_cache_retention": self.PROMPT_CACHE_RETENTION,
+            "prompt_cache_key": f"redvelveteer-86171435-{username}-{project_part}-{chat_name}-{stage_name}",
+            "reasoning": {
+                "effort": reasoning_effort,
+                "summary": "auto"
+            },
+            "service_tier": service_tier
+        }
+
+        if json_mode:
+            params["text"] = {"format": {"type": "json_object"}}
+
+        return params
+
+    def send_request_non_streaming(self, client: Any, request_params: dict) -> dict:
+        """
+        Make a non-streaming API call and return extracted usage dict.
+
+        Used by pipeline stages (Events, Mechanics) that produce JSON output
+        for the next stage rather than streaming to the user.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        request_params['stream'] = False
+        response = client.responses.create(**request_params)
+        return self._extract_usage(response)
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:
