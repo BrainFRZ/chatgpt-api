@@ -2842,6 +2842,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if not accumulated_content:
                 if len(data["messages"]) > 1:  # Don't pop system message
                     data["messages"].pop()
+                    save_chat(username, request.chat_name, data, request.project)
             else:
                 # We got content but done handler failed - save what we have
                 logger.info(f"Stream: saving partial response for user {username}")
