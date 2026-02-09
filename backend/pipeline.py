@@ -51,8 +51,15 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
       "new_total": <updated total>,
       "reason": "<brief reason for the change>"
     }
-  ]
+  ],
+  "arc_label": "<string or null>"
 }
+
+ARC LABEL:
+- Set to a short label when this turn BEGINS an invented mini-arc not from the plot documents, e.g. "Invented Mini-Arc: Dock Worker Dispute"
+- Set to a label for plot-doc content when starting a new plot beat, e.g. "Plot-Doc Beat: The Contact"
+- Set to null on all other turns (the vast majority)
+- Only set this when a NEW arc or beat is starting, not on every turn within one
 
 SCORE CHANGES (RS / RomS / FR):
 - Evaluate whether this turn's events warrant any Relationship Score (RS), Romance Score (RomS), or Faction Reputation (FR) changes
@@ -143,7 +150,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   ],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
-  "score_changes": <pass through from Events JSON unchanged>
+  "score_changes": <pass through from Events JSON unchanged>,
+  "arc_label": <pass through from Events JSON unchanged>
 }
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
@@ -180,17 +188,19 @@ IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - You have NO conversation history. All context comes from Events' JSON and your assigned documents.
 - Apply rules exactly as written (RAW). Do not bias rolls toward success or failure.
-- The "score_changes" array from Events should be passed through to your output unchanged. Do not modify scores."""
+- The "score_changes" array from Events should be passed through to your output unchanged. Do not modify scores.
+- The "arc_label" field from Events should be passed through to your output unchanged."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
 YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
 
-YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, and score_changes.
+YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, score_changes, and arc_label.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON). This is what the player sees directly.
 
 OUTPUT STRUCTURE:
+0. If the Mechanics JSON contains a non-null "arc_label", display it as a small bold header at the very start of your response, e.g.: **[Invented Mini-Arc: Dock Worker Dispute]** — then continue with the narrative below it.
 1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened.
 2. Place roll breakdowns where they fit naturally within the beat they belong to:
    🎲 [Description]: [roll1, **selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
