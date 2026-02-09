@@ -600,7 +600,9 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "narration", "status": "thinking"})
 
     narration_system = build_agent_system_prompt(NARRATION_CONTRACT, agent_instructions["narration"], agent_files["narration"])
-    recent_pairs = get_recent_pairs(branch_path, NARRATION_CONTEXT_PAIRS)
+    # Use context-trimmed branch so Narration only sees messages within the context window
+    narration_branch = [branch_path[0]] + branch_path[context_start_index:]
+    recent_pairs = get_recent_pairs(narration_branch, NARRATION_CONTEXT_PAIRS)
     narration_messages = build_narration_messages(narration_system, recent_pairs, mechanics_data)
 
     narration_params = provider.build_pipeline_request(

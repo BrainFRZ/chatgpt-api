@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from pathlib import Path
 from contextlib import contextmanager
+import asyncio
 import os
 import json
 import shutil
@@ -2288,7 +2289,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 pipeline_result = None
 
-                for event_type, event_data in run_pipeline(
+                # Use a sentinel to avoid StopIteration propagation in async generator (PEP 479)
+                _PIPELINE_STOP = object()
+                def _next_pipeline_event(gen):
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return _PIPELINE_STOP
+
+                # Run pipeline in thread pool to avoid blocking the event loop
+                # during synchronous API calls (Events/Mechanics stages)
+                pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,
                     username=username,
@@ -2300,7 +2311,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
                     updates_text=updates_text
-                ):
+                )
+
+                while True:
+                    result = await asyncio.to_thread(_next_pipeline_event, pipeline_gen)
+                    if result is _PIPELINE_STOP:
+                        break
+                    event_type, event_data = result
+
                     if event_type == "pipeline_stage":
                         yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
                         await sync_manager.broadcast_to_chat(
@@ -2313,6 +2331,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if await http_request.is_disconnected():
                             logger.warning(f"Pipeline: client disconnected during streaming for user {username}")
                             data["messages"].pop()
+                            save_chat(username, request.chat_name, data, request.project)
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": "Client disconnected"})
+                            )
                             return
                         accumulated_content += event_data["delta"]
                         yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
@@ -2539,9 +2562,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     event_count += 1
                     # Check for client disconnect (but not on done event - we must save)
                     if stream_event.event_type != 'done' and await http_request.is_disconnected():
-                        # Client disconnected - clean up
+                        # Client disconnected - clean up and notify other clients
                         logger.warning(f"Client disconnected after {event_count} events for user {username}")
                         data["messages"].pop()
+                        save_chat(username, request.chat_name, data, request.project)
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": "Client disconnected"})
+                        )
                         return
 
                     if stream_event.event_type == 'content_delta':
