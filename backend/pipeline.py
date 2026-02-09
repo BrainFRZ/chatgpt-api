@@ -38,7 +38,9 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "time_passed": "<how much in-world time this turn covers, e.g. '1 minute', '10 minutes', '2 hours'>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
-  "callbacks": ["<triggered callback 1>", ...],
+  "callbacks": [
+    {"callback": "<triggered callback description>", "source": "<NPC/faction name or null>"}
+  ],
   "emotional_context": "<emotional state and significance of this moment>",
   "character_states": {
     "<name>": "<current HP, conditions, relevant resources, equipment>"
@@ -107,7 +109,7 @@ IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
 - "character_states" should include all mechanically relevant info since Mechanics has NO conversation history.
-- Include ALL triggered callbacks - things directly related/promised/foreshadowed earlier that should now activate or be referenced."""
+- Include ALL triggered callbacks - things directly related/promised/foreshadowed earlier that should now activate or be referenced. Set "source" to the NPC or faction name when applicable, or null for environmental/systemic triggers."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game master pipeline. You are the second stage.
 
@@ -151,7 +153,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
   "score_changes": <pass through from Events JSON unchanged>,
-  "arc_label": <pass through from Events JSON unchanged>
+  "arc_label": <pass through from Events JSON unchanged>,
+  "callbacks": <pass through from Events JSON unchanged>
 }
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
@@ -189,19 +192,20 @@ IMPORTANT:
 - You have NO conversation history. All context comes from Events' JSON and your assigned documents.
 - Apply rules exactly as written (RAW). Do not bias rolls toward success or failure.
 - The "score_changes" array from Events should be passed through to your output unchanged. Do not modify scores.
-- The "arc_label" field from Events should be passed through to your output unchanged."""
+- The "arc_label" field from Events should be passed through to your output unchanged.
+- The "callbacks" array from Events should be passed through to your output unchanged."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
-YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the voice, tone, and literary quality of the output.
+YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the character voices, tone, and literary quality of the output.
 
-YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, score_changes, and arc_label.
+YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, score_changes, arc_label, and callbacks.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON). This is what the player sees directly.
 
 OUTPUT STRUCTURE:
 0. If the Mechanics JSON contains a non-null "arc_label", display it as a small bold header at the very start of your response, e.g.: **[Invented Mini-Arc: Dock Worker Dispute]** — then continue with the narrative below it.
-1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened.
+1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened. Use the "callbacks" array for context on foreshadowed events being paid off — weave these naturally into the narrative using the "source" NPC's voice and mannerisms when applicable.
 2. Place roll breakdowns where they fit naturally within the beat they belong to:
    🎲 [Description]: [roll1, **selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
    For advantage: show both rolls, bold the selected one
