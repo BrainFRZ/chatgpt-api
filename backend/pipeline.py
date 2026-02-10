@@ -725,3 +725,136 @@ def _aggregate_usage(stage_results: list[PipelineStageResult], provider: OpenAIP
         },
         "cost": total_cost
     }
+
+
+# ============================================================
+# Debug Transcript Generation
+# ============================================================
+
+def _parse_reasoning_by_stage(reasoning: str) -> dict:
+    """Split a joined '[Events] ...\n[Mechanics] ...' reasoning string into per-stage dict."""
+    result = {"events": "", "mechanics": "", "narration": ""}
+    if not reasoning:
+        return result
+    current_stage = None
+    current_lines = []
+    for line in reasoning.split("\n"):
+        stripped = line.strip()
+        matched = False
+        for stage in ("Events", "Mechanics", "Narration"):
+            prefix = f"[{stage}]"
+            if stripped.startswith(prefix):
+                # Save previous stage
+                if current_stage:
+                    result[current_stage] = "\n".join(current_lines).strip()
+                current_stage = stage.lower()
+                current_lines = [stripped[len(prefix):].strip()]
+                matched = True
+                break
+        if not matched and current_stage:
+            current_lines.append(line)
+    if current_stage:
+        result[current_stage] = "\n".join(current_lines).strip()
+    return result
+
+
+def _pretty_json(raw: str) -> str:
+    """Pretty-print a JSON string with 2-space indent. Falls back to raw on error."""
+    if not raw:
+        return "(none)"
+    try:
+        return json.dumps(json.loads(raw), indent=2)
+    except (json.JSONDecodeError, TypeError):
+        return f"[PARSE ERROR] {raw}"
+
+
+def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -> None:
+    """
+    Generate a debug transcript file for a pipeline chat.
+
+    Walks the active branch (current_leaf_id → root) and expands pipeline
+    assistant messages to show per-stage JSON and reasoning.
+    """
+    from datetime import datetime, timezone
+
+    debug_path = chat_path.replace(".json", "_debug.txt")
+
+    messages = chat_data.get("messages", [])
+    leaf_id = chat_data.get("current_leaf_id")
+    if not messages or not leaf_id:
+        return
+
+    # Build index and trace active branch (root → leaf)
+    index = {m["id"]: m for m in messages if m.get("id")}
+    path = []
+    current = leaf_id
+    while current:
+        if current not in index:
+            break
+        path.append(index[current])
+        current = index[current].get("parent_id")
+    path.reverse()
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"PIPELINE DEBUG TRANSCRIPT: {chat_name}")
+    lines.append(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    for msg in path:
+        role = msg.get("role", "")
+        if role == "system":
+            continue
+
+        timestamp = msg.get("timestamp", "")
+        content = msg.get("content", "")
+
+        if role == "user":
+            lines.append(f"[USER] {timestamp}")
+            lines.append(content)
+            lines.append("")
+
+        elif role == "assistant":
+            events_raw = msg.get("events_stage")
+            mechanics_raw = msg.get("mechanics_stage")
+
+            if events_raw or mechanics_raw:
+                # Pipeline message — expand stages
+                lines.append(f"[ASSISTANT] {timestamp}")
+
+                reasoning_parts = _parse_reasoning_by_stage(msg.get("reasoning", ""))
+
+                if events_raw:
+                    lines.append("--- EVENTS STAGE ---")
+                    lines.append(_pretty_json(events_raw))
+                    lines.append("")
+                    lines.append("--- EVENTS REASONING ---")
+                    lines.append(reasoning_parts["events"] or "(none)")
+                    lines.append("")
+
+                if mechanics_raw:
+                    lines.append("--- MECHANICS STAGE ---")
+                    lines.append(_pretty_json(mechanics_raw))
+                    lines.append("")
+                    lines.append("--- MECHANICS REASONING ---")
+                    lines.append(reasoning_parts["mechanics"] or "(none)")
+                    lines.append("")
+
+                narration_reasoning = reasoning_parts["narration"]
+                if narration_reasoning:
+                    lines.append("--- NARRATION REASONING ---")
+                    lines.append(narration_reasoning)
+                    lines.append("")
+
+                lines.append("--- FINAL OUTPUT ---")
+                lines.append(content)
+                lines.append("")
+            else:
+                # Non-pipeline assistant message
+                lines.append(f"[ASSISTANT] {timestamp}")
+                lines.append(content)
+                lines.append("")
+
+    with open(debug_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))

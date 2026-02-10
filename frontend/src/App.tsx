@@ -2564,8 +2564,8 @@ function App() {
     for (const file of files) {
       // Check extension
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (ext !== 'txt' && ext !== 'md') {
-        setError(`${file.name}: Only .txt and .md files are allowed`);
+      if (!['txt', 'md', 'yaml', 'yml'].includes(ext || '')) {
+        setError(`${file.name}: Only .txt, .md, .yaml, and .yml files are allowed`);
         continue;
       }
       
@@ -2610,8 +2610,8 @@ function App() {
     
     for (const file of files) {
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (ext !== 'txt' && ext !== 'md') {
-        setError(`${file.name}: Only .txt and .md files are allowed`);
+      if (!['txt', 'md', 'yaml', 'yml'].includes(ext || '')) {
+        setError(`${file.name}: Only .txt, .md, .yaml, and .yml files are allowed`);
         continue;
       }
       
@@ -2851,7 +2851,7 @@ function App() {
           setTotalMessages(prev => prev - 1);
         }
       } else {
-        setError('Could not send message');
+        setError(`Could not send message: ${(err as Error).message || err}`);
         if (!ctx.isStale()) {
           setMessages(prev => prev.slice(0, -2));
           setTotalMessages(prev => prev - 1);
@@ -3836,7 +3836,7 @@ function App() {
                         ref={chatFileInputRef}
                         onChange={handleChatFileSelect}
                         multiple
-                        accept=".txt,.md"
+                        accept=".txt,.md,.yaml,.yml"
                         style={{ display: 'none' }}
                       />
                     </div>
@@ -4175,7 +4175,7 @@ function App() {
                         ref={fileInputRef}
                         onChange={handleFileUpload}
                         multiple
-                        accept=".txt,.md"
+                        accept=".txt,.md,.yaml,.yml"
                         style={{ display: 'none' }}
                       />
                       <button

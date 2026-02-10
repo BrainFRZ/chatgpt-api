@@ -94,7 +94,7 @@ class OpenAIProvider(ModelProvider):
             "input": messages,
             "store": False,
             "prompt_cache_retention": self.PROMPT_CACHE_RETENTION,
-            "prompt_cache_key": f"redvelveteer-86171435-{username}-{project_part}-{chat_name}",
+            "prompt_cache_key": f"rv-86171435-{username}-{project_part}-{chat_name}"[:64],
             "reasoning": {
                 "effort": "medium",
                 "summary": "auto"
@@ -360,7 +360,7 @@ class OpenAIProvider(ModelProvider):
             "input": messages,
             "store": False,
             "prompt_cache_retention": self.PROMPT_CACHE_RETENTION,
-            "prompt_cache_key": f"redvelveteer-86171435-{username}-{project_part}-{chat_name}-{stage_name}",
+            "prompt_cache_key": f"rv-86171435-{username}-{project_part}-{chat_name}-{stage_name}"[:64],
             "reasoning": {
                 "effort": reasoning_effort,
                 "summary": "auto"
@@ -373,18 +373,19 @@ class OpenAIProvider(ModelProvider):
 
         return params
 
-    def send_request_non_streaming(self, client: Any, request_params: dict) -> dict:
+    def send_request_non_streaming(self, client: Any, request_params: dict, timeout: float = 120.0) -> dict:
         """
         Make a non-streaming API call and return extracted usage dict.
 
         Used by pipeline stages (Events, Mechanics) that produce JSON output
         for the next stage rather than streaming to the user.
+        Disables OpenAI client's internal retries — pipeline.py handles retries instead.
         """
-        import logging
-        logger = logging.getLogger(__name__)
+        import httpx
 
         request_params['stream'] = False
-        response = client.responses.create(**request_params)
+        no_retry_client = client.with_options(max_retries=0, timeout=httpx.Timeout(timeout, connect=10.0))
+        response = no_retry_client.responses.create(**request_params)
         return self._extract_usage(response)
 
 

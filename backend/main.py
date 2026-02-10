@@ -30,7 +30,7 @@ from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvide
 from sync_manager import sync_manager, SyncEvent, SyncEventType
 
 # Pipeline imports
-from pipeline import run_pipeline, PipelineResult
+from pipeline import run_pipeline, PipelineResult, generate_debug_transcript
 
 # Pipeline agent names (used for per-agent instructions and file routing)
 PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
@@ -908,7 +908,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 def load_project_files(username: str, project: str) -> str:
-    """Load all staged .md files from project's uploads folder"""
+    """Load all staged project files from project's uploads folder"""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
 
     if not os.path.exists(uploads_dir):
@@ -917,12 +917,12 @@ def load_project_files(username: str, project: str) -> str:
     # Load token cache to check staged status
     tokens_cache = load_file_tokens_cache(username, project)
 
-    md_files = [f for f in os.listdir(uploads_dir) if f.endswith('.md')]
-    if not md_files:
+    project_files = [f for f in os.listdir(uploads_dir) if os.path.splitext(f)[1].lower() in ALLOWED_FILE_EXTENSIONS]
+    if not project_files:
         return ""
 
     combined = ""
-    for filename in sorted(md_files):
+    for filename in sorted(project_files):
         # Skip files that are not staged (default to True for backward compat)
         if not tokens_cache.get(filename, {}).get("staged", True):
             continue
@@ -937,7 +937,7 @@ def load_project_files(username: str, project: str) -> str:
     return combined
 
 def load_project_files_for_agent(username: str, project: str, agent_name: str) -> str:
-    """Load staged .md files filtered to a specific pipeline agent."""
+    """Load staged files filtered to a specific pipeline agent."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
 
     if not os.path.exists(uploads_dir):
@@ -945,12 +945,12 @@ def load_project_files_for_agent(username: str, project: str, agent_name: str) -
 
     tokens_cache = load_file_tokens_cache(username, project)
 
-    md_files = [f for f in os.listdir(uploads_dir) if f.endswith('.md')]
-    if not md_files:
+    project_files = [f for f in os.listdir(uploads_dir) if os.path.splitext(f)[1].lower() in ALLOWED_FILE_EXTENSIONS]
+    if not project_files:
         return ""
 
     combined = ""
-    for filename in sorted(md_files):
+    for filename in sorted(project_files):
         file_cache = tokens_cache.get(filename, {})
         # Skip files that are not staged
         if not file_cache.get("staged", True):
@@ -2288,6 +2288,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 pipeline_state_prev = data.get("pipeline_state")
 
                 pipeline_result = None
+                pipeline_current_stage = "starting"
 
                 # Use a sentinel to avoid StopIteration propagation in async generator (PEP 479)
                 _PIPELINE_STOP = object()
@@ -2314,12 +2315,24 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 )
 
                 while True:
-                    result = await asyncio.to_thread(_next_pipeline_event, pipeline_gen)
+                    # Run pipeline step in thread, sending SSE keepalive comments
+                    # every 15s to prevent proxy/browser timeouts during long API calls
+                    pipeline_future = asyncio.ensure_future(
+                        asyncio.to_thread(_next_pipeline_event, pipeline_gen)
+                    )
+                    while not pipeline_future.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pipeline_future), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                    result = pipeline_future.result()
+
                     if result is _PIPELINE_STOP:
                         break
                     event_type, event_data = result
 
                     if event_type == "pipeline_stage":
+                        pipeline_current_stage = f"{event_data.get('stage', '?')}:{event_data.get('status', '?')}"
                         yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
                         await sync_manager.broadcast_to_chat(
                             chat_key,
@@ -2352,7 +2365,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         pipeline_result = event_data
 
                 if pipeline_result is None:
-                    raise Exception("Pipeline completed without producing a result")
+                    raise Exception(f"Pipeline completed without producing a result (last stage: {pipeline_current_stage})")
 
                 # Process pipeline result (similar to single-agent done handler)
                 assistant_message = pipeline_result.final_content
@@ -2466,6 +2479,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 save_chat(username, request.chat_name, data, request.project)
                 logger.info(f"Pipeline: saved chat for user {username}")
+
+                try:
+                    debug_chat_path = get_chat_path(username, request.chat_name, request.project)
+                    generate_debug_transcript(data, debug_chat_path, request.chat_name)
+                except Exception as e:
+                    logger.warning(f"Pipeline: failed to generate debug transcript: {e}")
 
                 # Commit deferred updates
                 if pending_usage is not None:
@@ -2833,6 +2852,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         )
 
                 logger.info(f"Stream loop completed for user {username}")
+
+        except asyncio.CancelledError:
+            # Client disconnected while pipeline/stream was blocking (e.g. API call in progress).
+            # CancelledError inherits from BaseException, not Exception, so needs its own handler.
+            stage_info = f" (stage: {pipeline_current_stage})" if use_pipeline and pipeline_current_stage else ""
+            logger.warning(f"Client disconnected (cancelled) for user {username}{stage_info}")
+            if not accumulated_content:
+                if len(data["messages"]) > 1:
+                    data["messages"].pop()
+                    save_chat(username, request.chat_name, data, request.project)
+            # Can't yield SSE events - connection is already dead
 
         except Exception as e:
             logger.error(f"Streaming error for user {username}: {e}", exc_info=True)
@@ -3634,7 +3664,7 @@ def get_free_tokens(username: str):
 # Project File Management Endpoints
 # ============================================================
 
-ALLOWED_FILE_EXTENSIONS = {'.txt', '.md'}
+ALLOWED_FILE_EXTENSIONS = {'.txt', '.md', '.yaml', '.yml'}
 
 @app.get("/api/project-files/{username}/{project}", response_model=ProjectFilesResponse)
 def list_project_files(username: str, project: str, model: str = None):
@@ -3819,7 +3849,7 @@ async def upload_project_files(username: str, project: str, files: List[UploadFi
         # Check extension
         ext = os.path.splitext(file.filename)[1].lower()
         if ext not in ALLOWED_FILE_EXTENSIONS:
-            errors.append(f"{file.filename}: Only .txt and .md files are allowed")
+            errors.append(f"{file.filename}: Only .txt, .md, .yaml, and .yml files are allowed")
             continue
 
         # Validate filename doesn't have path separators
