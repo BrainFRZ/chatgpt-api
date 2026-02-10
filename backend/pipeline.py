@@ -54,7 +54,17 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
       "reason": "<brief reason for the change>"
     }
   ],
-  "arc_label": "<string or null>"
+  "arc_label": "<string or null>",
+  "current_player": "<name of the character whose turn this is>",
+  "hud_state": {
+    "date": "<in-world date>",
+    "time": "<in-world time as HHMM, e.g. 1430>",
+    "location": "<current location>",
+    "funds": {
+      "<character name>": "<funds for this character>"
+    }
+  },
+  "combat": "<null OR combat object (see COMBAT section)>"
 }
 
 ARC LABEL:
@@ -82,6 +92,33 @@ TIME PASSED:
 - Conversations, short walks, searching a room: "5-15 minutes"
 - Travel, extended activities, resting: use your judgment from context
 - Mechanics uses this to advance the HUD clock
+
+CURRENT PLAYER:
+- Set to the name of the character whose turn this is (the character who just acted or is about to act)
+- Present on every turn — Mechanics and Narration use this for turn tracking
+- Use the character's name exactly as it appears in your documents
+
+HUD STATE:
+- You MUST always include "hud_state" with the current in-world state
+- This is the authoritative source Mechanics uses to build the HUD line (Mechanics is stateless and cannot derive this from conversation)
+- "date": the current in-world date
+- "time": current in-world time in HHMM format (e.g. "1430")
+- "location": where the party currently is
+- "funds": an object mapping each party member (PCs and NPC companions) to their current funds (e.g. {"Aedina": "32 gp, 5 sp", "Orrophim": "18 gp"})
+- Derive all values from the full conversation context — you have access to the complete history
+
+COMBAT:
+- Set "combat" to null when NOT in combat (the vast majority of turns)
+- When combat is active, set "combat" to:
+  {
+    "round": 1,
+    "initiative_order": ["<name1>", "<name2>", ...],
+    "current_turn": "<name acting right now in initiative>"
+  }
+- "initiative_order" is the rolled initiative sequence — include all combatants (PCs, NPCs, enemies)
+- "current_turn" is whoever is acting RIGHT NOW in the initiative
+- Update "round" when the initiative order cycles back to the top
+- Set "combat" back to null when combat ends
 
 SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mechanics):
 {
@@ -115,7 +152,7 @@ MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game 
 
 YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebooks and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what ACTUALLY happens.
 
-YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, character_states, and time_passed. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
+YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, character_states, time_passed, current_player, hud_state, and combat. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
 
 CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens. After adjudicating mechanics:
 - DROP beats that can't happen (lock pick failed → no hiding in the vault behind it)
@@ -154,7 +191,9 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "hud": "<the full HUD line to be appended verbatim>",
   "score_changes": <pass through from Events JSON unchanged>,
   "arc_label": <pass through from Events JSON unchanged>,
-  "callbacks": <pass through from Events JSON unchanged>
+  "callbacks": <pass through from Events JSON unchanged>,
+  "current_player": <pass through from Events JSON unchanged>,
+  "combat": <pass through from Events JSON unchanged>
 }
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
@@ -184,8 +223,13 @@ ROLL RULES:
 HUD:
 - You MUST always include the "hud" field with the current game state line
 - Format: [Date: X | Time: XXXX | Loc: X | Funds: X]
-- Advance the HUD clock by the "time_passed" value from the Events JSON
-- Events has full conversation context to judge time; trust its estimate
+- Build the HUD from the "hud_state" object in the Events JSON:
+  * Use hud_state.date for the Date field; advance the date if time_passed crosses midnight
+  * Take hud_state.time and advance it by the "time_passed" value for the Time field
+  * Use hud_state.location for Loc (update if the player moved this turn)
+  * Use hud_state.funds for Funds (update if transactions occurred in the beats)
+- Events has full conversation context and provides accurate hud_state; trust its values as the baseline
+- If a beat involves spending or earning money, adjust the relevant character's funds accordingly
 
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
@@ -193,13 +237,15 @@ IMPORTANT:
 - Apply rules exactly as written (RAW). Do not bias rolls toward success or failure.
 - The "score_changes" array from Events should be passed through to your output unchanged. Do not modify scores.
 - The "arc_label" field from Events should be passed through to your output unchanged.
-- The "callbacks" array from Events should be passed through to your output unchanged."""
+- The "callbacks" array from Events should be passed through to your output unchanged.
+- The "current_player" field from Events should be passed through to your output unchanged.
+- The "combat" field from Events should be passed through to your output unchanged (null or the full combat object)."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
 YOUR ROLE: Take the mechanical outcomes from the Mechanics Agent and produce the narrative prose the player reads. You own the character voices, tone, and literary quality of the output.
 
-YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, score_changes, arc_label, and callbacks.
+YOU RECEIVE: JSON from the Mechanics Agent containing a "beats" array (each with beat, outcome, rolls, and state_changes), plus dramatic_notes, hud, score_changes, arc_label, callbacks, current_player, and combat.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON). This is what the player sees directly.
 
@@ -218,6 +264,8 @@ OUTPUT STRUCTURE:
    - If a tier boundary was crossed, include the new tier: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
    - Omit this line entirely if score_changes is empty
 4. The HUD line appended verbatim at the very end of your response (from the "hud" field)
+5. The "current_player" field tells you whose turn this is. Use this to correctly attribute the action in your narration. Combined with the turn order from your instructions, you know who to address or prompt next.
+6. If "combat" is non-null, you are in combat. You may reference the initiative order and round number in your narration if it serves the pacing (e.g., "Round 2 begins..." or noting who is up next in initiative). This is optional — use your judgment for what enhances the scene.
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.

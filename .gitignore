@@ -9,6 +9,7 @@
 !backend/sync_manager.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
+!backend/test_e2e.py
 !backend/test_token_counting.py
 !backend/requirements.txt
 !backend/providers/

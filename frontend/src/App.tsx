@@ -2431,26 +2431,31 @@ function App() {
     try {
       // Get original message to preserve attached files and find parent
       const originalMessage = messages[editingMessageIndex];
-
-      // For branching: the new message becomes a sibling of the original
-      // So its parent is the same as the original message's parent
       const parentId = originalMessage.parent_id || null;
 
-      // Optimistically show truncated messages + placeholder for new edit
+      // Optimistically show truncated messages + edited user msg + streaming placeholder
       const truncatedMessages = messages.slice(0, editingMessageIndex);
       const editedMessage: ChatMessage = {
         role: 'user',
         content: editingMessageContent.trim(),
         attached_files: originalMessage.attached_files
       };
-      const newMessages = [...truncatedMessages, editedMessage];
-      setMessages(newMessages);
+      const streamingAssistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: '',
+        timestamp: new Date().toISOString()
+      };
+      setMessages([...truncatedMessages, editedMessage, streamingAssistantMsg]);
 
       // Clear editing state
       setEditingMessageIndex(null);
       setEditingMessageContent('');
 
-      const response = await fetch('/api/send-message', {
+      let accumulatedContent = '';
+      let accumulatedThinking = '';
+      let userMsgId: string | null = null;
+
+      const response = await fetch('/api/send-message-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2458,77 +2463,13 @@ function App() {
           chat_name: ctx.chat,
           message: editedMessage.content,
           project: ctx.project,
-          parent_id: parentId,  // Use parent_id for branching instead of truncate_to_index
+          parent_id: parentId,
           attached_files: originalMessage.attached_files || undefined,
           model: selectedModel
         })
       });
 
-      if (response.ok) {
-        const data = await response.json();
-
-        // Defensive check for malformed response
-        if (!data.assistant_message) {
-          console.error('Invalid API response: missing assistant_message', data);
-          setError('Server returned invalid response');
-          if (!ctx.isStale()) {
-            setMessages(originalMessages);
-            setAllMessages(originalAllMessages);
-            setCurrentLeafId(originalLeafId);
-          }
-          return;
-        }
-
-        // Build complete new user and assistant messages with IDs from response
-        const newUserMessage: ChatMessage = {
-          id: data.user_message_id,
-          parent_id: parentId,
-          role: 'user',
-          content: editedMessage.content,
-          timestamp: new Date().toISOString(),
-          attached_files: originalMessage.attached_files
-        };
-
-        const assistantMessage: ChatMessage = {
-          id: data.assistant_message_id,
-          parent_id: data.user_message_id,
-          role: 'assistant',
-          content: data.assistant_message,
-          timestamp: new Date().toISOString(),
-          tokens: data.tokens,
-          cost: data.cost,
-          reasoning: data.reasoning,
-          model: data.model
-        };
-
-        if (!ctx.isStale()) {
-          // Update displayed messages (the new branch path)
-          const finalMessages = [...truncatedMessages, newUserMessage, assistantMessage];
-          setMessages(finalMessages);
-
-          // Add the new messages to the full tree
-          setAllMessages(prev => [...prev, newUserMessage, assistantMessage]);
-
-          // Update current leaf to the new assistant message
-          setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
-
-          setStats(data.stats);
-          setContextStartIndex(data.context_start_index || 1);
-
-          // Use backend's total_messages for accurate pagination after edit
-          // Backend returns total messages in the new branch (including system message)
-          const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
-          setTotalMessages(branchTotalMessages);
-          // Check if branch has more messages than we're displaying (+1 accounts for system message)
-          setHasMoreMessages(branchTotalMessages > finalMessages.length + 1);
-          // Offset = count of messages loaded from end (for next pagination request)
-          setMessageOffset(finalMessages.length);
-
-          fetchUserStats();
-          fetchFreeTokens();
-          requestAnimationFrame(() => scrollToBottom());
-        }
-      } else {
+      if (!response.ok) {
         const data = await response.json();
         setError(data.detail || 'Failed to regenerate response');
         if (!ctx.isStale()) {
@@ -2536,18 +2477,132 @@ function App() {
           setAllMessages(originalAllMessages);
           setCurrentLeafId(originalLeafId);
         }
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = parseSSEEvents(buffer);
+        const lastNewline = buffer.lastIndexOf('\n\n');
+        if (lastNewline !== -1) {
+          buffer = buffer.slice(lastNewline + 2);
+        }
+
+        for (const event of events) {
+          if (ctx.isStale()) break;
+
+          if (event.type === 'init') {
+            userMsgId = event.data.user_message_id;
+          } else if (event.type === 'pipeline_stage') {
+            setPipelineStage(prev => {
+              const next = new Map(prev);
+              next.set(ctx.chat!, { stage: event.data.stage, status: event.data.status });
+              return next;
+            });
+          } else if (event.type === 'content') {
+            accumulatedContent += event.data.delta;
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastIdx = newMessages.length - 1;
+              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                newMessages[lastIdx] = { ...newMessages[lastIdx], content: accumulatedContent };
+              }
+              return newMessages;
+            });
+          } else if (event.type === 'thinking') {
+            accumulatedThinking += event.data.delta;
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastIdx = newMessages.length - 1;
+              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+                newMessages[lastIdx] = { ...newMessages[lastIdx], reasoning: accumulatedThinking };
+              }
+              return newMessages;
+            });
+          } else if (event.type === 'done') {
+            const data = event.data;
+
+            const newUserMessage: ChatMessage = {
+              id: data.user_message_id,
+              parent_id: parentId,
+              role: 'user',
+              content: editedMessage.content,
+              timestamp: new Date().toISOString(),
+              attached_files: originalMessage.attached_files
+            };
+
+            const assistantMessage: ChatMessage = {
+              id: data.assistant_message_id,
+              parent_id: data.user_message_id,
+              role: 'assistant',
+              content: data.assistant_message,
+              timestamp: new Date().toISOString(),
+              tokens: data.tokens,
+              cost: data.cost,
+              reasoning: data.reasoning,
+              model: data.model,
+              service_tier: data.service_tier
+            };
+
+            if (!ctx.isStale()) {
+              const finalMessages = [...truncatedMessages, newUserMessage, assistantMessage];
+              setMessages(finalMessages);
+              setAllMessages(prev => [...prev, newUserMessage, assistantMessage]);
+              setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+              setStats(data.stats);
+              setContextStartIndex(data.context_start_index || 1);
+
+              const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
+              setTotalMessages(branchTotalMessages);
+              setHasMoreMessages(branchTotalMessages > finalMessages.length + 1);
+              setMessageOffset(finalMessages.length);
+
+              fetchUserStats();
+              fetchFreeTokens();
+            }
+          } else if (event.type === 'error') {
+            setError(event.data.detail || 'Failed to regenerate response');
+            if (!ctx.isStale()) {
+              setMessages(originalMessages);
+              setAllMessages(originalAllMessages);
+              setCurrentLeafId(originalLeafId);
+            }
+          }
+        }
       }
     } catch (err) {
-      console.error('Error saving edited message:', err);
-      setError('Could not save edited message');
-      if (!ctx.isStale()) {
-        setMessages(originalMessages);
-        setAllMessages(originalAllMessages);
-        setCurrentLeafId(originalLeafId);
+      if ((err as Error).name === 'AbortError') {
+        if (!ctx.isStale()) {
+          setMessages(originalMessages);
+          setAllMessages(originalAllMessages);
+          setCurrentLeafId(originalLeafId);
+        }
+      } else {
+        console.error('Error saving edited message:', err);
+        setError(`Could not save edited message: ${(err as Error).message || err}`);
+        if (!ctx.isStale()) {
+          setMessages(originalMessages);
+          setAllMessages(originalAllMessages);
+          setCurrentLeafId(originalLeafId);
+        }
       }
     } finally {
       setIsLoading(prev => {
         const next = new Set(prev);
+        next.delete(ctx.chat!);
+        return next;
+      });
+      setPipelineStage(prev => {
+        const next = new Map(prev);
         next.delete(ctx.chat!);
         return next;
       });

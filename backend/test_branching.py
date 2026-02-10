@@ -8,7 +8,7 @@ import sys
 import unittest
 
 # Add the backend directory to path for imports
-sys.path.insert(0, '/home/user/chatgpt-api/backend')
+sys.path.insert(0, '/home/chatgpt/backend')
 
 from main import (
     generate_message_id,

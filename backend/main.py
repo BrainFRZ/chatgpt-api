@@ -1551,6 +1551,12 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         # Update current_leaf_id if navigating to a different leaf
         if leaf_id and leaf_id != current_leaf:
             data["current_leaf_id"] = leaf_id
+            # Regenerate debug transcript for the new branch
+            try:
+                debug_chat_path = get_chat_path(username, chat_name, project)
+                generate_debug_transcript(data, debug_chat_path, chat_name)
+            except Exception:
+                pass
     else:
         # Fallback for non-migrated chats or no leaf specified: use linear order
         branch_messages = all_messages
@@ -2765,6 +2771,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         save_chat(username, request.chat_name, data, request.project)
                         logger.info(f"Stream: saved chat for user {username}")
 
+                        # Regenerate debug transcript if this is a project chat
+                        if request.project:
+                            try:
+                                debug_chat_path = get_chat_path(username, request.chat_name, request.project)
+                                generate_debug_transcript(data, debug_chat_path, request.chat_name)
+                            except Exception as e:
+                                logger.warning(f"Stream: failed to generate debug transcript: {e}")
+
                         # Commit deferred updates
                         if pending_usage is not None:
                             save_daily_usage(username, pending_usage)
@@ -3003,6 +3017,13 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
     # Update current_leaf_id
     data["current_leaf_id"] = new_leaf_id
     save_chat(username, chat_name, data, project)
+
+    # Regenerate debug transcript for the new branch
+    try:
+        debug_chat_path = get_chat_path(username, chat_name, project)
+        generate_debug_transcript(data, debug_chat_path, chat_name)
+    except Exception as e:
+        logger.warning(f"switch_branch: failed to generate debug transcript: {e}")
 
     # Broadcast branch switch to other clients
     chat_key = sync_manager.make_chat_key(username, project, chat_name)
