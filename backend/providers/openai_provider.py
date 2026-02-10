@@ -78,7 +78,8 @@ class OpenAIProvider(ModelProvider):
         project: Optional[str],
         chat_name: str,
         is_free_chat: bool,
-        service_tier: str = "flex"
+        # service_tier: str = "flex"  # Flex disabled — use standard for reliability
+        service_tier: str = "auto"
     ) -> dict:
         """
         Build OpenAI API request parameters.
@@ -141,63 +142,54 @@ class OpenAIProvider(ModelProvider):
         self, client: Any, request_params: dict, ttfb_timeout: float = 30.0
     ) -> Iterator[StreamEvent]:
         """
-        Stream with flex mode, auto-fallback to standard on timeout/error.
+        Stream with standard tier. Flex mode disabled for reliability.
 
-        If TTFB exceeds ttfb_timeout seconds before receiving content,
-        cancels the stream and retries with standard tier.
+        Previously attempted flex first with TTFB fallback to standard.
+        Preserved below in comments for future re-enablement.
         """
-        import logging
-        import time
-        logger = logging.getLogger(__name__)
+        # Flex mode disabled — use standard directly for reliability
+        # To re-enable flex with fallback, uncomment the flex block below
+        # and change service_tier back to 'flex'
+        for stream_event in self._stream_standard(client, request_params):
+            yield stream_event
 
-        # Ensure flex mode for initial attempt
-        request_params['service_tier'] = 'flex'
-        request_params['stream'] = True
-
-        try:
-            stream = client.responses.create(**request_params)
-            start_time = time.time()
-            first_content = False
-
-            for event in stream:
-                if not first_content:
-                    if event.type == "response.output_text.delta":
-                        first_content = True
-                    # TTFB timeout disabled for pipeline - always use flex for the discount
-                    # elif time.time() - start_time > ttfb_timeout:
-                    #     logger.warning(f"Flex mode TTFB timeout ({ttfb_timeout}s) exceeded, falling back to standard")
-                    #     stream.close()
-                    #     raise FlexTimeoutError()
-
-                if event.type == "response.output_text.delta":
-                    yield StreamEvent('content_delta', content=event.delta)
-                elif event.type == "response.completed":
-                    logger.info(f"OpenAI stream (flex): got response.completed event")
-                    usage = self._extract_usage(event.response)
-                    usage['service_tier'] = 'flex'
-                    yield StreamEvent('done', usage=usage)
-                elif event.type == "response.incomplete":
-                    logger.warning(f"OpenAI stream (flex): got response.incomplete event")
-                    usage = self._extract_usage(event.response)
-                    usage['service_tier'] = 'flex'
-                    yield StreamEvent('done', usage=usage)
-
-        except FlexTimeoutError:
-            # Retry with standard tier
-            logger.info("Retrying request with standard tier")
-            request_params['service_tier'] = 'auto'
-            for stream_event in self._stream_standard(client, request_params):
-                yield stream_event
-
-        except Exception as e:
-            # Check if it's a 429 or similar recoverable error
-            if hasattr(e, 'status_code') and e.status_code == 429:
-                logger.warning(f"Flex mode got 429, falling back to standard")
-                request_params['service_tier'] = 'auto'
-                for stream_event in self._stream_standard(client, request_params):
-                    yield stream_event
-            else:
-                raise
+        # --- FLEX MODE (disabled) ---
+        # import time
+        # request_params['service_tier'] = 'flex'
+        # request_params['stream'] = True
+        # try:
+        #     stream = client.responses.create(**request_params)
+        #     start_time = time.time()
+        #     first_content = False
+        #     for event in stream:
+        #         if not first_content:
+        #             if event.type == "response.output_text.delta":
+        #                 first_content = True
+        #             elif time.time() - start_time > ttfb_timeout:
+        #                 logger.warning(f"Flex mode TTFB timeout ({ttfb_timeout}s) exceeded, falling back to standard")
+        #                 stream.close()
+        #                 raise FlexTimeoutError()
+        #         if event.type == "response.output_text.delta":
+        #             yield StreamEvent('content_delta', content=event.delta)
+        #         elif event.type == "response.completed":
+        #             usage = self._extract_usage(event.response)
+        #             usage['service_tier'] = 'flex'
+        #             yield StreamEvent('done', usage=usage)
+        #         elif event.type == "response.incomplete":
+        #             usage = self._extract_usage(event.response)
+        #             usage['service_tier'] = 'flex'
+        #             yield StreamEvent('done', usage=usage)
+        # except FlexTimeoutError:
+        #     request_params['service_tier'] = 'auto'
+        #     for stream_event in self._stream_standard(client, request_params):
+        #         yield stream_event
+        # except Exception as e:
+        #     if hasattr(e, 'status_code') and e.status_code == 429:
+        #         request_params['service_tier'] = 'auto'
+        #         for stream_event in self._stream_standard(client, request_params):
+        #             yield stream_event
+        #     else:
+        #         raise
 
     def _stream_standard(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
         """Stream with standard tier (used as fallback)."""
@@ -343,7 +335,8 @@ class OpenAIProvider(ModelProvider):
         chat_name: str,
         stage_name: str = "default",
         reasoning_effort: str = "medium",
-        service_tier: str = "flex",
+        # service_tier: str = "flex",  # Flex disabled — use standard for reliability
+        service_tier: str = "auto",
         json_mode: bool = True
     ) -> dict:
         """

@@ -244,13 +244,15 @@ STAGE_CONFIGS = {
     "events": StageConfig(
         name="events",
         reasoning_effort="medium",
-        service_tier="flex",
+        # service_tier="flex",  # Flex disabled — use standard for reliability
+        service_tier="auto",
         json_mode=True,
         contract=EVENTS_CONTRACT
     ),
     "mechanics": StageConfig(
         name="mechanics",
-        reasoning_effort="high",
+        # reasoning_effort="high",  # Lowered to medium — high was slow for marginal gain
+        reasoning_effort="medium",
         service_tier="auto",
         json_mode=True,
         contract=MECHANICS_CONTRACT
@@ -568,7 +570,7 @@ def run_pipeline(
             aggregate_cost=aggregate["cost"],
             pipeline_state=new_pipeline_state,
             reasoning_summaries=reasoning_summaries,
-            service_tier_label="flex"
+            service_tier_label="standard"
         ))
         return
 
@@ -606,7 +608,7 @@ def run_pipeline(
             aggregate_cost=aggregate["cost"],
             pipeline_state=new_pipeline_state,
             reasoning_summaries=reasoning_summaries,
-            service_tier_label="flex+standard"
+            service_tier_label="standard"
         ))
         return
 
