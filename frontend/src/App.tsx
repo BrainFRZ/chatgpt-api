@@ -342,6 +342,7 @@ function App() {
   const [updatesText, setUpdatesText] = useState('');
   const [updatesTokenCount, setUpdatesTokenCount] = useState(0);
   const [showUpdatesModal, setShowUpdatesModal] = useState(false);
+  const [draftUpdatesText, setDraftUpdatesText] = useState('');
   const [updatesLoading, setUpdatesLoading] = useState(false);
   const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(new Set());
   const tokenCountTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -493,6 +494,7 @@ function App() {
     setStats(null);
     setNewMessage('');
     setUpdatesText('');
+    setDraftUpdatesText('');
     setUpdatesTokenCount(0);
     setShowUpdatesModal(false);
     setUpdatesLoading(false);
@@ -2169,7 +2171,7 @@ function App() {
   const saveUpdates = async () => {
     const ctx = createContextGuard();
     if (!user || !ctx.chat) return;
-    
+
     setUpdatesLoading(true);
     try {
       const response = await fetch('/api/save-updates', {
@@ -2178,14 +2180,15 @@ function App() {
         body: JSON.stringify({
           username: user.username,
           chat_name: ctx.chat,
-          updates: updatesText,
+          updates: draftUpdatesText,
           project: ctx.project
         })
       });
-      
+
       if (ctx.isChatStale()) return;
-      
+
       if (response.ok) {
+        setUpdatesText(draftUpdatesText);
         setShowUpdatesModal(false);
       } else {
         const data = await response.json();
@@ -2199,7 +2202,7 @@ function App() {
   };
 
   const updateUpdatesText = (text: string) => {
-    setUpdatesText(text);
+    setDraftUpdatesText(text);
     
     const ctx = createContextGuard();
     
@@ -3933,7 +3936,7 @@ function App() {
                     
                     <div style={styles.buttonColumn}>
                       <button
-                        onClick={() => setShowUpdatesModal(true)}
+                        onClick={() => { setDraftUpdatesText(updatesText); setShowUpdatesModal(true); }}
                         style={{
                           ...styles.updateButton,
                           backgroundColor: updatesText.trim() ? '#2d6a4f' : '#2a2a4e'
@@ -4572,7 +4575,7 @@ function App() {
               Text here is prepended to each message you send. Use it for mid-conversation context updates.
             </p>
             <textarea
-              value={updatesText}
+              value={draftUpdatesText}
               onChange={(e) => updateUpdatesText(e.target.value)}
               placeholder="e.g., Character sheet updates, session notes, reminders..."
               style={styles.updatesTextarea}
