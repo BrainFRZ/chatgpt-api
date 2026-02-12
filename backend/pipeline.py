@@ -208,6 +208,12 @@ SCENE STATE:
 - "pending_actions" tracks things about to happen that should carry into the next turn
 - BOOTSTRAP (empty scene): On your first turn or when scene_state is empty, construct the full scene state from your context — location, who's present, what's happening.
 
+CHARACTER STATES:
+- You may receive a [CHARACTER STATES] block with each character's persisted mechanical state from the previous turn (HP, spell slots, conditions, resources, equipment)
+- Use this as the baseline for your "character_states" output — update it with any changes visible in the current context (damage taken, spells cast, items used, conditions gained/lost)
+- If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
+- This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
+
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay, even if no dice rolls seem needed (Mechanics always updates the HUD)
 - Route to "output" ONLY for pure OOC questions with no mechanics component (e.g., "can we take a break?", "what happened last session?")
@@ -273,8 +279,17 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "current_player": <pass through from Events JSON unchanged>,
   "next_player": <pass through from Events JSON unchanged>,
   "next_player_prompt": <pass through from Events JSON unchanged>,
-  "combat": <pass through from Events JSON unchanged>
+  "combat": <pass through from Events JSON unchanged>,
+  "character_states": {
+    "<name>": "<updated HP, conditions, spell slots, relevant resources, equipment after this turn's outcomes>"
+  }
 }
+
+CHARACTER STATES:
+- You MUST always include "character_states" with the UPDATED state of all characters after adjudicating this turn
+- Start from the "character_states" in the Events JSON (the previous turn's state) and apply all state_changes from your beats
+- Include HP, spell slots, class resources, conditions, and any other mechanically relevant state
+- This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
 {
@@ -322,7 +337,8 @@ IMPORTANT:
 - The "current_player" field from Events should be passed through to your output unchanged.
 - The "next_player" field from Events should be passed through to your output unchanged.
 - The "next_player_prompt" field from Events should be passed through to your output unchanged.
-- The "combat" field from Events should be passed through to your output unchanged (null or the full combat object)."""
+- The "combat" field from Events should be passed through to your output unchanged (null or the full combat object).
+- The "character_states" field is your updated version — do NOT pass through from Events unchanged. Apply all beat outcomes first."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
@@ -409,6 +425,7 @@ NARRATION_TARGET_PAIRS = 20
 CALLBACK_RESOLVED_RETENTION = 20  # Turns to keep resolved callbacks before pruning
 NPC_MEMORY_TIER_LIMITS = {"high": 8, "moderate": 10, "flavor": 12}
 NPC_MEMORY_MAX_PER_NPC = 30
+CHARACTER_STATE_TTL = 150  # Prune NPC character states not updated in this many turns
 
 # ============================================================
 # Pipeline Result
@@ -508,7 +525,12 @@ def build_events_messages(
     if scene_injection:
         injections.append(scene_injection)
 
-    # 5. Context updates
+    # 5. Character states
+    cs_injection = build_character_states_injection(pipeline_state.get("character_states", {}))
+    if cs_injection:
+        injections.append(cs_injection)
+
+    # 6. Context updates
     if updates_text.strip():
         injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
 
@@ -615,6 +637,7 @@ def _fresh_pipeline_state() -> dict:
         "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
         "npc_memories": {},
         "scene_state": {},
+        "character_states": {},
         "turn_counter": 0
     }
 
@@ -631,6 +654,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
             "npc_memories": {},
             "scene_state": {},
+            "character_states": {},
             "turn_counter": 0
         }
 
@@ -643,6 +667,12 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     ledger.setdefault("recently_resolved", [])
     state.setdefault("npc_memories", {})
     state.setdefault("scene_state", {})
+    state.setdefault("character_states", {})
+    # Migrate flat string character_states to structured format
+    cs = state["character_states"]
+    for name, entry in cs.items():
+        if not isinstance(entry, dict):
+            cs[name] = {"state": entry, "last_updated": state.get("turn_counter", 0)}
     state.setdefault("turn_counter", 0)
     return state
 
@@ -814,6 +844,27 @@ def apply_scene_state(new_scene: dict) -> dict:
     return result
 
 
+def apply_character_states(existing: dict, mechanics_output: dict, current_turn: int) -> dict:
+    """
+    Merge Mechanics' character_states into existing state and prune stale entries.
+
+    Each entry is stored as {"state": "<string>", "last_updated": <turn>}.
+    Mechanics outputs flat {"name": "state string"} — we wrap on merge.
+    Entries not updated in CHARACTER_STATE_TTL turns are pruned.
+    """
+    # Merge new entries from Mechanics
+    for name, state_str in mechanics_output.items():
+        existing[name] = {"state": state_str, "last_updated": current_turn}
+
+    # Prune stale entries
+    stale = [name for name, entry in existing.items()
+             if current_turn - entry.get("last_updated", 0) > CHARACTER_STATE_TTL]
+    for name in stale:
+        del existing[name]
+
+    return existing
+
+
 # ============================================================
 # Injection Builders (format state for model consumption)
 # ============================================================
@@ -905,6 +956,24 @@ def build_scene_state_injection(scene: dict) -> str:
                 lines.append(f"{label}: {val}")
 
     lines.append("[/SCENE STATE]")
+    return "\n".join(lines)
+
+
+def build_character_states_injection(character_states: dict) -> str:
+    """Build human-readable character states injection for Events.
+
+    Entries are stored as {"name": {"state": "...", "last_updated": N}}.
+    Falls back to flat string values for backwards compatibility.
+    """
+    if not character_states:
+        return ""
+    lines = ["[CHARACTER STATES]"]
+    for name, entry in character_states.items():
+        if isinstance(entry, dict):
+            lines.append(f"{name}: {entry.get('state', '')}")
+        else:
+            lines.append(f"{name}: {entry}")
+    lines.append("[/CHARACTER STATES]")
     return "\n".join(lines)
 
 
@@ -1087,6 +1156,11 @@ def run_pipeline(
 
     mechanics_data = mechanics_result.parsed_json
     mechanics_route = mechanics_data.get("route", "narration")
+    new_pipeline_state["character_states"] = apply_character_states(
+        new_pipeline_state["character_states"],
+        mechanics_data.get("character_states") or {},
+        current_turn
+    )
     stage_results.append(mechanics_result)
     if mechanics_result.usage.get('reasoning'):
         reasoning_summaries.append(f"[Mechanics] {mechanics_result.usage['reasoning']}")
@@ -1347,6 +1421,25 @@ def _compute_state_delta(prev: dict, curr: dict) -> str:
     for npc in sorted(set(prev_mems.keys()) - set(curr_mems.keys())):
         if npc not in all_npcs:  # already handled above
             parts.append(f"memory -{npc}: (all removed)")
+
+    # Character states (entries are {"state": "...", "last_updated": N} or flat strings)
+    prev_cs = prev.get("character_states", {})
+    curr_cs = curr.get("character_states", {})
+    def _cs_state(entry):
+        return entry.get("state", "") if isinstance(entry, dict) else entry
+    all_chars = set(list(prev_cs.keys()) + list(curr_cs.keys()))
+    for char in sorted(all_chars):
+        prev_entry = prev_cs.get(char)
+        curr_entry = curr_cs.get(char)
+        prev_state = _cs_state(prev_entry) if prev_entry else None
+        curr_state = _cs_state(curr_entry) if curr_entry else None
+        if curr_state != prev_state:
+            if prev_state is None:
+                parts.append(f"character_state +{char}: {curr_state}")
+            elif curr_state is None:
+                parts.append(f"character_state -{char}")
+            else:
+                parts.append(f"character_state {char}: {prev_state} → {curr_state}")
 
     # Scene state
     prev_scene = prev.get("scene_state", {})

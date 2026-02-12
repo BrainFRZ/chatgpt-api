@@ -21,4 +21,5 @@
 !backend/tests/test_multi_model.py
 !backend/tests/test_pipeline_phase2.py
 !backend/tests/test_pipeline_phase3.py
+!backend/tests/test_pipeline_state.py
 !PIPELINE_PLAN.md
