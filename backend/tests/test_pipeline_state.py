@@ -1091,6 +1091,7 @@ class TestRunPipelineE2E:
         assert result.stages_run == ["events"]
         assert result.pipeline_state is not None
         assert result.pipeline_state["scene_state"]["location"] == "Tavern"
+        assert result.pipeline_state["turn_counter"] == 0  # OOC doesn't advance turn counter
         assert result.injected_state is not None
 
     def test_mechanics_output_shortcircuit(self):
@@ -1293,7 +1294,7 @@ class TestRunPipelineE2E:
         assert injected["callback_ledger"]["open"] == []  # Empty before bootstrap
         assert injected["npc_memories"] == {}  # Empty before bootstrap
         assert injected["scene_state"] == {}  # Empty before bootstrap
-        assert injected["turn_counter"] == 1  # After increment but before ops
+        assert injected["turn_counter"] == 0  # Snapshot taken before route-conditional increment
 
     def test_legacy_chat_second_message_has_injections(self):
         """
@@ -1372,7 +1373,7 @@ class TestRunPipelineE2E:
 
         # The injected state snapshot should show state BEFORE this turn's ops
         injected = json.loads(result.injected_state)
-        assert injected["turn_counter"] == 2  # After increment
+        assert injected["turn_counter"] == 1  # Snapshot taken before route-conditional increment
         assert len(injected["callback_ledger"]["open"]) == 2  # Before resolve
         assert len(injected["npc_memories"]["Sara"]) == 1  # Before add
 

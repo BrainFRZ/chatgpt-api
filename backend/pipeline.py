@@ -1072,10 +1072,9 @@ def run_pipeline(
     # migrate uses setdefault which would modify the original, and if the pipeline
     # fails mid-way we don't want half-applied ops persisted on save
     pipeline_state = migrate_pipeline_state(copy.deepcopy(pipeline_state))
-    pipeline_state["turn_counter"] += 1
-    current_turn = pipeline_state["turn_counter"]
 
     # Snapshot state before Events sees it (for debug transcript)
+    # turn_counter is incremented AFTER we know the route — OOC turns don't advance it
     injected_state_snapshot = json.dumps(pipeline_state, indent=2)
 
     # ---- STAGE 1: Events ----
@@ -1095,6 +1094,11 @@ def run_pipeline(
 
     events_data = events_result.parsed_json
     events_route = events_data.get("route", "mechanics")
+
+    # Increment turn counter only for in-character turns — OOC shouldn't age TTLs
+    if events_route != "output":
+        pipeline_state["turn_counter"] += 1
+    current_turn = pipeline_state["turn_counter"]
 
     # Extract and apply state from Events output
     if events_data.get("pacing"):
