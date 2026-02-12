@@ -842,7 +842,7 @@ class TestTimePassedFlow:
     def test_mechanics_contract_references_time_passed(self):
         """Mechanics contract should reference time_passed for HUD advancement."""
         assert "time_passed" in MECHANICS_CONTRACT
-        assert "Advance the HUD clock" in MECHANICS_CONTRACT
+        assert "advance it by" in MECHANICS_CONTRACT and "time_passed" in MECHANICS_CONTRACT
 
     def test_events_schema_a_time_passed_in_mechanics_input(self):
         """Events JSON with time_passed should be passed to Mechanics via build_mechanics_messages."""
@@ -945,7 +945,7 @@ class TestTimePassedFlow:
 
         # Verify Mechanics system prompt tells it to use time_passed for HUD
         assert "time_passed" in mechanics_messages[0]["content"]
-        assert "Advance the HUD clock" in mechanics_messages[0]["content"]
+        assert "advance it by" in mechanics_messages[0]["content"]
 
     def test_time_passed_with_context_updates(self):
         """time_passed should survive when context updates are also injected."""

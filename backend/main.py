@@ -30,7 +30,14 @@ from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvide
 from sync_manager import sync_manager, SyncEvent, SyncEventType
 
 # Pipeline imports
-from pipeline import run_pipeline, PipelineResult, generate_debug_transcript
+from pipeline import (
+    run_pipeline, PipelineResult, generate_debug_transcript,
+    SINGLE_AGENT_STATE_CONTRACT, StateInterceptor,
+    parse_state_updates_block, apply_single_agent_state_updates,
+    build_single_agent_injections, migrate_pipeline_state,
+    get_context_pairs,
+    SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
+)
 
 # Pipeline agent names (used for per-agent instructions and file routing)
 PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
@@ -870,8 +877,20 @@ def get_instructions(username: str, project: str = None) -> str:
 
     if os.path.exists(path):
         with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
-    return "You are a helpful assistant."
+            instructions = f.read()
+    else:
+        instructions = "You are a helpful assistant."
+
+    # Append user-level base instructions if they exist (shared DM rules across all projects)
+    if project:
+        base_path = os.path.join(get_user_dir(username), "base_instructions.di")
+        if os.path.exists(base_path):
+            with open(base_path, 'r', encoding='utf-8') as f:
+                base = f.read().strip()
+            if base:
+                instructions = instructions.rstrip() + "\n\n" + base
+
+    return instructions
 
 def get_instructions_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load per-agent instructions file, falling back to shared instructions.di."""
@@ -2233,19 +2252,49 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             content = f"{files_text}\n\n{content}"
         return content
 
-    system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
-    history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
-    user_content = build_message_content(branch_path[-1])
-    new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
-
-    messages_for_api = [system_msg] + history_msgs + [new_user_msg]
+    # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
+    use_stateful = model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    stateful_pipeline_state = None
+    stateful_injected_snapshot = None
 
     updates_text = data.get("updates", "").strip()
-    if updates_text:
-        if model_id.startswith("claude"):
-            messages_for_api = anthropic_add_updates(messages_for_api, updates_text)
-        else:
-            messages_for_api = openai_add_updates(messages_for_api, updates_text)
+
+    if use_stateful:
+        # Pair-based context trimming (same approach as pipeline agents)
+        import copy as _copy
+        stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
+        stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
+
+        context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+
+        # Build injections for user message
+        injections_str = build_single_agent_injections(stateful_pipeline_state, updates_text)
+
+        # System prompt: contract + original
+        system_content = SINGLE_AGENT_STATE_CONTRACT + "\n\n" + branch_path[0]["content"]
+        system_msg = {"role": branch_path[0]["role"], "content": system_content}
+
+        # User message with injections prepended
+        user_content = build_message_content(branch_path[-1])
+        if injections_str:
+            user_content = injections_str + "\n\n" + user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + context_pairs + [new_user_msg]
+        # Updates already injected via build_single_agent_injections — don't double-inject
+    else:
+        system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
+        history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
+        user_content = build_message_content(branch_path[-1])
+        new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
+
+        messages_for_api = [system_msg] + history_msgs + [new_user_msg]
+
+        if updates_text:
+            if model_id.startswith("claude"):
+                messages_for_api = anthropic_add_updates(messages_for_api, updates_text)
+            else:
+                messages_for_api = openai_add_updates(messages_for_api, updates_text)
 
     is_free_chat = not request.project
     request_params = provider.build_request(
@@ -2278,6 +2327,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             use_pipeline = model_id == "gpt-5.2" and request.project
+            # use_stateful is computed in the outer scope (before event_generator)
 
             if use_pipeline:
                 # ============================================================
@@ -2581,6 +2631,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # ============================================================
                 # Standard single-agent path (existing behavior)
                 # ============================================================
+                interceptor = StateInterceptor() if use_stateful else None
                 event_count = 0
                 if model_id == "gpt-5.2":
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
@@ -2601,16 +2652,29 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         return
 
                     if stream_event.event_type == 'content_delta':
-                        accumulated_content += stream_event.content
-                        yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
-                        # Broadcast content delta to other clients
-                        await sync_manager.broadcast_to_chat(
-                            chat_key,
-                            SyncEvent(
-                                type=SyncEventType.STREAM_CONTENT,
-                                data={"delta": stream_event.content}
+                        if interceptor:
+                            safe_text = interceptor.feed(stream_event.content)
+                            if safe_text:
+                                accumulated_content += safe_text
+                                yield f"event: content\ndata: {json.dumps({'delta': safe_text})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(
+                                        type=SyncEventType.STREAM_CONTENT,
+                                        data={"delta": safe_text}
+                                    )
+                                )
+                        else:
+                            accumulated_content += stream_event.content
+                            yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                            # Broadcast content delta to other clients
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(
+                                    type=SyncEventType.STREAM_CONTENT,
+                                    data={"delta": stream_event.content}
+                                )
                             )
-                        )
 
                     elif stream_event.event_type == 'thinking_delta':
                         accumulated_thinking += stream_event.content
@@ -2627,6 +2691,36 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     elif stream_event.event_type == 'done':
                         logger.info(f"Stream done event received for user {username}")
                         usage = stream_event.usage
+
+                        # Finalize interceptor: flush remaining narrative and extract state block
+                        state_block_text = None
+                        if interceptor:
+                            remaining, state_block_text = interceptor.finalize()
+                            if remaining:
+                                accumulated_content += remaining
+                                yield f"event: content\ndata: {json.dumps({'delta': remaining})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(
+                                        type=SyncEventType.STREAM_CONTENT,
+                                        data={"delta": remaining}
+                                    )
+                                )
+
+                            # Process state block and apply updates
+                            if state_block_text is not None and stateful_pipeline_state is not None:
+                                stateful_pipeline_state["turn_counter"] += 1
+                                current_turn = stateful_pipeline_state["turn_counter"]
+                                parsed_state = parse_state_updates_block(state_block_text, current_turn)
+                                apply_single_agent_state_updates(
+                                    stateful_pipeline_state, parsed_state, current_turn
+                                )
+                                data["pipeline_state"] = stateful_pipeline_state
+                                logger.info(f"Stateful: applied state updates for user {username}, turn {current_turn}")
+                            else:
+                                # No state block = OOC turn — don't increment turn counter
+                                logger.info(f"Stateful: no state block found (OOC turn) for user {username}")
+
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
                         reasoning_summary = accumulated_thinking or usage.get('reasoning')
@@ -2767,6 +2861,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["reasoning"] = reasoning_summary
                         if service_tier:
                             assistant_msg_data["service_tier"] = service_tier
+                        if use_stateful and stateful_injected_snapshot is not None:
+                            assistant_msg_data["pipeline_state_injected"] = stateful_injected_snapshot
 
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id

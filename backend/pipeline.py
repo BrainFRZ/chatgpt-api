@@ -376,6 +376,70 @@ IMPORTANT:
 - You have access to recent conversation history for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences."""
 
+SINGLE_AGENT_STATE_CONTRACT = """## Persistent State System
+
+You maintain persistent state across turns via injected blocks and a structured output block. This is your long-term memory — when conversation history scrolls out of your context window, these state blocks are your ONLY source of continuity.
+
+### Injected State (read these carefully each turn):
+- **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
+- **[CALLBACK LEDGER]**: Open plot threads, promises, foreshadowing with IDs
+- **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
+- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
+
+### Output Format:
+After your narrative response (including any HUD), output a state update block. This block MUST appear after all narrative content:
+
+```
+[STATE UPDATES]
+PACING:
+episode: <current episode/session name>
+beat: <current narrative beat>
+responses: <number of responses on this beat>
+notes: <pacing observations>
+
+SCENE:
+location: <current location>
+npcs_present: <comma-separated NPC names>
+tensions: <comma-separated active tensions>
+trigger: <what initiated this scene>
+atmosphere: <mood, sensory details>
+details: <comma-separated transient facts>
+pending: <comma-separated pending actions>
+
+CHARACTERS:
+<Name>: <current HP, AC, spell slots, conditions, resources>
+<Name>: <current HP, AC, conditions, resources>
+[/STATE UPDATES]
+```
+
+### Section Rules:
+- **PACING**: Always include. Key-value pairs for episode tracking.
+- **SCENE**: Always include. Full replacement each turn. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene.
+- **CHARACTERS**: Always include. Report each character's updated mechanical state after this turn's outcomes (HP, spell slots, conditions, resources, equipment). Full replacement.
+- **CALLBACKS**: Include only when ops occur. Format:
+  - Add: `+ "description of promise/hook/foreshadowing" | source: <NPC name or null>`
+  - Resolve: `RESOLVE #<id>: "how it resolved"`
+- **MEMORIES**: Include only when ops occur. Format:
+  - Add: `+ <NPC> [<impact 1-5>] "<what happened, max 640 chars>" | "<verbatim quote, max 120 chars>" | <in-world date>`
+  - Drop: `- <NPC> [<index from injected block>]`
+  - Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
+
+### Bootstrap (first turn or empty state):
+When state blocks are absent or empty, review your context to initialize:
+- Set PACING from current session context
+- Build SCENE from where the story currently is
+- Set CHARACTERS from known character sheets
+- Add foundational CALLBACKS for any open plot threads
+- Add key MEMORIES for important NPCs in the scene
+
+### Rules:
+- SCENE, CHARACTERS, and PACING sections are REQUIRED every in-character turn (even if unchanged)
+- CALLBACKS and MEMORIES sections only when operations occurred
+- Omit the entire [STATE UPDATES] block only on pure OOC turns (out-of-character questions with no game content)
+- The block must appear AFTER all narrative content — never interleave it with your story text
+- Do NOT reference the state system in your narrative — it is invisible to the player"""
+
 # ============================================================
 # Pipeline Stage Configuration
 # ============================================================
@@ -1644,3 +1708,330 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
 
     with open(debug_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+
+
+# ============================================================
+# Single-Agent Stateful Persistence (Claude project chats)
+# ============================================================
+
+STATE_BLOCK_START = "\n[STATE UPDATES]\n"
+STATE_BLOCK_END = "\n[/STATE UPDATES]"
+
+# Threshold/target for single-agent context trimming (same as pipeline)
+SINGLE_AGENT_THRESHOLD_PAIRS = 40
+SINGLE_AGENT_TARGET_PAIRS = 20
+
+
+class StateInterceptor:
+    """Buffers streaming content and intercepts the [STATE UPDATES] block."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.state_started = False
+        self.state_buffer = ""
+        self.narrative_complete = ""
+
+    def feed(self, delta: str) -> str:
+        """Feed a content delta. Returns text safe to yield to user."""
+        if self.state_started:
+            self.state_buffer += delta
+            return ""
+
+        self.buffer += delta
+
+        if STATE_BLOCK_START in self.buffer:
+            parts = self.buffer.split(STATE_BLOCK_START, 1)
+            self.state_started = True
+            safe = parts[0]
+            self.state_buffer = parts[1]
+            self.narrative_complete += safe
+            self.buffer = ""
+            return safe
+
+        # Hold back potential partial delimiter
+        safe_len = max(0, len(self.buffer) - len(STATE_BLOCK_START))
+        safe = self.buffer[:safe_len]
+        self.buffer = self.buffer[safe_len:]
+        self.narrative_complete += safe
+        return safe
+
+    def finalize(self) -> tuple:
+        """Call after stream ends. Returns (remaining_narrative, state_block_text_or_None)."""
+        if self.state_started:
+            state_text = self.state_buffer
+            if STATE_BLOCK_END in state_text:
+                state_text = state_text[:state_text.index(STATE_BLOCK_END)]
+            return self.buffer, state_text
+        else:
+            return self.buffer, None
+
+
+def _parse_pacing_section(lines: list) -> dict:
+    """Parse PACING section lines into a dict."""
+    result = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            # Try to parse responses as int
+            if key == "responses":
+                try:
+                    value = int(value)
+                except (ValueError, TypeError):
+                    pass
+            result[key] = value
+    return result
+
+
+def _parse_callbacks_section(lines: list) -> list:
+    """Parse CALLBACKS section lines into ops list."""
+    import re
+    ops = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("+"):
+            # Add: + "description" | source: NPC
+            text_match = re.search(r'"([^"]*)"', line)
+            text = text_match.group(1) if text_match else line[1:].strip()
+            source = None
+            source_match = re.search(r'\|\s*source:\s*(.+)', line)
+            if source_match:
+                source = source_match.group(1).strip()
+                if source.lower() == "null":
+                    source = None
+            ops.append({
+                "action": "add",
+                "original_text": text[:800],
+                "source_npc": source
+            })
+        elif line.upper().startswith("RESOLVE"):
+            # RESOLVE #N: "text"
+            id_match = re.search(r'#(\d+)', line)
+            text_match = re.search(r'"([^"]*)"', line)
+            if id_match:
+                ops.append({
+                    "action": "resolve",
+                    "id": int(id_match.group(1)),
+                    "resolution_text": text_match.group(1) if text_match else ""
+                })
+    return ops
+
+
+def _parse_memories_section(lines: list) -> list:
+    """Parse MEMORIES section lines into ops list."""
+    import re
+    ops = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("+"):
+            # + NPC [impact] "text" | "quote" | date
+            rest = line[1:].strip()
+            # Extract NPC name (everything before first [)
+            bracket_idx = rest.find("[")
+            if bracket_idx == -1:
+                continue
+            npc = rest[:bracket_idx].strip()
+            # Extract impact
+            impact_match = re.search(r'\[(\d+)\]', rest)
+            impact = int(impact_match.group(1)) if impact_match else 1
+            # Extract quoted strings
+            quotes = re.findall(r'"([^"]*)"', rest)
+            text = quotes[0] if len(quotes) > 0 else ""
+            quote = quotes[1] if len(quotes) > 1 else None
+            # Date is after last | (at least 2 pipes for text|quote|date, or 1 pipe for text|date)
+            parts = rest.split("|")
+            date = None
+            if len(parts) >= 2:
+                candidate = parts[-1].strip()
+                # If the last segment looks like a quoted string, it's a quote not a date
+                if candidate and not candidate.startswith('"'):
+                    date = candidate
+            ops.append({
+                "action": "add",
+                "npc": npc,
+                "text": text[:640],
+                "quote": quote[:120] if quote else None,
+                "date": date,
+                "impact": impact
+            })
+        elif line.startswith("-"):
+            # - NPC [index]
+            rest = line[1:].strip()
+            bracket_match = re.search(r'\[(\d+)\]', rest)
+            if bracket_match:
+                idx = int(bracket_match.group(1))
+                npc = rest[:rest.find("[")].strip()
+                ops.append({
+                    "action": "drop",
+                    "npc": npc,
+                    "index": idx
+                })
+    return ops
+
+
+def _parse_scene_section(lines: list) -> dict:
+    """Parse SCENE section lines into a scene_state dict."""
+    result = {}
+    list_keys = {"npcs_present", "tensions", "details", "pending"}
+    # Map short keys to full scene_state keys
+    key_map = {
+        "npcs_present": "npcs_present",
+        "tensions": "active_tensions",
+        "trigger": "scene_trigger",
+        "pending": "pending_actions",
+        "location": "location",
+        "atmosphere": "atmosphere",
+        "details": "details",
+    }
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            mapped_key = key_map.get(key, key)
+            if key in list_keys:
+                result[mapped_key] = [v.strip() for v in value.split(",") if v.strip()] if value and value != "(none)" else []
+            else:
+                result[mapped_key] = value
+    return result
+
+
+def _parse_characters_section(lines: list) -> dict:
+    """Parse CHARACTERS section lines into a flat name→state dict."""
+    result = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            name, _, state = line.partition(":")
+            name = name.strip()
+            state = state.strip()
+            if name and state:
+                result[name] = state
+    return result
+
+
+def parse_state_updates_block(text: str, current_turn: int) -> dict:
+    """
+    Parse the [STATE UPDATES] block text into ops compatible with existing apply_* functions.
+
+    Returns dict with keys: pacing, callback_ops, npc_memory_ops, scene_state, character_states.
+    Each value is None if that section was not present.
+    """
+    result = {
+        "pacing": None,
+        "callback_ops": None,
+        "npc_memory_ops": None,
+        "scene_state": None,
+        "character_states": None,
+    }
+
+    # Split text into sections by header lines
+    current_section = None
+    section_lines = {}
+
+    # Map alternate section header names to canonical names
+    _section_aliases = {
+        "PACING": "PACING", "CALLBACKS": "CALLBACKS", "MEMORIES": "MEMORIES",
+        "SCENE": "SCENE", "CHARACTERS": "CHARACTERS",
+        "SCENE STATE": "SCENE", "CHARACTER STATES": "CHARACTERS",
+        "NPC MEMORIES": "MEMORIES",
+    }
+
+    for line in text.split("\n"):
+        stripped = line.strip().upper().rstrip(":")
+        if stripped in _section_aliases:
+            current_section = _section_aliases[stripped]
+            section_lines[current_section] = []
+        elif current_section is not None:
+            section_lines[current_section].append(line)
+
+    if "PACING" in section_lines:
+        result["pacing"] = _parse_pacing_section(section_lines["PACING"])
+    if "CALLBACKS" in section_lines:
+        result["callback_ops"] = _parse_callbacks_section(section_lines["CALLBACKS"])
+    if "MEMORIES" in section_lines:
+        result["npc_memory_ops"] = _parse_memories_section(section_lines["MEMORIES"])
+    if "SCENE" in section_lines:
+        result["scene_state"] = _parse_scene_section(section_lines["SCENE"])
+    if "CHARACTERS" in section_lines:
+        result["character_states"] = _parse_characters_section(section_lines["CHARACTERS"])
+
+    return result
+
+
+def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int) -> dict:
+    """Apply parsed state updates to pipeline_state using existing apply_* functions."""
+    if parsed["pacing"]:
+        pipeline_state["pacing"] = parsed["pacing"]
+    if parsed["callback_ops"]:
+        pipeline_state["callback_ledger"] = apply_callback_ops(
+            pipeline_state["callback_ledger"],
+            parsed["callback_ops"],
+            current_turn
+        )
+    if parsed["npc_memory_ops"]:
+        pipeline_state["npc_memories"] = apply_npc_memory_ops(
+            pipeline_state["npc_memories"],
+            parsed["npc_memory_ops"],
+            current_turn
+        )
+    if parsed["scene_state"]:
+        pipeline_state["scene_state"] = apply_scene_state(parsed["scene_state"])
+    pipeline_state["character_states"] = apply_character_states(
+        pipeline_state["character_states"],
+        parsed["character_states"] or {},
+        current_turn
+    )
+    return pipeline_state
+
+
+def build_single_agent_injections(pipeline_state: dict, updates_text: str = "") -> str:
+    """Build the full injection string for a single-agent stateful user message."""
+    injections = []
+
+    # 1. Pacing state
+    pacing = pipeline_state.get("pacing", {})
+    if pacing:
+        injections.append(f"[PIPELINE STATE]\n{json.dumps(pacing, indent=2)}\n[/PIPELINE STATE]")
+
+    # 2. Callback ledger
+    cb = build_callback_injection(pipeline_state.get("callback_ledger", {}))
+    if cb:
+        injections.append(cb)
+
+    # 3. NPC memories (scene-scoped)
+    mem = build_npc_memories_injection(
+        pipeline_state.get("npc_memories", {}),
+        pipeline_state.get("scene_state", {})
+    )
+    if mem:
+        injections.append(mem)
+
+    # 4. Scene state
+    scene = build_scene_state_injection(pipeline_state.get("scene_state", {}))
+    if scene:
+        injections.append(scene)
+
+    # 5. Character states
+    cs = build_character_states_injection(pipeline_state.get("character_states", {}))
+    if cs:
+        injections.append(cs)
+
+    # 6. Context updates
+    if updates_text.strip():
+        injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
+
+    return "\n\n".join(injections) if injections else ""

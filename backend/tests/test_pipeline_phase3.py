@@ -301,7 +301,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "Hello", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -336,7 +336,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "Can we take a break?", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -377,7 +377,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "What's my AC?", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -416,7 +416,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "Hello", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -463,7 +463,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "Hello", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -490,7 +490,7 @@ class TestPipelineStageEvents:
                 {"role": "system", "content": "System prompt", "id": "sys"},
                 {"role": "user", "content": "Test", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
@@ -709,7 +709,7 @@ class TestPipelineEventOrdering:
                 {"role": "system", "content": "Sys", "id": "sys"},
                 {"role": "user", "content": "Go", "id": "usr"}
             ],
-            context_start_index=1,
+
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=None
