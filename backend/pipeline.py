@@ -258,8 +258,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
           "description": "<what this roll is for>",
           "advantage": <true/false if applicable>,
           "disadvantage": <true/false if applicable>,
-          "rolls": [<die result 1>, <die result 2 if adv/disadv>],
-          "selected": <which roll was used>,
+          "rolls": [<single die result>],
+          "selected": <the die result>,
           "modifiers": [
             {"name": "<modifier name>", "value": <number>}
           ],
@@ -312,7 +312,9 @@ BEAT RULES:
 ROLL RULES:
 - BEFORE rolling, identify ALL modifiers: base ability, proficiency, relationship/romance/faction, situational
 - If ANY modifier cannot be verified from your documents, note the uncertainty in the outcome
-- Show advantage/disadvantage with both rolls when applicable
+- Normal rolls: "rolls" has ONE element, e.g. "rolls": [14], "selected": 14
+- Advantage/disadvantage: "rolls" has TWO elements, e.g. "rolls": [14, 8], "selected": 14. Set the appropriate flag to true.
+- NEVER put two values in "rolls" unless advantage or disadvantage is true — Narration displays all values
 - Include the "details" field for damage rolls (e.g., "2d6 force damage")
 
 HUD:
@@ -352,10 +354,11 @@ OUTPUT STRUCTURE:
 0. If the Mechanics JSON contains a non-null "arc_label", display it as a small bold header at the very start of your response, e.g.: **[Invented Mini-Arc: Dock Worker Dispute]** — then continue with the narrative below it.
 1. Narrate the beats in order. Each beat in the Mechanics JSON is a discrete event that happened — write them as a cohesive narrative in the sequence provided. Use the "outcome" and "state_changes" fields on each beat to know exactly what happened. Use the "callbacks" array for context on foreshadowed events being paid off — weave these naturally into the narrative using the "source" NPC's voice and mannerisms when applicable.
 2. Place roll breakdowns where they fit naturally within the beat they belong to:
-   🎲 [Description]: [roll1, **selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
-   For advantage: show both rolls, bold the selected one
-   For disadvantage: show both rolls, bold the selected (lower) one
-   Use the exact modifier names and values from the beat's "rolls" array.
+   Normal roll: 🎲 [Description]: [**selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
+   Advantage: 🎲 [Description]: [roll1, **selected**] +N (Mod) = Total vs DC X ✓/✗ (show both rolls, bold the higher)
+   Disadvantage: 🎲 [Description]: [roll1, **selected**] +N (Mod) = Total vs DC X ✓/✗ (show both rolls, bold the lower)
+   Only show two die values when "advantage" or "disadvantage" is true in the roll object. If neither flag is set, show one value.
+   Use the modifier names and values from the beat's "rolls" array, but OMIT any modifier with value 0 — only show modifiers that actually affect the total.
 3. If the Mechanics JSON contains non-empty "score_changes", format them as a brief OOC line just ABOVE the HUD:
    📊 **RS** [Name] [+/-N] ([total]) · [reason] | **FR** [Name] [+/-N] ([total]) · [reason]
    Example: 📊 **RS** Kira +2 (47) · Stood up for her | **FR** Chrome Syndicate -5 (30) · Refused their job
