@@ -228,7 +228,7 @@ PACING STATE:
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
-- "character_states" should include all mechanically relevant info since Mechanics has NO conversation history.
+- "character_states" should include all mechanically relevant info since Mechanics has NO conversation history. Report current state as baseline — do NOT apply changes yourself (e.g. don't subtract HP for damage). Mechanics is the sole authority on state changes.
 - Include ALL triggered callbacks in the "callbacks" array — things directly related/promised/foreshadowed earlier that should now activate or be referenced. Set "source" to the NPC or faction name when applicable, or null for environmental/systemic triggers.
 - You see recent conversation pairs plus persistent state injections. Use both to maintain continuity."""
 
