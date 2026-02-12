@@ -6,6 +6,7 @@ Each stage has its own reasoning effort, service tier, and context window.
 Only activates for GPT-5.2 project chats; Anthropic models use the existing single-agent flow.
 """
 
+import copy
 import json
 import logging
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 EVENTS_CONTRACT = """You are the EVENTS AGENT in a multi-agent TTRPG game master pipeline. You are the first stage.
 
-YOUR ROLE: Analyze the conversation history and determine what is happening this turn. Identify narrative beats, triggered callbacks, emotional context, and current character states.
+YOUR ROLE: Analyze the conversation history and determine what is happening this turn. Identify narrative beats, triggered callbacks, emotional context, and current character states. Maintain the persistent callback ledger, NPC memories, and scene state.
 
 YOU MUST OUTPUT VALID JSON matching one of these schemas:
 
@@ -65,7 +66,41 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "funds": "<string for shared party funds OR object mapping character names to their funds>",
     "trackables": "<null, or object mapping resource names to current values e.g. {\"Ship Fuel\": \"72%\", \"Railgun Ammo\": \"14/20\"}>"
   },
-  "combat": "<null OR combat object (see COMBAT section)>"
+  "combat": "<null OR combat object (see COMBAT section)>",
+  "callback_ops": [
+    {"action": "add", "original_text": "<what was promised/foreshadowed, ~800 char max>", "source_npc": "<NPC name or null>"},
+    {"action": "resolve", "id": <callback ID from ledger>, "resolution_text": "<how it resolved>"},
+    {"action": "update", "id": <callback ID>, "fields": {"original_text": "<revised text>"}}
+  ],
+  "npc_memory_ops": [
+    {"action": "add", "npc": "<NPC name>", "text": "<what happened, ~400 char max>", "quote": "<verbatim quote or null, ~120 char max>", "date": "<in-world date>", "impact": <1-5>},
+    {"action": "drop", "npc": "<NPC name>", "index": <0-based index in that NPC's memory list>}
+  ],
+  "scene_state": {
+    "location": "<current location>",
+    "npcs_present": ["<NPC name>", ...],
+    "active_tensions": ["<tension description>", ...],
+    "scene_trigger": "<what initiated this scene>",
+    "atmosphere": "<mood, lighting, weather, sensory details>",
+    "details": ["<transient fact>", ...],
+    "pending_actions": ["<action someone is about to take>", ...]
+  }
+}
+
+SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mechanics):
+{
+  "route": "output",
+  "pacing": {
+    "episode": "<current episode name>",
+    "beat": "<current narrative beat>",
+    "beat_responses": <number of responses on this beat>,
+    "notes": "<pacing observations>"
+  },
+  "time_passed": "0 minutes",
+  "content": "<your conversational OOC response>",
+  "callback_ops": [],
+  "npc_memory_ops": [],
+  "scene_state": {<maintain current scene state unchanged>}
 }
 
 ARC LABEL:
@@ -93,7 +128,7 @@ CONTEXT UPDATES:
 - Tier effects should feel organic, not mechanical — an NPC doesn't announce their tier, they simply behave according to the relationship level
 
 TIME PASSED:
-- Estimate how much in-world time this turn covers based on the full conversation context
+- Estimate how much in-world time this turn covers based on the conversation context
 - Use natural language: "1 minute", "10 minutes", "2 hours", "overnight (8 hours)"
 - Quick actions (opening a door, a single exchange): "1 minute"
 - Conversations, short walks, searching a room: "5-15 minutes"
@@ -125,7 +160,7 @@ HUD STATE:
 - "location": where the party currently is
 - "funds": EITHER a plain string for shared party funds (e.g. "97,572 cr") OR an object mapping each party member to their funds (e.g. {"Aedina": "32 gp, 5 sp", "Orrophim": "18 gp"}). Use whichever matches how the campaign tracks funds per instructions.
 - "trackables": null when the campaign has no extra resources to track. When the campaign tracks resources beyond funds (ship fuel, ammo, rations, heat, etc.), set this to an object mapping resource names to current values (e.g. {"Ship Fuel": "72%", "Railgun Ammo": "14/20"}). Derive which resources to track from the campaign instructions and conversation context.
-- Derive all values from the full conversation context — you have access to the complete history
+- Derive all values from your context window and the injected state blocks
 
 COMBAT:
 - Set "combat" to null when NOT in combat (the vast majority of turns)
@@ -140,33 +175,56 @@ COMBAT:
 - Update "round" when the initiative order cycles back to the top
 - Set "combat" back to null when combat ends
 
-SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mechanics):
-{
-  "route": "output",
-  "pacing": {
-    "episode": "<current episode name>",
-    "beat": "<current narrative beat>",
-    "beat_responses": <number of responses on this beat>,
-    "notes": "<pacing observations>"
-  },
-  "time_passed": "0 minutes",
-  "content": "<your conversational OOC response>"
-}
+PERSISTENT STATE — YOUR LONG-TERM MEMORY:
+You only see the most recent 20-40 turns of conversation (context grows then trims periodically). Everything older is gone from your context. To compensate, you maintain three persistent state structures that are injected into every turn: a Callback Ledger (open plot threads and promises), NPC Memories (key moments per character), and Scene State (where and what is happening). These are your ONLY source of information beyond the visible context window. Read them carefully — they contain context you cannot derive from conversation alone. Maintain them diligently — if you don't record something, it's lost when it scrolls out of your context window.
+
+CALLBACK LEDGER:
+- You receive a [CALLBACK LEDGER] block showing all open and recently resolved callbacks — promises, foreshadowing, unresolved hooks
+- Use "callback_ops" to manage this ledger. Operations:
+  * "add": Register a new callback when an NPC makes a promise, a plot thread is introduced, or something is foreshadowed. Set "original_text" to a concise summary (max 800 chars, truncated beyond). Set "source_npc" to the NPC name or null for environmental/systemic triggers.
+  * "resolve": When a callback fires or is paid off, resolve it by ID. Set "resolution_text" to describe how it resolved.
+  * "update": Modify an open callback's text if circumstances changed (e.g., the stakes escalated). Only update "original_text" via the "fields" object.
+- The per-turn "callbacks" field (passed through to Mechanics/Narration) is SEPARATE from "callback_ops". "callbacks" describes what triggers THIS turn. "callback_ops" maintains the persistent ledger across turns.
+- Most turns have 0-1 callback_ops. Don't force ops — only act when the narrative warrants it.
+- BOOTSTRAP (empty ledger): On your first turn or when the ledger is empty, review your context for any open promises, unresolved hooks, or foreshadowed events. Add them with "add" ops to seed the ledger.
+
+NPC MEMORIES:
+- You receive [NPC MEMORIES: <name>] blocks for NPCs present in the current scene (based on previous turn's scene_state.npcs_present). Each memory is prefixed with its index: [0], [1], etc.
+- Use "npc_memory_ops" to manage memories. Operations:
+  * "add": Record a significant moment for an NPC. Fields: npc, text (max 640 chars, truncated beyond), quote (verbatim line, max 120 chars, or null), date (in-world), impact (1-5).
+  * "drop": Remove an outdated or superseded memory. Fields: npc, index (use the [N] index shown in the injection).
+- Impact scale: 1-2 = flavor (funny moments, small interactions), 3 = moderate (meaningful exchanges, minor revelations), 4-5 = high (life-changing events, betrayals, deep bonds)
+- Tier limits per NPC: 8 high, 10 moderate, 12 flavor — the system enforces these as a safety net, but you should manage organically
+- Only create memories for narratively significant NPCs, not every background character
+- Most turns have 0-1 memory ops. Add when something genuinely memorable happens for that NPC's relationship with the party.
+- BOOTSTRAP (empty memories): On your first turn or when memories are empty, review your context for key NPCs and their important interactions. Add foundational memories to establish the relationship baseline.
+
+SCENE STATE:
+- You receive a [SCENE STATE] block showing the previous turn's scene
+- Output a complete "scene_state" object EVERY turn — this is a full replacement, not a diff
+- "npcs_present" is critical: it controls which NPC memories are injected on the NEXT turn. List every NPC actively in the scene.
+- "active_tensions" captures unresolved dramatic tensions driving the scene
+- "details" is for transient facts that matter now but may not next scene (e.g., "disguise is active", "door is barricaded")
+- "pending_actions" tracks things about to happen that should carry into the next turn
+- BOOTSTRAP (empty scene): On your first turn or when scene_state is empty, construct the full scene state from your context — location, who's present, what's happening.
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay, even if no dice rolls seem needed (Mechanics always updates the HUD)
 - Route to "output" ONLY for pure OOC questions with no mechanics component (e.g., "can we take a break?", "what happened last session?")
 - When routing to "output", respond conversationally as a friendly DM speaking out of character
+- On OOC turns (route=output), still output scene_state (unchanged) and optionally callback_ops/npc_memory_ops. If omitted, state persists unchanged.
 
 PACING STATE:
 - You will receive a [PIPELINE STATE] block with pacing data from the previous turn. Update the pacing field in your output to reflect the current state.
+- You also receive [CALLBACK LEDGER], [NPC MEMORIES], and [SCENE STATE] injections — these are your persistent memory across turns.
 - Track episode/beat progression to avoid runaway or skipped beats.
 
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
 - "character_states" should include all mechanically relevant info since Mechanics has NO conversation history.
-- Include ALL triggered callbacks - things directly related/promised/foreshadowed earlier that should now activate or be referenced. Set "source" to the NPC or faction name when applicable, or null for environmental/systemic triggers."""
+- Include ALL triggered callbacks in the "callbacks" array — things directly related/promised/foreshadowed earlier that should now activate or be referenced. Set "source" to the NPC or faction name when applicable, or null for environmental/systemic triggers.
+- You see recent conversation pairs plus persistent state injections. Use both to maintain continuity."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game master pipeline. You are the second stage.
 
@@ -296,7 +354,7 @@ IMPORTANT:
 - Output plain text only. No JSON wrapping.
 - Append the HUD exactly as provided - do not modify it.
 - The beats array IS the ground truth. Do not invent outcomes that aren't in the beats.
-- You have access to the last 20 conversation pairs for voice consistency.
+- You have access to recent conversation history for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences."""
 
 # ============================================================
@@ -339,8 +397,18 @@ STAGE_CONFIGS = {
     ),
 }
 
-# Number of recent user-assistant pairs for Narration's context window
-NARRATION_CONTEXT_PAIRS = 20
+# Threshold/target pairs for agent context windows (prefix-caching friendly)
+# Context grows by appending until threshold is exceeded, then trims to target.
+# ~95% of turns preserve the prefix for OpenAI prompt caching.
+EVENTS_THRESHOLD_PAIRS = 40
+EVENTS_TARGET_PAIRS = 20
+NARRATION_THRESHOLD_PAIRS = 40
+NARRATION_TARGET_PAIRS = 20
+
+# State management constants
+CALLBACK_RESOLVED_RETENTION = 20  # Turns to keep resolved callbacks before pruning
+NPC_MEMORY_TIER_LIMITS = {"high": 8, "moderate": 10, "flavor": 12}
+NPC_MEMORY_MAX_PER_NPC = 30
 
 # ============================================================
 # Pipeline Result
@@ -365,9 +433,11 @@ class PipelineResult:
     stages_run: list[str]  # e.g. ["events", "mechanics", "narration"]
     aggregate_usage: dict  # Combined token usage
     aggregate_cost: float  # Total cost across all stages
-    pipeline_state: Optional[dict]  # Updated pacing state from Events
+    pipeline_state: Optional[dict]  # Updated pipeline state from Events
     reasoning_summaries: list[str]  # Reasoning from each stage
     service_tier_label: str  # e.g. "flex+standard"
+    injected_state: Optional[str] = None  # Snapshot of pipeline_state injected into Events
+    stage_usage: Optional[dict] = None  # Per-stage usage: {"events": {...}, "mechanics": {...}, "narration": {...}}
 
 
 # ============================================================
@@ -398,25 +468,47 @@ def build_events_messages(
     system_prompt: str,
     history_messages: list[dict],
     user_message: dict,
-    pipeline_state: Optional[dict],
+    pipeline_state: dict,
     updates_text: str = ""
 ) -> list[dict]:
     """
     Build the message list for the Events agent.
 
-    Events sees the full conversation context (same as current single-agent),
-    plus a [PIPELINE STATE] injection.
+    Events sees recent conversation pairs plus persistent state injections:
+    [PIPELINE STATE] (pacing), [CALLBACK LEDGER], [NPC MEMORIES], [SCENE STATE], [CONTEXT UPDATES]
     """
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history_messages)
 
-    # Build the final user message with pipeline state and updates injected
+    # Build the final user message with all injections
     user_content = user_message["content"]
 
     injections = []
-    if pipeline_state:
-        state_str = json.dumps(pipeline_state, indent=2)
-        injections.append(f"[PIPELINE STATE]\n{state_str}\n[/PIPELINE STATE]")
+
+    # 1. Pacing state (compact JSON)
+    pacing = pipeline_state.get("pacing", {})
+    if pacing:
+        injections.append(f"[PIPELINE STATE]\n{json.dumps(pacing, indent=2)}\n[/PIPELINE STATE]")
+
+    # 2. Callback ledger
+    cb_injection = build_callback_injection(pipeline_state.get("callback_ledger", {}))
+    if cb_injection:
+        injections.append(cb_injection)
+
+    # 3. NPC memories (scene-scoped)
+    mem_injection = build_npc_memories_injection(
+        pipeline_state.get("npc_memories", {}),
+        pipeline_state.get("scene_state", {})
+    )
+    if mem_injection:
+        injections.append(mem_injection)
+
+    # 4. Scene state
+    scene_injection = build_scene_state_injection(pipeline_state.get("scene_state", {}))
+    if scene_injection:
+        injections.append(scene_injection)
+
+    # 5. Context updates
     if updates_text.strip():
         injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
 
@@ -491,21 +583,329 @@ def build_message_content(msg: dict) -> str:
     return content
 
 
-def get_recent_pairs(branch_path: list[dict], n_pairs: int = NARRATION_CONTEXT_PAIRS) -> list[dict]:
+def get_context_pairs(branch_path: list[dict], threshold_pairs: int, target_pairs: int) -> list[dict]:
     """
-    Extract the last N user-assistant message pairs from the branch path.
+    Extract context pairs using threshold/target for prefix-cache-friendly behavior.
 
+    Context grows by appending (preserving the prefix for caching) until
+    total pairs exceed threshold_pairs, then trims back to target_pairs.
     Skips the system message (index 0) and the current user message (last).
     Returns pairs as a flat list of {role, content} dicts.
     """
     # branch_path: [system, ...history..., current_user]
-    # We want pairs from history (skip system at 0, skip current user at -1)
     history = branch_path[1:-1]  # All messages between system and current user
+    total_pairs = len(history) // 2
 
-    # Take the last n_pairs*2 messages (each pair = user + assistant)
-    pair_messages = history[-(n_pairs * 2):]
+    if total_pairs > threshold_pairs:
+        pair_messages = history[-(target_pairs * 2):]  # trim to target
+    else:
+        pair_messages = history  # include all — prefix preserved for caching
 
     return [{"role": msg["role"], "content": build_message_content(msg)} for msg in pair_messages]
+
+
+# ============================================================
+# Pipeline State Migration & Op-Application
+# ============================================================
+
+def _fresh_pipeline_state() -> dict:
+    """Return a fresh pipeline_state with all sub-structures initialized."""
+    return {
+        "pacing": {},
+        "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
+        "npc_memories": {},
+        "scene_state": {},
+        "turn_counter": 0
+    }
+
+
+def migrate_pipeline_state(state: Optional[dict]) -> dict:
+    """Migrate pipeline_state from any legacy format to the current nested structure."""
+    if state is None:
+        return _fresh_pipeline_state()
+
+    # Old flat format: state IS the pacing dict (has keys like "episode", "beat" but no "pacing" key)
+    if "pacing" not in state:
+        return {
+            "pacing": state,
+            "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
+            "npc_memories": {},
+            "scene_state": {},
+            "turn_counter": 0
+        }
+
+    # New format — ensure all keys exist
+    state.setdefault("pacing", {})
+    state.setdefault("callback_ledger", {"next_id": 1, "open": [], "recently_resolved": []})
+    ledger = state["callback_ledger"]
+    ledger.setdefault("next_id", 1)
+    ledger.setdefault("open", [])
+    ledger.setdefault("recently_resolved", [])
+    state.setdefault("npc_memories", {})
+    state.setdefault("scene_state", {})
+    state.setdefault("turn_counter", 0)
+    return state
+
+
+def apply_callback_ops(ledger: dict, ops: list, current_turn: int) -> dict:
+    """Apply callback_ops to the ledger and prune old resolved entries."""
+    open_list = ledger.get("open", [])
+    resolved_list = ledger.get("recently_resolved", [])
+    next_id = ledger.get("next_id", 1)
+
+    # Build index of open callbacks by ID for fast lookup
+    open_by_id = {cb["id"]: cb for cb in open_list}
+
+    for op in (ops or []):
+        action = op.get("action")
+
+        if action == "add":
+            text = op.get("original_text", "")[:800]
+            entry = {
+                "id": next_id,
+                "created_turn": current_turn,
+                "original_text": text,
+                "source_npc": op.get("source_npc")
+            }
+            open_by_id[next_id] = entry
+            next_id += 1
+
+        elif action == "resolve":
+            target_id = op.get("id")
+            if target_id is None or target_id not in open_by_id:
+                logger.warning(f"callback_ops resolve: ID {target_id} not found in open callbacks")
+                continue
+            entry = open_by_id.pop(target_id)
+            entry["resolved_turn"] = current_turn
+            entry["resolution_text"] = op.get("resolution_text", "")
+            resolved_list.append(entry)
+
+        elif action == "update":
+            target_id = op.get("id")
+            if target_id is None or target_id not in open_by_id:
+                logger.warning(f"callback_ops update: ID {target_id} not found in open callbacks")
+                continue
+            fields = op.get("fields", {})
+            for k, v in fields.items():
+                if k not in ("id", "created_turn"):  # Protect immutable fields
+                    open_by_id[target_id][k] = v
+
+    # Prune old resolved entries
+    resolved_list = [
+        r for r in resolved_list
+        if current_turn - r.get("resolved_turn", current_turn) <= CALLBACK_RESOLVED_RETENTION
+    ]
+
+    return {
+        "next_id": next_id,
+        "open": list(open_by_id.values()),
+        "recently_resolved": resolved_list
+    }
+
+
+def _memory_tier(impact) -> str:
+    """Map impact score (1-5) to tier name."""
+    try:
+        impact = int(impact)
+    except (TypeError, ValueError):
+        return "flavor"
+    if impact >= 4:
+        return "high"
+    elif impact == 3:
+        return "moderate"
+    else:
+        return "flavor"
+
+
+def _memory_sort_key(m: dict) -> tuple:
+    """Sort key for NPC memories — matches injection display order."""
+    return (m.get("impact", 0), m.get("turn_created", 0))
+
+
+def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
+    """Apply npc_memory_ops (add/drop) to the NPC memories dict."""
+    if not ops:
+        return memories
+
+    # Sort all NPC lists to match injection display order BEFORE processing drops,
+    # so drop indices align with what the model saw in [NPC MEMORIES] blocks
+    for npc_name in memories:
+        memories[npc_name] = sorted(memories[npc_name], key=_memory_sort_key, reverse=True)
+
+    # Process drops first (reverse index order to avoid shift issues)
+    drop_ops = sorted(
+        [op for op in ops if op.get("action") == "drop"],
+        key=lambda o: o.get("index", 0),
+        reverse=True
+    )
+    for op in drop_ops:
+        npc = op.get("npc")
+        idx = op.get("index")
+        if not npc or npc not in memories:
+            logger.warning(f"npc_memory_ops drop: NPC '{npc}' not found")
+            continue
+        npc_list = memories[npc]
+        if idx is None or idx < 0 or idx >= len(npc_list):
+            logger.warning(f"npc_memory_ops drop: index {idx} out of bounds for '{npc}' (len={len(npc_list)})")
+            continue
+        npc_list.pop(idx)
+        if not npc_list:
+            del memories[npc]
+
+    # Process adds
+    add_ops = [op for op in ops if op.get("action") == "add"]
+    for op in add_ops:
+        npc = op.get("npc")
+        if not npc:
+            continue
+        try:
+            impact = int(op.get("impact", 1))
+        except (TypeError, ValueError):
+            impact = 1
+        tier = _memory_tier(impact)
+        entry = {
+            "text": op.get("text", "")[:640],
+            "quote": (op.get("quote") or "")[:120] or None,
+            "date": op.get("date"),
+            "impact": impact,
+            "tier": tier,
+            "turn_created": current_turn
+        }
+        if npc not in memories:
+            memories[npc] = []
+        memories[npc].append(entry)
+
+        # Enforce per-NPC cap
+        if len(memories[npc]) > NPC_MEMORY_MAX_PER_NPC:
+            # Sort so we keep highest-impact; drop from the tail (lowest)
+            memories[npc] = sorted(memories[npc], key=_memory_sort_key, reverse=True)[:NPC_MEMORY_MAX_PER_NPC]
+
+        # Enforce tier limits as safety net
+        tier_limit = NPC_MEMORY_TIER_LIMITS.get(tier, 12)
+        tier_entries_indexed = [(i, m) for i, m in enumerate(memories[npc]) if m.get("tier") == tier]
+        if len(tier_entries_indexed) > tier_limit:
+            excess = len(tier_entries_indexed) - tier_limit
+            # Sort by turn_created asc (oldest first), then impact asc (lowest-value first among ties)
+            tier_entries_indexed.sort(key=lambda x: (x[1].get("turn_created", 0), x[1].get("impact", 0)))
+            remove_indices = set(idx for idx, _ in tier_entries_indexed[:excess])
+            memories[npc] = [m for i, m in enumerate(memories[npc]) if i not in remove_indices]
+
+    # Keep lists in injection display order for index consistency on next turn
+    for npc_name in memories:
+        memories[npc_name] = sorted(memories[npc_name], key=_memory_sort_key, reverse=True)
+
+    return memories
+
+
+def apply_scene_state(new_scene: dict) -> dict:
+    """Apply a wholesale scene_state replacement with key defaults."""
+    defaults = {
+        "location": "",
+        "npcs_present": [],
+        "active_tensions": [],
+        "scene_trigger": "",
+        "atmosphere": "",
+        "details": [],
+        "pending_actions": []
+    }
+    result = {}
+    for key, default in defaults.items():
+        result[key] = new_scene.get(key, default)
+    return result
+
+
+# ============================================================
+# Injection Builders (format state for model consumption)
+# ============================================================
+
+def build_callback_injection(ledger: dict) -> str:
+    """Build human-readable callback ledger injection for Events."""
+    open_list = ledger.get("open", [])
+    resolved_list = ledger.get("recently_resolved", [])
+    if not open_list and not resolved_list:
+        return ""
+
+    lines = ["[CALLBACK LEDGER]"]
+
+    if open_list:
+        lines.append("OPEN:")
+        for cb in open_list:
+            npc = cb.get("source_npc") or "null"
+            lines.append(f"#{cb['id']} (turn {cb['created_turn']}, {npc}): \"{cb['original_text']}\"")
+    else:
+        lines.append("OPEN: (none)")
+
+    if resolved_list:
+        lines.append("")
+        lines.append("RECENTLY RESOLVED:")
+        for cb in resolved_list:
+            npc = cb.get("source_npc") or "null"
+            created = cb.get("created_turn", "?")
+            resolved = cb.get("resolved_turn", "?")
+            lines.append(f"#{cb['id']} (turn {created}\u2192{resolved}, {npc}): \"{cb['original_text']}\" \u2192 \"{cb.get('resolution_text', '')}\"")
+
+    lines.append("[/CALLBACK LEDGER]")
+    return "\n".join(lines)
+
+
+def build_npc_memories_injection(memories: dict, scene_state: dict) -> str:
+    """Build NPC memories injection, scoped to NPCs present in the scene."""
+    npcs_present = scene_state.get("npcs_present", [])
+    if not npcs_present or not memories:
+        return ""
+
+    blocks = []
+    for npc in npcs_present:
+        npc_mems = memories.get(npc)
+        if not npc_mems:
+            continue
+        # Sort by impact descending, then turn_created descending
+        sorted_mems = sorted(npc_mems, key=lambda m: (m.get("impact", 0), m.get("turn_created", 0)), reverse=True)
+        lines = [f"[NPC MEMORIES: {npc}]"]
+        for idx, m in enumerate(sorted_mems):
+            stars = "\u2605" * max(1, m.get("impact", 1))
+            date_str = m.get("date") or "?"
+            entry = f"[{idx}] [{date_str}, {stars}] {m['text']}"
+            if m.get("quote"):
+                entry += f" | \"{m['quote']}\""
+            lines.append(entry)
+        lines.append(f"[/NPC MEMORIES]")
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
+def build_scene_state_injection(scene: dict) -> str:
+    """Build human-readable scene state injection for Events."""
+    if not scene:
+        return ""
+
+    lines = ["[SCENE STATE]"]
+
+    field_labels = [
+        ("location", "Location"),
+        ("npcs_present", "NPCs Present"),
+        ("scene_trigger", "Scene Trigger"),
+        ("active_tensions", "Active Tensions"),
+        ("atmosphere", "Atmosphere"),
+        ("details", "Details"),
+        ("pending_actions", "Pending Actions"),
+    ]
+    for key, label in field_labels:
+        val = scene.get(key)
+        if val is None:
+            continue
+        if isinstance(val, list):
+            if val:
+                lines.append(f"{label}: {', '.join(str(v) for v in val)}")
+            else:
+                lines.append(f"{label}: (none)")
+        else:
+            if val:
+                lines.append(f"{label}: {val}")
+
+    lines.append("[/SCENE STATE]")
+    return "\n".join(lines)
 
 
 def run_pipeline_stage(
@@ -580,7 +980,6 @@ def run_pipeline(
     project: str,
     chat_name: str,
     branch_path: list[dict],
-    context_start_index: int,
     agent_instructions: dict[str, str],
     agent_files: dict[str, str],
     pipeline_state: Optional[dict],
@@ -600,13 +999,23 @@ def run_pipeline(
     This is a generator that the event_generator in send_message_stream iterates over.
     """
 
+    # Deep-copy BEFORE migration to avoid mutating the caller's data dict —
+    # migrate uses setdefault which would modify the original, and if the pipeline
+    # fails mid-way we don't want half-applied ops persisted on save
+    pipeline_state = migrate_pipeline_state(copy.deepcopy(pipeline_state))
+    pipeline_state["turn_counter"] += 1
+    current_turn = pipeline_state["turn_counter"]
+
+    # Snapshot state before Events sees it (for debug transcript)
+    injected_state_snapshot = json.dumps(pipeline_state, indent=2)
+
     # ---- STAGE 1: Events ----
     yield ("pipeline_stage", {"stage": "events", "status": "thinking"})
 
     events_system = build_agent_system_prompt(EVENTS_CONTRACT, agent_instructions["events"], agent_files["events"])
-    history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
+    recent_events_pairs = get_context_pairs(branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS)
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
-    events_messages = build_events_messages(events_system, history_msgs, user_msg, pipeline_state, updates_text)
+    events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, updates_text)
 
     events_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["events"],
@@ -618,8 +1027,22 @@ def run_pipeline(
     events_data = events_result.parsed_json
     events_route = events_data.get("route", "mechanics")
 
-    # Extract pipeline state from Events output
-    new_pipeline_state = events_data.get("pacing")
+    # Extract and apply state from Events output
+    if events_data.get("pacing"):
+        pipeline_state["pacing"] = events_data["pacing"]
+    pipeline_state["callback_ledger"] = apply_callback_ops(
+        pipeline_state["callback_ledger"],
+        events_data.get("callback_ops"),
+        current_turn
+    )
+    pipeline_state["npc_memories"] = apply_npc_memory_ops(
+        pipeline_state["npc_memories"],
+        events_data.get("npc_memory_ops"),
+        current_turn
+    )
+    if events_data.get("scene_state"):
+        pipeline_state["scene_state"] = apply_scene_state(events_data["scene_state"])
+    new_pipeline_state = pipeline_state
 
     # Collect stage results for aggregation
     stage_results = [events_result]
@@ -643,7 +1066,9 @@ def run_pipeline(
             aggregate_cost=aggregate["cost"],
             pipeline_state=new_pipeline_state,
             reasoning_summaries=reasoning_summaries,
-            service_tier_label="standard"
+            service_tier_label="standard",
+            injected_state=injected_state_snapshot,
+            stage_usage=_build_stage_usage(stage_results, provider)
         ))
         return
 
@@ -681,7 +1106,9 @@ def run_pipeline(
             aggregate_cost=aggregate["cost"],
             pipeline_state=new_pipeline_state,
             reasoning_summaries=reasoning_summaries,
-            service_tier_label="standard"
+            service_tier_label="standard",
+            injected_state=injected_state_snapshot,
+            stage_usage=_build_stage_usage(stage_results, provider)
         ))
         return
 
@@ -689,9 +1116,7 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "narration", "status": "thinking"})
 
     narration_system = build_agent_system_prompt(NARRATION_CONTRACT, agent_instructions["narration"], agent_files["narration"])
-    # Use context-trimmed branch so Narration only sees messages within the context window
-    narration_branch = [branch_path[0]] + branch_path[context_start_index:]
-    recent_pairs = get_recent_pairs(narration_branch, NARRATION_CONTEXT_PAIRS)
+    recent_pairs = get_context_pairs(branch_path, NARRATION_THRESHOLD_PAIRS, NARRATION_TARGET_PAIRS)
     narration_messages = build_narration_messages(narration_system, recent_pairs, mechanics_data)
 
     narration_params = provider.build_pipeline_request(
@@ -746,8 +1171,35 @@ def run_pipeline(
         aggregate_cost=aggregate["cost"],
         pipeline_state=new_pipeline_state,
         reasoning_summaries=reasoning_summaries,
-        service_tier_label="flex+standard"
+        service_tier_label="flex+standard",
+        injected_state=injected_state_snapshot,
+        stage_usage=_build_stage_usage(stage_results, provider)
     ))
+
+
+def _build_stage_usage(stage_results: list[PipelineStageResult], provider: OpenAIProvider) -> dict:
+    """Build per-stage usage dict for debug storage."""
+    result = {}
+    for sr in stage_results:
+        u = sr.usage
+        parsed = ParsedResponse(
+            content="", reasoning=None,
+            input_tokens=u.get('input_tokens', 0),
+            cache_read_tokens=u.get('cache_read_tokens', 0),
+            cache_creation_tokens=u.get('cache_creation_tokens', 0),
+            output_tokens=u.get('output_tokens', 0),
+            reasoning_tokens=u.get('reasoning_tokens', 0)
+        )
+        result[sr.stage] = {
+            "input_tokens": u.get('input_tokens', 0),
+            "cache_read_tokens": u.get('cache_read_tokens', 0),
+            "cache_creation_tokens": u.get('cache_creation_tokens', 0),
+            "output_tokens": u.get('output_tokens', 0),
+            "reasoning_tokens": u.get('reasoning_tokens', 0),
+            "cost": provider.calculate_cost_with_tier(parsed, sr.service_tier),
+            "service_tier": sr.service_tier
+        }
+    return result
 
 
 def _aggregate_usage(stage_results: list[PipelineStageResult], provider: OpenAIProvider) -> dict:
@@ -843,6 +1295,89 @@ def _pretty_json(raw: str) -> str:
         return f"[PARSE ERROR] {raw}"
 
 
+def _compute_state_delta(prev: dict, curr: dict) -> str:
+    """Compute a human-readable delta between two pipeline states."""
+    parts = []
+
+    # Turn counter
+    prev_turn = prev.get("turn_counter", 0)
+    curr_turn = curr.get("turn_counter", 0)
+    if curr_turn != prev_turn:
+        parts.append(f"turn_counter: {prev_turn} → {curr_turn}")
+
+    # Pacing — show if changed
+    prev_pacing = prev.get("pacing", {})
+    curr_pacing = curr.get("pacing", {})
+    if curr_pacing != prev_pacing:
+        changed = {k: v for k, v in curr_pacing.items() if prev_pacing.get(k) != v}
+        if changed:
+            parts.append(f"pacing: {json.dumps(changed)}")
+
+    # Callback ledger
+    prev_ledger = prev.get("callback_ledger", {})
+    curr_ledger = curr.get("callback_ledger", {})
+    prev_open_ids = {cb["id"] for cb in prev_ledger.get("open", []) if "id" in cb}
+    curr_open_ids = {cb["id"] for cb in curr_ledger.get("open", []) if "id" in cb}
+    added_ids = curr_open_ids - prev_open_ids
+    resolved_ids = prev_open_ids - curr_open_ids
+    if added_ids:
+        added_cbs = [cb for cb in curr_ledger.get("open", []) if cb.get("id") in added_ids]
+        for cb in added_cbs:
+            parts.append(f"callback +#{cb.get('id')}: \"{cb.get('original_text', '')[:80]}\"")
+    if resolved_ids:
+        resolved_cbs = [cb for cb in curr_ledger.get("recently_resolved", []) if cb.get("id") in resolved_ids]
+        for cb in resolved_cbs:
+            parts.append(f"callback resolved #{cb.get('id')}: \"{cb.get('resolution_text', '')[:80]}\"")
+
+    # NPC memories
+    prev_mems = prev.get("npc_memories", {})
+    curr_mems = curr.get("npc_memories", {})
+    all_npcs = set(list(prev_mems.keys()) + list(curr_mems.keys()))
+    for npc in sorted(all_npcs):
+        prev_list = prev_mems.get(npc, [])
+        curr_list = curr_mems.get(npc, [])
+        prev_texts = {m.get("text") for m in prev_list}
+        curr_texts = {m.get("text") for m in curr_list}
+        for text in curr_texts - prev_texts:
+            mem = next((m for m in curr_list if m.get("text") == text), {})
+            parts.append(f"memory +{npc}: [{mem.get('impact', '?')}★] \"{text[:60]}\"")
+        for text in prev_texts - curr_texts:
+            parts.append(f"memory -{npc}: \"{text[:60]}\"")
+    # NPC removed entirely
+    for npc in sorted(set(prev_mems.keys()) - set(curr_mems.keys())):
+        if npc not in all_npcs:  # already handled above
+            parts.append(f"memory -{npc}: (all removed)")
+
+    # Scene state
+    prev_scene = prev.get("scene_state", {})
+    curr_scene = curr.get("scene_state", {})
+    if curr_scene != prev_scene:
+        scene_changes = []
+        for key in ["location", "npcs_present", "active_tensions", "scene_trigger", "atmosphere", "details", "pending_actions"]:
+            pv = prev_scene.get(key)
+            cv = curr_scene.get(key)
+            if pv != cv:
+                if isinstance(cv, list):
+                    scene_changes.append(f"  {key}: {', '.join(str(v) for v in cv) if cv else '(none)'}")
+                else:
+                    scene_changes.append(f"  {key}: {cv}")
+        if scene_changes:
+            parts.append("scene_state:\n" + "\n".join(scene_changes))
+
+    return "\n".join(parts)
+
+
+def _format_stage_usage(stage_name: str, usage: dict) -> str:
+    """Format a single stage's usage as a compact one-liner."""
+    inp = usage.get("input_tokens", 0)
+    cache = usage.get("cache_read_tokens", 0)
+    out = usage.get("output_tokens", 0)
+    reasoning = usage.get("reasoning_tokens", 0)
+    cost = usage.get("cost", 0)
+    tier = usage.get("service_tier", "?")
+    return f"{stage_name}: Input: {inp:,}  Cache: {cache:,}  Output: {out:,}  Reasoning: {reasoning:,}  Cost: ${cost:.4f}  Tier: {tier}"
+
+
 def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -> None:
     """
     Generate a debug transcript file for a pipeline chat.
@@ -877,6 +1412,9 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
     lines.append("=" * 80)
     lines.append("")
 
+    prev_state = None  # Track previous state for delta computation
+    latest_state_raw = None  # Track the latest full state for the end block
+
     for msg in path:
         role = msg.get("role", "")
         if role == "system":
@@ -898,15 +1436,64 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 # Pipeline message — expand stages
                 lines.append(f"[ASSISTANT] {timestamp}")
 
+                # Show pipeline state delta (what changed since last turn)
+                injected_state_raw = msg.get("pipeline_state_injected")
+                if injected_state_raw:
+                    latest_state_raw = injected_state_raw
+                    try:
+                        current_state = json.loads(injected_state_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        current_state = None
+
+                    if current_state is not None:
+                        if prev_state is None:
+                            lines.append("--- PIPELINE STATE (initial) ---")
+                            lines.append(json.dumps(current_state, indent=2))
+                        else:
+                            delta = _compute_state_delta(prev_state, current_state)
+                            if delta:
+                                lines.append("--- PIPELINE STATE DELTA ---")
+                                lines.append(delta)
+                            else:
+                                lines.append("--- PIPELINE STATE DELTA ---")
+                                lines.append("(no changes)")
+                        lines.append("")
+                        prev_state = current_state
+
                 reasoning_parts = _parse_reasoning_by_stage(msg.get("reasoning", ""))
+                stage_usage = msg.get("pipeline_stage_usage", {})
 
                 if events_raw:
                     lines.append("--- EVENTS STAGE ---")
                     lines.append(_pretty_json(events_raw))
                     lines.append("")
+
+                    # Show extracted state ops from Events output
+                    try:
+                        events_parsed = json.loads(events_raw)
+                        ops_parts = []
+                        cb_ops = events_parsed.get("callback_ops")
+                        if cb_ops:
+                            ops_parts.append(f"callback_ops: {json.dumps(cb_ops, indent=2)}")
+                        mem_ops = events_parsed.get("npc_memory_ops")
+                        if mem_ops:
+                            ops_parts.append(f"npc_memory_ops: {json.dumps(mem_ops, indent=2)}")
+                        scene = events_parsed.get("scene_state")
+                        if scene:
+                            ops_parts.append(f"scene_state: {json.dumps(scene, indent=2)}")
+                        if ops_parts:
+                            lines.append("--- STATE OPS EXTRACTED ---")
+                            lines.append("\n".join(ops_parts))
+                            lines.append("")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                     lines.append("--- EVENTS REASONING ---")
                     lines.append(reasoning_parts["events"] or "(none)")
                     lines.append("")
+                    if "events" in stage_usage:
+                        lines.append(_format_stage_usage("Events", stage_usage["events"]))
+                        lines.append("")
 
                 if mechanics_raw:
                     lines.append("--- MECHANICS STAGE ---")
@@ -915,11 +1502,26 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                     lines.append("--- MECHANICS REASONING ---")
                     lines.append(reasoning_parts["mechanics"] or "(none)")
                     lines.append("")
+                    if "mechanics" in stage_usage:
+                        lines.append(_format_stage_usage("Mechanics", stage_usage["mechanics"]))
+                        lines.append("")
 
                 narration_reasoning = reasoning_parts["narration"]
                 if narration_reasoning:
                     lines.append("--- NARRATION REASONING ---")
                     lines.append(narration_reasoning)
+                    lines.append("")
+                if "narration" in stage_usage:
+                    lines.append(_format_stage_usage("Narration", stage_usage["narration"]))
+                    lines.append("")
+
+                # Total usage across all stages for this turn
+                if stage_usage:
+                    total_cost = sum(s.get("cost", 0) for s in stage_usage.values())
+                    total_input = sum(s.get("input_tokens", 0) for s in stage_usage.values())
+                    total_output = sum(s.get("output_tokens", 0) for s in stage_usage.values())
+                    total_reasoning = sum(s.get("reasoning_tokens", 0) for s in stage_usage.values())
+                    lines.append(f"--- TURN TOTAL: Input: {total_input:,}  Output: {total_output:,}  Reasoning: {total_reasoning:,}  Cost: ${total_cost:.4f} ---")
                     lines.append("")
 
                 lines.append("--- FINAL OUTPUT ---")
@@ -930,6 +1532,15 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 lines.append(f"[ASSISTANT] {timestamp}")
                 lines.append(content)
                 lines.append("")
+
+    # Append full final state at the end of the file for easy reference
+    final_state = chat_data.get("pipeline_state")
+    if final_state:
+        lines.append("=" * 80)
+        lines.append("FULL PIPELINE STATE (after last turn)")
+        lines.append("=" * 80)
+        lines.append(json.dumps(final_state, indent=2))
+        lines.append("")
 
     with open(debug_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

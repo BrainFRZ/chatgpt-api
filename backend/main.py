@@ -2313,7 +2313,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     project=request.project,
                     chat_name=request.chat_name,
                     branch_path=branch_path,
-                    context_start_index=context_start_index,
                     agent_instructions=agent_instructions,
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
@@ -2380,7 +2379,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 service_tier = pipeline_result.service_tier_label
 
                 # Save pipeline state for next turn
-                if pipeline_result.pipeline_state:
+                if pipeline_result.pipeline_state is not None:
                     data["pipeline_state"] = pipeline_result.pipeline_state
 
                 # Get cross-model providers for token counting
@@ -2470,6 +2469,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["events_stage"] = pipeline_result.events_json
                 if pipeline_result.mechanics_json:
                     assistant_msg_data["mechanics_stage"] = pipeline_result.mechanics_json
+                if pipeline_result.injected_state is not None:
+                    assistant_msg_data["pipeline_state_injected"] = pipeline_result.injected_state
+                if pipeline_result.stage_usage is not None:
+                    assistant_msg_data["pipeline_stage_usage"] = pipeline_result.stage_usage
 
                 data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
