@@ -2413,6 +2413,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     updates_text=updates_text
                 )
 
+                client_disconnected = False
+
                 while True:
                     # Run pipeline step in thread, sending SSE keepalive comments
                     # every 15s to prevent proxy/browser timeouts during long API calls
@@ -2423,7 +2425,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         try:
                             await asyncio.wait_for(asyncio.shield(pipeline_future), timeout=15.0)
                         except asyncio.TimeoutError:
-                            yield ": keepalive\n\n"
+                            if not client_disconnected:
+                                yield ": keepalive\n\n"
                     result = pipeline_future.result()
 
                     if result is _PIPELINE_STOP:
@@ -2432,25 +2435,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                     if event_type == "pipeline_stage":
                         pipeline_current_stage = f"{event_data.get('stage', '?')}:{event_data.get('status', '?')}"
-                        yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+                        if not client_disconnected:
+                            yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
                         await sync_manager.broadcast_to_chat(
                             chat_key,
                             SyncEvent(type=SyncEventType.PIPELINE_STAGE, data=event_data)
                         )
 
                     elif event_type == "content":
-                        # Check for client disconnect during streaming (not on done - we must save)
-                        if await http_request.is_disconnected():
-                            logger.warning(f"Pipeline: client disconnected during streaming for user {username}")
-                            data["messages"].pop()
-                            save_chat(username, request.chat_name, data, request.project)
-                            await sync_manager.broadcast_to_chat(
-                                chat_key,
-                                SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": "Client disconnected"})
-                            )
-                            return
+                        # Check for client disconnect (soft: tab switch/background)
+                        if not client_disconnected and await http_request.is_disconnected():
+                            client_disconnected = True
+                            logger.warning(f"Pipeline: client disconnected during streaming for user {username}, continuing to consume stream")
                         accumulated_content += event_data["delta"]
-                        yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
+                        if not client_disconnected:
+                            yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
                         # Broadcast content delta to other clients
                         await sync_manager.broadcast_to_chat(
                             chat_key,
@@ -2650,7 +2649,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'service_tier': service_tier,
                     'pipeline_stages': pipeline_result.stages_run
                 }
-                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+                if not client_disconnected:
+                    yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 # Broadcast stream done to other clients
                 await sync_manager.broadcast_to_chat(
@@ -2677,30 +2677,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # ============================================================
                 interceptor = StateInterceptor() if use_stateful else None
                 event_count = 0
+                client_disconnected = False
                 if model_id == "gpt-5.2":
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
                 else:
                     stream_iter = provider.send_request_stream(client, request_params)
                 for stream_event in stream_iter:
                     event_count += 1
-                    # Check for client disconnect (but not on done event - we must save)
-                    if stream_event.event_type != 'done' and await http_request.is_disconnected():
-                        # Client disconnected - clean up and notify other clients
-                        logger.warning(f"Client disconnected after {event_count} events for user {username}")
-                        data["messages"].pop()
-                        save_chat(username, request.chat_name, data, request.project)
-                        await sync_manager.broadcast_to_chat(
-                            chat_key,
-                            SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": "Client disconnected"})
-                        )
-                        return
+                    # Check for client disconnect (soft: tab switch/background)
+                    if not client_disconnected and stream_event.event_type != 'done' and await http_request.is_disconnected():
+                        client_disconnected = True
+                        logger.warning(f"Client disconnected after {event_count} events for user {username}, continuing to consume stream")
 
                     if stream_event.event_type == 'content_delta':
                         if interceptor:
                             safe_text = interceptor.feed(stream_event.content)
                             if safe_text:
                                 accumulated_content += safe_text
-                                yield f"event: content\ndata: {json.dumps({'delta': safe_text})}\n\n"
+                                if not client_disconnected:
+                                    yield f"event: content\ndata: {json.dumps({'delta': safe_text})}\n\n"
                                 await sync_manager.broadcast_to_chat(
                                     chat_key,
                                     SyncEvent(
@@ -2710,7 +2705,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 )
                         else:
                             accumulated_content += stream_event.content
-                            yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                            if not client_disconnected:
+                                yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
                             # Broadcast content delta to other clients
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -2722,7 +2718,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                     elif stream_event.event_type == 'thinking_delta':
                         accumulated_thinking += stream_event.content
-                        yield f"event: thinking\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                        if not client_disconnected:
+                            yield f"event: thinking\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
                         # Broadcast thinking delta to other clients
                         await sync_manager.broadcast_to_chat(
                             chat_key,
@@ -2742,7 +2739,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             remaining, state_block_text = interceptor.finalize()
                             if remaining:
                                 accumulated_content += remaining
-                                yield f"event: content\ndata: {json.dumps({'delta': remaining})}\n\n"
+                                if not client_disconnected:
+                                    yield f"event: content\ndata: {json.dumps({'delta': remaining})}\n\n"
                                 await sync_manager.broadcast_to_chat(
                                     chat_key,
                                     SyncEvent(
@@ -2996,7 +2994,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         }
                         if service_tier:
                             done_data['service_tier'] = service_tier
-                        yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+                        if not client_disconnected:
+                            yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                         # Broadcast stream done to other clients
                         await sync_manager.broadcast_to_chat(
@@ -3018,26 +3017,40 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 logger.info(f"Stream loop completed for user {username}")
 
         except asyncio.CancelledError:
-            # Client disconnected while pipeline/stream was blocking (e.g. API call in progress).
+            # Client disconnected (hard: tab closed) while pipeline/stream was blocking.
             # CancelledError inherits from BaseException, not Exception, so needs its own handler.
             stage_info = f" (stage: {pipeline_current_stage})" if use_pipeline and pipeline_current_stage else ""
             logger.warning(f"Client disconnected (cancelled) for user {username}{stage_info}")
-            if not accumulated_content:
-                if len(data["messages"]) > 1:
-                    data["messages"].pop()
+            if accumulated_content:
+                # Save partial response
+                try:
+                    assistant_msg_id = generate_message_id()
+                    assistant_msg_data = {
+                        "id": assistant_msg_id,
+                        "parent_id": user_msg_id,
+                        "role": "assistant",
+                        "content": accumulated_content,
+                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                        "tokens": "partial",
+                        "cost": "unknown",
+                        "model": model_id
+                    }
+                    data["messages"].append(assistant_msg_data)
+                    data["current_leaf_id"] = assistant_msg_id
                     save_chat(username, request.chat_name, data, request.project)
-            # Can't yield SSE events - connection is already dead
+                    logger.info(f"CancelledError: saved partial response ({len(accumulated_content)} chars) for user {username}")
+                except Exception as save_err:
+                    logger.error(f"CancelledError: failed to save partial response: {save_err}")
+            else:
+                # No content yet — keep user message so user can see they sent it and retry
+                logger.info(f"CancelledError: no content accumulated, keeping user message for user {username}")
+            # Can't yield SSE events or do async broadcasts — connection is dead
 
         except Exception as e:
             logger.error(f"Streaming error for user {username}: {e}", exc_info=True)
 
-            # Only remove user message if we haven't received any content yet
-            # (i.e., the stream itself failed, not post-processing)
-            if not accumulated_content:
-                if len(data["messages"]) > 1:  # Don't pop system message
-                    data["messages"].pop()
-                    save_chat(username, request.chat_name, data, request.project)
-            else:
+            # Never delete user message — preserve it so user can see what they sent
+            if accumulated_content:
                 # We got content but done handler failed - save what we have
                 logger.info(f"Stream: saving partial response for user {username}")
                 try:
