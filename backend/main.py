@@ -2708,12 +2708,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 )
 
                             # Process state block and apply updates
+                            stateful_state_block_raw = None
+                            stateful_parsed_ops = None
                             if state_block_text is not None and stateful_pipeline_state is not None:
+                                stateful_state_block_raw = state_block_text
                                 stateful_pipeline_state["turn_counter"] += 1
                                 current_turn = stateful_pipeline_state["turn_counter"]
-                                parsed_state = parse_state_updates_block(state_block_text, current_turn)
+                                stateful_parsed_ops = parse_state_updates_block(state_block_text, current_turn)
                                 apply_single_agent_state_updates(
-                                    stateful_pipeline_state, parsed_state, current_turn
+                                    stateful_pipeline_state, stateful_parsed_ops, current_turn
                                 )
                                 data["pipeline_state"] = stateful_pipeline_state
                                 logger.info(f"Stateful: applied state updates for user {username}, turn {current_turn}")
@@ -2863,6 +2866,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["service_tier"] = service_tier
                         if use_stateful and stateful_injected_snapshot is not None:
                             assistant_msg_data["pipeline_state_injected"] = stateful_injected_snapshot
+                        if use_stateful and stateful_state_block_raw is not None:
+                            assistant_msg_data["state_block_raw"] = stateful_state_block_raw
+                        if use_stateful and stateful_parsed_ops is not None:
+                            assistant_msg_data["state_ops_parsed"] = stateful_parsed_ops
 
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id

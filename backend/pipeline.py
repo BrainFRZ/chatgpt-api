@@ -1588,6 +1588,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
         content = msg.get("content", "")
 
         if role == "user":
+            lines.append("+" * 80)
+            lines.append("")
             lines.append(f"[USER] {timestamp}")
             lines.append(content)
             lines.append("")
@@ -1691,8 +1693,65 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 lines.append("--- FINAL OUTPUT ---")
                 lines.append(content)
                 lines.append("")
+            elif msg.get("state_block_raw") is not None or msg.get("pipeline_state_injected"):
+                # Single-agent stateful message
+                lines.append(f"[ASSISTANT] {timestamp}")
+
+                # Show pipeline state delta (what changed since last turn)
+                injected_state_raw = msg.get("pipeline_state_injected")
+                if injected_state_raw:
+                    latest_state_raw = injected_state_raw
+                    try:
+                        current_state = json.loads(injected_state_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        current_state = None
+
+                    if current_state is not None:
+                        if prev_state is None:
+                            lines.append("--- PIPELINE STATE (initial) ---")
+                            lines.append(json.dumps(current_state, indent=2))
+                        else:
+                            delta = _compute_state_delta(prev_state, current_state)
+                            if delta:
+                                lines.append("--- PIPELINE STATE DELTA ---")
+                                lines.append(delta)
+                            else:
+                                lines.append("--- PIPELINE STATE DELTA ---")
+                                lines.append("(no changes)")
+                        lines.append("")
+                        prev_state = current_state
+
+                # Show raw state block from model output
+                state_block_raw = msg.get("state_block_raw")
+                if state_block_raw:
+                    lines.append("--- RAW STATE BLOCK ---")
+                    lines.append(state_block_raw.strip())
+                    lines.append("")
+
+                # Show parsed ops
+                state_ops = msg.get("state_ops_parsed")
+                if state_ops:
+                    ops_parts = []
+                    if state_ops.get("pacing"):
+                        ops_parts.append(f"pacing: {json.dumps(state_ops['pacing'], indent=2)}")
+                    if state_ops.get("callback_ops"):
+                        ops_parts.append(f"callback_ops: {json.dumps(state_ops['callback_ops'], indent=2)}")
+                    if state_ops.get("npc_memory_ops"):
+                        ops_parts.append(f"npc_memory_ops: {json.dumps(state_ops['npc_memory_ops'], indent=2)}")
+                    if state_ops.get("scene_state"):
+                        ops_parts.append(f"scene_state: {json.dumps(state_ops['scene_state'], indent=2)}")
+                    if state_ops.get("character_states"):
+                        ops_parts.append(f"character_states: {json.dumps(state_ops['character_states'], indent=2)}")
+                    if ops_parts:
+                        lines.append("--- STATE OPS PARSED ---")
+                        lines.append("\n".join(ops_parts))
+                        lines.append("")
+
+                lines.append("--- OUTPUT ---")
+                lines.append(content)
+                lines.append("")
             else:
-                # Non-pipeline assistant message
+                # Non-pipeline, non-stateful assistant message
                 lines.append(f"[ASSISTANT] {timestamp}")
                 lines.append(content)
                 lines.append("")
