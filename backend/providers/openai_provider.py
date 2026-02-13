@@ -78,6 +78,7 @@ class OpenAIProvider(ModelProvider):
         project: Optional[str],
         chat_name: str,
         is_free_chat: bool,
+        use_cache: bool = True,
         # service_tier: str = "flex"  # Flex disabled — use standard for reliability
         service_tier: str = "auto"
     ) -> dict:

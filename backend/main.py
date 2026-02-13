@@ -1131,6 +1131,7 @@ class ChatResponse(BaseModel):
     has_more_messages: bool
     current_leaf_id: str | None = None  # ID of the current leaf message (for branching)
     model: str | None = None  # Model used for this chat (gpt-5.2 or claude-sonnet-4.5)
+    anthropic_sync: bool | None = None  # Whether Anthropic caching is enabled (sync mode)
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -1346,7 +1347,7 @@ def list_models():
     return ProviderRegistry.list_models()
 
 @app.post("/api/set-chat-model")
-def set_chat_model(request: SetChatModelRequest):
+async def set_chat_model(request: SetChatModelRequest):
     """Set the model for a specific chat."""
     username = request.username.strip().lower()
 
@@ -1426,7 +1427,45 @@ def set_chat_model(request: SetChatModelRequest):
             count_tokens_fn=token_counter
         )
 
+    # Broadcast model change to other sessions viewing this chat
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.CHAT_SETTINGS_CHANGED,
+            data={"model": request.model, "context_start_index": context_start_index}
+        )
+    )
+
     return {"status": "ok", "model": request.model, "context_start_index": context_start_index}
+
+class SetAnthropicSyncRequest(BaseModel):
+    username: str
+    chat_name: str
+    project: str | None = None
+    sync: bool
+
+@app.post("/api/set-anthropic-sync")
+async def set_anthropic_sync(request: SetAnthropicSyncRequest):
+    """Toggle Anthropic prompt caching (sync=True means caching on)."""
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    data["anthropic_sync"] = request.sync
+    save_chat(username, request.chat_name, data, request.project)
+
+    # Broadcast to other sessions viewing this chat
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.CHAT_SETTINGS_CHANGED,
+            data={"anthropic_sync": request.sync}
+        )
+    )
+
+    return {"status": "ok", "anthropic_sync": request.sync}
 
 @app.get("/api/chats/{username}", response_model=ChatListResponse)
 def list_chats(username: str, limit: int = 20, offset: int = 0):
@@ -1641,7 +1680,8 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         total_messages=total_messages,
         has_more_messages=has_more_messages,
         current_leaf_id=data.get("current_leaf_id"),
-        model=data.get("model", DEFAULT_MODEL)
+        model=data.get("model", DEFAULT_MODEL),
+        anthropic_sync=data.get("anthropic_sync", True)
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
@@ -1847,12 +1887,14 @@ def send_message(request: SendMessageRequest):
 
         # Build provider-specific request
         is_free_chat = not request.project
+        use_cache = data.get("anthropic_sync", True)
         request_params = provider.build_request(
             messages=messages_for_api,
             username=username,
             project=request.project,
             chat_name=request.chat_name,
-            is_free_chat=is_free_chat
+            is_free_chat=is_free_chat,
+            use_cache=use_cache
         )
 
         # Send request and parse response
@@ -2297,12 +2339,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 messages_for_api = openai_add_updates(messages_for_api, updates_text)
 
     is_free_chat = not request.project
+    use_cache = data.get("anthropic_sync", True)
     request_params = provider.build_request(
         messages=messages_for_api,
         username=username,
         project=request.project,
         chat_name=request.chat_name,
-        is_free_chat=is_free_chat
+        is_free_chat=is_free_chat,
+        use_cache=use_cache
     )
 
     async def event_generator():

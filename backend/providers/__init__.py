@@ -87,7 +87,8 @@ class ModelProvider(ABC):
         username: str,
         project: Optional[str],
         chat_name: str,
-        is_free_chat: bool
+        is_free_chat: bool,
+        use_cache: bool = True
     ) -> dict:
         """
         Build the API request parameters.
@@ -98,6 +99,7 @@ class ModelProvider(ABC):
             project: Project name or None
             chat_name: Current chat name
             is_free_chat: Whether this is a free (non-project) chat
+            use_cache: Whether to use prompt caching (Anthropic only)
 
         Returns:
             Dict of parameters to pass to the API

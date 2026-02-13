@@ -57,7 +57,8 @@ class AnthropicProvider(ModelProvider):
         username: str,
         project: Optional[str],
         chat_name: str,
-        is_free_chat: bool
+        is_free_chat: bool,
+        use_cache: bool = True
     ) -> dict:
         """
         Build Anthropic API request parameters.
@@ -68,6 +69,7 @@ class AnthropicProvider(ModelProvider):
         Cache breakpoint strategy (1hr TTL):
         - Place breakpoints: (1) after system, (2) after second-to-last assistant
         - This ensures cache hits on stable prefixes
+        - When use_cache=False (async mode), all cache breakpoints are omitted
         """
         # Separate system message from conversation
         system_content = None
@@ -78,18 +80,26 @@ class AnthropicProvider(ModelProvider):
                 # Only set system with cache_control if content is non-empty
                 content = msg.get("content", "").strip()
                 if content:
-                    system_content = [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-                        }
-                    ]
+                    if use_cache:
+                        system_content = [
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                            }
+                        ]
+                    else:
+                        system_content = [
+                            {
+                                "type": "text",
+                                "text": content
+                            }
+                        ]
             else:
                 conversation_messages.append(msg)
 
         # Convert messages to Anthropic format and add cache breakpoints
-        anthropic_messages = self._convert_messages_with_cache(conversation_messages)
+        anthropic_messages = self._convert_messages_with_cache(conversation_messages, use_cache=use_cache)
 
         params = {
             "model": self.MODEL_NAME,
@@ -111,7 +121,7 @@ class AnthropicProvider(ModelProvider):
 
         return params
 
-    def _convert_messages_with_cache(self, messages: list[dict]) -> list[dict]:
+    def _convert_messages_with_cache(self, messages: list[dict], use_cache: bool = True) -> list[dict]:
         """
         Convert messages to Anthropic format with cache breakpoints.
 
@@ -123,6 +133,8 @@ class AnthropicProvider(ModelProvider):
         - The prefix up to breakpoint 2 is stable (Updates already removed from previous turns)
         - Future rounds match the cached prefix -> cache HIT
         - Only current exchange is cache miss (unavoidable)
+
+        When use_cache=False, all messages are plain format (no breakpoints).
         """
         result = []
 
@@ -130,7 +142,7 @@ class AnthropicProvider(ModelProvider):
         assistant_indices = [i for i, msg in enumerate(messages) if msg["role"] == "assistant"]
 
         # Second-to-last assistant index (for cache breakpoint)
-        cache_breakpoint_index = assistant_indices[-2] if len(assistant_indices) >= 2 else None
+        cache_breakpoint_index = assistant_indices[-2] if len(assistant_indices) >= 2 and use_cache else None
 
         for i, msg in enumerate(messages):
             content = msg["content"]
@@ -391,7 +403,8 @@ class AnthropicOpusProvider(AnthropicProvider):
         username: str,
         project: Optional[str],
         chat_name: str,
-        is_free_chat: bool
+        is_free_chat: bool,
+        use_cache: bool = True
     ) -> dict:
         """
         Build Anthropic API request with adaptive thinking for Opus 4.6.
@@ -400,7 +413,7 @@ class AnthropicOpusProvider(AnthropicProvider):
         explicit thinking budget.
         """
         # Call parent to get base params (system, messages, cache breakpoints)
-        params = super().build_request(messages, username, project, chat_name, is_free_chat)
+        params = super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
 
         # Override thinking to use adaptive mode with effort
         params["thinking"] = {"type": "adaptive"}

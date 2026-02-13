@@ -302,6 +302,7 @@ function App() {
   const [error, setError] = useState('');
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('gpt-5.2');
+  const [anthropicSync, setAnthropicSync] = useState<boolean>(true);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null);
   const [modalApiKey, setModalApiKey] = useState('');
@@ -1092,6 +1093,19 @@ function App() {
         setNeedsSyncReload(true);
         break;
 
+      case 'chat_settings_changed':
+        // Another client changed model or sync setting
+        if (event.data.model !== undefined) {
+          setSelectedModel(event.data.model);
+          if (event.data.context_start_index !== undefined) {
+            setContextStartIndex(event.data.context_start_index);
+          }
+        }
+        if (event.data.anthropic_sync !== undefined) {
+          setAnthropicSync(event.data.anthropic_sync);
+        }
+        break;
+
       case 'chat_created':
         // Another client created a chat - update the chat list
         // Add to appropriate list based on whether it's a project chat or root chat
@@ -1534,6 +1548,26 @@ function App() {
       setSelectedModel(previousModel);
       setError('Could not switch model - network error');
       console.error('Could not save model preference:', err);
+    }
+  };
+
+  const handleAnthropicSyncToggle = async () => {
+    if (!user || !currentChat) return;
+    const newValue = !anthropicSync;
+    setAnthropicSync(newValue);
+    try {
+      const response = await fetch('/api/set-anthropic-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username, chat_name: currentChat, project: currentProject, sync: newValue })
+      });
+      if (!response.ok) {
+        setAnthropicSync(!newValue);
+        console.error('Could not save anthropic sync preference:', response.status);
+      }
+    } catch (err) {
+      setAnthropicSync(!newValue);
+      console.error('Could not save anthropic sync preference:', err);
     }
   };
 
@@ -2098,6 +2132,7 @@ function App() {
       // Set model selection from chat data
       // Priority: chat's model > project's model > 'gpt-5.2'
       setSelectedModel(data.model || projectModel || 'gpt-5.2');
+      setAnthropicSync(data.anthropic_sync !== false);
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -3604,6 +3639,30 @@ function App() {
                         <option key={m.id} value={m.id}>{m.name}</option>
                       ))}
                     </select>
+                  )}
+                  {selectedModel.startsWith('claude') && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#999', userSelect: 'none' as const }}>Async</span>
+                      <div
+                        onClick={handleAnthropicSyncToggle}
+                        style={{
+                          width: 40, height: 20, borderRadius: 10,
+                          background: anthropicSync ? '#4ade80' : '#4a4a6e',
+                          cursor: 'pointer', position: 'relative' as const,
+                          transition: 'background 0.2s',
+                        }}
+                        title={anthropicSync ? 'Sync mode: prompt caching enabled (cost-efficient for live conversations)' : 'Async mode: prompt caching disabled (cost-efficient for infrequent turns)'}
+                      >
+                        <div style={{
+                          width: 16, height: 16, borderRadius: '50%',
+                          background: 'white', position: 'absolute' as const,
+                          top: 2, left: 2,
+                          transform: anthropicSync ? 'translateX(20px)' : 'translateX(0)',
+                          transition: 'transform 0.2s',
+                        }} />
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: '#999', userSelect: 'none' as const }}>Sync</span>
+                    </div>
                   )}
                   <button
                     onClick={handleReloadChat}
