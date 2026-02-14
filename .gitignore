@@ -24,4 +24,5 @@
 !backend/tests/test_pipeline_state.py
 !backend/tests/test_single_agent_state.py
 !backend/tests/test_anthropic_sync.py
+!backend/tests/test_docs_refresh.py
 !PIPELINE_PLAN.md

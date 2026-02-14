@@ -2298,6 +2298,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     use_stateful = model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
+    docs_refreshed = False
 
     updates_text = data.get("updates", "").strip()
 
@@ -2306,6 +2307,24 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         import copy as _copy
         stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
+
+        # Detect if trimming will fire — refresh system prompt from disk
+        history = branch_path[1:-1]
+        total_pairs = len(history) // 2
+        if total_pairs > SINGLE_AGENT_THRESHOLD_PAIRS:
+            docs_refreshed = True
+            fresh_instructions = get_instructions(username, request.project)
+            fresh_files = load_project_files(username, request.project)
+            if fresh_files:
+                fresh_system = fresh_instructions + "\n\n" + fresh_files
+            else:
+                fresh_system = fresh_instructions
+            # branch_path[0] is the same dict ref as data["messages"][0] (via get_path_to_root)
+            branch_path[0]["content"] = fresh_system
+            branch_path[0].pop("total_tokens", None)
+            branch_path[0].pop("total_gpt_tokens", None)
+            branch_path[0].pop("total_claude_tokens", None)
+            logger.info(f"Stateful: refreshed system prompt on context trim for {username}/{request.project}/{request.chat_name}")
 
         context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
@@ -2356,6 +2375,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         try:
             # Send init event with user message ID
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
+
+            # Notify if docs were refreshed on context trim
+            if docs_refreshed:
+                yield f"event: docs_refreshed\ndata: {json.dumps({'message': 'Instructions and project files refreshed'})}\n\n"
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(type=SyncEventType.DOCS_REFRESHED, data={})
+                )
 
             # Broadcast user message to other clients viewing this chat
             await sync_manager.broadcast_to_chat(

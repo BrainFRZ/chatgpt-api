@@ -300,6 +300,7 @@ function App() {
   const [apiKeysStatus, setApiKeysStatus] = useState<ApiKeysStatus>({ has_openai: false, has_anthropic: false });
   const [needsApiKey, setNeedsApiKey] = useState(false);
   const [error, setError] = useState('');
+  const [docsRefreshed, setDocsRefreshed] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('gpt-5.2');
   const [anthropicSync, setAnthropicSync] = useState<boolean>(true);
@@ -1104,6 +1105,11 @@ function App() {
         if (event.data.anthropic_sync !== undefined) {
           setAnthropicSync(event.data.anthropic_sync);
         }
+        break;
+
+      case 'docs_refreshed':
+        setDocsRefreshed(true);
+        setTimeout(() => setDocsRefreshed(false), 4000);
         break;
 
       case 'chat_created':
@@ -2540,6 +2546,9 @@ function App() {
 
           if (event.type === 'init') {
             userMsgId = event.data.user_message_id;
+          } else if (event.type === 'docs_refreshed') {
+            setDocsRefreshed(true);
+            setTimeout(() => setDocsRefreshed(false), 4000);
           } else if (event.type === 'pipeline_stage') {
             setPipelineStage(prev => {
               const next = new Map(prev);
@@ -2851,6 +2860,9 @@ function App() {
 
           if (event.type === 'init') {
             userMsgId = event.data.user_message_id;
+          } else if (event.type === 'docs_refreshed') {
+            setDocsRefreshed(true);
+            setTimeout(() => setDocsRefreshed(false), 4000);
           } else if (event.type === 'pipeline_stage') {
             setPipelineStage(prev => {
               const next = new Map(prev);
@@ -4705,6 +4717,13 @@ function App() {
         </div>
       )}
 
+      {docsRefreshed && (
+        <div style={styles.docsRefreshedBanner}>
+          Context trimmed. Instructions & project files refreshed.
+          <button onClick={() => setDocsRefreshed(false)} style={styles.errorClose}>×</button>
+        </div>
+      )}
+
       {error && (
         <div style={styles.errorBanner}>
           {error}
@@ -5228,6 +5247,19 @@ const styles: { [key: string]: React.CSSProperties } = {
     left: '50%',
     transform: 'translateX(-50%)',
     backgroundColor: '#ff6b6b',
+    color: '#fff',
+    padding: '12px 20px',
+    borderRadius: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+  },
+  docsRefreshedBanner: {
+    position: 'fixed',
+    bottom: '60px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    backgroundColor: '#4caf50',
     color: '#fff',
     padding: '12px 20px',
     borderRadius: '8px',
