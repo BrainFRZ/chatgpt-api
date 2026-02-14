@@ -32,8 +32,8 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 # Pipeline imports
 from pipeline import (
     run_pipeline, PipelineResult, generate_debug_transcript,
-    SINGLE_AGENT_STATE_CONTRACT, StateInterceptor,
-    parse_state_updates_block, apply_single_agent_state_updates,
+    SINGLE_AGENT_STATE_CONTRACT, STATE_REPORT_TOOL,
+    apply_single_agent_state_updates,
     build_single_agent_injections, migrate_pipeline_state,
     get_context_pairs,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
@@ -2146,6 +2146,44 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+def _stateful_tool_retry(client, model_name: str, system_content, messages, narrative: str, thinking: str, tool_def: dict):
+    """Non-streaming follow-up to force report_state when tool_choice: auto didn't produce it.
+    Returns (tool_input_dict_or_None, retry_usage_dict).
+    Thinking is included as plain text (not a thinking content block, which would require
+    a cryptographic signature we don't have from streaming)."""
+    if thinking:
+        assistant_text = f"<reasoning>\n{thinking}\n</reasoning>\n\n{narrative}"
+    else:
+        assistant_text = narrative
+    assistant_content = [{"type": "text", "text": assistant_text}]
+
+    retry_messages = list(messages) + [
+        {"role": "assistant", "content": assistant_content},
+        {"role": "user", "content": "You did not call report_state. Call it now with the state updates for the turn you just wrote."}
+    ]
+    response = client.messages.create(
+        model=model_name,
+        max_tokens=4096,
+        system=system_content,
+        messages=retry_messages,
+        tools=[tool_def],
+        tool_choice={"type": "tool", "name": tool_def["name"]},
+    )
+    tool_input = None
+    for block in response.content:
+        if block.type == "tool_use":
+            tool_input = block.input
+            break
+    ru = response.usage
+    retry_usage = {
+        "input_tokens": ru.input_tokens + (getattr(ru, 'cache_read_input_tokens', 0) or 0) + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
+        "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
+        "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
+        "output_tokens": ru.output_tokens,
+    }
+    return tool_input, retry_usage
+
+
 @app.post("/api/send-message-stream")
 async def send_message_stream(request: SendMessageRequest, http_request: Request):
     """
@@ -2367,6 +2405,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         is_free_chat=is_free_chat,
         use_cache=use_cache
     )
+
+    if use_stateful:
+        request_params["tools"] = [STATE_REPORT_TOOL]
+        # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
+        # Auto + strong contract instructions achieves the same result.
+        request_params["tool_choice"] = {"type": "auto"}
 
     async def event_generator():
         accumulated_content = ""
@@ -2702,7 +2746,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # ============================================================
                 # Standard single-agent path (existing behavior)
                 # ============================================================
-                interceptor = StateInterceptor() if use_stateful else None
                 event_count = 0
                 client_disconnected = False
                 if model_id == "gpt-5.2":
@@ -2717,31 +2760,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         logger.warning(f"Client disconnected after {event_count} events for user {username}, continuing to consume stream")
 
                     if stream_event.event_type == 'content_delta':
-                        if interceptor:
-                            safe_text = interceptor.feed(stream_event.content)
-                            if safe_text:
-                                accumulated_content += safe_text
-                                if not client_disconnected:
-                                    yield f"event: content\ndata: {json.dumps({'delta': safe_text})}\n\n"
-                                await sync_manager.broadcast_to_chat(
-                                    chat_key,
-                                    SyncEvent(
-                                        type=SyncEventType.STREAM_CONTENT,
-                                        data={"delta": safe_text}
-                                    )
-                                )
-                        else:
-                            accumulated_content += stream_event.content
-                            if not client_disconnected:
-                                yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
-                            # Broadcast content delta to other clients
-                            await sync_manager.broadcast_to_chat(
-                                chat_key,
-                                SyncEvent(
-                                    type=SyncEventType.STREAM_CONTENT,
-                                    data={"delta": stream_event.content}
-                                )
+                        # With forced tool_use, all text deltas are narrative (tool_use deltas are partial_json, not text)
+                        accumulated_content += stream_event.content
+                        if not client_disconnected:
+                            yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_CONTENT,
+                                data={"delta": stream_event.content}
                             )
+                        )
 
                     elif stream_event.event_type == 'thinking_delta':
                         accumulated_thinking += stream_event.content
@@ -2760,38 +2789,59 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         logger.info(f"Stream done event received for user {username}")
                         usage = stream_event.usage
 
-                        # Finalize interceptor: flush remaining narrative and extract state block
-                        state_block_text = None
-                        if interceptor:
-                            remaining, state_block_text = interceptor.finalize()
-                            if remaining:
-                                accumulated_content += remaining
-                                if not client_disconnected:
-                                    yield f"event: content\ndata: {json.dumps({'delta': remaining})}\n\n"
-                                await sync_manager.broadcast_to_chat(
-                                    chat_key,
-                                    SyncEvent(
-                                        type=SyncEventType.STREAM_CONTENT,
-                                        data={"delta": remaining}
+                        # Extract tool_use input for stateful state updates
+                        stateful_tool_input = None
+                        if use_stateful and stateful_pipeline_state is not None:
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input:
+                                is_ooc = tool_input.get("is_ooc", False)
+                                if not is_ooc:
+                                    stateful_pipeline_state["turn_counter"] += 1
+                                    current_turn = stateful_pipeline_state["turn_counter"]
+                                    apply_single_agent_state_updates(
+                                        stateful_pipeline_state, tool_input, current_turn
                                     )
-                                )
-
-                            # Process state block and apply updates
-                            stateful_state_block_raw = None
-                            stateful_parsed_ops = None
-                            if state_block_text is not None and stateful_pipeline_state is not None:
-                                stateful_state_block_raw = state_block_text
-                                stateful_pipeline_state["turn_counter"] += 1
-                                current_turn = stateful_pipeline_state["turn_counter"]
-                                stateful_parsed_ops = parse_state_updates_block(state_block_text, current_turn)
-                                apply_single_agent_state_updates(
-                                    stateful_pipeline_state, stateful_parsed_ops, current_turn
-                                )
-                                data["pipeline_state"] = stateful_pipeline_state
-                                logger.info(f"Stateful: applied state updates for user {username}, turn {current_turn}")
+                                    data["pipeline_state"] = stateful_pipeline_state
+                                    stateful_tool_input = tool_input
+                                    logger.info(f"Stateful: applied tool state updates for user {username}, turn {current_turn}")
+                                else:
+                                    stateful_tool_input = tool_input
+                                    logger.info(f"Stateful: OOC turn (tool is_ooc=true) for user {username}")
                             else:
-                                # No state block = OOC turn — don't increment turn counter
-                                logger.info(f"Stateful: no state block found (OOC turn) for user {username}")
+                                logger.warning(f"Stateful: no tool_use_input, attempting retry for user {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        request_params.get("system", []),
+                                        request_params["messages"],
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        STATE_REPORT_TOOL
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        is_ooc = retry_result.get("is_ooc", False)
+                                        if not is_ooc:
+                                            stateful_pipeline_state["turn_counter"] += 1
+                                            current_turn = stateful_pipeline_state["turn_counter"]
+                                            apply_single_agent_state_updates(
+                                                stateful_pipeline_state, retry_result, current_turn
+                                            )
+                                            data["pipeline_state"] = stateful_pipeline_state
+                                            stateful_tool_input = retry_result
+                                            logger.info(f"Stateful: retry succeeded for user {username}, turn {current_turn}")
+                                        else:
+                                            stateful_tool_input = retry_result
+                                            logger.info(f"Stateful: retry returned OOC for user {username}")
+                                    else:
+                                        logger.warning(f"Stateful: retry also failed for user {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Stateful: retry error for user {username}: {retry_err}")
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
@@ -2935,10 +2985,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["service_tier"] = service_tier
                         if use_stateful and stateful_injected_snapshot is not None:
                             assistant_msg_data["pipeline_state_injected"] = stateful_injected_snapshot
-                        if use_stateful and stateful_state_block_raw is not None:
-                            assistant_msg_data["state_block_raw"] = stateful_state_block_raw
-                        if use_stateful and stateful_parsed_ops is not None:
-                            assistant_msg_data["state_ops_parsed"] = stateful_parsed_ops
+                        if use_stateful and stateful_tool_input is not None:
+                            assistant_msg_data["state_tool_input"] = stateful_tool_input
 
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id

@@ -199,10 +199,11 @@ class AnthropicProvider(ModelProvider):
         cache_creation_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
         input_tokens = raw_input_tokens + cache_read_tokens + cache_creation_tokens
 
-        # Extract thinking tokens
+        # Extract thinking tokens and tool_use
         thinking_tokens = 0
         reasoning = None
         content = None
+        tool_use_input = None
         for block in response.content:
             if block.type == "thinking":
                 reasoning = block.thinking
@@ -212,6 +213,8 @@ class AnthropicProvider(ModelProvider):
                     thinking_tokens = len(reasoning) // 4
             elif block.type == "text":
                 content = block.text
+            elif block.type == "tool_use":
+                tool_use_input = block.input
 
         text_output_tokens = max(0, output_tokens - thinking_tokens)
 
@@ -222,7 +225,8 @@ class AnthropicProvider(ModelProvider):
             'output_tokens': text_output_tokens,
             'reasoning_tokens': thinking_tokens,
             'content': content,
-            'reasoning': reasoning
+            'reasoning': reasoning,
+            'tool_use_input': tool_use_input
         }
 
     def parse_response(self, response: Any) -> ParsedResponse:

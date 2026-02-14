@@ -376,9 +376,83 @@ IMPORTANT:
 - You have access to recent conversation history for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences."""
 
+STATE_REPORT_TOOL = {
+    "name": "report_state",
+    "description": "Report all state updates after your narrative. Call every turn. Review your narrative and capture all changes.",
+    "input_schema": {
+        "type": "object",
+        "required": ["is_ooc", "pacing", "scene_state", "character_states"],
+        "properties": {
+            "is_ooc": {
+                "type": "boolean",
+                "description": "True ONLY for pure OOC responses (meta discussion, zero game content). False for all narrative responses."
+            },
+            "pacing": {
+                "type": "object",
+                "required": ["episode", "beat", "responses"],
+                "properties": {
+                    "episode": {"type": "string"},
+                    "beat": {"type": "string"},
+                    "responses": {"type": "integer"},
+                    "notes": {"type": "string"}
+                }
+            },
+            "scene_state": {
+                "type": "object",
+                "required": ["location", "npcs_present", "active_tensions", "atmosphere"],
+                "properties": {
+                    "location": {"type": "string"},
+                    "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "active_tensions": {"type": "array", "items": {"type": "string"}},
+                    "scene_trigger": {"type": "string"},
+                    "atmosphere": {"type": "string"},
+                    "details": {"type": "array", "items": {"type": "string"}},
+                    "pending_actions": {"type": "array", "items": {"type": "string"}}
+                }
+            },
+            "character_states": {
+                "type": "object",
+                "description": "Map of character name to current state string (HP, conditions, resources)",
+                "additionalProperties": {"type": "string"}
+            },
+            "callback_ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "resolve"]},
+                        "original_text": {"type": "string"},
+                        "source_npc": {"type": "string"},
+                        "id": {"type": "integer"},
+                        "resolution_text": {"type": "string"}
+                    }
+                }
+            },
+            "npc_memory_ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["action", "npc"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "drop"]},
+                        "npc": {"type": "string"},
+                        "focus": {"type": "string", "description": "NPC, location, or subject this memory is about"},
+                        "impact": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "text": {"type": "string"},
+                        "quote": {"type": "string"},
+                        "date": {"type": "string"},
+                        "index": {"type": "integer"}
+                    }
+                }
+            }
+        }
+    }
+}
+
 SINGLE_AGENT_STATE_CONTRACT = """## Persistent State System
 
-You maintain persistent state across turns via injected blocks and a structured output block. This is your long-term memory — when conversation history scrolls out of your context window, these state blocks are your ONLY source of continuity.
+You maintain persistent state across turns. This is your long-term memory — when conversation history scrolls out of your context window, these state blocks are your ONLY source of continuity.
 
 ### Injected State (read these carefully each turn):
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
@@ -387,58 +461,29 @@ You maintain persistent state across turns via injected blocks and a structured 
 - **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
 
-### Output Format:
-After your narrative response (including any HUD), output a state update block. This block MUST appear after all narrative content:
+### State Reporting (via report_state tool):
+After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
+- **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
+- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene.
+- **character_states**: Map of character name → current mechanical state (HP, AC, spell slots, conditions, resources). Full replacement each turn.
+- **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
-```
-[STATE UPDATES]
-PACING:
-episode: <current episode/session name>
-beat: <current narrative beat>
-responses: <number of responses on this beat>
-notes: <pacing observations>
-
-SCENE:
-location: <current location>
-npcs_present: <comma-separated NPC names>
-tensions: <comma-separated active tensions>
-trigger: <what initiated this scene>
-atmosphere: <mood, sensory details>
-details: <comma-separated transient facts>
-pending: <comma-separated pending actions>
-
-CHARACTERS:
-<Name>: <current HP, AC, spell slots, conditions, resources>
-<Name>: <current HP, AC, conditions, resources>
-[/STATE UPDATES]
-```
-
-### Section Rules:
-- **PACING**: Always include. Key-value pairs for episode tracking.
-- **SCENE**: Always include. Full replacement each turn. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene.
-- **CHARACTERS**: Always include. Report each character's updated mechanical state after this turn's outcomes (HP, spell slots, conditions, resources, equipment). Full replacement.
-- **CALLBACKS**: Include only when ops occur. Format:
-  - Add: `+ "description of promise/hook/foreshadowing" | source: <NPC name or null>`
-  - Resolve: `RESOLVE #<id>: "how it resolved"`
-- **MEMORIES**: Include only when ops occur. Format:
-  - Add: `+ <NPC> [<impact 1-5>] "<what happened, max 640 chars>" | "<verbatim quote, max 120 chars>" | <in-world date>`
-  - Drop: `- <NPC> [<index from injected block>]`
-  - Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
+Optional arrays (omit or leave empty when no ops occurred):
+- **callback_ops**: Add promises/hooks/foreshadowing (`action: "add"`, `original_text`, `source_npc`) or resolve them (`action: "resolve"`, `id`, `resolution_text`).
+- **npc_memory_ops**: Add significant NPC moments (`action: "add"`, `npc`, `text` max 640 chars, `quote` max 120 chars, `date`, `impact` 1-5, `focus`: the NPC/location/subject the memory is about) or drop stale ones (`action: "drop"`, `npc`, `index` from injected block). Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
-- Set PACING from current session context
-- Build SCENE from where the story currently is
-- Set CHARACTERS from known character sheets
-- Add foundational CALLBACKS for any open plot threads
-- Add key MEMORIES for important NPCs in the scene
+- Set pacing from current session context
+- Build scene_state from where the story currently is
+- Set character_states from known character sheets
+- Add foundational callback_ops for any open plot threads
+- Add key npc_memory_ops for important NPCs in the scene
 
 ### Rules:
-- SCENE, CHARACTERS, and PACING sections are REQUIRED every in-character turn (even if unchanged)
-- CALLBACKS and MEMORIES sections only when operations occurred
-- Omit the entire [STATE UPDATES] block only on pure OOC turns (out-of-character questions with no game content)
-- The block must appear AFTER all narrative content — never interleave it with your story text
-- Do NOT reference the state system in your narrative — it is invisible to the player"""
+- Call `report_state` every turn — including OOC turns (with `is_ooc: true`)
+- Do NOT reference the state system in your narrative — it is invisible to the player
+- The `focus` field on memories identifies who or what the memory is about (can be a different NPC, a location, or a subject)"""
 
 # ============================================================
 # Pipeline Stage Configuration
@@ -866,7 +911,8 @@ def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
             "date": op.get("date"),
             "impact": impact,
             "tier": tier,
-            "turn_created": current_turn
+            "turn_created": current_turn,
+            "focus": op.get("focus")
         }
         if npc not in memories:
             memories[npc] = []
@@ -894,8 +940,8 @@ def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
     return memories
 
 
-def apply_scene_state(new_scene: dict) -> dict:
-    """Apply a wholesale scene_state replacement with key defaults."""
+def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
+    """Apply scene_state with merge: new keys overwrite, absent keys retain existing values."""
     defaults = {
         "location": "",
         "npcs_present": [],
@@ -905,10 +951,11 @@ def apply_scene_state(new_scene: dict) -> dict:
         "details": [],
         "pending_actions": []
     }
-    result = {}
-    for key, default in defaults.items():
-        result[key] = new_scene.get(key, default)
-    return result
+    base = {k: (existing_scene or {}).get(k, default) for k, default in defaults.items()}
+    for key in defaults:
+        if key in new_scene:
+            base[key] = new_scene[key]
+    return base
 
 
 def apply_character_states(existing: dict, mechanics_output: dict, current_turn: int) -> dict:
@@ -1169,7 +1216,7 @@ def run_pipeline(
 
     # Extract and apply state from Events output
     if events_data.get("pacing"):
-        pipeline_state["pacing"] = events_data["pacing"]
+        pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **events_data["pacing"]}
     pipeline_state["callback_ledger"] = apply_callback_ops(
         pipeline_state["callback_ledger"],
         events_data.get("callback_ops"),
@@ -1181,7 +1228,10 @@ def run_pipeline(
         current_turn
     )
     if events_data.get("scene_state"):
-        pipeline_state["scene_state"] = apply_scene_state(events_data["scene_state"])
+        pipeline_state["scene_state"] = apply_scene_state(
+            events_data["scene_state"],
+            existing_scene=pipeline_state.get("scene_state")
+        )
     new_pipeline_state = pipeline_state
 
     # Collect stage results for aggregation
@@ -1693,7 +1743,7 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 lines.append("--- FINAL OUTPUT ---")
                 lines.append(content)
                 lines.append("")
-            elif msg.get("state_block_raw") is not None or msg.get("pipeline_state_injected"):
+            elif msg.get("state_block_raw") is not None or msg.get("state_tool_input") is not None or msg.get("pipeline_state_injected"):
                 # Single-agent stateful message
                 lines.append(f"[ASSISTANT] {timestamp}")
 
@@ -1721,11 +1771,18 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                         lines.append("")
                         prev_state = current_state
 
-                # Show raw state block from model output
+                # Show raw state block from model output (legacy text-based)
                 state_block_raw = msg.get("state_block_raw")
                 if state_block_raw:
                     lines.append("--- RAW STATE BLOCK ---")
                     lines.append(state_block_raw.strip())
+                    lines.append("")
+
+                # Show tool-based state input (new forced tool_use)
+                state_tool = msg.get("state_tool_input")
+                if state_tool:
+                    lines.append("--- STATE TOOL INPUT ---")
+                    lines.append(json.dumps(state_tool, indent=2))
                     lines.append("")
 
                 # Show parsed ops
@@ -2033,25 +2090,28 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
 
 def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int) -> dict:
     """Apply parsed state updates to pipeline_state using existing apply_* functions."""
-    if parsed["pacing"]:
-        pipeline_state["pacing"] = parsed["pacing"]
-    if parsed["callback_ops"]:
+    if parsed.get("pacing"):
+        pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **parsed["pacing"]}
+    if parsed.get("callback_ops"):
         pipeline_state["callback_ledger"] = apply_callback_ops(
             pipeline_state["callback_ledger"],
             parsed["callback_ops"],
             current_turn
         )
-    if parsed["npc_memory_ops"]:
+    if parsed.get("npc_memory_ops"):
         pipeline_state["npc_memories"] = apply_npc_memory_ops(
             pipeline_state["npc_memories"],
             parsed["npc_memory_ops"],
             current_turn
         )
-    if parsed["scene_state"]:
-        pipeline_state["scene_state"] = apply_scene_state(parsed["scene_state"])
+    if parsed.get("scene_state"):
+        pipeline_state["scene_state"] = apply_scene_state(
+            parsed["scene_state"],
+            existing_scene=pipeline_state.get("scene_state")
+        )
     pipeline_state["character_states"] = apply_character_states(
         pipeline_state["character_states"],
-        parsed["character_states"] or {},
+        parsed.get("character_states") or {},
         current_turn
     )
     return pipeline_state

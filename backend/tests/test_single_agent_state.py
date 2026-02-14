@@ -24,6 +24,8 @@ from pipeline import (
     _parse_scene_section,
     _parse_characters_section,
     apply_single_agent_state_updates,
+    apply_scene_state,
+    apply_npc_memory_ops,
     build_single_agent_injections,
     StateInterceptor,
     STATE_BLOCK_START,
@@ -529,3 +531,195 @@ Orrophim: 35/38 HP, AC 17"""
         assert "[PIPELINE STATE]" in injections2
         assert "[SCENE STATE]" in injections2
         assert "[CHARACTER STATES]" in injections2
+
+
+# ============================================================
+# Scene State Merge Tests
+# ============================================================
+
+class TestApplySceneStateMerge:
+    def test_partial_preserves_existing(self):
+        """Partial scene update preserves existing keys not in the new dict."""
+        existing = {
+            "location": "Town square",
+            "npcs_present": ["Guard"],
+            "active_tensions": ["Tax revolt"],
+            "scene_trigger": "Arrived in town",
+            "atmosphere": "Sunny",
+            "details": ["Market stalls"],
+            "pending_actions": ["Meet the mayor"]
+        }
+        new = {
+            "location": "Town square",
+            "npcs_present": ["Guard", "Merchant"],
+            "active_tensions": ["Tax revolt"],
+            "atmosphere": "Cloudy",
+        }
+        result = apply_scene_state(new, existing_scene=existing)
+        assert result["location"] == "Town square"
+        assert result["npcs_present"] == ["Guard", "Merchant"]
+        assert result["atmosphere"] == "Cloudy"
+        # These were absent in new — preserved from existing
+        assert result["scene_trigger"] == "Arrived in town"
+        assert result["details"] == ["Market stalls"]
+        assert result["pending_actions"] == ["Meet the mayor"]
+
+    def test_full_replaces_all(self):
+        """Full scene update replaces all values."""
+        existing = {
+            "location": "Old place",
+            "npcs_present": ["NPC1"],
+            "active_tensions": ["Old tension"],
+            "scene_trigger": "Old trigger",
+            "atmosphere": "Old atmo",
+            "details": ["Old detail"],
+            "pending_actions": ["Old action"]
+        }
+        new = {
+            "location": "New place",
+            "npcs_present": ["NPC2"],
+            "active_tensions": ["New tension"],
+            "scene_trigger": "New trigger",
+            "atmosphere": "New atmo",
+            "details": ["New detail"],
+            "pending_actions": ["New action"]
+        }
+        result = apply_scene_state(new, existing_scene=existing)
+        assert result["location"] == "New place"
+        assert result["npcs_present"] == ["NPC2"]
+        assert result["scene_trigger"] == "New trigger"
+        assert result["details"] == ["New detail"]
+
+    def test_backward_compat_no_existing(self):
+        """Without existing_scene, behaves like before (defaults for missing keys)."""
+        new = {
+            "location": "Town",
+            "npcs_present": ["Guard"],
+            "active_tensions": [],
+            "atmosphere": "Calm",
+        }
+        result = apply_scene_state(new)
+        assert result["location"] == "Town"
+        assert result["scene_trigger"] == ""
+        assert result["details"] == []
+        assert result["pending_actions"] == []
+
+
+# ============================================================
+# Pacing Merge Tests
+# ============================================================
+
+class TestPacingMerge:
+    def test_partial_preserves_existing_keys(self):
+        """Pacing merge preserves keys not in the new dict."""
+        state = _fresh_pipeline_state()
+        state["pacing"] = {"episode": "Session 1", "beat": "Opening", "responses": 3, "notes": "tension"}
+        parsed = {
+            "pacing": {"episode": "Session 1", "beat": "Battle", "responses": 1},
+            # notes omitted
+        }
+        result = apply_single_agent_state_updates(state, parsed, current_turn=2)
+        assert result["pacing"]["beat"] == "Battle"
+        assert result["pacing"]["responses"] == 1
+        assert result["pacing"]["notes"] == "tension"  # preserved
+
+    def test_full_pacing_replaces(self):
+        """Full pacing dict replaces all values."""
+        state = _fresh_pipeline_state()
+        state["pacing"] = {"episode": "S1", "beat": "B1", "responses": 5, "notes": "old"}
+        parsed = {
+            "pacing": {"episode": "S2", "beat": "B2", "responses": 1, "notes": "new"},
+        }
+        result = apply_single_agent_state_updates(state, parsed, current_turn=2)
+        assert result["pacing"]["episode"] == "S2"
+        assert result["pacing"]["notes"] == "new"
+
+
+# ============================================================
+# Tool Input Processing Tests
+# ============================================================
+
+class TestToolInputProcessing:
+    def test_tool_input_applied(self):
+        """Tool input dict (from forced tool_use) applies correctly via apply_single_agent_state_updates."""
+        state = _fresh_pipeline_state()
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Session 5", "beat": "Combat", "responses": 1},
+            "scene_state": {
+                "location": "Battlefield",
+                "npcs_present": ["Goblin Chief"],
+                "active_tensions": ["Ambush"],
+                "atmosphere": "Dust and chaos",
+            },
+            "character_states": {"Hero": "45/50 HP, AC 16"},
+            "callback_ops": [{"action": "add", "original_text": "Goblin Chief threatened revenge", "source_npc": "Goblin Chief"}],
+            "npc_memory_ops": [{"action": "add", "npc": "Goblin Chief", "text": "Attacked the party", "impact": 4, "date": "Day 5", "focus": "Hero"}],
+        }
+        result = apply_single_agent_state_updates(state, tool_input, current_turn=1)
+        assert result["pacing"]["episode"] == "Session 5"
+        assert result["scene_state"]["location"] == "Battlefield"
+        assert result["scene_state"]["atmosphere"] == "Dust and chaos"
+        assert result["character_states"]["Hero"]["state"] == "45/50 HP, AC 16"
+        assert len(result["callback_ledger"]["open"]) == 1
+        assert "Goblin Chief" in result["npc_memories"]
+
+    def test_tool_input_empty_ops(self):
+        """Tool input with empty callback_ops and npc_memory_ops doesn't crash."""
+        state = _fresh_pipeline_state()
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Session 1", "beat": "Intro", "responses": 1},
+            "scene_state": {
+                "location": "Tavern",
+                "npcs_present": [],
+                "active_tensions": [],
+                "atmosphere": "Cozy",
+            },
+            "character_states": {},
+            "callback_ops": [],
+            "npc_memory_ops": [],
+        }
+        result = apply_single_agent_state_updates(state, tool_input, current_turn=1)
+        assert result["pacing"]["beat"] == "Intro"
+        assert result["scene_state"]["location"] == "Tavern"
+        assert len(result["callback_ledger"]["open"]) == 0
+
+    def test_tool_input_no_optional_arrays(self):
+        """Tool input without callback_ops and npc_memory_ops (omitted entirely)."""
+        state = _fresh_pipeline_state()
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Session 1", "beat": "Intro", "responses": 1},
+            "scene_state": {
+                "location": "Tavern",
+                "npcs_present": [],
+                "active_tensions": [],
+                "atmosphere": "Cozy",
+            },
+            "character_states": {"Hero": "50/50 HP"},
+        }
+        result = apply_single_agent_state_updates(state, tool_input, current_turn=1)
+        assert result["pacing"]["beat"] == "Intro"
+        assert result["character_states"]["Hero"]["state"] == "50/50 HP"
+
+
+# ============================================================
+# Memory Focus Field Tests
+# ============================================================
+
+class TestMemoryFocusField:
+    def test_focus_stored_on_add(self):
+        """The focus field is stored when adding an NPC memory."""
+        memories = {}
+        ops = [{"action": "add", "npc": "Kira", "text": "Warned about the cave", "impact": 3, "date": "Day 5", "focus": "Cave of Echoes"}]
+        result = apply_npc_memory_ops(memories, ops, current_turn=5)
+        assert len(result["Kira"]) == 1
+        assert result["Kira"][0]["focus"] == "Cave of Echoes"
+
+    def test_focus_none_when_absent(self):
+        """Focus is None when not provided in the op."""
+        memories = {}
+        ops = [{"action": "add", "npc": "Vex", "text": "Sold a potion", "impact": 1, "date": "Day 3"}]
+        result = apply_npc_memory_ops(memories, ops, current_turn=3)
+        assert result["Vex"][0]["focus"] is None
