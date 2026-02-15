@@ -1781,9 +1781,28 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 # Show tool-based state input (new forced tool_use)
                 state_tool = msg.get("state_tool_input")
                 if state_tool:
-                    lines.append("--- STATE TOOL INPUT ---")
+                    retried = msg.get("state_tool_retried", False)
+                    header = "--- STATE TOOL INPUT (retried) ---" if retried else "--- STATE TOOL INPUT ---"
+                    lines.append(header)
                     lines.append(json.dumps(state_tool, indent=2))
                     lines.append("")
+
+                # Show delta between injected state and state after ops applied
+                state_after_raw = msg.get("pipeline_state_after")
+                if state_after_raw and injected_state_raw:
+                    try:
+                        state_after = json.loads(state_after_raw)
+                        state_before = json.loads(injected_state_raw)
+                        applied_delta = _compute_state_delta(state_before, state_after)
+                        if applied_delta:
+                            lines.append("--- STATE CHANGES APPLIED ---")
+                            lines.append(applied_delta)
+                        else:
+                            lines.append("--- STATE CHANGES APPLIED ---")
+                            lines.append("(no changes)")
+                        lines.append("")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
                 # Show parsed ops
                 state_ops = msg.get("state_ops_parsed")

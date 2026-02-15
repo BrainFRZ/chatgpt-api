@@ -2791,6 +2791,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Extract tool_use input for stateful state updates
                         stateful_tool_input = None
+                        stateful_tool_retried = False
                         if use_stateful and stateful_pipeline_state is not None:
                             tool_input = usage.get('tool_use_input')
                             if tool_input:
@@ -2834,14 +2835,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             )
                                             data["pipeline_state"] = stateful_pipeline_state
                                             stateful_tool_input = retry_result
+                                            stateful_tool_retried = True
                                             logger.info(f"Stateful: retry succeeded for user {username}, turn {current_turn}")
                                         else:
                                             stateful_tool_input = retry_result
+                                            stateful_tool_retried = True
                                             logger.info(f"Stateful: retry returned OOC for user {username}")
                                     else:
                                         logger.warning(f"Stateful: retry also failed for user {username}")
                                 except Exception as retry_err:
                                     logger.error(f"Stateful: retry error for user {username}: {retry_err}")
+
+                        # Snapshot state after ops applied (for debug transcript delta)
+                        stateful_after_snapshot = None
+                        if use_stateful and stateful_tool_input is not None and stateful_pipeline_state is not None:
+                            stateful_after_snapshot = json.dumps(stateful_pipeline_state)
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
@@ -2987,6 +2995,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["pipeline_state_injected"] = stateful_injected_snapshot
                         if use_stateful and stateful_tool_input is not None:
                             assistant_msg_data["state_tool_input"] = stateful_tool_input
+                            if stateful_tool_retried:
+                                assistant_msg_data["state_tool_retried"] = True
+                        if use_stateful and stateful_after_snapshot is not None:
+                            assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id
