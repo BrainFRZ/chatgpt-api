@@ -17,6 +17,13 @@
 !backend/providers/openai_provider.py
 !backend/providers/anthropic_provider.py
 !backend/pipeline.py
+!backend/game_systems/
+!backend/game_systems/__init__.py
+!backend/game_systems/dnd5e.py
+!backend/game_systems/coc7e.py
+!backend/game_systems/sr6e.py
+!backend/game_systems/cpred.py
+!backend/game_systems/dnd5e_cyber.py
 !backend/tests/
 !backend/tests/test_multi_model.py
 !backend/tests/test_pipeline_phase2.py

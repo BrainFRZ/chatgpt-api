@@ -1,0 +1,638 @@
+"""
+Call of Cthulhu 7th Edition game system — contracts and structured state functions.
+
+CoC 7E has mechanical ratchets (Mythos% up → max_san down, Bond damage from insanity,
+Luck spending) with derived values and threshold triggers. These need structured,
+system-specific state tracking to prevent drift after context trims.
+"""
+
+import copy
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# Structured Game State
+# ============================================================
+#
+# Stored in pipeline_state["game_state"]:
+# {
+#     "investigators": {
+#         "Harvey Walters": {
+#             "san": {"current": 55, "max": 85},  # max = 99 - mythos
+#             "luck": 45,
+#             "mythos": 14,                        # one-way ratchet up
+#             "bonds": [
+#                 {"name": "Wife - Margaret", "value": 42},
+#                 {"name": "Dr. Armitage", "value": 35}
+#             ],
+#             "phobias": ["darkness"],
+#             "manias": [],
+#             "skill_marks": ["Library Use", "Spot Hidden"]
+#         }
+#     }
+# }
+
+
+def init_game_state():
+    """Return empty investigators dict — populated via 'set' ops on first turn."""
+    return {"investigators": {}}
+
+
+def apply_game_state(game_state, agent_json, turn):
+    """
+    Apply CoC investigator_ops from Events agent (or single-agent report_state) output.
+
+    Ops format (array in agent_json["investigator_ops"]):
+      {"investigator": "Harvey", "op": "san", "change": -3, "reason": "..."}
+      {"investigator": "Harvey", "op": "luck", "change": -5, "reason": "..."}
+      {"investigator": "Harvey", "op": "mythos", "change": +2, "reason": "..."}
+      {"investigator": "Harvey", "op": "bond", "name": "Wife - Margaret", "change": -8, "reason": "..."}
+      {"investigator": "Harvey", "op": "skill_mark", "skill": "Spot Hidden"}
+      {"investigator": "Harvey", "op": "phobia", "action": "add", "value": "deep water"}
+      {"investigator": "Harvey", "op": "mania", "action": "add", "value": "pyromania"}
+      {"investigator": "Harvey", "op": "phobia", "action": "remove", "value": "darkness"}
+      {"investigator": "Harvey", "op": "set", "fields": {"san": {"current": 55, "max": 85}, "luck": 45, ...}}
+    """
+    ops = agent_json.get("investigator_ops")
+    if not ops:
+        return game_state
+
+    investigators = game_state.setdefault("investigators", {})
+
+    for op_data in ops:
+        inv_name = op_data.get("investigator")
+        op = op_data.get("op")
+        if not inv_name or not op:
+            continue
+
+        # Auto-create investigator stub if not yet tracked
+        if inv_name not in investigators:
+            investigators[inv_name] = {
+                "san": {"current": 0, "max": 99},
+                "luck": 0,
+                "mythos": 0,
+                "bonds": [],
+                "phobias": [],
+                "manias": [],
+                "skill_marks": []
+            }
+        inv = investigators[inv_name]
+
+        try:
+            if op == "set":
+                # Full field replacement for bootstrap/corrections
+                fields = copy.deepcopy(op_data.get("fields", {}))
+                for key, val in fields.items():
+                    if key in inv:
+                        inv[key] = val
+                # Re-derive max SAN from mythos after set
+                if "mythos" in fields or "san" in fields:
+                    inv["san"]["max"] = 99 - inv.get("mythos", 0)
+
+            elif op == "san":
+                change = int(op_data.get("change", 0))
+                inv["san"]["current"] = max(0, min(inv["san"]["max"], inv["san"]["current"] + change))
+
+            elif op == "luck":
+                change = int(op_data.get("change", 0))
+                inv["luck"] = max(0, inv["luck"] + change)
+
+            elif op == "mythos":
+                change = int(op_data.get("change", 0))
+                if change > 0:  # One-way ratchet — only increases
+                    inv["mythos"] += change
+                    # Auto-derive max SAN: 99 - Mythos%
+                    inv["san"]["max"] = 99 - inv["mythos"]
+                    # Clamp current SAN to new max
+                    inv["san"]["current"] = min(inv["san"]["current"], inv["san"]["max"])
+
+            elif op == "bond":
+                bond_name = op_data.get("name")
+                change = int(op_data.get("change", 0))
+                if bond_name:
+                    found = False
+                    for bond in inv["bonds"]:
+                        if bond["name"] == bond_name:
+                            bond["value"] = max(0, bond["value"] + change)
+                            if bond["value"] == 0:
+                                logger.info(f"CoC: Bond '{bond_name}' for {inv_name} destroyed (reached 0)")
+                            found = True
+                            break
+                    if not found:
+                        # New bond — treat change as initial value
+                        inv["bonds"].append({"name": bond_name, "value": max(0, change)})
+
+            elif op == "skill_mark":
+                skill = op_data.get("skill")
+                if skill and skill not in inv["skill_marks"]:
+                    inv["skill_marks"].append(skill)
+
+            elif op == "phobia":
+                action = op_data.get("action", "add")
+                value = op_data.get("value")
+                if value:
+                    if action == "add" and value not in inv["phobias"]:
+                        inv["phobias"].append(value)
+                    elif action == "remove" and value in inv["phobias"]:
+                        inv["phobias"].remove(value)
+
+            elif op == "mania":
+                action = op_data.get("action", "add")
+                value = op_data.get("value")
+                if value:
+                    if action == "add" and value not in inv["manias"]:
+                        inv["manias"].append(value)
+                    elif action == "remove" and value in inv["manias"]:
+                        inv["manias"].remove(value)
+
+        except (ValueError, TypeError, KeyError) as e:
+            logger.warning(f"CoC apply_game_state: error processing op {op_data}: {e}")
+            continue
+
+    return game_state
+
+
+def build_game_injection(game_state):
+    """Build [INVESTIGATOR STATE] injection block from structured state."""
+    investigators = game_state.get("investigators", {})
+    if not investigators:
+        return ""
+
+    lines = ["[INVESTIGATOR STATE]"]
+    for name, inv in sorted(investigators.items()):
+        san = inv.get("san", {})
+        mythos = inv.get("mythos", 0)
+        luck = inv.get("luck", 0)
+        bonds = inv.get("bonds", [])
+        phobias = inv.get("phobias", [])
+        manias = inv.get("manias", [])
+        skill_marks = inv.get("skill_marks", [])
+
+        lines.append(f"{name}:")
+        lines.append(f"  SAN: {san.get('current', 0)}/{san.get('max', 99)} (max = 99 - {mythos} Mythos%)")
+        lines.append(f"  Luck: {luck}")
+        lines.append(f"  Mythos: {mythos}%")
+
+        if bonds:
+            bond_strs = [f"{b['name']} ({b['value']})" for b in bonds]
+            lines.append(f"  Bonds: {', '.join(bond_strs)}")
+        else:
+            lines.append("  Bonds: (none)")
+
+        if phobias:
+            lines.append(f"  Phobias: {', '.join(phobias)}")
+        if manias:
+            lines.append(f"  Manias: {', '.join(manias)}")
+        if skill_marks:
+            lines.append(f"  Skill marks: {', '.join(skill_marks)}")
+
+    lines.append("[/INVESTIGATOR STATE]")
+    return "\n".join(lines)
+
+
+# ============================================================
+# Pipeline Contracts
+# ============================================================
+
+EVENTS_CONTRACT = """You are the EVENTS AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the first stage.
+
+YOUR ROLE: Analyze the conversation history and determine what is happening this turn. Identify narrative beats, triggered callbacks, emotional context, and current character states. Maintain the persistent callback ledger, NPC memories, scene state, and investigator mechanical state via ops.
+
+YOU MUST OUTPUT VALID JSON matching one of these schemas:
+
+SCHEMA A - Route to Mechanics (default for in-character gameplay):
+{
+  "route": "mechanics",
+  "pacing": {
+    "episode": "<current episode/scenario name>",
+    "beat": "<current narrative beat>",
+    "beat_responses": <number of responses on this beat>,
+    "notes": "<pacing observations>"
+  },
+  "time_passed": "<how much in-world time this turn covers>",
+  "beats": ["<beat 1>", "<beat 2>", ...],
+  "player_action": "<what the player is attempting>",
+  "callbacks": [
+    {"callback": "<triggered callback description>", "source": "<NPC name or null>"}
+  ],
+  "emotional_context": "<emotional state, horror level, sanity pressure>",
+  "character_states": {
+    "<name>": "<current HP, MP, conditions, equipment — NOT SAN/Luck/Bonds/Mythos>"
+  },
+  "investigator_ops": [
+    {"investigator": "<name>", "op": "san|luck|mythos|bond|skill_mark|phobia|mania|set", ...}
+  ],
+  "arc_label": "<string or null>",
+  "current_player": "<name of the investigator whose turn this is>",
+  "next_player": "<name of the investigator whose turn is NEXT>",
+  "next_player_prompt": "<1-2 sentence scene setup for the next player>",
+  "hud_state": {
+    "date": "<in-world date>",
+    "time": "<in-world time as HHMM>",
+    "location": "<current location>",
+    "funds": "<investigator funds>",
+    "trackables": "<null or resource tracking object>"
+  },
+  "combat": "<null OR combat object>",
+  "callback_ops": [...],
+  "npc_memory_ops": [...],
+  "scene_state": {
+    "location": "<current location>",
+    "npcs_present": ["<NPC name>", ...],
+    "active_tensions": ["<tension description>", ...],
+    "scene_trigger": "<what initiated this scene>",
+    "atmosphere": "<mood, lighting, weather, sensory details — lean into horror>",
+    "details": ["<transient fact>", ...],
+    "pending_actions": ["<action someone is about to take>", ...]
+  }
+}
+
+SCHEMA B - Route to Output (ONLY for pure OOC questions):
+{
+  "route": "output",
+  "pacing": {...},
+  "time_passed": "0 minutes",
+  "content": "<your conversational OOC response>",
+  "callback_ops": [],
+  "npc_memory_ops": [],
+  "scene_state": {<maintain current scene state unchanged>}
+}
+
+INVESTIGATOR OPS (structured state tracking):
+You receive an [INVESTIGATOR STATE] block with each investigator's tracked mechanical state: SAN (current/max), Luck, Mythos%, Bonds, Phobias, Manias, and Skill marks. This is your authoritative source — it persists across context trims.
+
+Use "investigator_ops" to update this state. Operations:
+- {"investigator": "<name>", "op": "san", "change": <signed int>, "reason": "<why>"}
+  SAN loss/gain. Current is clamped 0 to max. Max is always 99 - Mythos%.
+- {"investigator": "<name>", "op": "luck", "change": <signed int>, "reason": "<why>"}
+  Luck spent or gained. Mechanics will output the Luck cost; you record it here.
+- {"investigator": "<name>", "op": "mythos", "change": <positive int>, "reason": "<why>"}
+  Mythos% increase (one-way ratchet — only goes up). Auto-derives new max SAN.
+- {"investigator": "<name>", "op": "bond", "name": "<bond name>", "change": <signed int>, "reason": "<why>"}
+  Bond damage or recovery. Clamped ≥ 0. Bond at 0 is destroyed.
+- {"investigator": "<name>", "op": "skill_mark", "skill": "<skill name>"}
+  Mark a skill for development roll (deduped).
+- {"investigator": "<name>", "op": "phobia", "action": "add|remove", "value": "<phobia>"}
+- {"investigator": "<name>", "op": "mania", "action": "add|remove", "value": "<mania>"}
+- {"investigator": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
+  Use "set" to bootstrap investigator state on first turn or correct errors.
+
+IMPORTANT: SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. character_states is for HP, MP, conditions, and equipment only.
+
+CHARACTER STATES:
+- "character_states" tracks HP, MP, conditions, equipment, and other non-investigator-ops state
+- Do NOT include SAN, Luck, Bonds, or Mythos here — those are managed by investigator_ops and shown in [INVESTIGATOR STATE]
+
+COMBAT (CoC style):
+- DEX-order initiative (highest DEX acts first)
+- When combat is active, set "combat" to:
+  {"round": 1, "initiative_order": ["<name1>", ...], "current_turn": "<name>"}
+- CoC combat is fast and deadly — most fights should be short
+
+PACING (investigation focus):
+- CoC scenarios are investigation-driven. Pacing should emphasize clue discovery, NPC interrogation, research, and slow horror buildup.
+- Combat is rare and dangerous — avoid prolonged combat sequences
+- Track the mounting dread: each Mythos encounter should feel like a ratchet tightening
+
+ARC LABEL:
+- Set to a short label when starting a new scenario beat or invented subplot
+- null on all other turns
+
+CALLBACK LEDGER:
+- Same semantics as standard pipeline (add/resolve/update via callback_ops)
+- Use for Mythos clues, NPC promises, investigation leads, ominous foreshadowing
+
+NPC MEMORIES:
+- Same semantics (add/drop via npc_memory_ops)
+- Track NPC knowledge of the Mythos, suspicious behaviors, and relationship to investigators
+
+SCENE STATE:
+- Full replacement every turn, same as standard pipeline
+- atmosphere should emphasize horror elements: dread, wrongness, sensory unease
+
+ROUTING RULES:
+- Route to "mechanics" for ALL in-character gameplay
+- Route to "output" ONLY for pure OOC questions
+
+IMPORTANT:
+- Output ONLY valid JSON
+- "beats" array: discrete narrative events
+- "character_states": HP, MP, conditions, equipment (NOT SAN/Luck/Bonds/Mythos)
+- "investigator_ops": SAN, Luck, Mythos, Bonds, skill marks, phobias, manias
+- Bootstrap: On first turn with empty [INVESTIGATOR STATE], use "set" ops to initialize all investigators from character sheets"""
+
+MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the second stage.
+
+YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics using CoC 7E rules. Resolve percentile rolls, opposed rolls, SAN checks, and combat. Determine what ACTUALLY happens.
+
+YOU RECEIVE: JSON from Events containing beats, player_action, callbacks, emotional_context, character_states, investigator_ops, hud_state, and combat.
+
+CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens.
+
+YOU MUST OUTPUT VALID JSON:
+
+SCHEMA A - Route to Narration (default):
+{
+  "route": "narration",
+  "beats": [
+    {
+      "beat": "<what happens>",
+      "outcome": "<mechanical result>",
+      "rolls": [
+        {
+          "description": "<what this roll is for>",
+          "skill": "<skill name and current %>",
+          "difficulty": "Regular|Hard|Extreme",
+          "roll": <d100 result>,
+          "target": <skill value or half/fifth>,
+          "bonus_dice": <0 or number of bonus dice>,
+          "penalty_dice": <0 or number of penalty dice>,
+          "all_tens": [<tens digits rolled if bonus/penalty dice>],
+          "selected_tens": <selected tens digit>,
+          "result": "Critical|Extreme|Hard|Regular|Fail|Fumble",
+          "pushed": <true if this is a pushed roll>,
+          "luck_spent": <0 or amount of Luck spent to modify>
+        }
+      ],
+      "san_check": {
+        "trigger": "<what caused the SAN check>",
+        "roll": <d100>,
+        "target": <current SAN>,
+        "result": "pass|fail",
+        "loss": <SAN points lost>,
+        "loss_formula": "<e.g. '1d6' or '1/1d10'>"
+      },
+      "state_changes": ["<change from this beat>", ...]
+    }
+  ],
+  "dramatic_notes": "<tone/pacing guidance — horror emphasis>",
+  "hud": "<HUD line>",
+  "investigator_ops": <pass through from Events JSON unchanged>,
+  "arc_label": <pass through from Events unchanged>,
+  "callbacks": <pass through from Events unchanged>,
+  "current_player": <pass through from Events unchanged>,
+  "next_player": <pass through from Events unchanged>,
+  "next_player_prompt": <pass through from Events unchanged>,
+  "combat": <pass through from Events unchanged>,
+  "character_states": {
+    "<name>": "<updated HP, MP, conditions, equipment after this turn>"
+  }
+}
+
+SCHEMA B - Route to Output (OOC rules questions):
+{
+  "route": "output",
+  "content": "<rules explanation>"
+}
+
+ROLL RULES (CoC 7E percentile):
+- Roll d100 against skill percentage
+- Regular success: roll ≤ skill%
+- Hard success: roll ≤ half skill% (round down)
+- Extreme success: roll ≤ fifth of skill% (round down)
+- Critical: roll = 01
+- Fumble: roll = 100 (or 96-100 if skill < 50%)
+- Bonus dice: Roll extra tens die, keep LOWEST tens digit (better result)
+- Penalty dice: Roll extra tens die, keep HIGHEST tens digit (worse result)
+- Show all tens digits rolled when bonus/penalty dice are in play
+
+PUSHED ROLLS:
+- An investigator may push a failed roll (retry at greater risk)
+- If pushed roll also fails, consequences are worse than normal failure
+- Mark pushed rolls with "pushed": true
+
+LUCK SPENDING:
+- Investigator can spend Luck points to modify a roll after seeing the result
+- Each Luck point spent reduces the roll by 1
+- Record luck_spent on the roll; Events records the Luck deduction via investigator_ops
+- Luck cannot be spent on SAN checks or Luck rolls
+
+OPPOSED ROLLS:
+- Both sides roll; higher level of success wins (Extreme > Hard > Regular)
+- If tied, higher skill wins; if still tied, reroll
+
+SAN CHECKS:
+- Triggered by Mythos encounters, horrific scenes, casting spells
+- Roll d100 vs current SAN
+- Pass: lose minimum SAN (or 0); Fail: lose maximum SAN
+- Format: "loss_formula": "0/1d6" means 0 on pass, 1d6 on fail
+- If SAN loss ≥ 5 in one check: bout of madness
+- Include "san_check" object on beats that trigger SAN rolls (null otherwise)
+
+COMBAT (CoC 7E):
+- DEX-order initiative (no roll — highest DEX goes first)
+- Fighting (Brawl) for melee, Firearms for ranged
+- Dodge is an opposed roll vs attacker's Fighting
+- No AC — armor provides damage reduction
+- Damage applied directly to HP
+- Major Wound: single attack ≥ half max HP
+
+HUD:
+- Format: [Date: X | Time: XXXX | Loc: X | Funds: X | SAN: X/Y | Luck: Z]
+- Include per-investigator SAN and Luck in the HUD
+- Build from hud_state, advance time by time_passed
+
+IMPORTANT:
+- Output ONLY valid JSON
+- Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
+- character_states is YOUR updated version (HP, MP, conditions) — apply beat outcomes"""
+
+NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the final stage.
+
+YOUR ROLE: Take the mechanical outcomes from Mechanics and produce the narrative prose the player reads. You own the character voices, tone, and literary quality — which for CoC means creeping dread, unreliable perception, and cosmic horror.
+
+YOU RECEIVE: JSON from Mechanics containing beats (with rolls, san_check, state_changes), dramatic_notes, hud, investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
+
+YOUR OUTPUT: Plain text narrative prose (NOT JSON).
+
+OUTPUT STRUCTURE:
+0. If "arc_label" is non-null, display as bold header: **[Scenario Beat: The Auction]**
+1. Narrate beats in order as cohesive horror prose. Use "outcome" and "state_changes" for ground truth.
+2. Place roll breakdowns naturally within their beat:
+   Percentile: 🎲 [Description]: [**roll**] vs [Skill] XX% (Regular/Hard/Extreme) ✓/✗
+   With bonus dice: 🎲 [Description]: [tens: T1, **T2**, units: U] = **roll** vs Skill XX% ✓/✗
+   Pushed roll: 🎲 [Description] (Pushed): [**roll**] vs Skill XX% ✓/✗
+   With Luck: 🎲 [Description]: [**roll**] vs Skill XX% ✗ → spent N Luck → **adjusted** ✓
+3. SAN check display (when san_check is present on a beat):
+   🧠 SAN Check: [**roll**] vs SAN XX — [Pass/Fail] (-N SAN)
+   If bout of madness triggered (loss ≥ 5): note it dramatically in narration
+4. If "investigator_ops" contains changes, show a brief OOC summary above the HUD:
+   📊 **SAN** Harvey -3 (52/85) · Failed SAN check | **Luck** Harvey -5 (40) · Spent on Library Use
+   📊 **Mythos** Harvey +2 (14%) · max SAN now 85 | **Bond** Margaret -8 (34) · Bout of madness
+5. HUD appended verbatim at the end
+6. current_player attribution and next_player closing hook per standard pipeline
+7. Combat: reference DEX initiative order if in combat
+
+TONE:
+- Creeping dread, not jump scares. Wrongness in the mundane.
+- Describe what investigators PERCEIVE, not what IS — unreliable narrator energy
+- Cosmic horror: the universe is indifferent, knowledge is dangerous
+- NPCs should feel real, sympathetic, breakable
+- Physical descriptions: cold, damp, wrong angles, shadows that don't match
+
+IMPORTANT:
+- Output plain text only. No JSON wrapping.
+- Append HUD exactly as provided.
+- The beats array IS ground truth — do not invent outcomes.
+- Never control the player's investigator."""
+
+SINGLE_AGENT_STATE_CONTRACT = """## Persistent State System (Call of Cthulhu 7E)
+
+You maintain persistent state across turns. This is your long-term memory — when conversation history scrolls out of your context window, these state blocks are your ONLY source of continuity.
+
+### Injected State (read these carefully each turn):
+- **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
+- **[CALLBACK LEDGER]**: Open plot threads, promises, investigation leads with IDs
+- **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
+- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[CHARACTER STATES]**: Mechanical state per character (HP, MP, conditions, equipment — NOT SAN/Luck)
+- **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
+
+### State Reporting (via report_state tool):
+After your narrative, you MUST call the `report_state` tool every turn. Required sections:
+- **pacing**: Episode/beat tracking
+- **scene_state**: Current scene (npcs_present controls memory injection)
+- **character_states**: HP, MP, conditions, equipment per character
+- **is_ooc**: true only for pure OOC turns
+
+Optional arrays:
+- **callback_ops**: Add/resolve investigation leads, Mythos clues, NPC promises
+- **npc_memory_ops**: Record significant NPC moments
+- **investigator_ops**: SAN/Luck/Mythos/Bond/skill mark/phobia/mania changes
+
+### Investigator Ops (in report_state):
+Use the "investigator_ops" array to track CoC-specific mechanical state:
+- `{"investigator": "<name>", "op": "san", "change": -3, "reason": "Failed SAN check"}`
+- `{"investigator": "<name>", "op": "luck", "change": -5, "reason": "Spent on roll"}`
+- `{"investigator": "<name>", "op": "mythos", "change": +2, "reason": "Read tome"}`
+- `{"investigator": "<name>", "op": "bond", "name": "<bond>", "change": -8, "reason": "Bout of madness"}`
+- `{"investigator": "<name>", "op": "skill_mark", "skill": "Spot Hidden"}`
+- `{"investigator": "<name>", "op": "phobia", "action": "add", "value": "darkness"}`
+- `{"investigator": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
+
+SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states.
+
+### Bootstrap (first turn or empty state):
+- Set pacing from scenario context
+- Build scene_state from current location
+- Set character_states (HP, MP, conditions)
+- Use investigator_ops "set" to initialize SAN, Luck, Mythos, Bonds from character sheets
+- Add callback_ops for open investigation threads
+
+### Rules:
+- Call `report_state` every turn
+- Do NOT reference the state system in your narrative
+- Percentile rolls: 🎲 [Description]: [**roll**] vs Skill XX% (difficulty) ✓/✗
+- SAN checks: 🧠 SAN Check: [**roll**] vs SAN XX — Pass/Fail (-N)
+- Horror tone: creeping dread, cosmic indifference, unreliable perception"""
+
+STATE_REPORT_TOOL = {
+    "name": "report_state",
+    "description": "Report all state updates after your narrative. Call every turn. Review your narrative and capture all changes.",
+    "input_schema": {
+        "type": "object",
+        "required": ["is_ooc", "pacing", "scene_state", "character_states"],
+        "properties": {
+            "is_ooc": {
+                "type": "boolean",
+                "description": "True ONLY for pure OOC responses. False for all narrative responses."
+            },
+            "pacing": {
+                "type": "object",
+                "required": ["episode", "beat", "responses"],
+                "properties": {
+                    "episode": {"type": "string"},
+                    "beat": {"type": "string"},
+                    "responses": {"type": "integer"},
+                    "notes": {"type": "string"}
+                }
+            },
+            "scene_state": {
+                "type": "object",
+                "required": ["location", "npcs_present", "active_tensions", "atmosphere"],
+                "properties": {
+                    "location": {"type": "string"},
+                    "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "active_tensions": {"type": "array", "items": {"type": "string"}},
+                    "scene_trigger": {"type": "string"},
+                    "atmosphere": {"type": "string"},
+                    "details": {"type": "array", "items": {"type": "string"}},
+                    "pending_actions": {"type": "array", "items": {"type": "string"}}
+                }
+            },
+            "character_states": {
+                "type": "object",
+                "description": "Map of character name to current state string (HP, MP, conditions, equipment — NOT SAN/Luck)",
+                "additionalProperties": {"type": "string"}
+            },
+            "callback_ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "resolve"]},
+                        "original_text": {"type": "string"},
+                        "source_npc": {"type": "string"},
+                        "id": {"type": "integer"},
+                        "resolution_text": {"type": "string"}
+                    }
+                }
+            },
+            "npc_memory_ops": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["action", "npc"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "drop"]},
+                        "npc": {"type": "string"},
+                        "focus": {"type": "string"},
+                        "impact": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "text": {"type": "string"},
+                        "quote": {"type": "string"},
+                        "date": {"type": "string"},
+                        "index": {"type": "integer"}
+                    }
+                }
+            },
+            "investigator_ops": {
+                "type": "array",
+                "description": "CoC investigator state changes: SAN, Luck, Mythos, Bonds, skill marks, phobias, manias",
+                "items": {
+                    "type": "object",
+                    "required": ["investigator", "op"],
+                    "properties": {
+                        "investigator": {"type": "string"},
+                        "op": {"type": "string", "enum": ["san", "luck", "mythos", "bond", "skill_mark", "phobia", "mania", "set"]},
+                        "change": {"type": "integer"},
+                        "reason": {"type": "string"},
+                        "name": {"type": "string", "description": "Bond name (for bond ops)"},
+                        "skill": {"type": "string", "description": "Skill name (for skill_mark ops)"},
+                        "action": {"type": "string", "enum": ["add", "remove"], "description": "For phobia/mania ops"},
+                        "value": {"type": "string", "description": "Phobia/mania value"},
+                        "fields": {"type": "object", "description": "Full field replacement (for set ops)"}
+                    }
+                }
+            }
+        }
+    }
+}
+
+# ============================================================
+# Game System Definition
+# ============================================================
+
+GAME_SYSTEM = {
+    "id": "coc7e",
+    "display_name": "Call of Cthulhu 7E",
+    "events_contract": EVENTS_CONTRACT,
+    "mechanics_contract": MECHANICS_CONTRACT,
+    "narration_contract": NARRATION_CONTRACT,
+    "single_agent_contract": SINGLE_AGENT_STATE_CONTRACT,
+    "state_report_tool": STATE_REPORT_TOOL,
+    "init_game_state": init_game_state,
+    "apply_game_state": apply_game_state,
+    "build_game_injection": build_game_injection,
+}

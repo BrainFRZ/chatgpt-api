@@ -32,12 +32,12 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 # Pipeline imports
 from pipeline import (
     run_pipeline, PipelineResult, generate_debug_transcript,
-    SINGLE_AGENT_STATE_CONTRACT, STATE_REPORT_TOOL,
     apply_single_agent_state_updates,
     build_single_agent_injections, migrate_pipeline_state,
     get_context_pairs,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
+from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 
 # Pipeline agent names (used for per-agent instructions and file routing)
 PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
@@ -993,12 +993,17 @@ def get_project_metadata_path(username: str, project: str) -> str:
     return os.path.join(get_project_dir(username, project), "metadata.json")
 
 def load_project_metadata(username: str, project: str) -> dict:
-    """Load project metadata (like last_accessed)"""
+    """Load project metadata (like last_accessed). Auto-migrates game_system if missing."""
     metadata_path = get_project_metadata_path(username, project)
     if os.path.exists(metadata_path):
         with open(metadata_path, 'r') as f:
-            return json.load(f)
-    return {"last_accessed": "1970-01-01T00:00:00"}
+            metadata = json.load(f)
+        # Auto-migrate: ensure game_system exists
+        if "game_system" not in metadata:
+            metadata["game_system"] = DEFAULT_GAME_SYSTEM
+            save_project_metadata(username, project, metadata)
+        return metadata
+    return {"last_accessed": "1970-01-01T00:00:00", "game_system": DEFAULT_GAME_SYSTEM}
 
 def save_project_metadata(username: str, project: str, metadata: dict):
     """Save project metadata atomically."""
@@ -1050,6 +1055,12 @@ class SetProjectModelRequest(BaseModel):
     username: str
     project: str
     model: str
+
+class SetProjectGameSystemRequest(BaseModel):
+    """Request to change a project's game system."""
+    username: str
+    project: str
+    game_system: str
 
 class ModelInfo(BaseModel):
     """Information about an available model."""
@@ -2332,6 +2343,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             content = f"{files_text}\n\n{content}"
         return content
 
+    # Load game system for this project
+    gs = None
+    if request.project:
+        proj_meta = load_project_metadata(username, request.project)
+        gs = get_game_system(proj_meta.get("game_system", DEFAULT_GAME_SYSTEM))
+    else:
+        gs = get_game_system(DEFAULT_GAME_SYSTEM)
+
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     use_stateful = model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
@@ -2367,10 +2386,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
         # Build injections for user message
-        injections_str = build_single_agent_injections(stateful_pipeline_state, updates_text)
+        injections_str = build_single_agent_injections(stateful_pipeline_state, updates_text, game_system=gs)
 
         # System prompt: contract + original
-        system_content = SINGLE_AGENT_STATE_CONTRACT + "\n\n" + branch_path[0]["content"]
+        system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
         system_msg = {"role": branch_path[0]["role"], "content": system_content}
 
         # User message with injections prepended
@@ -2407,7 +2426,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     )
 
     if use_stateful:
-        request_params["tools"] = [STATE_REPORT_TOOL]
+        request_params["tools"] = [gs["state_report_tool"]]
         # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
         # Auto + strong contract instructions achieves the same result.
         request_params["tool_choice"] = {"type": "auto"}
@@ -2481,7 +2500,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     agent_instructions=agent_instructions,
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
-                    updates_text=updates_text
+                    updates_text=updates_text,
+                    game_system=gs["id"]
                 )
 
                 client_disconnected = False
@@ -2800,7 +2820,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     stateful_pipeline_state["turn_counter"] += 1
                                     current_turn = stateful_pipeline_state["turn_counter"]
                                     apply_single_agent_state_updates(
-                                        stateful_pipeline_state, tool_input, current_turn
+                                        stateful_pipeline_state, tool_input, current_turn, game_system=gs
                                     )
                                     data["pipeline_state"] = stateful_pipeline_state
                                     stateful_tool_input = tool_input
@@ -2818,7 +2838,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         request_params["messages"],
                                         accumulated_content,
                                         accumulated_thinking,
-                                        STATE_REPORT_TOOL
+                                        gs["state_report_tool"]
                                     )
                                     if retry_usage:
                                         usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
@@ -2831,7 +2851,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             stateful_pipeline_state["turn_counter"] += 1
                                             current_turn = stateful_pipeline_state["turn_counter"]
                                             apply_single_agent_state_updates(
-                                                stateful_pipeline_state, retry_result, current_turn
+                                                stateful_pipeline_state, retry_result, current_turn, game_system=gs
                                             )
                                             data["pipeline_state"] = stateful_pipeline_state
                                             stateful_tool_input = retry_result
@@ -4566,8 +4586,38 @@ def get_project_metadata_endpoint(username: str, project: str):
     metadata = load_project_metadata(username, project)
     return {
         "last_accessed": metadata.get("last_accessed"),
-        "model": metadata.get("model", DEFAULT_MODEL)
+        "model": metadata.get("model", DEFAULT_MODEL),
+        "game_system": metadata.get("game_system", DEFAULT_GAME_SYSTEM)
     }
+
+
+@app.get("/api/game-systems")
+def get_game_systems():
+    """Return available game systems for frontend dropdown."""
+    return list_game_systems()
+
+
+@app.post("/api/set-project-game-system")
+def set_project_game_system(request: SetProjectGameSystemRequest):
+    """Set the game system for a project."""
+    from game_systems import GAME_SYSTEMS
+    username = request.username.strip().lower()
+
+    if not os.path.exists(get_user_dir(username)):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    project_dir = get_project_dir(username, request.project)
+    if not os.path.exists(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if request.game_system not in GAME_SYSTEMS:
+        raise HTTPException(status_code=400, detail=f"Unknown game system: {request.game_system}")
+
+    metadata = load_project_metadata(username, request.project)
+    metadata["game_system"] = request.game_system
+    save_project_metadata(username, request.project, metadata)
+
+    return {"status": "ok", "game_system": request.game_system}
 
 
 @app.get("/health")

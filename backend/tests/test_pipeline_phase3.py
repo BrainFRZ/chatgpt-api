@@ -29,8 +29,8 @@ from sync_manager import SyncEventType, SyncEvent, SyncManager
 from pipeline import (
     run_pipeline, PipelineResult, PipelineStageResult,
     STAGE_CONFIGS, build_agent_system_prompt,
-    EVENTS_CONTRACT, MECHANICS_CONTRACT, NARRATION_CONTRACT
 )
+from game_systems.dnd5e import EVENTS_CONTRACT, MECHANICS_CONTRACT, NARRATION_CONTRACT
 from providers.openai_provider import OpenAIProvider
 
 AGENT_NAMES = ["events", "mechanics", "narration"]

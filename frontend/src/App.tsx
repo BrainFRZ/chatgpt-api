@@ -422,6 +422,8 @@ function App() {
   const [rootChatsCache, setRootChatsCache] = useState<string[] | null>(null);
   const [projectModel, setProjectModel] = useState<string | null>(null);
   const isPipelineProject = projectModel === 'gpt-5.2';
+  const [projectGameSystem, setProjectGameSystem] = useState<string | null>(null);
+  const [availableGameSystems, setAvailableGameSystems] = useState<{id: string, name: string}[]>([]);
 
   // Real-time sync state
   const [viewerCount, setViewerCount] = useState(1);
@@ -531,6 +533,7 @@ function App() {
     setChatSearchQuery('');
     setViewMode('chat');
     setProjectModel(null);
+    setProjectGameSystem(null);
   };
 
   // Reset all user session state (called on logout)
@@ -1199,6 +1202,17 @@ function App() {
           { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', pricing: { input_new: 5, input_cached: 0.5, output: 25, reasoning: 25 }, context_limits: { threshold: 80000, target: 55000 } }
         ]);
       });
+
+    // Fetch available game systems
+    fetch('/api/game-systems')
+      .then(res => res.json())
+      .then(data => setAvailableGameSystems(data))
+      .catch(() => {
+        setAvailableGameSystems([
+          { id: 'dnd5e', name: 'D&D 5E' },
+          { id: 'coc7e', name: 'Call of Cthulhu 7E' }
+        ]);
+      });
   }, []);
 
   const loadChatList = async () => {
@@ -1285,6 +1299,7 @@ function App() {
       setFilesUploading(false);
       setProjectChatsDetailed([]);
       setProjectModel(null);
+      setProjectGameSystem(null);
     }
     setChatSearchQuery('');
     setViewMode('chat');
@@ -1309,6 +1324,7 @@ function App() {
         if (currentProjectRef.current !== projectName) return;
         fetchedModel = metadataData.model || 'gpt-5.2';
         setProjectModel(fetchedModel);
+        setProjectGameSystem(metadataData.game_system || 'dnd5e');
       }
     } catch (err) {
       console.error('Could not fetch project metadata:', err);
@@ -1684,6 +1700,35 @@ function App() {
       setProjectModel(previousModel);
       setError('Could not switch project model - network error');
       console.error('Could not save project model preference:', err);
+    }
+  };
+
+  const handleProjectGameSystemChange = async (newGameSystem: string) => {
+    if (!user || !currentProject) return;
+
+    const previousGameSystem = projectGameSystem;
+    setProjectGameSystem(newGameSystem);  // Optimistic update
+
+    try {
+      const response = await fetch('/api/set-project-game-system', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          project: currentProject,
+          game_system: newGameSystem
+        })
+      });
+
+      if (!response.ok) {
+        setProjectGameSystem(previousGameSystem);
+        const data = await response.json().catch(() => ({}));
+        setError(data.detail || 'Could not switch game system');
+      }
+    } catch (err) {
+      setProjectGameSystem(previousGameSystem);
+      setError('Could not switch game system - network error');
+      console.error('Could not save game system preference:', err);
     }
   };
 
@@ -3633,6 +3678,18 @@ function App() {
                       {viewerCount} viewing
                     </span>
                   )}
+                  {currentProject && availableGameSystems.length > 0 && (
+                    <select
+                      value={projectGameSystem || 'dnd5e'}
+                      onChange={(e) => handleProjectGameSystemChange(e.target.value)}
+                      style={styles.modelSelector}
+                      title="Select game system"
+                    >
+                      {availableGameSystems.map(gs => (
+                        <option key={gs.id} value={gs.id}>{gs.name}</option>
+                      ))}
+                    </select>
+                  )}
                   {availableModels.length > 0 && (
                     <select
                       value={selectedModel}
@@ -4152,6 +4209,23 @@ function App() {
                         ))}
                       </select>
                       <p style={styles.projectModelHelperText}>New chats will use this model by default</p>
+                    </div>
+
+                    {/* Game System section */}
+                    <div style={styles.projectSection}>
+                      <div style={styles.projectSectionHeader}>
+                        <h3 style={styles.projectSectionTitle}>Game System</h3>
+                      </div>
+                      <select
+                        value={projectGameSystem || 'dnd5e'}
+                        onChange={(e) => handleProjectGameSystemChange(e.target.value)}
+                        style={styles.projectModelSelector}
+                      >
+                        {availableGameSystems.map(gs => (
+                          <option key={gs.id} value={gs.id}>{gs.name}</option>
+                        ))}
+                      </select>
+                      <p style={styles.projectModelHelperText}>Determines dice mechanics, state tracking, and narrative style</p>
                     </div>
 
                     {/* Instructions section */}

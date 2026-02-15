@@ -27,7 +27,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from pipeline import build_agent_system_prompt, EVENTS_CONTRACT, MECHANICS_CONTRACT, NARRATION_CONTRACT
+from pipeline import build_agent_system_prompt
+from game_systems.dnd5e import EVENTS_CONTRACT, MECHANICS_CONTRACT, NARRATION_CONTRACT
 
 AGENT_NAMES = ["events", "mechanics", "narration"]
 
@@ -909,9 +910,9 @@ class TestTimePassedFlow:
         """Full pipeline mock: Events outputs time_passed, Mechanics receives it in its messages."""
         from pipeline import (
             build_events_messages, build_mechanics_messages,
-            build_agent_system_prompt, EVENTS_CONTRACT, MECHANICS_CONTRACT,
-            _parse_stage_json
+            build_agent_system_prompt, _parse_stage_json
         )
+        from game_systems.dnd5e import EVENTS_CONTRACT, MECHANICS_CONTRACT
 
         pp = pipeline_project
 
