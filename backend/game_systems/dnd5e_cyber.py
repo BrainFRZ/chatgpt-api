@@ -201,6 +201,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
+    "pcs_present": ["<PC name>", ...],
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting, weather, sensory details>",
@@ -307,6 +308,7 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
+- "pcs_present": list every PC actively in the scene. Controls which per-character funds appear in the HUD.
 
 CHARACTER STATES:
 - Same as standard D&D 5E pipeline — HP, spell slots, conditions, resources, equipment
@@ -441,15 +443,16 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
 - **[CALLBACK LEDGER]**: Open plot threads, promises, foreshadowing with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
-- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
+- **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 - **[SHIP STATE]**: Hull, shields, ammo, and credits for the party's ship
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
-- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn.
+- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: Map of character name → current mechanical state. Full replacement each turn.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
@@ -474,6 +477,15 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "set", "fields": {<full ship state replacement>}}`
   - Bootstrap with "set" op when [SHIP STATE] is empty.
   - **CONTEXT UPDATES override**: If [CONTEXT UPDATES] contains ship values (hull, shields, ammo, credits) that differ from [SHIP STATE], emit a "set" op to sync.
+
+### HUD Line
+Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line.
+Standard format: `[Date: X | Time: XXXX | Loc: X | Funds: X]`
+If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]`
+During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y | Funds: X]`
+Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
+Advance time/date based on in-world passage. Update funds/trackables if they changed.
+Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -523,6 +535,7 @@ STATE_REPORT_TOOL = {
                 "properties": {
                     "location": {"type": "string"},
                     "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
@@ -597,6 +610,17 @@ STATE_REPORT_TOOL = {
                         "reason": {"type": "string", "description": "Why the change occurred"},
                         "fields": {"type": "object", "description": "Full ship state replacement (for set ops)"}
                     }
+                }
+            },
+            "hud_state": {
+                "type": "object",
+                "description": "Current in-world HUD state. Report every in-character turn.",
+                "properties": {
+                    "date": {"type": "string"},
+                    "time": {"type": "string", "description": "HHMM format"},
+                    "location": {"type": "string"},
+                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "trackables": {"description": "null or object of resource name → value"}
                 }
             }
         }

@@ -223,6 +223,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
+    "pcs_present": ["<PC name>", ...],
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting, weather, sensory details>",
@@ -362,6 +363,7 @@ SCENE STATE:
 - You receive a [SCENE STATE] block showing the previous turn's scene
 - Output a complete "scene_state" object EVERY turn — this is a full replacement, not a diff
 - "npcs_present" is critical: it controls which NPC memories are injected on the NEXT turn. List every NPC actively in the scene.
+- "pcs_present": list every PC actively in the scene. Controls which per-character funds appear in the HUD.
 - "active_tensions" captures unresolved dramatic tensions driving the scene
 - "details" is for transient facts that matter now but may not next scene (e.g., "disguise is active", "door is barricaded")
 - "pending_actions" tracks things about to happen that should carry into the next turn
@@ -543,14 +545,15 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
 - **[CALLBACK LEDGER]**: Open plot threads, promises, foreshadowing with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
-- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
+- **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
-- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene.
+- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
 - **character_states**: Map of character name → current mechanical state (HP, AC, spell slots, conditions, resources). Full replacement each turn.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
@@ -577,6 +580,14 @@ Optional arrays (omit or leave empty when no ops occurred):
     3. Show a 📊 notification line after the narrative: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
   - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize from context.
   - **CONTEXT UPDATES override**: If a [CONTEXT UPDATES] block contains RS, RomS, or FR values that differ from [RELATIONSHIP STATE], the player is correcting the state. Emit "set" ops to update the persisted state to match — CONTEXT UPDATES is the higher authority. Example: CONTEXT UPDATES says "Kira RS 55, RomS 30" but [RELATIONSHIP STATE] shows RS 47, RomS 25 → emit: {"op": "set", "target": "Kira", "type": "npc", "fields": {"rs": 55, "roms": 30}}
+
+### HUD Line
+Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
+`[Date: X | Time: XXXX | Loc: X | Funds: X]`
+If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]`
+Advance time/date based on in-world passage. Update funds if transactions occurred. Update trackables if resources changed.
+Game-specific stats come from injected game-state blocks, NOT from hud_state.
+Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -619,6 +630,7 @@ STATE_REPORT_TOOL = {
                 "properties": {
                     "location": {"type": "string"},
                     "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
@@ -677,6 +689,17 @@ STATE_REPORT_TOOL = {
                         "type": {"type": "string", "enum": ["npc", "faction"], "description": "Entity type (for set ops)"},
                         "fields": {"type": "object", "description": "Full replacement fields (for set ops)"}
                     }
+                }
+            },
+            "hud_state": {
+                "type": "object",
+                "description": "Current in-world HUD state. Report every in-character turn.",
+                "properties": {
+                    "date": {"type": "string"},
+                    "time": {"type": "string", "description": "HHMM format"},
+                    "location": {"type": "string"},
+                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "trackables": {"description": "null or object of resource name → value"}
                 }
             }
         }

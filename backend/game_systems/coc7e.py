@@ -240,6 +240,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
+    "pcs_present": ["<PC name>", ...],
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting, weather, sensory details — lean into horror>",
@@ -309,6 +310,7 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
+- "pcs_present": list every PC actively in the scene. Controls which per-character funds appear in the HUD.
 - atmosphere should emphasize horror elements: dread, wrongness, sensory unease
 
 ROUTING RULES:
@@ -485,14 +487,15 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
 - **[CALLBACK LEDGER]**: Open plot threads, promises, investigation leads with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
-- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, MP, conditions, equipment — NOT SAN/Luck)
+- **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
-- **scene_state**: Current scene (npcs_present controls memory injection)
+- **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: HP, MP, conditions, equipment per character
 - **is_ooc**: true only for pure OOC turns
 
@@ -512,6 +515,13 @@ Use the "investigator_ops" array to track CoC-specific mechanical state:
 - `{"investigator": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
 SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states.
+
+### HUD Line
+Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
+`[Date: X | Time: XXXX | Loc: X | Funds: X | SAN: X/Y | Luck: Z]`
+Include per-investigator SAN and Luck from `[INVESTIGATOR STATE]`, NOT from hud_state.
+Advance time/date based on in-world passage. Update funds if transactions occurred.
+Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — SAN/Luck come from investigator_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from scenario context
@@ -554,6 +564,7 @@ STATE_REPORT_TOOL = {
                 "properties": {
                     "location": {"type": "string"},
                     "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
@@ -614,6 +625,17 @@ STATE_REPORT_TOOL = {
                         "value": {"type": "string", "description": "Phobia/mania value"},
                         "fields": {"type": "object", "description": "Full field replacement (for set ops)"}
                     }
+                }
+            },
+            "hud_state": {
+                "type": "object",
+                "description": "Current in-world HUD state. Report every in-character turn.",
+                "properties": {
+                    "date": {"type": "string"},
+                    "time": {"type": "string", "description": "HHMM format"},
+                    "location": {"type": "string"},
+                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "trackables": {"description": "null or object of resource name → value"}
                 }
             }
         }

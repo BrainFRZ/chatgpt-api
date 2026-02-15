@@ -261,6 +261,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
+    "pcs_present": ["<PC name>", ...],
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting — neon haze, rain-slick chrome, bass-heavy clubs, toxic smog>",
@@ -352,6 +353,7 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Full replacement every turn
+- "pcs_present": list every PC actively in the scene. Controls which per-character funds appear in the HUD.
 - atmosphere should emphasize Night City: neon, chrome, smog, bass, danger
 
 ROUTING RULES:
@@ -522,14 +524,15 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
 - **[CALLBACK LEDGER]**: Open plot threads, Fixer contacts, gig promises with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
-- **[SCENE STATE]**: Current location, NPCs present, tensions, atmosphere, details
+- **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Conditions, equipment, weapons per edgerunner (NOT HP/Humanity/Luck/Armor/EB)
+- **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware per edgerunner
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
-- **scene_state**: Current scene (npcs_present controls memory injection)
+- **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: Conditions, weapons, equipment per edgerunner
 - **is_ooc**: true only for pure OOC turns
 
@@ -564,6 +567,13 @@ HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are track
 - Critical injuries: 13+ damage in one hit
 - Death Saves: BODY + WILL + d10 vs DV 10 (+1/round +injury mods)
 - Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
+
+### HUD Line
+Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
+`[Date: 2045-XX-XX | Time: XXXX | Loc: X | EB: X | HP: X/Y | Humanity: X/Y]`
+Include per-edgerunner HP and Humanity from `[EDGERUNNER STATE]`, NOT from hud_state.
+Advance time/date based on in-world passage. Update EB if transactions occurred.
+Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — HP/Humanity come from edgerunner_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from gig/scenario context
@@ -606,6 +616,7 @@ STATE_REPORT_TOOL = {
                 "properties": {
                     "location": {"type": "string"},
                     "npcs_present": {"type": "array", "items": {"type": "string"}},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
@@ -668,6 +679,17 @@ STATE_REPORT_TOOL = {
                         "dv_mod": {"type": "integer", "description": "Death Save DV modifier (for critical_injury add)"},
                         "fields": {"type": "object", "description": "Full field replacement (for set ops)"}
                     }
+                }
+            },
+            "hud_state": {
+                "type": "object",
+                "description": "Current in-world HUD state. Report every in-character turn.",
+                "properties": {
+                    "date": {"type": "string"},
+                    "time": {"type": "string", "description": "HHMM format"},
+                    "location": {"type": "string"},
+                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "trackables": {"description": "null or object of resource name → value"}
                 }
             }
         }

@@ -294,6 +294,7 @@ def _fresh_pipeline_state() -> dict:
         "scene_state": {},
         "character_states": {},
         "game_state": {},
+        "hud_state": {},
         "turn_counter": 0
     }
 
@@ -311,6 +312,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "npc_memories": {},
             "scene_state": {},
             "character_states": {},
+            "hud_state": {},
             "turn_counter": 0
         }
 
@@ -330,6 +332,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         if not isinstance(entry, dict):
             cs[name] = {"state": entry, "last_updated": state.get("turn_counter", 0)}
     state.setdefault("game_state", {})
+    state.setdefault("hud_state", {})
     state.setdefault("turn_counter", 0)
     return state
 
@@ -490,6 +493,7 @@ def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
     defaults = {
         "location": "",
         "npcs_present": [],
+        "pcs_present": [],
         "active_tensions": [],
         "scene_trigger": "",
         "atmosphere": "",
@@ -527,6 +531,43 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
 # ============================================================
 # Injection Builders (format state for model consumption)
 # ============================================================
+
+def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) -> dict:
+    """Return hud_state with funds filtered to scene-present characters.
+    Non-character keys (ship, party) pass through. String funds unchanged."""
+    funds = hud_state.get("funds")
+    pcs_present = scene_state.get("pcs_present")
+    if not isinstance(funds, dict) or not pcs_present:
+        return hud_state
+    present = set(pcs_present) | set(scene_state.get("npcs_present", []))
+    all_chars = set(character_states.keys())
+    return {**hud_state, "funds": {
+        k: v for k, v in funds.items() if k in present or k not in all_chars
+    }}
+
+
+def build_hud_state_injection(hud_state: dict, scene_state: dict, character_states: dict) -> str:
+    """Build [HUD STATE] injection with scene-scoped funds."""
+    if not hud_state:
+        return ""
+    scoped = scope_hud_funds(hud_state, scene_state, character_states)
+    lines = ["[HUD STATE]"]
+    for key, label in [("date", "Date"), ("time", "Time"), ("location", "Location")]:
+        if scoped.get(key) is not None:
+            lines.append(f"{label}: {scoped[key]}")
+    funds = scoped.get("funds")
+    if funds is not None:
+        if isinstance(funds, dict):
+            lines.append(f"Funds: {', '.join(f'{k}: {v}' for k, v in funds.items())}")
+        else:
+            lines.append(f"Funds: {funds}")
+    trackables = scoped.get("trackables")
+    if trackables and isinstance(trackables, dict):
+        for k, v in trackables.items():
+            lines.append(f"{k}: {v}")
+    lines.append("[/HUD STATE]")
+    return "\n".join(lines)
+
 
 def build_callback_injection(ledger: dict) -> str:
     """Build human-readable callback ledger injection for Events."""
@@ -595,6 +636,7 @@ def build_scene_state_injection(scene: dict) -> str:
     field_labels = [
         ("location", "Location"),
         ("npcs_present", "NPCs Present"),
+        ("pcs_present", "PCs Present"),
         ("scene_trigger", "Scene Trigger"),
         ("active_tensions", "Active Tensions"),
         ("atmosphere", "Atmosphere"),
@@ -788,6 +830,14 @@ def run_pipeline(
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = gs["init_game_state"]()
         gs["apply_game_state"](pipeline_state["game_state"], events_data, current_turn)
+
+    # Scene-scope hud_state.funds and persist for cross-mode continuity
+    if "hud_state" in events_data:
+        events_data["hud_state"] = scope_hud_funds(
+            events_data["hud_state"],
+            pipeline_state.get("scene_state", {}),
+            pipeline_state.get("character_states", {}))
+        pipeline_state["hud_state"] = events_data["hud_state"]
 
     new_pipeline_state = pipeline_state
 
@@ -1622,10 +1672,11 @@ def _parse_memories_section(lines: list) -> list:
 def _parse_scene_section(lines: list) -> dict:
     """Parse SCENE section lines into a scene_state dict."""
     result = {}
-    list_keys = {"npcs_present", "tensions", "details", "pending"}
+    list_keys = {"npcs_present", "pcs_present", "tensions", "details", "pending"}
     # Map short keys to full scene_state keys
     key_map = {
         "npcs_present": "npcs_present",
+        "pcs_present": "pcs_present",
         "tensions": "active_tensions",
         "trigger": "scene_trigger",
         "pending": "pending_actions",
@@ -1745,6 +1796,9 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = game_system["init_game_state"]()
         game_system["apply_game_state"](pipeline_state["game_state"], parsed, current_turn)
+    # Persist HUD state from tool report
+    if "hud_state" in parsed:
+        pipeline_state["hud_state"] = parsed["hud_state"]
     return pipeline_state
 
 
@@ -1780,13 +1834,21 @@ def build_single_agent_injections(pipeline_state: dict, updates_text: str = "", 
     if cs:
         injections.append(cs)
 
-    # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
+    # 6. HUD state (with scene-scoped funds)
+    hud = build_hud_state_injection(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("scene_state", {}),
+        pipeline_state.get("character_states", {}))
+    if hud:
+        injections.append(hud)
+
+    # 7. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
         game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
         if game_injection:
             injections.append(game_injection)
 
-    # 7. Context updates
+    # 8. Context updates
     if updates_text.strip():
         injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
 

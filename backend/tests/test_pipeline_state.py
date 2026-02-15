@@ -36,6 +36,9 @@ from pipeline import (
     build_scene_state_injection,
     build_character_states_injection,
     apply_character_states,
+    scope_hud_funds,
+    build_hud_state_injection,
+    apply_single_agent_state_updates,
     build_events_messages,
     build_narration_messages,
     build_agent_system_prompt,
@@ -100,6 +103,7 @@ def populated_scene():
     return {
         "location": "The Rusted Anchor, back booth",
         "npcs_present": ["Kira", "Dockmaster Yael"],
+        "pcs_present": ["Aedina", "Orrophim"],
         "active_tensions": ["Yael suspects Kira is lying about the cargo manifest"],
         "scene_trigger": "Kira called an emergency meeting after the warehouse raid",
         "atmosphere": "Tense, low lighting, rain hammering the windows",
@@ -136,6 +140,7 @@ class TestMigratePipelineState:
         assert result["callback_ledger"]["recently_resolved"] == []
         assert result["npc_memories"] == {}
         assert result["scene_state"] == {}
+        assert result["hud_state"] == {}
         assert result["turn_counter"] == 0
 
     def test_old_flat_pacing_wrapped(self):
@@ -146,6 +151,7 @@ class TestMigratePipelineState:
         assert result["callback_ledger"]["next_id"] == 1
         assert result["npc_memories"] == {}
         assert result["scene_state"] == {}
+        assert result["hud_state"] == {}
         assert result["turn_counter"] == 0
 
     def test_real_legacy_format(self):
@@ -166,6 +172,7 @@ class TestMigratePipelineState:
         assert result["callback_ledger"] == {"next_id": 1, "open": [], "recently_resolved": []}
         assert result["npc_memories"] == {}
         assert result["scene_state"] == {}
+        assert result["hud_state"] == {}
         assert result["turn_counter"] == 0
 
         # Migrated state should be usable by all op-application functions
@@ -250,6 +257,7 @@ class TestMigratePipelineState:
         assert result["callback_ledger"]["next_id"] == 1
         assert result["npc_memories"] == {}
         assert result["scene_state"] == {}
+        assert result["hud_state"] == {}
         assert result["turn_counter"] == 0
 
     def test_new_format_ledger_missing_subkeys(self):
@@ -268,7 +276,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "turn_counter"}
 
 
 # ============================================================
@@ -535,6 +543,7 @@ class TestApplySceneState:
         result = apply_scene_state(populated_scene)
         assert result["location"] == "The Rusted Anchor, back booth"
         assert result["npcs_present"] == ["Kira", "Dockmaster Yael"]
+        assert result["pcs_present"] == ["Aedina", "Orrophim"]
         assert len(result["active_tensions"]) == 1
         assert result["atmosphere"] == "Tense, low lighting, rain hammering the windows"
 
@@ -542,6 +551,7 @@ class TestApplySceneState:
         result = apply_scene_state({"location": "Tavern"})
         assert result["location"] == "Tavern"
         assert result["npcs_present"] == []
+        assert result["pcs_present"] == []
         assert result["active_tensions"] == []
         assert result["scene_trigger"] == ""
         assert result["atmosphere"] == ""
@@ -552,11 +562,136 @@ class TestApplySceneState:
         result = apply_scene_state({})
         assert result["location"] == ""
         assert result["npcs_present"] == []
+        assert result["pcs_present"] == []
 
     def test_extra_keys_ignored(self):
         result = apply_scene_state({"location": "X", "bogus_key": "should be dropped"})
         assert "bogus_key" not in result
         assert result["location"] == "X"
+
+
+class TestSceneScopedFunds:
+    """Test that hud_state.funds dict is filtered to scene-present characters + non-character keys."""
+
+    @staticmethod
+    def _apply_funds_filter(events_data, pipeline_state):
+        """Replicate the filtering logic from run_pipeline."""
+        hud_funds = events_data.get("hud_state", {}).get("funds")
+        scene = pipeline_state.get("scene_state", {})
+        pcs_present = scene.get("pcs_present")
+        if isinstance(hud_funds, dict) and pcs_present:
+            present = set(pcs_present) | set(scene.get("npcs_present", []))
+            all_characters = set(pipeline_state.get("character_states", {}).keys())
+            events_data["hud_state"]["funds"] = {
+                k: v for k, v in hud_funds.items()
+                if k in present or k not in all_characters
+            }
+
+    def test_funds_dict_filtered_to_pcs_present(self):
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp", "Orrophim": "18 gp", "Vex": "5 gp"}}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina", "Orrophim"]},
+            "character_states": {"Aedina": {}, "Orrophim": {}, "Vex": {}}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp", "Orrophim": "18 gp"}
+
+    def test_npc_funds_kept_when_present(self):
+        """NPC hireling funds should survive if the NPC is in npcs_present."""
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp", "Squire Tam": "8 gp", "Vex": "5 gp"}}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina"], "npcs_present": ["Squire Tam"]},
+            "character_states": {"Aedina": {}, "Squire Tam": {}, "Vex": {}}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp", "Squire Tam": "8 gp"}
+
+    def test_absent_npc_funds_filtered(self):
+        """NPC not in npcs_present should have their funds filtered out."""
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp", "Squire Tam": "8 gp"}}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina"], "npcs_present": []},
+            "character_states": {"Aedina": {}, "Squire Tam": {}}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp"}
+
+    def test_non_character_funds_pass_through(self):
+        """Ship/party funds not in character_states should survive filtering."""
+        events_data = {
+            "hud_state": {"funds": {
+                "The Rustbucket": "1,200 credits",
+                "Aedina": "32 credits",
+                "Orrophim": "18 credits",
+                "Vex": "5 credits"
+            }}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina", "Orrophim"]},
+            "character_states": {"Aedina": {}, "Orrophim": {}, "Vex": {}}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {
+            "The Rustbucket": "1,200 credits",
+            "Aedina": "32 credits",
+            "Orrophim": "18 credits"
+        }
+
+    def test_funds_string_unchanged(self):
+        events_data = {
+            "hud_state": {"funds": "50 gp party fund"}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina"]}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == "50 gp party fund"
+
+    def test_funds_dict_no_pcs_present_unchanged(self):
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp", "Orrophim": "18 gp"}}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": []},
+            "character_states": {"Aedina": {}, "Orrophim": {}}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        # Empty pcs_present is falsy, so funds should remain unchanged
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp", "Orrophim": "18 gp"}
+
+    def test_funds_dict_no_scene_state(self):
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp"}}
+        }
+        pipeline_state = {}
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp"}
+
+    def test_no_hud_state(self):
+        events_data = {"route": "mechanics"}
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina"]}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        # No hud_state at all — should not crash
+        assert "hud_state" not in events_data
+
+    def test_no_character_states_all_funds_kept(self):
+        """Without character_states, all keys are non-character so all pass through."""
+        events_data = {
+            "hud_state": {"funds": {"Aedina": "32 gp", "Vex": "5 gp"}}
+        }
+        pipeline_state = {
+            "scene_state": {"pcs_present": ["Aedina"]}
+        }
+        self._apply_funds_filter(events_data, pipeline_state)
+        assert events_data["hud_state"]["funds"] == {"Aedina": "32 gp", "Vex": "5 gp"}
 
 
 # ============================================================
@@ -670,6 +805,7 @@ class TestBuildSceneStateInjection:
         assert "[/SCENE STATE]" in result
         assert "Location: The Rusted Anchor, back booth" in result
         assert "NPCs Present: Kira, Dockmaster Yael" in result
+        assert "PCs Present: Aedina, Orrophim" in result
         assert "Atmosphere: Tense, low lighting" in result
 
     def test_empty_scene(self):
@@ -1259,7 +1395,7 @@ class TestRunPipelineE2E:
         state = result.pipeline_state
 
         # Verify full nested structure exists
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "turn_counter"}
 
         # Turn counter should be 1 (migrated from 0 + increment)
         assert state["turn_counter"] == 1
@@ -2505,3 +2641,161 @@ class TestApplyCharacterStates:
         for name in mechanics_output:
             assert result[name]["state"] == mechanics_output[name]
             assert result[name]["last_updated"] == 1
+
+
+# ============================================================
+# HUD State Tests
+# ============================================================
+
+class TestScopeHudFunds:
+    """Test the extracted scope_hud_funds helper."""
+
+    def test_dict_funds_filtered_to_present(self):
+        hud = {"date": "Day 5", "funds": {"Aedina": "32 gp", "Orrophim": "18 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": ["Aedina", "Orrophim"]}
+        chars = {"Aedina": {}, "Orrophim": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"Aedina": "32 gp", "Orrophim": "18 gp"}
+        assert result["date"] == "Day 5"  # Other keys preserved
+
+    def test_npc_funds_kept_when_present(self):
+        hud = {"funds": {"Aedina": "32 gp", "Squire Tam": "8 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": ["Aedina"], "npcs_present": ["Squire Tam"]}
+        chars = {"Aedina": {}, "Squire Tam": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"Aedina": "32 gp", "Squire Tam": "8 gp"}
+
+    def test_non_character_funds_pass_through(self):
+        hud = {"funds": {"The Rustbucket": "1,200 cr", "Aedina": "32 cr", "Vex": "5 cr"}}
+        scene = {"pcs_present": ["Aedina"]}
+        chars = {"Aedina": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"The Rustbucket": "1,200 cr", "Aedina": "32 cr"}
+
+    def test_string_funds_unchanged(self):
+        hud = {"funds": "50 gp party fund"}
+        scene = {"pcs_present": ["Aedina"]}
+        chars = {"Aedina": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == "50 gp party fund"
+
+    def test_no_pcs_present_unchanged(self):
+        hud = {"funds": {"Aedina": "32 gp", "Orrophim": "18 gp"}}
+        scene = {"pcs_present": []}
+        chars = {"Aedina": {}, "Orrophim": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"Aedina": "32 gp", "Orrophim": "18 gp"}
+
+    def test_empty_hud_state(self):
+        result = scope_hud_funds({}, {}, {})
+        assert result == {}
+
+    def test_no_funds_key(self):
+        hud = {"date": "Day 5", "time": "1400"}
+        result = scope_hud_funds(hud, {"pcs_present": ["Aedina"]}, {"Aedina": {}})
+        assert result == hud
+
+    def test_original_hud_not_mutated(self):
+        hud = {"funds": {"Aedina": "32 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": ["Aedina"]}
+        chars = {"Aedina": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        # Original should still have Vex
+        assert "Vex" in hud["funds"]
+        assert "Vex" not in result["funds"]
+
+
+class TestBuildHudStateInjection:
+    """Test build_hud_state_injection rendering."""
+
+    def test_empty_state_returns_empty(self):
+        assert build_hud_state_injection({}, {}, {}) == ""
+
+    def test_populated_renders_all_fields(self):
+        hud = {
+            "date": "Day 5",
+            "time": "1430",
+            "location": "The Rusted Anchor",
+            "funds": "97,572 cr"
+        }
+        result = build_hud_state_injection(hud, {}, {})
+        assert "[HUD STATE]" in result
+        assert "[/HUD STATE]" in result
+        assert "Date: Day 5" in result
+        assert "Time: 1430" in result
+        assert "Location: The Rusted Anchor" in result
+        assert "Funds: 97,572 cr" in result
+
+    def test_dict_funds_rendered(self):
+        hud = {
+            "date": "Day 5",
+            "funds": {"Aedina": "32 gp", "Orrophim": "18 gp"}
+        }
+        result = build_hud_state_injection(hud, {}, {})
+        assert "Funds: Aedina: 32 gp, Orrophim: 18 gp" in result
+
+    def test_dict_funds_scene_scoped(self):
+        hud = {"funds": {"Aedina": "32 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": ["Aedina"]}
+        chars = {"Aedina": {}, "Vex": {}}
+        result = build_hud_state_injection(hud, scene, chars)
+        assert "Aedina: 32 gp" in result
+        assert "Vex" not in result
+
+    def test_trackables_rendered(self):
+        hud = {
+            "date": "Day 5",
+            "trackables": {"Ship Fuel": "72%", "Railgun Ammo": "14/20"}
+        }
+        result = build_hud_state_injection(hud, {}, {})
+        assert "Ship Fuel: 72%" in result
+        assert "Railgun Ammo: 14/20" in result
+
+    def test_null_trackables_omitted(self):
+        hud = {"date": "Day 5", "trackables": None}
+        result = build_hud_state_injection(hud, {}, {})
+        assert "trackables" not in result.lower()
+
+    def test_partial_fields(self):
+        hud = {"location": "Tavern"}
+        result = build_hud_state_injection(hud, {}, {})
+        assert "[HUD STATE]" in result
+        assert "Location: Tavern" in result
+        assert "Date" not in result
+        assert "Time" not in result
+
+
+class TestApplySingleAgentHudState:
+    """Test that apply_single_agent_state_updates persists hud_state."""
+
+    def test_hud_state_persisted(self):
+        ps = _fresh_pipeline_state()
+        parsed = {
+            "hud_state": {"date": "Day 5", "time": "1430", "location": "Tavern", "funds": "50 gp"}
+        }
+        apply_single_agent_state_updates(ps, parsed, current_turn=1)
+        assert ps["hud_state"] == parsed["hud_state"]
+
+    def test_hud_state_not_overwritten_when_absent(self):
+        ps = _fresh_pipeline_state()
+        ps["hud_state"] = {"date": "Day 3", "time": "0900"}
+        parsed = {}
+        apply_single_agent_state_updates(ps, parsed, current_turn=2)
+        assert ps["hud_state"] == {"date": "Day 3", "time": "0900"}
+
+    def test_hud_state_replaced_not_merged(self):
+        ps = _fresh_pipeline_state()
+        ps["hud_state"] = {"date": "Day 3", "time": "0900", "location": "Tavern"}
+        parsed = {
+            "hud_state": {"date": "Day 4", "time": "1000", "location": "Market"}
+        }
+        apply_single_agent_state_updates(ps, parsed, current_turn=2)
+        assert ps["hud_state"] == {"date": "Day 4", "time": "1000", "location": "Market"}
+
+    def test_hud_state_empty_dict_still_persisted(self):
+        """Empty dict hud_state from tool call should still overwrite (key present, value falsy)."""
+        ps = _fresh_pipeline_state()
+        ps["hud_state"] = {"date": "Day 3", "time": "0900"}
+        parsed = {"hud_state": {}}
+        apply_single_agent_state_updates(ps, parsed, current_turn=2)
+        assert ps["hud_state"] == {}
