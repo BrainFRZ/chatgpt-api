@@ -1650,7 +1650,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
 
             if events_raw or mechanics_raw:
                 # Pipeline message — expand stages
-                lines.append(f"[ASSISTANT] {timestamp}")
+                cost = msg.get("cost", "")
+                lines.append(f"[ASSISTANT] {timestamp}  {cost}")
 
                 # Show pipeline state delta (what changed since last turn)
                 injected_state_raw = msg.get("pipeline_state_injected")
@@ -1745,7 +1746,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 lines.append("")
             elif msg.get("state_block_raw") is not None or msg.get("state_tool_input") is not None or msg.get("pipeline_state_injected"):
                 # Single-agent stateful message
-                lines.append(f"[ASSISTANT] {timestamp}")
+                cost = msg.get("cost", "")
+                lines.append(f"[ASSISTANT] {timestamp}  {cost}")
 
                 # Show pipeline state delta (what changed since last turn)
                 injected_state_raw = msg.get("pipeline_state_injected")
@@ -1828,7 +1830,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 lines.append("")
             else:
                 # Non-pipeline, non-stateful assistant message
-                lines.append(f"[ASSISTANT] {timestamp}")
+                cost = msg.get("cost", "")
+                lines.append(f"[ASSISTANT] {timestamp}  {cost}")
                 lines.append(content)
                 lines.append("")
 

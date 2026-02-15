@@ -165,7 +165,6 @@ interface ChatCardInfo {
   lastMessage: string;
   lastActive: string;
   messageCount: number;
-  cost: number;
 }
 
 function App() {
@@ -2041,8 +2040,7 @@ function App() {
           name: chat.name,
           lastMessage: chat.last_message || '',
           lastActive: chat.last_active || '',
-          messageCount: chat.message_count || 0,
-          cost: chat.cost || 0
+          messageCount: chat.message_count || 0
         }));
 
         setProjectChatsDetailed(detailedChats);
@@ -3314,7 +3312,6 @@ function App() {
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.lifetime_input_tokens.toLocaleString()} C:{userStats.lifetime_cached_tokens.toLocaleString()} O:{userStats.lifetime_output_tokens.toLocaleString()} R:{userStats.lifetime_reasoning_tokens.toLocaleString()}
                     </div>
-                    <div style={styles.statsRow}>Cost: ${userStats.lifetime_cost.toFixed(4)}</div>
                     <div style={styles.statsRow}>Cache Miss: {userStats.lifetime_cache_miss_percent.toFixed(1)}%</div>
                   </div>
                   <div style={styles.statsSeparator} />
@@ -3325,7 +3322,6 @@ function App() {
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.monthly_input_tokens.toLocaleString()} C:{userStats.monthly_cached_tokens.toLocaleString()} O:{userStats.monthly_output_tokens.toLocaleString()} R:{userStats.monthly_reasoning_tokens.toLocaleString()}
                     </div>
-                    <div style={styles.statsRow}>Cost: ${userStats.monthly_cost.toFixed(4)}</div>
                   </div>
                   <div style={styles.statsSeparator} />
                   <div style={styles.statsSection}>
@@ -3334,7 +3330,6 @@ function App() {
                     <div style={styles.statsRow}>
                       Tokens: I:{userStats.today_input_tokens.toLocaleString()} C:{userStats.today_cached_tokens.toLocaleString()} O:{userStats.today_output_tokens.toLocaleString()} R:{userStats.today_reasoning_tokens.toLocaleString()}
                     </div>
-                    <div style={styles.statsRow}>Cost: ${userStats.today_cost.toFixed(4)}</div>
                   </div>
                   <div style={styles.statsSeparator} />
                   <div style={styles.statsSection}>
@@ -3343,7 +3338,6 @@ function App() {
                     <div style={styles.statsRow}>
                       TPD: I:{userStats.avg_input_per_day.toFixed(0)} C:{userStats.avg_cached_per_day.toFixed(0)} O:{userStats.avg_output_per_day.toFixed(0)} R:{userStats.avg_reasoning_per_day.toFixed(0)}
                     </div>
-                    <div style={styles.statsRow}>Cost/day: ${userStats.avg_cost_per_day.toFixed(4)}</div>
                   </div>
                   <div style={styles.statsSeparator} />
                   <div style={styles.statsSection}>
@@ -3594,7 +3588,6 @@ function App() {
           {stats && (
             <div style={styles.statsBox}>
               <p style={styles.statsText}>Prompts: {stats.gpt_prompts ?? 0} GPT | {stats.sonnet_prompts ?? 0} Sonnet | {stats.total_prompts} Total</p>
-              <p style={styles.statsText}>Cost: ${stats.total_cost.toFixed(4)}</p>
               {stats.first_prompt_date && (() => {
                 const firstDate = new Date(stats.first_prompt_date);
                 const today = new Date();
@@ -3818,7 +3811,7 @@ function App() {
                             <div style={styles.messageFooter}>
                               {msg.tokens && (
                                 <span style={styles.messageTokens}>
-                                  {msg.tokens} | {msg.cost}
+                                  {msg.tokens}
                                   {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
                                   {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model}`}
                                 </span>
@@ -4133,7 +4126,6 @@ function App() {
                                 <div style={styles.chatCardMeta}>
                                   <span>{chat.lastActive ? formatTimestamp(chat.lastActive).split('  ')[1] || 'Unknown' : 'Never'}</span>
                                   <span>{chat.messageCount} msgs</span>
-                                  <span>${chat.cost.toFixed(2)}</span>
                                 </div>
                               </div>
                             ))}
