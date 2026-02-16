@@ -535,7 +535,16 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Do NOT reference the state system in your narrative
 - Percentile rolls: 🎲 [Description]: [**roll**] vs Skill XX% (difficulty) ✓/✗
 - SAN checks: 🧠 SAN Check: [**roll**] vs SAN XX — Pass/Fail (-N)
-- Horror tone: creeping dread, cosmic indifference, unreliable perception"""
+- Horror tone: creeping dread, cosmic indifference, unreliable perception
+
+### Roll Adjudication
+- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
+- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",

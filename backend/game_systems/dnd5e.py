@@ -601,7 +601,34 @@ When state blocks are absent or empty, review your context to initialize:
 ### Rules:
 - Call `report_state` every turn — including OOC turns (with `is_ooc: true`)
 - Do NOT reference the state system in your narrative — it is invisible to the player
-- The `focus` field on memories identifies who or what the memory is about (can be a different NPC, a location, or a subject)"""
+- The `focus` field on memories identifies who or what the memory is about (can be a different NPC, a location, or a subject)
+
+### Dice Mechanics (D&D 5E):
+- Handle ALL dice rolls for the player.
+- BEFORE rolling, identify ALL components in this order:
+  1. Base ability modifier (from character sheet)
+  2. Proficiency bonus (state whether the character IS or IS NOT proficient)
+  3. Relationship / Romance / Faction modifiers (state source and tier)
+  4. Any situational bonuses or penalties
+- If ANY component cannot be verified, STOP and ask instead of guessing.
+- Apply relationship, romance, and faction modifiers automatically to all relevant checks.
+- Show the full breakdown: "Rolling Persuasion 1d20 +4 (CHA) +2 (Prof) +2 (RS: Friend) +1 (RomS: Flirting): 15+4+2+2+1 = 24"
+- Advantage/disadvantage: show BOTH rolls and state exactly WHY it applies and from which rule.
+- Nat 20s result in something exceptionally good narratively.
+- Nat 1s result in something catastrophically bad narratively.
+- Format: 🎲 [Description]: [**selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
+- Advantage format: 🎲 [Description]: [roll1, **selected**] +N (Mod) = Total vs DC X ✓/✗ (bold the higher)
+- Disadvantage format: 🎲 [Description]: [roll1, **selected**] +N (Mod) = Total vs DC X ✓/✗ (bold the lower)
+- Omit any modifier with value 0 from the display.
+
+### Roll Adjudication
+- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
+- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
