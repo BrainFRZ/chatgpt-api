@@ -63,11 +63,8 @@ class AnthropicProvider(ModelProvider):
         """
         Build Anthropic API request parameters.
 
-        Claude does NOT allow consecutive user messages, so updates must be
-        concatenated into the last user message content.
-
         Cache breakpoint strategy (1hr TTL):
-        - Place breakpoints: (1) after system, (2) after second-to-last assistant
+        - Place breakpoints: (1) after system, (2) after last assistant
         - This ensures cache hits on stable prefixes
         - When use_cache=False (async mode), all cache breakpoints are omitted
         """
@@ -127,12 +124,13 @@ class AnthropicProvider(ModelProvider):
 
         Cache breakpoint strategy:
         - Breakpoint 1: After system message (handled in build_request)
-        - Breakpoint 2: After second-to-last assistant message
+        - Breakpoint 2: After last assistant message
 
         Why this works:
-        - The prefix up to breakpoint 2 is stable (Updates already removed from previous turns)
+        - No content is injected into user messages, so the prefix up to
+          the last assistant message is stable across turns
         - Future rounds match the cached prefix -> cache HIT
-        - Only current exchange is cache miss (unavoidable)
+        - Only the new user message + response is a cache miss (unavoidable)
 
         When use_cache=False, all messages are plain format (no breakpoints).
         """
@@ -141,8 +139,8 @@ class AnthropicProvider(ModelProvider):
         # Find indices of all assistant messages
         assistant_indices = [i for i, msg in enumerate(messages) if msg["role"] == "assistant"]
 
-        # Second-to-last assistant index (for cache breakpoint)
-        cache_breakpoint_index = assistant_indices[-2] if len(assistant_indices) >= 2 and use_cache else None
+        # Last assistant index (for cache breakpoint)
+        cache_breakpoint_index = assistant_indices[-1] if len(assistant_indices) >= 1 and use_cache else None
 
         for i, msg in enumerate(messages):
             content = msg["content"]

@@ -681,7 +681,7 @@ class TestAnthropicProvider:
         assert params["messages"][0]["role"] == "user"
 
     def test_cache_breakpoint_placement(self):
-        """Test cache breakpoint is placed on second-to-last assistant message."""
+        """Test cache breakpoint is placed on last assistant message."""
         from providers.anthropic_provider import AnthropicProvider
         provider = AnthropicProvider()
 
@@ -689,9 +689,9 @@ class TestAnthropicProvider:
             {"role": "user", "content": "1"},
             {"role": "assistant", "content": "A1"},
             {"role": "user", "content": "2"},
-            {"role": "assistant", "content": "A2"},  # This should get cache_control
+            {"role": "assistant", "content": "A2"},
             {"role": "user", "content": "3"},
-            {"role": "assistant", "content": "A3"},
+            {"role": "assistant", "content": "A3"},  # This should get cache_control (last assistant)
         ]
 
         params = provider.build_request(
@@ -709,8 +709,8 @@ class TestAnthropicProvider:
             any(c.get("cache_control") for c in m["content"] if isinstance(c, dict))
         ]
 
-        # Should be the second-to-last assistant (index 3 in this case)
-        assert 3 in cache_controlled
+        # Should be the last assistant (index 5 in params["messages"])
+        assert 5 in cache_controlled
 
     def test_calculate_cost(self):
         """Test cost calculation uses Claude pricing."""

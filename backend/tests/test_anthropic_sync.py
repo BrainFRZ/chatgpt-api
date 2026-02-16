@@ -136,7 +136,7 @@ class TestAnthropicBuildRequestCacheOn:
         assert "cache_control" in system[0]
 
     def test_assistant_breakpoint_present(self, sonnet_provider, sample_messages):
-        """Second-to-last assistant message should have cache breakpoint."""
+        """Last assistant message should have cache breakpoint."""
         params = sonnet_provider.build_request(
             sample_messages, "user", None, "chat", True, use_cache=True
         )
@@ -146,23 +146,23 @@ class TestAnthropicBuildRequestCacheOn:
         assistant_msgs = [m for m in messages if m["role"] == "assistant"]
         assert len(assistant_msgs) == 2
 
-        # First assistant (second-to-last) should have cache_control
-        first_assistant = assistant_msgs[0]
-        assert isinstance(first_assistant["content"], list)
-        assert "cache_control" in first_assistant["content"][0]
-        assert first_assistant["content"][0]["cache_control"]["ttl"] == "1h"
+        # Last assistant should have cache_control
+        last_assistant = assistant_msgs[-1]
+        assert isinstance(last_assistant["content"], list)
+        assert "cache_control" in last_assistant["content"][0]
+        assert last_assistant["content"][0]["cache_control"]["ttl"] == "1h"
 
-    def test_last_assistant_no_breakpoint(self, sonnet_provider, sample_messages):
-        """Last assistant message should NOT have cache breakpoint."""
+    def test_first_assistant_no_breakpoint(self, sonnet_provider, sample_messages):
+        """First assistant message (non-last) should NOT have cache breakpoint."""
         params = sonnet_provider.build_request(
             sample_messages, "user", None, "chat", True, use_cache=True
         )
         messages = params["messages"]
 
         assistant_msgs = [m for m in messages if m["role"] == "assistant"]
-        last_assistant = assistant_msgs[-1]
+        first_assistant = assistant_msgs[0]
         # Should be plain string content, not list with cache_control
-        assert isinstance(last_assistant["content"], str)
+        assert isinstance(first_assistant["content"], str)
 
 
 class TestAnthropicBuildRequestCacheOff:
@@ -251,7 +251,7 @@ class TestAnthropicBuildRequestEdgeCases:
             assert isinstance(msg["content"], str)
 
     def test_one_assistant_message_cache_on(self, sonnet_provider):
-        """With only one assistant message, no assistant breakpoint (need >= 2)."""
+        """With only one assistant message, it should get a cache breakpoint."""
         messages = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
@@ -261,10 +261,11 @@ class TestAnthropicBuildRequestEdgeCases:
         params = sonnet_provider.build_request(
             messages, "user", None, "chat", True, use_cache=True
         )
-        # The single assistant message should not have a breakpoint
+        # The single assistant message should have a breakpoint (it's the last)
         assistant_msgs = [m for m in params["messages"] if m["role"] == "assistant"]
         assert len(assistant_msgs) == 1
-        assert isinstance(assistant_msgs[0]["content"], str)
+        assert isinstance(assistant_msgs[0]["content"], list)
+        assert "cache_control" in assistant_msgs[0]["content"][0]
 
     def test_empty_system_content(self, sonnet_provider):
         """Empty system content should not produce cache_control block."""
@@ -300,11 +301,11 @@ class TestOpusBuildRequestCachePassthrough:
         )
         # System should have cache_control
         assert "cache_control" in params["system"][0]
-        # Second-to-last assistant should have breakpoint
+        # Last assistant should have breakpoint
         assistant_msgs = [m for m in params["messages"] if m["role"] == "assistant"]
-        first_assistant = assistant_msgs[0]
-        assert isinstance(first_assistant["content"], list)
-        assert "cache_control" in first_assistant["content"][0]
+        last_assistant = assistant_msgs[-1]
+        assert isinstance(last_assistant["content"], list)
+        assert "cache_control" in last_assistant["content"][0]
 
     def test_opus_cache_off(self, opus_provider, sample_messages):
         """Opus with use_cache=False should have no cache breakpoints."""
@@ -373,7 +374,7 @@ class TestConvertMessagesWithCache:
     """Direct tests for _convert_messages_with_cache."""
 
     def test_cache_on_places_breakpoint(self, sonnet_provider):
-        """With use_cache=True, second-to-last assistant gets breakpoint."""
+        """With use_cache=True, last assistant gets breakpoint."""
         messages = [
             {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},
@@ -383,12 +384,12 @@ class TestConvertMessagesWithCache:
         ]
         result = sonnet_provider._convert_messages_with_cache(messages, use_cache=True)
 
-        # A1 (index 1) is second-to-last assistant - should have breakpoint
-        assert isinstance(result[1]["content"], list)
-        assert result[1]["content"][0]["cache_control"]["ttl"] == "1h"
+        # A1 (index 1) is first assistant - no breakpoint
+        assert isinstance(result[1]["content"], str)
 
-        # A2 (index 3) is last assistant - no breakpoint
-        assert isinstance(result[3]["content"], str)
+        # A2 (index 3) is last assistant - should have breakpoint
+        assert isinstance(result[3]["content"], list)
+        assert result[3]["content"][0]["cache_control"]["ttl"] == "1h"
 
     def test_cache_off_no_breakpoints(self, sonnet_provider):
         """With use_cache=False, no messages get breakpoints."""
@@ -417,12 +418,12 @@ class TestConvertMessagesWithCache:
         result_default = sonnet_provider._convert_messages_with_cache(messages)
         result_true = sonnet_provider._convert_messages_with_cache(messages, use_cache=True)
 
-        # Both should place breakpoint on same message
-        assert isinstance(result_default[1]["content"], list)
-        assert isinstance(result_true[1]["content"], list)
+        # Both should place breakpoint on last assistant (index 3)
+        assert isinstance(result_default[3]["content"], list)
+        assert isinstance(result_true[3]["content"], list)
 
     def test_three_assistants_breakpoint_position(self, sonnet_provider):
-        """With 3 assistant messages, breakpoint goes on the second-to-last."""
+        """With 3 assistant messages, breakpoint goes on the last."""
         messages = [
             {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},
@@ -436,11 +437,11 @@ class TestConvertMessagesWithCache:
 
         # A1 (index 1) - no breakpoint
         assert isinstance(result[1]["content"], str)
-        # A2 (index 3) - second-to-last assistant, should have breakpoint
-        assert isinstance(result[3]["content"], list)
-        assert "cache_control" in result[3]["content"][0]
-        # A3 (index 5) - last assistant, no breakpoint
-        assert isinstance(result[5]["content"], str)
+        # A2 (index 3) - not last, no breakpoint
+        assert isinstance(result[3]["content"], str)
+        # A3 (index 5) - last assistant, should have breakpoint
+        assert isinstance(result[5]["content"], list)
+        assert "cache_control" in result[5]["content"][0]
 
 
 # ============================================================
