@@ -3706,7 +3706,7 @@ function App() {
                     </select>
                   )}
                   {selectedModel.startsWith('claude') && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
                       <span style={{ fontSize: '0.75rem', color: '#999', userSelect: 'none' as const }}>Async</span>
                       <div
                         onClick={handleAnthropicSyncToggle}
@@ -5011,11 +5011,16 @@ const styles: { [key: string]: React.CSSProperties } = {
     alignItems: 'center',
     gap: '12px',
     flexShrink: 0,
+    overflowX: 'auto',
   },
   chatTitle: {
     margin: 0,
     fontSize: '1.1rem',
     flex: 1,
+    minWidth: '80px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   viewerCount: {
     fontSize: '0.8rem',
@@ -5034,6 +5039,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '0.9rem',
     cursor: 'pointer',
     marginRight: '8px',
+    flexShrink: 0,
   },
   reloadButton: {
     background: 'none',
