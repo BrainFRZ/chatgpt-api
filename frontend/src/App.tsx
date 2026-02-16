@@ -4060,14 +4060,33 @@ function App() {
                     
                     <div style={styles.buttonColumn}>
                       <button
-                        onClick={() => { setDraftUpdatesText(updatesText); setShowUpdatesModal(true); }}
+                        onClick={async () => {
+                          // Fetch latest notes from backend before opening modal
+                          try {
+                            const url = currentProject
+                              ? `/api/updates/${user?.username}/${currentChat}?project=${currentProject}`
+                              : `/api/updates/${user?.username}/${currentChat}`;
+                            const resp = await fetch(url);
+                            if (resp.ok) {
+                              const data = await resp.json();
+                              const latest = data.updates || '';
+                              setUpdatesText(latest);
+                              setDraftUpdatesText(latest);
+                            } else {
+                              setDraftUpdatesText(updatesText);
+                            }
+                          } catch {
+                            setDraftUpdatesText(updatesText);
+                          }
+                          setShowUpdatesModal(true);
+                        }}
                         style={{
                           ...styles.updateButton,
                           backgroundColor: updatesText.trim() ? '#2d6a4f' : '#2a2a4e'
                         }}
-                        title={updatesText.trim() ? 'Updates active (click to edit)' : 'Add updates'}
+                        title={updatesText.trim() ? 'Notes (click to edit)' : 'Add notes'}
                       >
-                        Update
+                        Notes
                       </button>
                       <button
                         onClick={sendMessage}
@@ -4710,14 +4729,14 @@ function App() {
       {showUpdatesModal && (
         <div style={styles.modalOverlay} onClick={() => setShowUpdatesModal(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <h3 style={styles.modalTitle}>Updates</h3>
+            <h3 style={styles.modalTitle}>Notes</h3>
             <p style={styles.modalDescription}>
-              Text here is prepended to each message you send. Use it for mid-conversation context updates.
+              A personal notepad for this chat. Not sent to the model.
             </p>
             <textarea
               value={draftUpdatesText}
               onChange={(e) => updateUpdatesText(e.target.value)}
-              placeholder="e.g., Character sheet updates, session notes, reminders..."
+              placeholder="e.g., Session notes, reminders, character details..."
               style={styles.updatesTextarea}
             />
             <div style={styles.modalFooter}>
