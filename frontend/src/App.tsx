@@ -414,6 +414,18 @@ function App() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
+  // Keyboard shortcut: Ctrl+\ to toggle sidebar
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === '\\') {
+        e.preventDefault();
+        setSidebarOpen(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [chatsExpanded, setChatsExpanded] = useState(true);
   const [projects, setProjects] = useState<string[]>([]);
@@ -3309,30 +3321,53 @@ function App() {
         
         {/* Mobile overlay when sidebar is open */}
         {isMobile && sidebarOpen && (
-          <div 
+          <div
             style={styles.sidebarOverlay}
             onClick={() => setSidebarOpen(false)}
           />
         )}
-        
+
+        {/* Collapsed sidebar strip (desktop only) */}
+        {!isMobile && !sidebarOpen && (
+          <div style={styles.collapsedSidebarStrip}>
+            <button
+              onClick={() => setSidebarOpen(true)}
+              style={styles.expandSidebarButton}
+              title="Expand sidebar (Ctrl+\)"
+            >
+              »
+            </button>
+          </div>
+        )}
+
         {/* Sidebar */}
         <div style={{
           ...styles.sidebar,
           ...(isMobile ? styles.sidebarMobile : {}),
-          ...(isMobile && !sidebarOpen ? styles.sidebarHidden : {})
+          ...(isMobile && !sidebarOpen ? styles.sidebarHidden : {}),
+          ...(!isMobile && !sidebarOpen ? styles.sidebarCollapsed : {}),
         }}>
           <div style={styles.sidebarHeader}>
             <div style={styles.sidebarHeaderRow}>
               <h2 style={styles.sidebarTitle}>Chorus AI</h2>
               {isMobile && (
-                <button 
-                  onClick={() => setSidebarOpen(false)} 
+                <button
+                  onClick={() => setSidebarOpen(false)}
                   style={styles.closeSidebarButton}
                 >
                   ✕
                 </button>
               )}
               <button onClick={handleLogout} style={styles.logoutButton} title="Logout">↩</button>
+              {!isMobile && (
+                <button
+                  onClick={() => setSidebarOpen(false)}
+                  style={styles.collapseSidebarButton}
+                  title="Collapse sidebar (Ctrl+\)"
+                >
+                  «
+                </button>
+              )}
             </div>
             <p style={styles.muted}>
               {user.username}
@@ -3664,7 +3699,7 @@ function App() {
           ...styles.chatArea,
           ...(isMobile ? {
             position: 'absolute' as const,
-            top: '50px',
+            top: 0,
             left: 0,
             right: 0,
             bottom: '80px', // Leave room for fixed input area
@@ -3674,7 +3709,7 @@ function App() {
             // Normal chat interface
             currentChat ? (
               <>
-                <div style={styles.chatHeader}>
+                <div style={{...styles.chatHeader, ...(isMobile ? styles.chatHeaderMobile : {})}}>
                   <h2 style={styles.chatTitle}>{currentChat}</h2>
                   {viewerCount > 1 && (
                     <span style={styles.viewerCount} title={`${viewerCount} viewers connected`}>
@@ -4924,6 +4959,41 @@ const styles: { [key: string]: React.CSSProperties } = {
     flexDirection: 'column',
     borderRight: '1px solid #333',
     overflow: 'hidden',
+    transition: 'width 0.2s ease',
+  },
+  sidebarCollapsed: {
+    width: '0px',
+    minWidth: 0,
+    overflow: 'hidden',
+    borderRight: 'none',
+    padding: 0,
+  },
+  collapsedSidebarStrip: {
+    width: '40px',
+    minWidth: '40px',
+    backgroundColor: '#16162a',
+    borderRight: '1px solid #333',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    paddingTop: '16px',
+  },
+  expandSidebarButton: {
+    background: 'none',
+    border: 'none',
+    fontSize: '1.2rem',
+    color: '#888',
+    cursor: 'pointer',
+    padding: '4px 8px',
+  },
+  collapseSidebarButton: {
+    background: 'none',
+    border: 'none',
+    fontSize: '1.2rem',
+    color: '#888',
+    cursor: 'pointer',
+    marginLeft: '4px',
+    padding: '2px 6px',
   },
   sidebarMobile: {
     position: 'fixed' as const,
@@ -5031,6 +5101,10 @@ const styles: { [key: string]: React.CSSProperties } = {
     gap: '12px',
     flexShrink: 0,
     overflowX: 'auto',
+  },
+  chatHeaderMobile: {
+    paddingLeft: '56px', // Clear the fixed hamburger button
+    WebkitOverflowScrolling: 'touch',
   },
   chatTitle: {
     margin: 0,
