@@ -48,8 +48,11 @@ def apply_game_state(game_state, agent_json, turn):
             if op == "set":
                 # Full replacement for bootstrap/corrections
                 fields = copy.deepcopy(op_data.get("fields", {}))
+                # Normalize known keys to canonical lowercase
+                canonical = {"credits": "credits", "hull": "hull", "shields": "shields", "ammo": "ammo"}
                 for key, val in fields.items():
-                    ship[key] = val
+                    normalized = canonical.get(key.lower(), key)
+                    ship[normalized] = val
 
             elif op == "hull":
                 change = int(op_data.get("change", 0))
@@ -185,7 +188,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "date": "<in-world date>",
     "time": "<in-world time as HHMM, e.g. 1430>",
     "location": "<current location>",
-    "funds": "<string for shared party funds OR object mapping character names to their funds>",
+    "funds": "<auto-derived from ship.credits — do NOT set manually>",
     "trackables": "<null, or object mapping resource names to current values>"
   },
   "combat": "<null OR combat object (see COMBAT section)>",
@@ -278,12 +281,6 @@ SHIP OPS:
 - The "ship_ops" array should be empty [] if no changes occurred this turn.
 - Bootstrap: On first turn or when [SHIP STATE] is empty, use a "set" op to initialize from context.
 
-CONTEXT UPDATES:
-- You may receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, and other state information
-- **CONTEXT UPDATES overrides [RELATIONSHIP STATE] and [SHIP STATE]**: If CONTEXT UPDATES contains RS, RomS, FR, or ship values that differ from the injected state, those are corrections from the player. Emit "set" ops (relationship_ops or ship_ops) to update the persisted state to match. CONTEXT UPDATES is the higher authority. Example: CONTEXT UPDATES says "Kira RS 55, RomS 30" but [RELATIONSHIP STATE] shows RS 47, RomS 25 → emit: {"op": "set", "target": "Kira", "type": "npc", "fields": {"rs": 55, "roms": 30}}
-- After applying any corrections, use the resulting RS, RomS, and FR tier levels to shape narrative tone and NPC behavior
-- Factor tier effects into your "emotional_context", "callbacks", and "beats" — tier effects should feel organic, not mechanical
-
 TIME PASSED:
 - Estimate how much in-world time this turn covers based on the conversation context
 - Use natural language: "1 minute", "10 minutes", "2 hours", "overnight (8 hours)"
@@ -294,7 +291,7 @@ CURRENT PLAYER / NEXT PLAYER / NEXT PLAYER PROMPT:
 HUD STATE:
 - You MUST always include "hud_state" with the current in-world state
 - Same format as standard D&D 5E pipeline
-- "funds": Prefer an object mapping each party member and important NPC (RS ≥ 10) to their funds (e.g. {"ship": "97,572 cr", "Sara": "2,500 cr", "Cross": "1,200 cr"}). Fall back to a plain string only when the party explicitly pools funds. The HUD auto-scopes to characters in the scene. When the campaign has a shared pool (like ship funds), include it as a named entry alongside characters — non-character entries always display regardless of scene.
+- "funds": Do NOT set this field. Funds are auto-derived from ship.credits (the single source of truth). Use ship_ops credits to update balances.
 - "trackables" should include ship resources (fuel, heat, etc.) when applicable
 
 COMBAT:
@@ -306,13 +303,18 @@ You only see the most recent 20-40 turns of conversation. Everything older is go
 
 CALLBACK LEDGER:
 - Same semantics as standard D&D 5E pipeline (add/resolve/update via callback_ops)
+- Most turns have 0-1 callback_ops. Don't force ops — only act when a genuine promise, hook, or foreshadowing moment emerges.
 
 NPC MEMORIES:
 - Same semantics (add/drop via npc_memory_ops)
+- Most turns have 0-1 memory ops. Add only when something genuinely changes how an NPC views the party.
+- Don't default all memories to impact 3. Most are flavor (1-2). Reserve moderate (3) for meaningful exchanges. High (4-5) for climactic moments only.
+- Callbacks track plot threads needing resolution (promises, hooks, foreshadowing). Memories track NPC perspective shifts (how they feel about the party). Don't log the same event in both. Scene details and exposition belong in scene_state.
+- Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
-- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
+- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD (funds are derived from ship.credits and auto-scoped to scene).
 
 CHARACTER STATES:
 - Same as standard D&D 5E pipeline — HP, spell slots, conditions, resources, equipment
@@ -449,20 +451,24 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
-- **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
+- **[HUD STATE]**: Previous turn's date, time, location, funds (auto-derived from ship.credits), trackables (your source of truth after context trims)
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 - **[SHIP STATE]**: Hull, shields, ammo, and credits for the party's ship
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
-- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
+- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD (funds derived from ship.credits).
 - **character_states**: Map of character name → current mechanical state. Full replacement each turn.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
 - **callback_ops**: Add/resolve promises and plot hooks.
 - **npc_memory_ops**: Add/drop significant NPC moments. Impact 1-2=flavor, 3=moderate, 4-5=high.
+- **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
+- **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
+- **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
+- **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **relationship_ops**: Track RS/RomS/FR changes. Operations:
   * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
   * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
@@ -471,7 +477,6 @@ Optional arrays (omit or leave empty when no ops occurred):
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
   - Tier boundary checking: Note new tier in reason, narratively reflect the shift, show 📊 line.
   - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty.
-  - **CONTEXT UPDATES override**: If a [CONTEXT UPDATES] block contains RS, RomS, or FR values that differ from [RELATIONSHIP STATE], the player is correcting the state. Emit "set" ops to update the persisted state to match — CONTEXT UPDATES is the higher authority.
 - **ship_ops**: Track ship state changes. Operations:
   * `{"op": "hull", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "shields", "change": <signed int>, "reason": "<why>"}`
@@ -480,7 +485,6 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "credits", "account": "<account>", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "set", "fields": {<full ship state replacement>}}`
   - Bootstrap with "set" op when [SHIP STATE] is empty.
-  - **CONTEXT UPDATES override**: If [CONTEXT UPDATES] contains ship values (hull, shields, ammo, credits) that differ from [SHIP STATE], emit a "set" op to sync.
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line.
@@ -489,8 +493,8 @@ When multiple party members: `[Date: X | Time: XXXX | Loc: X | Funds: ship 97,57
 If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]`
 During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y | Funds: X]`
 Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage. Update funds/trackables if they changed.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only).
+Advance time/date based on in-world passage. Update trackables if they changed. Funds are auto-derived from ship.credits — do NOT set funds in hud_state; use ship_ops credits to change balances.
+Report updated values via `report_state` tool's `hud_state` field (date, time, location, trackables only — funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -652,7 +656,7 @@ STATE_REPORT_TOOL = {
                     "date": {"type": "string"},
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
-                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "funds": {"description": "Auto-derived from ship.credits. Do NOT set — use ship_ops credits instead."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
             }

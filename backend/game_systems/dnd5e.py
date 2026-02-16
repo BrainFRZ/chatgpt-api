@@ -207,7 +207,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "date": "<in-world date>",
     "time": "<in-world time as HHMM, e.g. 1430>",
     "location": "<current location>",
-    "funds": "<string for shared party funds OR object mapping character names to their funds>",
+    "funds": "<object mapping names to funds, e.g. {\"party chest\": \"500 gp\", \"Aedina\": \"32 gp\"}>",
     "trackables": "<null, or object mapping resource names to current values e.g. {\\"Ship Fuel\\": \\"72%\\", \\"Railgun Ammo\\": \\"14/20\\"}>"
   },
   "combat": "<null OR combat object (see COMBAT section)>",
@@ -282,13 +282,6 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 
-CONTEXT UPDATES:
-- You may receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, and other state information
-- **CONTEXT UPDATES overrides [RELATIONSHIP STATE]**: If CONTEXT UPDATES contains RS, RomS, or FR values for any NPC or faction, those values are corrections from the player. Emit "set" ops to update the persisted state to match. CONTEXT UPDATES is the higher authority — if the values differ from [RELATIONSHIP STATE], trust CONTEXT UPDATES and emit set ops so the persisted state catches up. Example: CONTEXT UPDATES says "Kira RS 55, RomS 30" but [RELATIONSHIP STATE] shows RS 47, RomS 25 → emit a set op: {"op": "set", "target": "Kira", "type": "npc", "fields": {"rs": 55, "roms": 30}}
-- After applying any CONTEXT UPDATES corrections, use the resulting RS, RomS, and FR tier levels to shape narrative tone and NPC behavior — consult the Relationship Systems document in your project files for tier definitions and their narrative effects
-- Factor tier effects into your "emotional_context", "callbacks", and "beats" — if an NPC's current tier justifies a shifted reaction to the scene, reflect that
-- Tier effects should feel organic, not mechanical — an NPC doesn't announce their tier, they simply behave according to the relationship level
-
 TIME PASSED:
 - Estimate how much in-world time this turn covers based on the conversation context
 - Use natural language: "1 minute", "10 minutes", "2 hours", "overnight (8 hours)"
@@ -319,7 +312,7 @@ HUD STATE:
 - "date": the current in-world date
 - "time": current in-world time in HHMM format (e.g. "1430")
 - "location": where the party currently is
-- "funds": Prefer an object mapping each party member and important NPC (RS ≥ 10) to their funds (e.g. {"Aedina": "32 gp, 5 sp", "Orrophim": "18 gp"}). Fall back to a plain string only when the party explicitly pools funds. The HUD auto-scopes to characters in the scene. When the campaign also has a shared pool (e.g. party chest, ship fund), include it as a named entry alongside characters — non-character entries always display regardless of scene.
+- "funds": Always use an object mapping names to funds (e.g. {"party chest": "500 gp", "Aedina": "32 gp, 5 sp", "Orrophim": "18 gp"}). Include shared pools (party chest, ship fund, etc.) as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display regardless of scene.
 - "trackables": null when the campaign has no extra resources to track. When the campaign tracks resources beyond funds (ship fuel, ammo, rations, heat, etc.), set this to an object mapping resource names to current values (e.g. {"Ship Fuel": "72%", "Railgun Ammo": "14/20"}). Derive which resources to track from the campaign instructions and conversation context.
 - Derive all values from your context window and the injected state blocks
 
@@ -360,6 +353,9 @@ NPC MEMORIES:
 - Tier limits per NPC: 8 high, 10 moderate, 12 flavor — the system enforces these as a safety net, but you should manage organically
 - Only create memories for narratively significant NPCs, not every background character
 - Most turns have 0-1 memory ops. Add when something genuinely memorable happens for that NPC's relationship with the party.
+- Don't default all memories to impact 3. Most are flavor (1-2). Reserve moderate (3) for meaningful exchanges. High (4-5) for climactic moments only.
+- Callbacks and memories serve different purposes — don't log the same event in both. Callbacks track plot threads needing resolution (promises, hooks, foreshadowing). Memories track NPC perspective shifts (how they feel about the party). Scene details and exposition belong in scene_state.
+- Before adding a new memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version. One evolving memory per conversation, not incremental entries each turn.
 - BOOTSTRAP (empty memories): On your first turn or when memories are empty, review your context for key NPCs and their important interactions. Add foundational memories to establish the relationship baseline.
 
 SCENE STATE:
@@ -400,7 +396,7 @@ MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game 
 
 YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics. Consult the rulebooks and character sheets. Resolve dice rolls with full breakdowns. Update the HUD. Determine what ACTUALLY happens.
 
-YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, character_states, time_passed, current_player, next_player, next_player_prompt, hud_state, and combat. You may also receive a [CONTEXT UPDATES] block with recent character sheet changes, resource updates, etc. Reference this for current state.
+YOU RECEIVE: JSON from the Events Agent containing beats, player_action, callbacks, emotional_context, character_states, time_passed, current_player, next_player, next_player_prompt, hud_state, and combat.
 
 CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens. After adjudicating mechanics:
 - DROP beats that can't happen (lock pick failed → no hiding in the vault behind it)
@@ -563,6 +559,10 @@ After your narrative, you MUST call the `report_state` tool every turn. The tool
 Optional arrays (omit or leave empty when no ops occurred):
 - **callback_ops**: Add promises/hooks/foreshadowing (`action: "add"`, `original_text`, `source_npc`) or resolve them (`action: "resolve"`, `id`, `resolution_text`).
 - **npc_memory_ops**: Add significant NPC moments (`action: "add"`, `npc`, `text` max 640 chars, `quote` max 120 chars, `date`, `impact` 1-5, `focus`: the NPC/location/subject the memory is about) or drop stale ones (`action: "drop"`, `npc`, `index` from injected block). Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
+- **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
+- **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
+- **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
+- **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **relationship_ops**: Track RS/RomS/FR changes. Operations:
   * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Relationship Score change. Clamped -100 to +100.
@@ -582,7 +582,6 @@ Optional arrays (omit or leave empty when no ops occurred):
     2. Narratively reflect the shift in your prose (a bond deepening, trust eroding, etc.)
     3. Show a 📊 notification line after the narrative: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
   - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize from context.
-  - **CONTEXT UPDATES override**: If a [CONTEXT UPDATES] block contains RS, RomS, or FR values that differ from [RELATIONSHIP STATE], the player is correcting the state. Emit "set" ops to update the persisted state to match — CONTEXT UPDATES is the higher authority. Example: CONTEXT UPDATES says "Kira RS 55, RomS 30" but [RELATIONSHIP STATE] shows RS 47, RomS 25 → emit: {"op": "set", "target": "Kira", "type": "npc", "fields": {"rs": 55, "roms": 30}}
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
@@ -731,7 +730,7 @@ STATE_REPORT_TOOL = {
                     "date": {"type": "string"},
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
-                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "funds": {"description": "Object mapping names to funds (e.g. {\"party chest\": \"500 gp\", \"Aedina\": \"32 gp\"}). Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
             }

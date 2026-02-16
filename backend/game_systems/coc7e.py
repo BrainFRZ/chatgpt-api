@@ -231,7 +231,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "date": "<in-world date>",
     "time": "<in-world time as HHMM>",
     "location": "<current location>",
-    "funds": "<string for shared funds OR object mapping party member names to funds>",
+    "funds": "<object mapping names to funds, e.g. {\"group fund\": \"$500\", \"Harvey\": \"$127\"}>",
     "trackables": "<null or resource tracking object>"
   },
   "combat": "<null OR combat object>",
@@ -306,15 +306,20 @@ PLOT DIVERGENCE:
 CALLBACK LEDGER:
 - Same semantics as standard pipeline (add/resolve/update via callback_ops)
 - Use for Mythos clues, NPC promises, investigation leads, ominous foreshadowing
+- Most turns have 0-1 callback_ops. Don't force ops — only act when a genuine promise, hook, or foreshadowing moment emerges.
 
 NPC MEMORIES:
 - Same semantics (add/drop via npc_memory_ops)
 - Track NPC knowledge of the Mythos, suspicious behaviors, and relationship to investigators
+- Most turns have 0-1 memory ops. Add only when something genuinely changes how an NPC views the party.
+- Don't default all memories to impact 3. Most are flavor (1-2). Reserve moderate (3) for meaningful exchanges. High (4-5) for climactic moments only.
+- Callbacks track plot threads needing resolution (promises, hooks, foreshadowing). Memories track NPC perspective shifts (how they feel about the party). Don't log the same event in both. Scene details and exposition belong in scene_state.
+- Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
 - "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
-- "funds": Prefer an object mapping each party member and important NPC (bonded, value > 0) to their funds (e.g. {"Harvey": "$127", "Gloria": "$84"}). Fall back to a plain string only when the group pools funds. The HUD auto-scopes to characters in the scene. When the group also has a shared pool, include it as a named entry (e.g. {"group fund": "$500", "Harvey": "$127", "Gloria": "$84"}) — non-character entries always display.
+- "funds": Always use an object mapping names to funds (e.g. {"group fund": "$500", "Harvey": "$127", "Gloria": "$84"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize horror elements: dread, wrongness, sensory unease
 
 ROUTING RULES:
@@ -506,6 +511,10 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 Optional arrays:
 - **callback_ops**: Add/resolve investigation leads, Mythos clues, NPC promises
 - **npc_memory_ops**: Record significant NPC moments
+- **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
+- **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
+- **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
+- **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **investigator_ops**: SAN/Luck/Mythos/Bond/skill mark/phobia/mania changes
 
 ### Investigator Ops (in report_state):
@@ -650,7 +659,7 @@ STATE_REPORT_TOOL = {
                     "date": {"type": "string"},
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
-                    "funds": {"description": "String for shared funds, or object mapping names to funds"},
+                    "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
             }
