@@ -1210,7 +1210,10 @@ function App() {
       .catch(() => {
         setAvailableGameSystems([
           { id: 'dnd5e', name: 'D&D 5E' },
-          { id: 'coc7e', name: 'Call of Cthulhu 7E' }
+          { id: 'dnd5e_cyber', name: 'D&D 5E (Cyberpunk)' },
+          { id: 'coc7e', name: 'Call of Cthulhu 7E' },
+          { id: 'sr6e', name: 'Shadowrun 6E' },
+          { id: 'cpred', name: 'Cyberpunk RED' }
         ]);
       });
   }, []);
