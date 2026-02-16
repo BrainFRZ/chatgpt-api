@@ -23,8 +23,8 @@ import hashlib
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
-from providers.openai_provider import OpenAIProvider, add_updates_to_messages as openai_add_updates
-from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider, add_updates_to_messages as anthropic_add_updates
+from providers.openai_provider import OpenAIProvider
+from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider
 
 # Real-time sync imports
 from sync_manager import sync_manager, SyncEvent, SyncEventType
@@ -1879,22 +1879,12 @@ def send_message(request: SendMessageRequest):
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
 
-        # Build user content (with attached files only, no updates yet)
+        # Build user content (with attached files)
         user_content = build_message_content(branch_path[-1])
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
         # Build messages list
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
-
-        # Add updates using provider-specific method
-        # OpenAI: separate trailing user message (allowed)
-        # Claude: concatenate into last user message (no consecutive user messages)
-        updates_text = data.get("updates", "").strip()
-        if updates_text:
-            if model_id.startswith("claude"):
-                messages_for_api = anthropic_add_updates(messages_for_api, updates_text)
-            else:
-                messages_for_api = openai_add_updates(messages_for_api, updates_text)
 
         # Build provider-specific request
         is_free_chat = not request.project
@@ -1946,21 +1936,6 @@ def send_message(request: SendMessageRequest):
         else:
             system_msg["total_tokens"] = system_msg["total_gpt_tokens"]
 
-        # Count updates tokens if present (to subtract from native token calculation)
-        # Updates are added to API call but not stored with messages, so we need to
-        # exclude them from the cached user token count
-        # Must count the FULL wrapped text as sent to API, not just raw updates_text
-        updates_tokens = 0
-        if updates_text:
-            if model_id.startswith("claude"):
-                # Claude wraps updates and prepends to last user message
-                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
-                updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
-            else:
-                # GPT adds updates as separate message before the user message
-                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
-                updates_tokens = gpt_provider.count_tokens(updates_wrapped)
-
         if model_id.startswith("claude"):
             # Claude response: count user tokens directly via API (accurate)
             # Don't derive from input_tokens - known_tokens, as known_tokens may be
@@ -1983,7 +1958,7 @@ def send_message(request: SendMessageRequest):
             assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
         else:
             # GPT response: We have accurate GPT tokens from API
-            # Calculate user message GPT tokens from API response (input - known - updates)
+            # Calculate user message GPT tokens from API response (input - known)
             # Use cached accurate tokens for system and history
             known_tokens = system_msg["total_gpt_tokens"]
             for msg in branch_path[context_start_index:-1]:
@@ -1992,7 +1967,7 @@ def send_message(request: SendMessageRequest):
                 gpt_tokens = msg.get("total_gpt_tokens")
                 known_tokens += gpt_tokens if gpt_tokens is not None else (msg.get("total_tokens") or 0)
             # Ensure non-negative (old cached estimates may be inaccurate)
-            user_gpt_tokens = max(0, parsed.input_tokens - known_tokens - updates_tokens)
+            user_gpt_tokens = max(0, parsed.input_tokens - known_tokens)
 
             # Claude tokens: use API tokenizer (accurate, post-response so no latency impact)
             # Only cache if we have API key - don't cache estimates so they'll be
@@ -2357,8 +2332,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     stateful_injected_snapshot = None
     docs_refreshed = False
 
-    updates_text = data.get("updates", "").strip()
-
     if use_stateful:
         # Pair-based context trimming (same approach as pipeline agents)
         import copy as _copy
@@ -2386,7 +2359,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
         # Build injections for user message
-        injections_str = build_single_agent_injections(stateful_pipeline_state, updates_text, game_system=gs)
+        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
 
         # System prompt: contract + original
         system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
@@ -2399,7 +2372,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
-        # Updates already injected via build_single_agent_injections — don't double-inject
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
@@ -2407,12 +2379,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
-
-        if updates_text:
-            if model_id.startswith("claude"):
-                messages_for_api = anthropic_add_updates(messages_for_api, updates_text)
-            else:
-                messages_for_api = openai_add_updates(messages_for_api, updates_text)
 
     is_free_chat = not request.project
     use_cache = data.get("anthropic_sync", True)
@@ -2500,7 +2466,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     agent_instructions=agent_instructions,
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
-                    updates_text=updates_text,
                     game_system=gs["id"]
                 )
 
@@ -2899,16 +2864,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         else:
                             system_msg_ref["total_tokens"] = system_msg_ref.get("total_gpt_tokens")
 
-                        # Count updates tokens
-                        updates_tokens = 0
-                        if updates_text:
-                            if model_id.startswith("claude"):
-                                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]\n\n"
-                                updates_tokens = claude_provider.count_tokens_api(updates_wrapped, api_key)
-                            else:
-                                updates_wrapped = f"[CONTEXT UPDATES - Reference as needed for the user message below]\n{updates_text}\n[/CONTEXT UPDATES]"
-                                updates_tokens = gpt_provider.count_tokens(updates_wrapped)
-
                         # Calculate dual token counts
                         if model_id.startswith("claude"):
                             user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, api_key)
@@ -2928,7 +2883,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             for msg in branch_path[context_start_index:-1]:
                                 gpt_tokens = msg.get("total_gpt_tokens")
                                 known_tokens += gpt_tokens if gpt_tokens is not None else (msg.get("total_tokens") or 0)
-                            user_gpt_tokens = max(0, usage['input_tokens'] - known_tokens - updates_tokens)
+                            user_gpt_tokens = max(0, usage['input_tokens'] - known_tokens)
 
                             if claude_api_key:
                                 user_claude_tokens = claude_provider.count_tokens_api(user_content_for_counting, claude_api_key)

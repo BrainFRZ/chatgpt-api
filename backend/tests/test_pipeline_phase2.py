@@ -936,7 +936,7 @@ class TestTimePassedFlow:
             ""
         )
         mechanics_messages = build_mechanics_messages(
-            mechanics_system, events_output, ""
+            mechanics_system, events_output
         )
 
         # Verify Mechanics receives time_passed in its input
@@ -948,8 +948,8 @@ class TestTimePassedFlow:
         assert "time_passed" in mechanics_messages[0]["content"]
         assert "advance it by" in mechanics_messages[0]["content"]
 
-    def test_time_passed_with_context_updates(self):
-        """time_passed should survive when context updates are also injected."""
+    def test_time_passed_without_context_updates(self):
+        """time_passed should be preserved (CONTEXT UPDATES injection was removed)."""
         from pipeline import build_mechanics_messages
 
         events_json = {
@@ -964,12 +964,11 @@ class TestTimePassedFlow:
             "pacing": {"episode": "Test", "beat": "Travel", "beat_responses": 1, "notes": ""}
         }
 
-        updates = "Character sheet updated: Aldric gained 50 gold from quest reward."
-        messages = build_mechanics_messages("SYSTEM", events_json, updates)
+        messages = build_mechanics_messages("SYSTEM", events_json)
 
-        # Should have system + updates msg + events json msg
-        assert len(messages) == 3
-        assert "[CONTEXT UPDATES]" in messages[1]["content"]
+        # Should have system + events json msg only (no updates msg)
+        assert len(messages) == 2
+        assert "[CONTEXT UPDATES]" not in messages[-1]["content"]
 
         # Events JSON with time_passed should be in the last message
         parsed = json.loads(messages[-1]["content"])

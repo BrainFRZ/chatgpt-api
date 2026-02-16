@@ -133,7 +133,6 @@ def build_events_messages(
     history_messages: list[dict],
     user_message: dict,
     pipeline_state: dict,
-    updates_text: str = "",
     game_system: dict = None
 ) -> list[dict]:
     """
@@ -141,7 +140,7 @@ def build_events_messages(
 
     Events sees recent conversation pairs plus persistent state injections:
     [PIPELINE STATE] (pacing), [CALLBACK LEDGER], [NPC MEMORIES], [SCENE STATE], [CHARACTER STATES],
-    [INVESTIGATOR STATE] (game-specific), [CONTEXT UPDATES]
+    [INVESTIGATOR STATE] (game-specific)
     """
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history_messages)
@@ -185,10 +184,6 @@ def build_events_messages(
         if game_injection:
             injections.append(game_injection)
 
-    # 7. Context updates
-    if updates_text.strip():
-        injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
-
     if injections:
         user_content = "\n\n".join(injections) + "\n\n" + user_content
 
@@ -199,21 +194,13 @@ def build_events_messages(
 def build_mechanics_messages(
     system_prompt: str,
     events_json: dict,
-    updates_text: str = ""
 ) -> list[dict]:
     """
     Build the message list for the Mechanics agent.
 
     Mechanics is stateless: only system prompt + Events JSON output.
-    If updates_text is provided (e.g. character sheet changes), it's injected
-    as a separate user message before the Events JSON.
     """
     messages = [{"role": "system", "content": system_prompt}]
-    if updates_text.strip():
-        messages.append({
-            "role": "user",
-            "content": f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]"
-        })
     messages.append({"role": "user", "content": json.dumps(events_json, indent=2)})
     return messages
 
@@ -546,10 +533,24 @@ def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) 
     }}
 
 
-def build_hud_state_injection(hud_state: dict, scene_state: dict, character_states: dict) -> str:
+def derive_funds_from_ship_credits(hud_state: dict, game_state: dict) -> dict:
+    """If game_state has ship.credits, derive hud_state.funds from it (single source of truth).
+    Returns hud_state (possibly with replaced funds). Non-ship game systems are unaffected."""
+    ship_credits = (game_state or {}).get("ship", {}).get("credits")
+    if not isinstance(ship_credits, dict):
+        return hud_state
+    derived = {
+        account: f"{amount:,} cr" if isinstance(amount, (int, float)) else str(amount)
+        for account, amount in ship_credits.items()
+    }
+    return {**hud_state, "funds": derived}
+
+
+def build_hud_state_injection(hud_state: dict, scene_state: dict, character_states: dict, game_state: dict = None) -> str:
     """Build [HUD STATE] injection with scene-scoped funds."""
     if not hud_state:
         return ""
+    hud_state = derive_funds_from_ship_credits(hud_state, game_state)
     scoped = scope_hud_funds(hud_state, scene_state, character_states)
     lines = ["[HUD STATE]"]
     for key, label in [("date", "Date"), ("time", "Time"), ("location", "Location")]:
@@ -753,7 +754,6 @@ def run_pipeline(
     agent_instructions: dict[str, str],
     agent_files: dict[str, str],
     pipeline_state: Optional[dict],
-    updates_text: str = "",
     game_system: str = "dnd5e"
 ) -> Iterator[tuple[str, dict]]:
     """
@@ -789,7 +789,7 @@ def run_pipeline(
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
     recent_events_pairs = get_context_pairs(branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS)
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
-    events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, updates_text, game_system=gs)
+    events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs)
 
     events_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["events"],
@@ -831,8 +831,11 @@ def run_pipeline(
             pipeline_state["game_state"] = gs["init_game_state"]()
         gs["apply_game_state"](pipeline_state["game_state"], events_data, current_turn)
 
-    # Scene-scope hud_state.funds and persist for cross-mode continuity
+    # Derive hud_state.funds from ship.credits (single source of truth), then scene-scope
     if "hud_state" in events_data:
+        events_data["hud_state"] = derive_funds_from_ship_credits(
+            events_data["hud_state"],
+            pipeline_state.get("game_state"))
         events_data["hud_state"] = scope_hud_funds(
             events_data["hud_state"],
             pipeline_state.get("scene_state", {}),
@@ -873,7 +876,7 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
     mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
-    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, updates_text)
+    mechanics_messages = build_mechanics_messages(mechanics_system, events_data)
 
     mechanics_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["mechanics"],
@@ -1802,7 +1805,7 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     return pipeline_state
 
 
-def build_single_agent_injections(pipeline_state: dict, updates_text: str = "", game_system: dict = None) -> str:
+def build_single_agent_injections(pipeline_state: dict, game_system: dict = None) -> str:
     """Build the full injection string for a single-agent stateful user message."""
     injections = []
 
@@ -1834,11 +1837,12 @@ def build_single_agent_injections(pipeline_state: dict, updates_text: str = "", 
     if cs:
         injections.append(cs)
 
-    # 6. HUD state (with scene-scoped funds)
+    # 6. HUD state (with scene-scoped funds, backfilled from game_state)
     hud = build_hud_state_injection(
         pipeline_state.get("hud_state", {}),
         pipeline_state.get("scene_state", {}),
-        pipeline_state.get("character_states", {}))
+        pipeline_state.get("character_states", {}),
+        game_state=pipeline_state.get("game_state"))
     if hud:
         injections.append(hud)
 
@@ -1847,9 +1851,5 @@ def build_single_agent_injections(pipeline_state: dict, updates_text: str = "", 
         game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
         if game_injection:
             injections.append(game_injection)
-
-    # 8. Context updates
-    if updates_text.strip():
-        injections.append(f"[CONTEXT UPDATES]\n{updates_text}\n[/CONTEXT UPDATES]")
 
     return "\n\n".join(injections) if injections else ""

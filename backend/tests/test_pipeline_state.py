@@ -833,7 +833,6 @@ class TestBuildEventsMessages:
             history_messages=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
             user_message={"role": "user", "content": "I attack the guard"},
             pipeline_state=full_pipeline_state,
-            updates_text="RS Kira +2"
         )
         # System + history + final user message
         assert messages[0]["role"] == "system"
@@ -845,7 +844,7 @@ class TestBuildEventsMessages:
         assert "[NPC MEMORIES:" in user_content
         assert "[SCENE STATE]" in user_content
         assert "[CHARACTER STATES]" in user_content
-        assert "[CONTEXT UPDATES]" in user_content
+        assert "[CONTEXT UPDATES]" not in user_content
         assert "I attack the guard" in user_content
 
     def test_injection_order(self, full_pipeline_state):
@@ -854,18 +853,16 @@ class TestBuildEventsMessages:
             history_messages=[],
             user_message={"role": "user", "content": "action"},
             pipeline_state=full_pipeline_state,
-            updates_text="updates here"
         )
         user_content = messages[-1]["content"]
-        # Verify order: PIPELINE STATE before CALLBACK LEDGER before NPC MEMORIES before SCENE STATE before CHARACTER STATES before CONTEXT UPDATES before user message
+        # Verify order: PIPELINE STATE before CALLBACK LEDGER before NPC MEMORIES before SCENE STATE before CHARACTER STATES before user message
         idx_pipeline = user_content.index("[PIPELINE STATE]")
         idx_callback = user_content.index("[CALLBACK LEDGER]")
         idx_memories = user_content.index("[NPC MEMORIES:")
         idx_scene = user_content.index("[SCENE STATE]")
         idx_char = user_content.index("[CHARACTER STATES]")
-        idx_updates = user_content.index("[CONTEXT UPDATES]")
         idx_action = user_content.index("action")
-        assert idx_pipeline < idx_callback < idx_memories < idx_scene < idx_char < idx_updates < idx_action
+        assert idx_pipeline < idx_callback < idx_memories < idx_scene < idx_char < idx_action
 
     def test_empty_state_minimal_injections(self, fresh_state):
         messages = build_events_messages(
@@ -884,13 +881,13 @@ class TestBuildEventsMessages:
         # Just the user message
         assert user_content == "hello"
 
-    def test_no_updates_text(self, full_pipeline_state):
+    def test_no_context_updates_ever(self, full_pipeline_state):
+        """CONTEXT UPDATES injection was removed — verify it never appears."""
         messages = build_events_messages(
             system_prompt="sys",
             history_messages=[],
             user_message={"role": "user", "content": "action"},
             pipeline_state=full_pipeline_state,
-            updates_text=""
         )
         user_content = messages[-1]["content"]
         assert "[CONTEXT UPDATES]" not in user_content
@@ -2034,7 +2031,6 @@ class TestOpToInjectionRoundTrip:
             history_messages=[{"role": "user", "content": "We enter the outpost"}, {"role": "assistant", "content": "..."}],
             user_message={"role": "user", "content": "I ask Reva about the frontier dangers"},
             pipeline_state=state,
-            updates_text="RS Captain Reva +1 (12)"
         )
 
         user_content = messages[-1]["content"]
@@ -2062,9 +2058,8 @@ class TestOpToInjectionRoundTrip:
         assert "Captain Reva, Merchant Giles" in user_content
         assert "Weapons confiscated at gate" in user_content
 
-        # Context updates
-        assert "[CONTEXT UPDATES]" in user_content
-        assert "RS Captain Reva +1" in user_content
+        # Context updates removed — should NOT appear
+        assert "[CONTEXT UPDATES]" not in user_content
 
         # User message at the end
         assert user_content.endswith("I ask Reva about the frontier dangers")

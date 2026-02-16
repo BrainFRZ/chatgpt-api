@@ -424,13 +424,9 @@ class TestBuildSingleAgentInjections:
         assert "[SCENE STATE]" in result
         assert "[CHARACTER STATES]" in result
 
-    def test_with_updates_text(self, fresh_state):
-        result = build_single_agent_injections(fresh_state, updates_text="Character HP changed")
-        assert "[CONTEXT UPDATES]" in result
-        assert "Character HP changed" in result
-
-    def test_empty_updates_text(self, fresh_state):
-        result = build_single_agent_injections(fresh_state, updates_text="  ")
+    def test_no_context_updates(self, fresh_state):
+        """CONTEXT UPDATES injection was removed — verify it never appears."""
+        result = build_single_agent_injections(fresh_state)
         assert "[CONTEXT UPDATES]" not in result
 
     def test_pacing_only(self):
