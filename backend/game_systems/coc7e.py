@@ -231,7 +231,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "date": "<in-world date>",
     "time": "<in-world time as HHMM>",
     "location": "<current location>",
-    "funds": "<investigator funds>",
+    "funds": "<string for shared funds OR object mapping party member names to funds>",
     "trackables": "<null or resource tracking object>"
   },
   "combat": "<null OR combat object>",
@@ -300,6 +300,9 @@ ARC LABEL:
 - Set to a short label when starting a new scenario beat or invented subplot
 - null on all other turns
 
+PLOT DIVERGENCE:
+- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+
 CALLBACK LEDGER:
 - Same semantics as standard pipeline (add/resolve/update via callback_ops)
 - Use for Mythos clues, NPC promises, investigation leads, ominous foreshadowing
@@ -310,7 +313,8 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
-- "pcs_present": list every PC actively in the scene. Controls which per-character funds appear in the HUD.
+- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
+- "funds": Prefer an object mapping each party member and important NPC (bonded, value > 0) to their funds (e.g. {"Harvey": "$127", "Gloria": "$84"}). Fall back to a plain string only when the group pools funds. The HUD auto-scopes to characters in the scene. When the group also has a shared pool, include it as a named entry (e.g. {"group fund": "$500", "Harvey": "$127", "Gloria": "$84"}) — non-character entries always display.
 - atmosphere should emphasize horror elements: dread, wrongness, sensory unease
 
 ROUTING RULES:
@@ -495,7 +499,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
-- **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` controls which per-character funds appear in the HUD.
+- **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: HP, MP, conditions, equipment per character
 - **is_ooc**: true only for pure OOC turns
 
@@ -519,6 +523,8 @@ SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
 `[Date: X | Time: XXXX | Loc: X | Funds: X | SAN: X/Y | Luck: Z]`
+When multiple party members: `[Date: X | Time: XXXX | Loc: X | Funds: Harvey $127, Gloria $84 | SAN: X/Y | Luck: Z]`
+With a shared pool: `[Date: X | Time: XXXX | Loc: X | Funds: group fund $500, Harvey $127, Gloria $84 | SAN: X/Y | Luck: Z]`
 Include per-investigator SAN and Luck from `[INVESTIGATOR STATE]`, NOT from hud_state.
 Advance time/date based on in-world passage. Update funds if transactions occurred.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — SAN/Luck come from investigator_ops).
@@ -533,6 +539,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Rules:
 - Call `report_state` every turn
 - Do NOT reference the state system in your narrative
+- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
 - Percentile rolls: 🎲 [Description]: [**roll**] vs Skill XX% (difficulty) ✓/✗
 - SAN checks: 🧠 SAN Check: [**roll**] vs SAN XX — Pass/Fail (-N)
 - Horror tone: creeping dread, cosmic indifference, unreliable perception
