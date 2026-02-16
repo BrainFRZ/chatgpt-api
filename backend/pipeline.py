@@ -156,7 +156,10 @@ def build_events_messages(
         injections.append(f"[PIPELINE STATE]\n{json.dumps(pacing, indent=2)}\n[/PIPELINE STATE]")
 
     # 2. Callback ledger
-    cb_injection = build_callback_injection(pipeline_state.get("callback_ledger", {}))
+    cb_injection = build_callback_injection(
+        pipeline_state.get("callback_ledger", {}),
+        turn_counter=pipeline_state.get("turn_counter", 0)
+    )
     if cb_injection:
         injections.append(cb_injection)
 
@@ -338,11 +341,14 @@ def apply_callback_ops(ledger: dict, ops: list, current_turn: int) -> dict:
 
         if action == "add":
             text = op.get("original_text", "")[:800]
+            resolutions = op.get("resolutions") or []
+            resolutions = [str(r)[:200] for r in resolutions[:3]]
             entry = {
                 "id": next_id,
                 "created_turn": current_turn,
                 "original_text": text,
-                "source_npc": op.get("source_npc")
+                "source_npc": op.get("source_npc"),
+                "resolutions": resolutions or None
             }
             open_by_id[next_id] = entry
             next_id += 1
@@ -570,7 +576,7 @@ def build_hud_state_injection(hud_state: dict, scene_state: dict, character_stat
     return "\n".join(lines)
 
 
-def build_callback_injection(ledger: dict) -> str:
+def build_callback_injection(ledger: dict, turn_counter: int = 0) -> str:
     """Build human-readable callback ledger injection for Events."""
     open_list = ledger.get("open", [])
     resolved_list = ledger.get("recently_resolved", [])
@@ -583,7 +589,14 @@ def build_callback_injection(ledger: dict) -> str:
         lines.append("OPEN:")
         for cb in open_list:
             npc = cb.get("source_npc") or "null"
-            lines.append(f"#{cb['id']} (turn {cb['created_turn']}, {npc}): \"{cb['original_text']}\"")
+            line = f"#{cb['id']} (turn {cb['created_turn']}, {npc}): \"{cb['original_text']}\""
+            resolutions = cb.get("resolutions")
+            if resolutions:
+                line += f" [resolves if: {'; '.join(resolutions)}]"
+            if turn_counter and turn_counter - cb.get("created_turn", turn_counter) >= 40:
+                age = turn_counter - cb["created_turn"]
+                line += f" \u26a0 open {age} turns \u2014 consider resolving or folding into the narrative"
+            lines.append(line)
     else:
         lines.append("OPEN: (none)")
 
@@ -1591,20 +1604,29 @@ def _parse_callbacks_section(lines: list) -> list:
         if not line:
             continue
         if line.startswith("+"):
-            # Add: + "description" | source: NPC
+            # Add: + "description" | source: NPC | resolutions: "a", "b"
             text_match = re.search(r'"([^"]*)"', line)
             text = text_match.group(1) if text_match else line[1:].strip()
             source = None
-            source_match = re.search(r'\|\s*source:\s*(.+)', line)
+            source_match = re.search(r'\|\s*source:\s*([^|]+)', line)
             if source_match:
                 source = source_match.group(1).strip()
                 if source.lower() == "null":
                     source = None
-            ops.append({
+            resolutions = None
+            res_match = re.search(r'\|\s*resolutions:\s*(.+)$', line)
+            if res_match:
+                raw = res_match.group(1).strip()
+                resolutions = [r.strip().strip('"').strip("'")[:200] for r in raw.split(",")][:3]
+                resolutions = [r for r in resolutions if r]
+            op = {
                 "action": "add",
                 "original_text": text[:800],
                 "source_npc": source
-            })
+            }
+            if resolutions:
+                op["resolutions"] = resolutions
+            ops.append(op)
         elif line.upper().startswith("RESOLVE"):
             # RESOLVE #N: "text"
             id_match = re.search(r'#(\d+)', line)
@@ -1815,7 +1837,10 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
         injections.append(f"[PIPELINE STATE]\n{json.dumps(pacing, indent=2)}\n[/PIPELINE STATE]")
 
     # 2. Callback ledger
-    cb = build_callback_injection(pipeline_state.get("callback_ledger", {}))
+    cb = build_callback_injection(
+        pipeline_state.get("callback_ledger", {}),
+        turn_counter=pipeline_state.get("turn_counter", 0)
+    )
     if cb:
         injections.append(cb)
 

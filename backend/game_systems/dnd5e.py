@@ -212,7 +212,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   },
   "combat": "<null OR combat object (see COMBAT section)>",
   "callback_ops": [
-    {"action": "add", "original_text": "<what was promised/foreshadowed, ~800 char max>", "source_npc": "<NPC name or null>"},
+    {"action": "add", "original_text": "<what was promised/foreshadowed, ~800 char max>", "source_npc": "<NPC name or null>", "resolutions": ["<trigger condition 1, 200 char max>", "<trigger condition 2>"]},
     {"action": "resolve", "id": <callback ID from ledger>, "resolution_text": "<how it resolved>"},
     {"action": "update", "id": <callback ID>, "fields": {"original_text": "<revised text>"}}
   ],
@@ -337,10 +337,11 @@ You also receive a [RELATIONSHIP STATE] block with persisted RS/RomS/FR scores a
 CALLBACK LEDGER:
 - You receive a [CALLBACK LEDGER] block showing all open and recently resolved callbacks — promises, foreshadowing, unresolved hooks
 - Use "callback_ops" to manage this ledger. Operations:
-  * "add": Register a new callback when an NPC makes a promise, a plot thread is introduced, or something is foreshadowed. Set "original_text" to a concise summary (max 800 chars, truncated beyond). Set "source_npc" to the NPC name or null for environmental/systemic triggers.
+  * "add": Register a new callback when an NPC makes a promise, a plot thread is introduced, or something is foreshadowed. Set "original_text" to a concise summary (max 800 chars, truncated beyond). Set "source_npc" to the NPC name or null for environmental/systemic triggers. Optionally include "resolutions": up to 3 trigger conditions that would close this callback (200 char limit each; truncated beyond). These are non-exhaustive — other narrative developments can also resolve the callback.
   * "resolve": When a callback fires or is paid off, resolve it by ID. Set "resolution_text" to describe how it resolved.
   * "update": Modify an open callback's text if circumstances changed (e.g., the stakes escalated). Only update "original_text" via the "fields" object.
 - The per-turn "callbacks" field (passed through to Mechanics/Narration) is SEPARATE from "callback_ops". "callbacks" describes what triggers THIS turn. "callback_ops" maintains the persistent ledger across turns.
+- Each turn, check open callbacks for `[resolves if: ...]` triggers. If any trigger condition has been met by the narrative, resolve that callback. Triggers are non-exhaustive — callbacks can also be resolved by developments not listed.
 - Most turns have 0-1 callback_ops. Don't force ops — only act when the narrative warrants it.
 - BOOTSTRAP (empty ledger): On your first turn or when the ledger is empty, review your context for any open promises, unresolved hooks, or foreshadowed events. Add them with "add" ops to seed the ledger.
 
@@ -557,7 +558,7 @@ After your narrative, you MUST call the `report_state` tool every turn. The tool
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
-- **callback_ops**: Add promises/hooks/foreshadowing (`action: "add"`, `original_text`, `source_npc`) or resolve them (`action: "resolve"`, `id`, `resolution_text`).
+- **callback_ops**: Add promises/hooks/foreshadowing (`action: "add"`, `original_text`, `source_npc`, `resolutions`: up to 3 trigger conditions that would close this callback, 200 char limit each) or resolve them (`action: "resolve"`, `id`, `resolution_text`). Each turn, check open callbacks' `[resolves if: ...]` triggers and resolve any whose conditions have been met.
 - **npc_memory_ops**: Add significant NPC moments (`action: "add"`, `npc`, `text` max 640 chars, `quote` max 120 chars, `date`, `impact` 1-5, `focus`: the NPC/location/subject the memory is about) or drop stale ones (`action: "drop"`, `npc`, `index` from injected block). Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
@@ -685,7 +686,13 @@ STATE_REPORT_TOOL = {
                         "original_text": {"type": "string"},
                         "source_npc": {"type": "string"},
                         "id": {"type": "integer"},
-                        "resolution_text": {"type": "string"}
+                        "resolution_text": {"type": "string"},
+                        "resolutions": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": 200},
+                            "maxItems": 3,
+                            "description": "Up to 3 non-exhaustive trigger conditions that would close this callback (200 char limit each)"
+                        }
                     }
                 }
             },

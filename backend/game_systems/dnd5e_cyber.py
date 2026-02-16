@@ -193,7 +193,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   },
   "combat": "<null OR combat object (see COMBAT section)>",
   "callback_ops": [
-    {"action": "add", "original_text": "<what was promised/foreshadowed, ~800 char max>", "source_npc": "<NPC name or null>"},
+    {"action": "add", "original_text": "<what was promised/foreshadowed, ~800 char max>", "source_npc": "<NPC name or null>", "resolutions": ["<trigger condition 1, 200 char max>", "<trigger condition 2>"]},
     {"action": "resolve", "id": <callback ID from ledger>, "resolution_text": "<how it resolved>"},
     {"action": "update", "id": <callback ID>, "fields": {"original_text": "<revised text>"}}
   ],
@@ -303,6 +303,8 @@ You only see the most recent 20-40 turns of conversation. Everything older is go
 
 CALLBACK LEDGER:
 - Same semantics as standard D&D 5E pipeline (add/resolve/update via callback_ops)
+- Include "resolutions" on "add" ops — up to 3 trigger conditions that would close this callback (200 char limit each; truncated beyond). Non-exhaustive.
+- Each turn, check open callbacks' `[resolves if: ...]` triggers — if a condition has been met, resolve that callback.
 - Most turns have 0-1 callback_ops. Don't force ops — only act when a genuine promise, hook, or foreshadowing moment emerges.
 
 NPC MEMORIES:
@@ -463,7 +465,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
-- **callback_ops**: Add/resolve promises and plot hooks.
+- **callback_ops**: Add/resolve promises and plot hooks. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Add/drop significant NPC moments. Impact 1-2=flavor, 3=moderate, 4-5=high.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
@@ -595,7 +597,13 @@ STATE_REPORT_TOOL = {
                         "original_text": {"type": "string"},
                         "source_npc": {"type": "string"},
                         "id": {"type": "integer"},
-                        "resolution_text": {"type": "string"}
+                        "resolution_text": {"type": "string"},
+                        "resolutions": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": 200},
+                            "maxItems": 3,
+                            "description": "Up to 3 non-exhaustive trigger conditions that would close this callback (200 char limit each)"
+                        }
                     }
                 }
             },
