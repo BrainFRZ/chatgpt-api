@@ -239,7 +239,18 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "emotional_context": "<emotional state, tension level, Night City atmosphere>",
   "character_states": {
-    "<name>": "<current conditions, equipment, weapons — NOT HP/Humanity/Luck/Armor/EB>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "HP", "current": 35, "max": 40},
+        {"label": "Humanity", "current": 48, "max": 60}
+      ],
+      "resources": [
+        {"label": "Luck", "current": 5, "max": 7}
+      ],
+      "conditions": ["Seriously Wounded", "Critical Injury: Broken Arm"],
+      "summary": "Medium pistol (12 rounds), light armorjack (SP 11/11)"
+    }
   },
   "edgerunner_ops": [
     {"edgerunner": "<name>", "op": "hp|humanity|therapy|luck|luck_reset|armor|armor_repair|eurobucks|critical_injury|cyberware|set", ...}
@@ -310,11 +321,16 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
   Use "set" to bootstrap edgerunner state on first turn or correct errors.
 
-IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops, NOT in character_states. character_states is for conditions, weapons, and equipment only.
+IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
 
-CHARACTER STATES:
-- "character_states" tracks conditions, equipped weapons, ammo, and other non-edgerunner-ops state
-- Do NOT include HP, Humanity, Luck, Armor SP, or Eurobucks here — those are managed by edgerunner_ops and shown in [EDGERUNNER STATE]
+CHARACTER STATES (structured format):
+- "character_states" uses a structured object per character with type, vitals, resources, conditions, and summary
+- "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
+- "vitals": array of {label, current, max} for HP, Humanity
+- "resources": array of {label, current, max} for Luck (mirrored from edgerunner_ops for HUD display)
+- "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
+- "summary": brief string for weapons, armor SP, equipment
+- Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks — character_states mirrors vitals/resources for HUD rendering
 
 COMBAT (Cyberpunk RED):
 - Initiative: REF + 1d10; ties broken by REF stat
@@ -374,7 +390,7 @@ ROUTING RULES:
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: discrete narrative events
-- "character_states": conditions, weapons, equipment (NOT HP/Humanity/Luck/Armor/EB)
+- "character_states": structured per-character objects with type, vitals, resources, conditions, summary (Luck mirrored for HUD)
 - "edgerunner_ops": HP, Humanity, Luck, Armor, Eurobucks, critical injuries, cyberware
 - Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets"""
 
@@ -434,7 +450,18 @@ SCHEMA A - Route to Narration (default):
   "next_player_prompt": <pass through from Events unchanged>,
   "combat": <pass through from Events unchanged>,
   "character_states": {
-    "<name>": "<updated conditions, weapons, equipment after this turn>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "HP", "current": 27, "max": 40},
+        {"label": "Humanity", "current": 48, "max": 60}
+      ],
+      "resources": [
+        {"label": "Luck", "current": 3, "max": 7}
+      ],
+      "conditions": ["Seriously Wounded"],
+      "summary": "Medium pistol (10 rounds), light armorjack (SP 10/11)"
+    }
   }
 }
 
@@ -486,7 +513,7 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through edgerunner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version — apply beat outcomes"""
+- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes"""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the final stage.
 
@@ -536,7 +563,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[CALLBACK LEDGER]**: Open plot threads, Fixer contacts, gig promises with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
-- **[CHARACTER STATES]**: Conditions, equipment, weapons per edgerunner (NOT HP/Humanity/Luck/Armor/EB)
+- **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions, equipment)
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware per edgerunner
 
@@ -544,7 +571,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Conditions, weapons, equipment per edgerunner
+- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -570,7 +598,7 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "cyberware", "action": "add", "value": "Cybereye"}`
 - `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
-HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops, NOT in character_states.
+HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
 
 ### Dice Mechanics:
 - Skill checks: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29)
@@ -595,7 +623,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Bootstrap (first turn or empty state):
 - Set pacing from gig/scenario context
 - Build scene_state from current location
-- Set character_states (conditions, weapons, equipment)
+- Set character_states from known character sheets (structured format with type, vitals, resources, conditions, summary)
 - Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets
 - Add callback_ops for open gig threads, Fixer contacts
 
@@ -653,8 +681,12 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of edgerunner name to current state string (conditions, weapons, equipment — NOT HP/Humanity/Luck/Armor/EB)",
-                "additionalProperties": {"type": "string"}
+                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy', vitals: [{label, current, max}], resources: [{label, current, max}], conditions: [strings], summary: string}",
+                "additionalProperties": True
+            },
+            "combat": {
+                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "type": ["object", "null"]
             },
             "callback_ops": {
                 "type": "array",

@@ -172,7 +172,32 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "emotional_context": "<emotional state and significance of this moment>",
   "character_states": {
-    "<name>": "<current HP, conditions, relevant resources, equipment>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy|ship",
+      "vitals": [
+        {"label": "HP", "current": 12, "max": 14},
+        {"label": "AC", "value": 14}
+      ],
+      "resources": [
+        {"label": "Spell Slots (1st)", "current": 2, "max": 3},
+        {"label": "Tech Points", "current": 1, "max": 2}
+      ],
+      "conditions": ["Exhausted"],
+      "summary": "Armored jacket equipped, light pistol holstered"
+    },
+    "<ShipName>": {
+      "type": "ship",
+      "vitals": [
+        {"label": "Hull", "current": 185, "max": 200},
+        {"label": "Shields", "current": 80, "max": 100}
+      ],
+      "resources": [
+        {"label": "Railgun Ammo", "current": 14, "max": 20},
+        {"label": "Missile Tubes", "current": 3, "max": 4}
+      ],
+      "conditions": [],
+      "summary": "Engines nominal, stealth plating active"
+    }
   },
   "relationship_ops": [
     {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
@@ -319,7 +344,12 @@ SCENE STATE:
 - "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD (funds are derived from ship.credits and auto-scoped to scene).
 
 CHARACTER STATES:
-- Same as standard D&D 5E pipeline — HP, spell slots, conditions, resources, equipment
+- You may receive a [CHARACTER STATES] block with each character's persisted mechanical state from the previous turn (HP, spell slots, conditions, resources, equipment)
+- Use this as the baseline for your "character_states" output — update it with any changes visible in the current context (damage taken, spells cast, items used, conditions gained/lost)
+- If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
+- This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
+- Use the structured format: each character is an object with type, vitals, resources, conditions, and summary
+- Ships should be included as entries with type "ship" — vitals include Hull/Shields, resources include ammo
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
@@ -331,8 +361,9 @@ PACING STATE:
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
-- "character_states" should include all mechanically relevant info since Mechanics has NO conversation history.
-- Include ALL triggered callbacks in the "callbacks" array."""
+- "character_states" should include all mechanically relevant info since Mechanics has NO conversation history. Report current state as baseline — do NOT apply changes yourself (e.g. don't subtract HP for damage). Mechanics is the sole authority on state changes.
+- Include ALL triggered callbacks in the "callbacks" array — things directly related/promised/foreshadowed earlier that should now activate or be referenced. Set "source" to the NPC or faction name when applicable, or null for environmental/systemic triggers.
+- You see recent conversation pairs plus persistent state injections. Use both to maintain continuity."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG game master pipeline. You are the second stage.
 
@@ -380,17 +411,46 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "next_player_prompt": <pass through from Events JSON unchanged>,
   "combat": <pass through from Events JSON unchanged>,
   "character_states": {
-    "<name>": "<updated HP, conditions, spell slots, relevant resources, equipment after this turn's outcomes>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy|ship",
+      "vitals": [
+        {"label": "HP", "current": 10, "max": 14},
+        {"label": "AC", "value": 14}
+      ],
+      "resources": [
+        {"label": "Spell Slots (1st)", "current": 1, "max": 3},
+        {"label": "Tech Points", "current": 0, "max": 2}
+      ],
+      "conditions": ["Exhausted", "Poisoned"],
+      "summary": "Armored jacket equipped, light pistol holstered"
+    },
+    "<ShipName>": {
+      "type": "ship",
+      "vitals": [
+        {"label": "Hull", "current": 170, "max": 200},
+        {"label": "Shields", "current": 60, "max": 100}
+      ],
+      "resources": [
+        {"label": "Railgun Ammo", "current": 12, "max": 20},
+        {"label": "Missile Tubes", "current": 2, "max": 4}
+      ],
+      "conditions": [],
+      "summary": "Port engine damaged, stealth plating offline"
+    }
   }
 }
+
+CHARACTER STATES:
+- You MUST always include "character_states" with the UPDATED state of all characters after adjudicating this turn
+- Start from the "character_states" in the Events JSON (the previous turn's state) and apply all state_changes from your beats
+- Include HP, spell slots, class resources, conditions, and any other mechanically relevant state
+- This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
+- Ships should be included as entries with type "ship" — update Hull/Shields/ammo after combat
 
 SHIP COMBAT HUD:
 - During ship combat, include ship status in the HUD or dramatic_notes
 - Format: [Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y | Funds: X]
 - Reference [SHIP STATE] injection for current values and apply ship_ops changes
-
-CHARACTER STATES:
-- You MUST always include "character_states" with the UPDATED state of all characters after adjudicating this turn
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
 {
@@ -461,7 +521,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD (funds derived from ship.credits).
-- **character_states**: Map of character name → current mechanical state. Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat (including ship combat). Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
@@ -584,8 +645,12 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to current state string (HP, conditions, resources)",
-                "additionalProperties": {"type": "string"}
+                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy'|'ship', vitals: [{label, current, max} or {label, value}], resources: [{label, current, max}], conditions: [strings], summary: string}",
+                "additionalProperties": True
+            },
+            "combat": {
+                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "type": ["object", "null"]
             },
             "callback_ops": {
                 "type": "array",

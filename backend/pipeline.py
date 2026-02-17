@@ -285,6 +285,7 @@ def _fresh_pipeline_state() -> dict:
         "character_states": {},
         "game_state": {},
         "hud_state": {},
+        "combat": None,
         "turn_counter": 0
     }
 
@@ -302,7 +303,9 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "npc_memories": {},
             "scene_state": {},
             "character_states": {},
+            "game_state": {},
             "hud_state": {},
+            "combat": None,
             "turn_counter": 0
         }
 
@@ -316,13 +319,25 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("npc_memories", {})
     state.setdefault("scene_state", {})
     state.setdefault("character_states", {})
-    # Migrate flat string character_states to structured format
+    # Migrate character_states to current format: {"data": {...}, "last_updated": N}
     cs = state["character_states"]
     for name, entry in cs.items():
         if not isinstance(entry, dict):
-            cs[name] = {"state": entry, "last_updated": state.get("turn_counter", 0)}
+            # Bare string → wrap
+            cs[name] = {"data": {"summary": str(entry)}, "last_updated": state.get("turn_counter", 0)}
+        elif "state" in entry and "data" not in entry:
+            # Old {"state": str, "last_updated": N} → migrate to {"data": {...}, ...}
+            old_state = entry.pop("state")
+            if isinstance(old_state, dict):
+                entry["data"] = old_state
+            else:
+                entry["data"] = {"summary": str(old_state)}
+        elif "data" not in entry:
+            # Dict without "data" key — treat entire dict as the data
+            cs[name] = {"data": entry, "last_updated": state.get("turn_counter", 0)}
     state.setdefault("game_state", {})
     state.setdefault("hud_state", {})
+    state.setdefault("combat", None)
     state.setdefault("turn_counter", 0)
     return state
 
@@ -504,17 +519,23 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
     """
     Merge Mechanics' character_states into existing state and prune stale entries.
 
-    Each entry is stored as {"state": "<string>", "last_updated": <turn>}.
-    Mechanics outputs flat {"name": "state string"} — we wrap on merge.
+    Each entry is stored as {"data": {structured_object}, "last_updated": <turn>}.
+    Accepts both:
+      - New structured format: {"name": {"type": "pc", "vitals": [...], ...}}
+      - Old string format: {"name": "state string"} → wrapped as {"data": {"summary": str}, ...}
     Entries not updated in CHARACTER_STATE_TTL turns are pruned.
     """
     # Merge new entries from Mechanics
-    for name, state_str in mechanics_output.items():
-        existing[name] = {"state": state_str, "last_updated": current_turn}
+    for name, state_val in mechanics_output.items():
+        if isinstance(state_val, dict):
+            existing[name] = {"data": state_val, "last_updated": current_turn}
+        else:
+            # Old string format → wrap into structured format
+            existing[name] = {"data": {"summary": str(state_val)}, "last_updated": current_turn}
 
     # Prune stale entries
     stale = [name for name, entry in existing.items()
-             if current_turn - entry.get("last_updated", 0) > CHARACTER_STATE_TTL]
+             if not isinstance(entry, dict) or current_turn - entry.get("last_updated", 0) > CHARACTER_STATE_TTL]
     for name in stale:
         del existing[name]
 
@@ -674,18 +695,46 @@ def build_scene_state_injection(scene: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_character_data(data) -> str:
+    """Format a character's data dict into a readable one-liner for model injection."""
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, dict):
+        return str(data)
+    parts = []
+    # Vitals
+    for v in data.get("vitals", []):
+        if "current" in v and "max" in v:
+            parts.append(f"{v['label']}: {v['current']}/{v['max']}")
+        elif "value" in v:
+            parts.append(f"{v['label']}: {v['value']}")
+    # Resources
+    for r in data.get("resources", []):
+        if "current" in r and "max" in r:
+            parts.append(f"{r['label']}: {r['current']}/{r['max']}")
+    # Conditions
+    conds = data.get("conditions", [])
+    if conds:
+        parts.append(f"Conditions: {', '.join(conds)}")
+    # Summary
+    if data.get("summary"):
+        parts.append(data["summary"])
+    return " | ".join(parts) if parts else json.dumps(data)
+
+
 def build_character_states_injection(character_states: dict) -> str:
     """Build human-readable character states injection for Events.
 
-    Entries are stored as {"name": {"state": "...", "last_updated": N}}.
-    Falls back to flat string values for backwards compatibility.
+    Entries are stored as {"name": {"data": {...}, "last_updated": N}}.
+    Falls back gracefully for old formats.
     """
     if not character_states:
         return ""
     lines = ["[CHARACTER STATES]"]
     for name, entry in character_states.items():
         if isinstance(entry, dict):
-            lines.append(f"{name}: {entry.get('state', '')}")
+            data = entry.get("data") or entry.get("state", "")
+            lines.append(f"{name}: {_format_character_data(data)}")
         else:
             lines.append(f"{name}: {entry}")
     lines.append("[/CHARACTER STATES]")
@@ -854,6 +903,10 @@ def run_pipeline(
             pipeline_state.get("scene_state", {}),
             pipeline_state.get("character_states", {}))
         pipeline_state["hud_state"] = events_data["hud_state"]
+
+    # Persist combat state (initiative tracker) from Events
+    if "combat" in events_data:
+        pipeline_state["combat"] = events_data["combat"]
 
     new_pipeline_state = pipeline_state
 
@@ -1166,11 +1219,13 @@ def _compute_state_delta(prev: dict, curr: dict) -> str:
         if npc not in all_npcs:  # already handled above
             parts.append(f"memory -{npc}: (all removed)")
 
-    # Character states (entries are {"state": "...", "last_updated": N} or flat strings)
+    # Character states (entries are {"data": {...}, "last_updated": N} or flat strings)
     prev_cs = prev.get("character_states", {})
     curr_cs = curr.get("character_states", {})
     def _cs_state(entry):
-        return entry.get("state", "") if isinstance(entry, dict) else entry
+        if isinstance(entry, dict):
+            return entry.get("data", entry.get("state", ""))
+        return entry
     all_chars = set(list(prev_cs.keys()) + list(curr_cs.keys()))
     for char in sorted(all_chars):
         prev_entry = prev_cs.get(char)
@@ -1824,6 +1879,9 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist HUD state from tool report
     if "hud_state" in parsed:
         pipeline_state["hud_state"] = parsed["hud_state"]
+    # Persist combat state (initiative tracker) from tool report
+    if "combat" in parsed:
+        pipeline_state["combat"] = parsed["combat"]
     return pipeline_state
 
 

@@ -1143,6 +1143,8 @@ class ChatResponse(BaseModel):
     current_leaf_id: str | None = None  # ID of the current leaf message (for branching)
     model: str | None = None  # Model used for this chat (gpt-5.2 or claude-sonnet-4.5)
     anthropic_sync: bool | None = None  # Whether Anthropic caching is enabled (sync mode)
+    pipeline_state: dict | None = None  # Character/scene state for right panel
+    game_system: str | None = None  # Game system ID for this chat's project
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -1684,6 +1686,12 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     chat_stats["avg_gpt_context_growth"] = gpt_context_tokens / gpt_prompts if gpt_prompts > 0 else 0
     chat_stats["avg_sonnet_context_growth"] = sonnet_context_tokens / sonnet_prompts if sonnet_prompts > 0 else 0
 
+    # Resolve game_system from project metadata
+    chat_game_system = None
+    if project:
+        proj_meta = load_project_metadata(username, project)
+        chat_game_system = proj_meta.get("game_system")
+
     return ChatResponse(
         messages=paginated_messages,
         all_messages=all_messages,  # Full tree for branch navigation
@@ -1692,7 +1700,9 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         has_more_messages=has_more_messages,
         current_leaf_id=data.get("current_leaf_id"),
         model=data.get("model", DEFAULT_MODEL),
-        anthropic_sync=data.get("anthropic_sync", True)
+        anthropic_sync=data.get("anthropic_sync", True),
+        pipeline_state=data.get("pipeline_state"),
+        game_system=chat_game_system
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
@@ -2530,6 +2540,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Save pipeline state for next turn
                 if pipeline_result.pipeline_state is not None:
                     data["pipeline_state"] = pipeline_result.pipeline_state
+                    # Send state_update SSE event for right panel
+                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                    )
 
                 # Get cross-model providers for token counting
                 gpt_provider = ProviderRegistry.get("gpt-5.2")
@@ -2835,6 +2851,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         stateful_after_snapshot = None
                         if use_stateful and stateful_tool_input is not None and stateful_pipeline_state is not None:
                             stateful_after_snapshot = json.dumps(stateful_pipeline_state)
+
+                        # Send state_update SSE event for right panel (single-agent path)
+                        if use_stateful and data.get("pipeline_state"):
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                            )
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
@@ -4573,6 +4597,34 @@ def set_project_game_system(request: SetProjectGameSystemRequest):
     save_project_metadata(username, request.project, metadata)
 
     return {"status": "ok", "game_system": request.game_system}
+
+
+@app.get("/api/character-sheet/{username}/{project}")
+def get_character_sheet(username: str, project: str):
+    """Return raw .md content of character sheet file(s) from project uploads."""
+    username = username.strip().lower()
+    uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
+    if not os.path.exists(uploads_dir):
+        return {"content": ""}
+
+    # Find files matching *character*sheet* (case-insensitive)
+    import fnmatch
+    matches = [f for f in os.listdir(uploads_dir)
+               if fnmatch.fnmatch(f.lower(), "*character*sheet*") or fnmatch.fnmatch(f.lower(), "*character*")]
+    if not matches:
+        return {"content": ""}
+
+    combined = ""
+    real_uploads = os.path.realpath(uploads_dir)
+    for filename in sorted(matches):
+        filepath = os.path.join(uploads_dir, filename)
+        # Ensure resolved path stays within uploads directory
+        if not os.path.realpath(filepath).startswith(real_uploads + os.sep):
+            continue
+        if os.path.isfile(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                combined += f.read() + "\n\n"
+    return {"content": combined.strip()}
 
 
 @app.get("/health")

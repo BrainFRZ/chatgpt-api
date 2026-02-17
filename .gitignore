@@ -5,6 +5,7 @@
 !frontend/App.tsx
 !frontend/src/
 !frontend/src/App.tsx
+!backend/tests/test_character_panel.py
 !backend/main.py
 !backend/sync_manager.py
 !backend/migrate_to_branching.py

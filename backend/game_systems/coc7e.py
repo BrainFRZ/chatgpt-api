@@ -218,7 +218,18 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "emotional_context": "<emotional state, horror level, sanity pressure>",
   "character_states": {
-    "<name>": "<current HP, MP, conditions, equipment — NOT SAN/Luck/Bonds/Mythos>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "HP", "current": 8, "max": 11},
+        {"label": "MP", "current": 10, "max": 14}
+      ],
+      "resources": [
+        {"label": "Luck", "current": 45, "max": 65}
+      ],
+      "conditions": ["Temporary Insanity", "Major Wound"],
+      "summary": ".45 revolver (2 rounds), flashlight"
+    }
   },
   "investigator_ops": [
     {"investigator": "<name>", "op": "san|luck|mythos|bond|skill_mark|phobia|mania|set", ...}
@@ -279,11 +290,16 @@ Use "investigator_ops" to update this state. Operations:
 - {"investigator": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
   Use "set" to bootstrap investigator state on first turn or correct errors.
 
-IMPORTANT: SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. character_states is for HP, MP, conditions, and equipment only.
+IMPORTANT: SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. Luck is tracked via investigator_ops but mirrored in character_states resources for HUD display.
 
-CHARACTER STATES:
-- "character_states" tracks HP, MP, conditions, equipment, and other non-investigator-ops state
-- Do NOT include SAN, Luck, Bonds, or Mythos here — those are managed by investigator_ops and shown in [INVESTIGATOR STATE]
+CHARACTER STATES (structured format):
+- "character_states" uses a structured object per character with type, vitals, resources, conditions, and summary
+- "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
+- "vitals": array of {label, current, max} for HP, MP
+- "resources": array of {label, current, max} for Luck (mirrored from investigator_ops for HUD display)
+- "conditions": array of active conditions (e.g. "Temporary Insanity", "Major Wound", "Poisoned")
+- "summary": brief string for equipment/notes
+- Do NOT include SAN, Bonds, or Mythos here — those are managed by investigator_ops and shown in [INVESTIGATOR STATE]
 
 COMBAT (CoC style):
 - DEX-order initiative (highest DEX acts first)
@@ -331,7 +347,7 @@ ROUTING RULES:
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: discrete narrative events
-- "character_states": HP, MP, conditions, equipment (NOT SAN/Luck/Bonds/Mythos)
+- "character_states": structured per-character objects with type, vitals, resources, conditions, summary (NOT SAN/Bonds/Mythos — Luck mirrored for HUD)
 - "investigator_ops": SAN, Luck, Mythos, Bonds, skill marks, phobias, manias
 - Bootstrap: On first turn with empty [INVESTIGATOR STATE], use "set" ops to initialize all investigators from character sheets"""
 
@@ -389,7 +405,18 @@ SCHEMA A - Route to Narration (default):
   "next_player_prompt": <pass through from Events unchanged>,
   "combat": <pass through from Events unchanged>,
   "character_states": {
-    "<name>": "<updated HP, MP, conditions, equipment after this turn>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "HP", "current": 8, "max": 11},
+        {"label": "MP", "current": 10, "max": 14}
+      ],
+      "resources": [
+        {"label": "Luck", "current": 45, "max": 65}
+      ],
+      "conditions": ["Temporary Insanity", "Major Wound"],
+      "summary": ".45 revolver (2 rounds), flashlight"
+    }
   }
 }
 
@@ -449,7 +476,7 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version (HP, MP, conditions) — apply beat outcomes"""
+- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes"""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the final stage.
 
@@ -499,7 +526,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[CALLBACK LEDGER]**: Open plot threads, promises, investigation leads with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
-- **[CHARACTER STATES]**: Mechanical state per character (HP, MP, conditions, equipment — NOT SAN/Luck)
+- **[CHARACTER STATES]**: Structured per-character objects with type, vitals (HP/MP), resources (Luck), conditions, and summary — NOT SAN/Bonds/Mythos
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
 
@@ -507,7 +534,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: HP, MP, conditions, equipment per character
+- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -529,7 +556,7 @@ Use the "investigator_ops" array to track CoC-specific mechanical state:
 - `{"investigator": "<name>", "op": "phobia", "action": "add", "value": "darkness"}`
 - `{"investigator": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
-SAN, Luck, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states.
+SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. Luck is tracked via investigator_ops but mirrored in character_states resources for HUD display.
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
@@ -543,7 +570,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Bootstrap (first turn or empty state):
 - Set pacing from scenario context
 - Build scene_state from current location
-- Set character_states (HP, MP, conditions)
+- Set character_states (structured objects with type, vitals, resources, conditions, summary)
 - Use investigator_ops "set" to initialize SAN, Luck, Mythos, Bonds from character sheets
 - Add callback_ops for open investigation threads
 
@@ -562,7 +589,13 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
 - Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
 - When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+### Combat Tracking
+- When combat begins, report `combat` in report_state: `{"round": 1, "initiative_order": ["name1", ...], "current_turn": "name"}`
+- DEX-order initiative (highest DEX acts first, no roll)
+- Update round number, current_turn each turn. Set combat to null when combat ends.
+- CoC combat is fast and deadly — most fights should resolve in 1-3 rounds."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -601,8 +634,12 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to current state string (HP, MP, conditions, equipment — NOT SAN/Luck)",
-                "additionalProperties": {"type": "string"}
+                "description": "Structured per-character state. Each key is a character name, value is {type: 'pc|npc|enemy', vitals: [{label, current, max}], resources: [{label, current, max}], conditions: [strings], summary: string}.",
+                "additionalProperties": True
+            },
+            "combat": {
+                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "type": ["object", "null"]
             },
             "callback_ops": {
                 "type": "array",

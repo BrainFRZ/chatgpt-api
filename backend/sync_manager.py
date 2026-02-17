@@ -33,6 +33,7 @@ class SyncEventType(Enum):
     CLIENT_LEFT = "client_left"
     CHAT_SETTINGS_CHANGED = "chat_settings_changed"
     DOCS_REFRESHED = "docs_refreshed"
+    STATE_UPDATE = "state_update"
     # User-level events (chat list changes)
     CHAT_CREATED = "chat_created"
     CHAT_DELETED = "chat_deleted"

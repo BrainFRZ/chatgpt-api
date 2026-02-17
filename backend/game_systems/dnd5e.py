@@ -194,7 +194,19 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "emotional_context": "<emotional state and significance of this moment>",
   "character_states": {
-    "<name>": "<current HP, conditions, relevant resources, equipment>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy|ship",
+      "vitals": [
+        {"label": "HP", "current": 25, "max": 30},
+        {"label": "AC", "value": 16}
+      ],
+      "resources": [
+        {"label": "Spell Slots (1st)", "current": 2, "max": 3},
+        {"label": "Spell Slots (2nd)", "current": 1, "max": 2}
+      ],
+      "conditions": ["Poisoned"],
+      "summary": "Wielding longsword and shield, wearing chain mail"
+    }
   },
   "relationship_ops": [
     {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
@@ -442,7 +454,19 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "next_player_prompt": <pass through from Events JSON unchanged>,
   "combat": <pass through from Events JSON unchanged>,
   "character_states": {
-    "<name>": "<updated HP, conditions, spell slots, relevant resources, equipment after this turn's outcomes>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy|ship",
+      "vitals": [
+        {"label": "HP", "current": 22, "max": 30},
+        {"label": "AC", "value": 16}
+      ],
+      "resources": [
+        {"label": "Spell Slots (1st)", "current": 1, "max": 3},
+        {"label": "Spell Slots (2nd)", "current": 1, "max": 2}
+      ],
+      "conditions": [],
+      "summary": "Wielding longsword and shield, wearing chain mail"
+    }
   }
 }
 
@@ -554,7 +578,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
-- **character_states**: Map of character name → current mechanical state (HP, AC, spell slots, conditions, resources). Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
@@ -673,8 +698,12 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to current state string (HP, conditions, resources)",
-                "additionalProperties": {"type": "string"}
+                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy'|'ship', vitals: [{label, current, max} or {label, value}], resources: [{label, current, max}], conditions: [strings], summary: string}",
+                "additionalProperties": True
+            },
+            "combat": {
+                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "type": ["object", "null"]
             },
             "callback_ops": {
                 "type": "array",

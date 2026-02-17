@@ -242,7 +242,18 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "emotional_context": "<emotional state, tension level, noir atmosphere>",
   "character_states": {
-    "<name>": "<current conditions, equipment, active cyberware — NOT Edge/CM/Essence/Nuyen>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "Physical", "current": 8, "max": 11},
+        {"label": "Stun", "current": 7, "max": 10}
+      ],
+      "resources": [
+        {"label": "Edge", "current": 3, "max": 5}
+      ],
+      "conditions": ["Wounded", "Stun Overflow"],
+      "summary": "Ares Predator VI, lined coat, 2 stim patches"
+    }
   },
   "runner_ops": [
     {"runner": "<name>", "op": "edge|edge_reset|physical|stun|heal_physical|heal_stun|essence|nuyen|sustained|effect|set", ...}
@@ -311,11 +322,15 @@ Use "runner_ops" to update this state. Operations:
 - {"runner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
   Use "set" to bootstrap runner state on first turn or correct errors.
 
-IMPORTANT: Edge, CM, Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops, NOT in character_states. character_states is for conditions, equipment, and active cyberware only.
+IMPORTANT: Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops. character_states uses structured format with vitals (Physical/Stun CM), resources (Edge), conditions, and summary (equipment, cyberware).
 
 CHARACTER STATES:
-- "character_states" tracks conditions, equipped gear, active cyberware, and other non-runner-ops state
-- Do NOT include Edge, CM, Essence, or Nuyen here — those are managed by runner_ops and shown in [RUNNER STATE]
+- "character_states" uses structured format: each character maps to {type, vitals, resources, conditions, summary}
+- "vitals": array of {label, current, max} — Physical CM, Stun CM
+- "resources": array of {label, current, max} — Edge
+- "conditions": array of strings — "Wounded", "Stun Overflow", etc.
+- "summary": free-text for equipment, active cyberware, gear
+- Essence, Nuyen, Sustained Spells, Active Effects are tracked via runner_ops — NOT in character_states
 
 COMBAT (Shadowrun 6E):
 - Initiative: Reaction + Intuition + modifiers; ties broken by Edge, then REA
@@ -371,8 +386,8 @@ ROUTING RULES:
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: discrete narrative events
-- "character_states": conditions, gear, cyberware (NOT Edge/CM/Essence/Nuyen)
-- "runner_ops": Edge, CM, Essence, Nuyen, sustained spells, active effects
+- "character_states": structured format {type, vitals, resources, conditions, summary} per character
+- "runner_ops": Essence, Nuyen, sustained spells, active effects
 - Bootstrap: On first turn with empty [RUNNER STATE], use "set" ops to initialize all runners from character sheets"""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG GM pipeline for Shadowrun 6th Edition. You are the second stage.
@@ -419,7 +434,18 @@ SCHEMA A - Route to Narration (default):
   "next_player_prompt": <pass through from Events unchanged>,
   "combat": <pass through from Events unchanged>,
   "character_states": {
-    "<name>": "<updated conditions, equipment, cyberware after this turn>"
+    "<CharacterName>": {
+      "type": "pc|npc|enemy",
+      "vitals": [
+        {"label": "Physical", "current": 5, "max": 11},
+        {"label": "Stun", "current": 7, "max": 10}
+      ],
+      "resources": [
+        {"label": "Edge", "current": 2, "max": 5}
+      ],
+      "conditions": ["Wounded"],
+      "summary": "Ares Predator VI, lined coat, 1 stim patch remaining"
+    }
   }
 }
 
@@ -469,6 +495,12 @@ HUD:
 - Format: [Date: 2082-XX-XX | Time: XXXX | Loc: X | Nuyen: X | Edge: X/Y | P: X/Y | S: X/Y]
 - Build from hud_state, advance time by time_passed
 - Include per-runner Edge and CM when relevant
+
+CHARACTER STATES:
+- You MUST always include "character_states" with the UPDATED state of all characters after adjudicating this turn
+- Start from the "character_states" in the Events JSON (the previous turn's state) and apply all state_changes from your beats
+- Include Physical/Stun CM, Edge, conditions, and any other mechanically relevant state
+- This is persisted across turns — if you don't include a change, it will appear unchanged next turn
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -522,7 +554,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[CALLBACK LEDGER]**: Open plot threads, promises, Johnson contacts with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
-- **[CHARACTER STATES]**: Conditions, equipment, active cyberware per runner (NOT Edge/CM/Essence/Nuyen)
+- **[CHARACTER STATES]**: Structured state per character (type, vitals, resources, conditions, summary)
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[RUNNER STATE]**: Edge, Physical CM, Stun CM, Overflow, Essence, Nuyen, Sustained Spells, Active Effects per runner
 
@@ -530,7 +562,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Conditions, equipment, cyberware per runner
+- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `vitals` (array of {label, current, max} -- e.g. Physical CM, Stun CM), `resources` (array of {label, current, max} -- e.g. Edge), `conditions` (array of strings -- e.g. "Wounded", "Stun Overflow"), and `summary` (free-text for equipment, active cyberware, gear). Full replacement each turn.
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -556,7 +589,7 @@ Use the "runner_ops" array to track SR6E-specific mechanical state:
 - `{"runner": "<name>", "op": "effect", "action": "add", "value": "Wired Reflexes 2"}`
 - `{"runner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
-Edge, CM, Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops, NOT in character_states.
+Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops. Physical/Stun CM and Edge go in character_states vitals/resources.
 
 ### Dice Mechanics:
 - Dice pools: Attribute + Skill = Xd6, count hits (5s and 6s) vs threshold
@@ -576,7 +609,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Bootstrap (first turn or empty state):
 - Set pacing from run/scenario context
 - Build scene_state from current location
-- Set character_states (conditions, gear, cyberware)
+- Set character_states (structured: type, vitals, resources, conditions, summary)
 - Use runner_ops "set" to initialize Edge, CM, Essence, Nuyen from character sheets
 - Add callback_ops for open plot threads, Johnson contacts
 
@@ -634,8 +667,12 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of runner name to current state string (conditions, equipment, cyberware — NOT Edge/CM/Essence/Nuyen)",
-                "additionalProperties": {"type": "string"}
+                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy', vitals: [{label, current, max}], resources: [{label, current, max}], conditions: [strings], summary: string}",
+                "additionalProperties": True
+            },
+            "combat": {
+                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "type": ["object", "null"]
             },
             "callback_ops": {
                 "type": "array",
