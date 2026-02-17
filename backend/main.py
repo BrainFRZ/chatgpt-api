@@ -2799,16 +2799,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
                                     stateful_pipeline_state["turn_counter"] += 1
-                                    current_turn = stateful_pipeline_state["turn_counter"]
-                                    apply_single_agent_state_updates(
-                                        stateful_pipeline_state, tool_input, current_turn, game_system=gs
-                                    )
-                                    data["pipeline_state"] = stateful_pipeline_state
-                                    stateful_tool_input = tool_input
-                                    logger.info(f"Stateful: applied tool state updates for user {username}, turn {current_turn}")
+                                current_turn = stateful_pipeline_state["turn_counter"]
+                                apply_single_agent_state_updates(
+                                    stateful_pipeline_state, tool_input, current_turn, game_system=gs
+                                )
+                                data["pipeline_state"] = stateful_pipeline_state
+                                stateful_tool_input = tool_input
+                                if is_ooc:
+                                    logger.info(f"Stateful: OOC turn for user {username}, state applied at turn {current_turn}")
                                 else:
-                                    stateful_tool_input = tool_input
-                                    logger.info(f"Stateful: OOC turn (tool is_ooc=true) for user {username}")
+                                    logger.info(f"Stateful: applied tool state updates for user {username}, turn {current_turn}")
                             else:
                                 logger.warning(f"Stateful: no tool_use_input, attempting retry for user {username}")
                                 try:
@@ -2830,18 +2830,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         is_ooc = retry_result.get("is_ooc", False)
                                         if not is_ooc:
                                             stateful_pipeline_state["turn_counter"] += 1
-                                            current_turn = stateful_pipeline_state["turn_counter"]
-                                            apply_single_agent_state_updates(
-                                                stateful_pipeline_state, retry_result, current_turn, game_system=gs
-                                            )
-                                            data["pipeline_state"] = stateful_pipeline_state
-                                            stateful_tool_input = retry_result
-                                            stateful_tool_retried = True
-                                            logger.info(f"Stateful: retry succeeded for user {username}, turn {current_turn}")
+                                        current_turn = stateful_pipeline_state["turn_counter"]
+                                        apply_single_agent_state_updates(
+                                            stateful_pipeline_state, retry_result, current_turn, game_system=gs
+                                        )
+                                        data["pipeline_state"] = stateful_pipeline_state
+                                        stateful_tool_input = retry_result
+                                        stateful_tool_retried = True
+                                        if is_ooc:
+                                            logger.info(f"Stateful: retry OOC for user {username}, state applied at turn {current_turn}")
                                         else:
-                                            stateful_tool_input = retry_result
-                                            stateful_tool_retried = True
-                                            logger.info(f"Stateful: retry returned OOC for user {username}")
+                                            logger.info(f"Stateful: retry succeeded for user {username}, turn {current_turn}")
                                     else:
                                         logger.warning(f"Stateful: retry also failed for user {username}")
                                 except Exception as retry_err:

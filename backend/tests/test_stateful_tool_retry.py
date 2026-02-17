@@ -674,7 +674,11 @@ class TestRetryStateApplicationIC:
 
 
 class TestRetryStateApplicationOOC:
-    """Test state behavior when retry returns an OOC turn."""
+    """Test state behavior when retry returns an OOC turn.
+
+    OOC turns apply state updates (for character creation) but do NOT
+    increment turn_counter.
+    """
 
     def test_turn_counter_not_incremented(self):
         state = _fresh_pipeline_state()
@@ -683,20 +687,30 @@ class TestRetryStateApplicationOOC:
 
         is_ooc = retry_result.get("is_ooc", False)
         assert is_ooc
-        # OOC branch: no state modification
+        # OOC: don't increment, but still apply state
+        current_turn = state["turn_counter"]
+        apply_single_agent_state_updates(state, retry_result, current_turn)
         assert state["turn_counter"] == 5
 
-    def test_state_unchanged(self):
+    def test_state_applied_on_ooc(self):
+        """OOC turns apply state updates (pacing, scene, characters) without incrementing turn."""
         state = _fresh_pipeline_state()
         state["turn_counter"] = 5
         state["pacing"] = {"episode": "S1", "beat": "B1", "responses": 3}
-        original = copy.deepcopy(state)
 
         retry_result = _sample_ooc_input()
         is_ooc = retry_result.get("is_ooc", False)
         assert is_ooc
 
-        assert state == original
+        current_turn = state["turn_counter"]
+        apply_single_agent_state_updates(state, retry_result, current_turn)
+
+        # Pacing and scene_state are overwritten by the OOC input
+        assert state["pacing"]["episode"] == "Session 1"
+        assert state["pacing"]["beat"] == "OOC"
+        assert state["scene_state"]["location"] == "N/A"
+        # But turn_counter is unchanged
+        assert state["turn_counter"] == 5
 
     def test_stateful_tool_input_still_set(self):
         """Even for OOC, stateful_tool_input should be set (for debug transcript)."""
@@ -983,11 +997,14 @@ class TestRetryFullScenario:
         assert main_usage['output_tokens'] == 300
 
     def test_full_retry_flow_ooc(self):
-        """Simulate the complete retry path for OOC turns."""
+        """Simulate the complete retry path for OOC turns.
+
+        OOC turns apply state (for character creation) but don't increment turn_counter.
+        """
         state = _fresh_pipeline_state()
         state["turn_counter"] = 5
         state["pacing"] = {"episode": "S1", "beat": "B1", "responses": 5}
-        original_state = copy.deepcopy(state)
+        data = {"pipeline_state": state}
 
         ooc_input = _sample_ooc_input()
         client = _make_client(
@@ -1002,11 +1019,21 @@ class TestRetryFullScenario:
         assert retry_result is not None
         is_ooc = retry_result.get("is_ooc", False)
         assert is_ooc
+
+        # Apply state (simulate new main.py OOC branch)
+        # turn_counter NOT incremented, but state IS applied
+        current_turn = state["turn_counter"]
+        apply_single_agent_state_updates(state, retry_result, current_turn)
+        data["pipeline_state"] = state
         stateful_tool_input = retry_result
 
-        # State unchanged
-        assert state["turn_counter"] == original_state["turn_counter"]
-        assert state["pacing"] == original_state["pacing"]
+        # turn_counter unchanged
+        assert state["turn_counter"] == 5
+        # But pacing and scene_state are updated from the OOC input
+        assert state["pacing"]["episode"] == "Session 1"
+        assert state["pacing"]["beat"] == "OOC"
+        assert state["scene_state"]["location"] == "N/A"
+        assert data["pipeline_state"] is state
         assert stateful_tool_input["is_ooc"] is True
 
     def test_full_retry_flow_failure(self):

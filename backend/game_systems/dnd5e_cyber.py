@@ -141,7 +141,7 @@ def build_game_injection(game_state):
         lines.append("[/SHIP STATE]")
         parts.append("\n".join(lines))
     else:
-        parts.append("[SHIP STATE]\n(empty — bootstrap with ship_ops \"set\")\n[/SHIP STATE]")
+        parts.append("[SHIP STATE]\n(empty — bootstrap with ship_ops \"set\" after character creation is complete)\n[/SHIP STATE]")
 
     return "\n\n".join(parts)
 
@@ -359,6 +359,13 @@ ROUTING RULES:
 PACING STATE:
 - You receive [PIPELINE STATE], [CALLBACK LEDGER], [NPC MEMORIES], [SCENE STATE], [RELATIONSHIP STATE], and [SHIP STATE] injections — these are your persistent memory across turns.
 
+CHARACTER CREATION:
+- When [CHARACTER STATES] is empty AND no character sheets are in the system prompt, the player needs to create a character.
+- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
+- Include partial "character_states" in your output as the character takes shape — the system will persist these even on output-routed turns.
+- Use relationship_ops "set" and ship_ops "set" only after creation is complete. Leave callback_ops, npc_memory_ops, relationship_ops, and ship_ops empty during creation.
+- Maintain scene_state unchanged (or minimal) during creation.
+
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
@@ -569,6 +576,30 @@ When state blocks are absent or empty, review your context to initialize:
 - Add key npc_memory_ops for important NPCs in the scene
 - Use relationship_ops "set" to initialize tracked NPCs and factions
 - Use ship_ops "set" to initialize ship state from context
+
+### Character Creation (interactive):
+**Trigger**: [CHARACTER STATES] is empty AND no character sheets are found in the system prompt.
+
+When triggered, guide the player through D&D 5E character creation (reflavored for the cyberpunk setting) **one step at a time**, waiting for player input before proceeding:
+
+1. **Concept** — Ask the player for a character concept, name, and role on the station/ship
+2. **Race** — Present race options reflavored for the setting (species, augmented lineages, etc.) with brief summaries; apply racial traits once chosen
+3. **Class** — Present class options with cyberpunk reflavoring (e.g. Artificer as Tech Specialist, Rogue as Infiltrator); note starting proficiencies and features
+4. **Ability Scores** — Offer a method (standard array, point buy, or roll 4d6 drop lowest); assign scores with racial bonuses
+5. **Background** — Present background options reflavored for the setting (station-born, corporate exile, spacer, etc.); note skill proficiencies and feature
+6. **Equipment** — Assign starting equipment with cyberpunk flavor (tech gear, weapons, armor); note items
+7. **Spells** — If the class is a spellcaster, select cantrips and prepared/known spells (reflavored as tech abilities, psionic powers, etc.)
+8. **Personality** — Define personality traits, ideals, bonds, and flaws in the context of the setting
+9. **Recap** — Summarize the complete character; transition to gameplay
+
+**State reporting during creation:**
+- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
+- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
+- Use the `summary` field to track creation progress (e.g. "Station-born human — choosing class...")
+- Suppress callback_ops, npc_memory_ops, relationship_ops, and ship_ops until gameplay begins — leave them as empty arrays
+- Set scene_state to a minimal OOC state (location: "Character Creation", npcs_present: [], atmosphere: "OOC")
+
+**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, relationship_ops "set", ship_ops "set", callbacks) as you begin the first narrative turn.
 
 ### Tone — Cyberpunk:
 - Neon-lit corridors, chrome and rust, station grit, vacuum cold

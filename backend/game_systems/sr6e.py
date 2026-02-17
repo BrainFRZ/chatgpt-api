@@ -181,7 +181,7 @@ def build_game_injection(game_state):
     """Build [RUNNER STATE] injection block from structured state."""
     runners = game_state.get("runners", {})
     if not runners:
-        return "[RUNNER STATE]\n(empty — bootstrap from character sheets)\n[/RUNNER STATE]"
+        return "[RUNNER STATE]\n(empty — bootstrap from character sheets, or initialize via character creation)\n[/RUNNER STATE]"
 
     lines = ["[RUNNER STATE]"]
     for name, runner in sorted(runners.items()):
@@ -382,6 +382,14 @@ SCENE STATE:
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
 - Route to "output" ONLY for pure OOC questions
+
+CHARACTER CREATION:
+- When [CHARACTER STATES] is empty AND [RUNNER STATE] is empty AND no character sheets are in the system prompt, the player needs to create a runner.
+- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
+- Include partial "character_states" in your output as the runner takes shape — the system will persist these even on output-routed turns.
+- Use runner_ops "set" to initialize Edge, CM, Essence, Nuyen as those values are determined during creation.
+- Leave callback_ops and npc_memory_ops empty during creation.
+- Maintain scene_state unchanged (or minimal) during creation.
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -612,6 +620,32 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Set character_states (structured: type, vitals, resources, conditions, summary)
 - Use runner_ops "set" to initialize Edge, CM, Essence, Nuyen from character sheets
 - Add callback_ops for open plot threads, Johnson contacts
+
+### Character Creation (interactive):
+**Trigger**: [CHARACTER STATES] is empty AND [RUNNER STATE] is empty AND no character sheets are found in the system prompt.
+
+When triggered, guide the player through SR6E character creation **one step at a time**, waiting for player input before proceeding:
+
+1. **Concept** — Ask the player for a runner concept, street name, and role idea (street samurai, decker, mage, face, rigger, etc.)
+2. **Metatype** — Present metatype options (Human, Elf, Dwarf, Ork, Troll) with attribute ranges and special abilities
+3. **Priority Table** — Walk through the priority system (A-E): Metatype, Attributes, Magic/Resonance, Skills, Resources
+4. **Attributes** — Allocate attribute points based on priority; derive Physical CM, Stun CM, Initiative, Composure, etc.
+5. **Skills** — Allocate skill points based on priority; note specializations
+6. **Qualities** — Select positive and negative qualities within karma budget
+7. **Magic/Resonance** — If Awakened or Emerged: select tradition, spells/complex forms, spirits/sprites
+8. **Gear & Cyberware** — Spend nuyen on gear, weapons, armor, cyberware/bioware (track Essence loss); assign lifestyle
+9. **Contacts** — Assign contact points to connections (loyalty/connection ratings)
+10. **Recap** — Summarize the complete runner; transition to gameplay
+
+**State reporting during creation:**
+- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
+- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
+- Use runner_ops "set" to initialize Edge, CM, Essence, Nuyen as those values are determined during creation
+- Use the `summary` field to track creation progress (e.g. "Ork street samurai — allocating attributes...")
+- Suppress callback_ops, npc_memory_ops until gameplay begins — leave them as empty arrays
+- Set scene_state to a minimal OOC state (location: "Character Creation", npcs_present: [], atmosphere: "OOC")
+
+**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, callbacks) as you begin the first narrative turn.
 
 ### Rules:
 - Call `report_state` every turn

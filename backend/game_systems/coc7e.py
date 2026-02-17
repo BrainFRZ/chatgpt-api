@@ -157,7 +157,7 @@ def build_game_injection(game_state):
     """Build [INVESTIGATOR STATE] injection block from structured state."""
     investigators = game_state.get("investigators", {})
     if not investigators:
-        return "[INVESTIGATOR STATE]\n(empty — bootstrap from character sheets)\n[/INVESTIGATOR STATE]"
+        return "[INVESTIGATOR STATE]\n(empty — bootstrap from character sheets, or initialize via character creation)\n[/INVESTIGATOR STATE]"
 
     lines = ["[INVESTIGATOR STATE]"]
     for name, inv in sorted(investigators.items()):
@@ -343,6 +343,14 @@ SCENE STATE:
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
 - Route to "output" ONLY for pure OOC questions
+
+CHARACTER CREATION:
+- When [CHARACTER STATES] is empty AND [INVESTIGATOR STATE] is empty AND no character sheets are in the system prompt, the player needs to create an investigator.
+- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
+- Include partial "character_states" in your output as the investigator takes shape — the system will persist these even on output-routed turns.
+- Use investigator_ops "set" to initialize SAN, Luck, Mythos%, Bonds as those values are determined during creation.
+- Leave callback_ops and npc_memory_ops empty during creation.
+- Maintain scene_state unchanged (or minimal) during creation.
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -573,6 +581,30 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Set character_states (structured objects with type, vitals, resources, conditions, summary)
 - Use investigator_ops "set" to initialize SAN, Luck, Mythos, Bonds from character sheets
 - Add callback_ops for open investigation threads
+
+### Character Creation (interactive):
+**Trigger**: [CHARACTER STATES] is empty AND [INVESTIGATOR STATE] is empty AND no character sheets are found in the system prompt.
+
+When triggered, guide the player through CoC 7E investigator creation **one step at a time**, waiting for player input before proceeding:
+
+1. **Concept** — Ask the player for an investigator concept, name, and era/setting
+2. **Occupation** — Present occupation options with brief descriptions; note Credit Rating range and occupation skills
+3. **Characteristics** — Roll or assign STR, CON, SIZ, DEX, APP, INT, POW, EDU; derive HP, MP, SAN, Luck, Move Rate, Build, Damage Bonus
+4. **Skills** — Allocate occupation skill points (EDU × 4 or varies by occupation) and personal interest points (INT × 2)
+5. **Backstory** — Define ideology/beliefs, significant people, meaningful locations, treasured possessions, traits
+6. **Bonds** — Establish bonds (POW-based starting values) with important NPCs or institutions
+7. **Equipment** — Assign starting equipment and possessions based on occupation and Credit Rating
+8. **Recap** — Summarize the complete investigator; transition to gameplay
+
+**State reporting during creation:**
+- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
+- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
+- Use investigator_ops "set" to initialize SAN, Luck, Mythos%, Bonds as those values are determined during creation
+- Use the `summary` field to track creation progress (e.g. "Professor — rolling characteristics...")
+- Suppress callback_ops, npc_memory_ops until gameplay begins — leave them as empty arrays
+- Set scene_state to a minimal OOC state (location: "Investigator Creation", npcs_present: [], atmosphere: "OOC")
+
+**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, callbacks) as you begin the first narrative turn.
 
 ### Rules:
 - Call `report_state` every turn

@@ -179,7 +179,7 @@ def build_game_injection(game_state):
     """Build [EDGERUNNER STATE] injection block from structured state."""
     edgerunners = game_state.get("edgerunners", {})
     if not edgerunners:
-        return "[EDGERUNNER STATE]\n(empty — bootstrap from character sheets)\n[/EDGERUNNER STATE]"
+        return "[EDGERUNNER STATE]\n(empty — bootstrap from character sheets, or initialize via character creation)\n[/EDGERUNNER STATE]"
 
     lines = ["[EDGERUNNER STATE]"]
     for name, er in sorted(edgerunners.items()):
@@ -386,6 +386,14 @@ SCENE STATE:
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
 - Route to "output" ONLY for pure OOC questions
+
+CHARACTER CREATION:
+- When [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are in the system prompt, the player needs to create an edgerunner.
+- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
+- Include partial "character_states" in your output as the edgerunner takes shape — the system will persist these even on output-routed turns.
+- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB as those values are determined during creation.
+- Leave callback_ops and npc_memory_ops empty during creation.
+- Maintain scene_state unchanged (or minimal) during creation.
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -626,6 +634,30 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Set character_states from known character sheets (structured format with type, vitals, resources, conditions, summary)
 - Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets
 - Add callback_ops for open gig threads, Fixer contacts
+
+### Character Creation (interactive):
+**Trigger**: [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are found in the system prompt.
+
+When triggered, guide the player through Cyberpunk RED character creation **one step at a time**, waiting for player input before proceeding:
+
+1. **Handle & Concept** — Ask the player for a handle (street name), real name, and character concept
+2. **Role** — Present the 10 Roles (Rockerboy, Solo, Netrunner, Tech, Medtech, Media, Exec, Lawman, Fixer, Nomad) with their Role Abilities
+3. **Stats** — Allocate 62 points across 10 stats (INT, REF, DEX, TECH, COOL, WILL, LUCK, MOVE, BODY, EMP); derive HP, Humanity, Wound Threshold
+4. **Skills** — Allocate skill points: 60 career skill points among Role skills, plus Education/Language points
+5. **Lifepath** — Walk through the Lifepath system: cultural background, personality, clothing style, hairstyle, motivations, life goals, friends, enemies, romance
+6. **Gear** — Spend starting eurobucks (2550 eb) on weapons, armor, gear, fashion, and housing
+7. **Cyberware** — Optional: install starting cyberware (track Humanity loss); calculate starting Humanity
+8. **Recap** — Summarize the complete edgerunner; transition to gameplay
+
+**State reporting during creation:**
+- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
+- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
+- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB as those values are determined during creation
+- Use the `summary` field to track creation progress (e.g. "Solo — allocating stats...")
+- Suppress callback_ops, npc_memory_ops until gameplay begins — leave them as empty arrays
+- Set scene_state to a minimal OOC state (location: "Character Creation", npcs_present: [], atmosphere: "OOC")
+
+**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, callbacks) as you begin the first narrative turn.
 
 ### Rules:
 - Call `report_state` every turn

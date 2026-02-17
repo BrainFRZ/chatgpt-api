@@ -727,7 +727,7 @@ def build_character_states_injection(character_states: dict) -> str:
     Falls back gracefully for old formats.
     """
     if not character_states:
-        return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt)\n[/CHARACTER STATES]"
+        return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt, or begin interactive character creation if no sheets are available)\n[/CHARACTER STATES]"
     lines = ["[CHARACTER STATES]"]
     for name, entry in character_states.items():
         if isinstance(entry, dict):
@@ -916,6 +916,15 @@ def run_pipeline(
 
     # ---- SHORT CIRCUIT: Events → Output ----
     if events_route == "output":
+        # Apply character_states from Events (needed for OOC turns like character creation
+        # where Mechanics never runs and would otherwise not persist character state)
+        if events_data.get("character_states"):
+            new_pipeline_state["character_states"] = apply_character_states(
+                new_pipeline_state["character_states"],
+                events_data["character_states"],
+                current_turn
+            )
+
         final_content = events_data.get("content", "")
         # Send content as a single chunk (OOC responses are short)
         yield ("content", {"delta": final_content})

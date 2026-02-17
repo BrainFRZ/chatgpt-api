@@ -152,7 +152,7 @@ def build_game_injection(game_state):
     relationships = game_state.get("relationships", {})
     factions = game_state.get("factions", {})
     if not relationships and not factions:
-        return "[RELATIONSHIP STATE]\n(empty — bootstrap with relationship_ops \"set\")\n[/RELATIONSHIP STATE]"
+        return "[RELATIONSHIP STATE]\n(empty — bootstrap with relationship_ops \"set\" after character creation is complete)\n[/RELATIONSHIP STATE]"
 
     lines = ["[RELATIONSHIP STATE]"]
     if relationships:
@@ -398,6 +398,13 @@ PACING STATE:
 - You also receive [CALLBACK LEDGER], [NPC MEMORIES], [SCENE STATE], and [RELATIONSHIP STATE] injections — these are your persistent memory across turns.
 - Track episode/beat progression to avoid runaway or skipped beats.
 
+CHARACTER CREATION:
+- When [CHARACTER STATES] is empty AND no character sheets are in the system prompt, the player needs to create a character.
+- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
+- Include partial "character_states" in your output as the character takes shape — the system will persist these even on output-routed turns.
+- Use relationship_ops "set" ops only after creation is complete. Leave callback_ops, npc_memory_ops, and relationship_ops empty during creation.
+- Maintain scene_state unchanged (or minimal) during creation.
+
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
@@ -627,6 +634,30 @@ When state blocks are absent or empty, review your context to initialize:
 - Add foundational callback_ops for any open plot threads
 - Add key npc_memory_ops for important NPCs in the scene
 - Use relationship_ops "set" to initialize tracked NPCs and factions from context
+
+### Character Creation (interactive):
+**Trigger**: [CHARACTER STATES] is empty AND no character sheets are found in the system prompt.
+
+When triggered, guide the player through D&D 5E character creation **one step at a time**, waiting for player input before proceeding:
+
+1. **Concept** — Ask the player for a character concept, name, and any ideas they have in mind
+2. **Race** — Present race options with brief summaries; apply racial traits once chosen
+3. **Class** — Present class options with brief summaries; note starting proficiencies and features
+4. **Ability Scores** — Offer a method (standard array, point buy, or roll 4d6 drop lowest); assign scores with racial bonuses
+5. **Background** — Present background options; note skill proficiencies, languages, and feature
+6. **Equipment** — Assign starting equipment from class and background; note armor, weapons, and gear
+7. **Spells** — If the class is a spellcaster, select cantrips and prepared/known spells
+8. **Personality** — Define personality traits, ideals, bonds, and flaws
+9. **Recap** — Summarize the complete character; transition to gameplay
+
+**State reporting during creation:**
+- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
+- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
+- Use the `summary` field to track creation progress (e.g. "Half-elf — choosing class...")
+- Suppress callback_ops, npc_memory_ops, and relationship_ops until gameplay begins — leave them as empty arrays
+- Set scene_state to a minimal OOC state (location: "Character Creation", npcs_present: [], atmosphere: "OOC")
+
+**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, relationship_ops "set", callbacks) as you begin the first narrative turn.
 
 ### Rules:
 - Call `report_state` every turn — including OOC turns (with `is_ooc: true`)
