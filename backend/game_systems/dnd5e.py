@@ -573,13 +573,12 @@ ROLL RULES:
 
 HUD:
 - You MUST always include the "hud" field with the current game state line
-- Base format: [Date: X | Time: XXXX | Loc: X | Funds: X]
-- If hud_state.trackables is non-null, append each trackable after Funds: [Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]
+- Base format: [Date: X | Time: XXXX | Loc: X]
+- If hud_state.trackables is non-null, append each trackable after Loc: [Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]
 - Build the HUD from the "hud_state" object in the Events JSON:
   * Use hud_state.date for the Date field; advance the date if time_passed crosses midnight
   * Take hud_state.time and advance it by the "time_passed" value for the Time field
   * Use hud_state.location for Loc (update if the player moved this turn)
-  * Use hud_state.funds for Funds — this may be a plain string ("97,572 cr") or an object ({"Aedina": "32 gp"}). Either way, format it naturally in the HUD. Update if transactions occurred in the beats.
   * If hud_state.trackables is non-null, include each key-value pair as additional HUD segments. Update values if a beat consumes or replenishes a tracked resource (e.g. fuel spent on travel, ammo fired in combat).
 - Events has full conversation context and provides accurate hud_state; trust its values as the baseline
 
@@ -687,11 +686,9 @@ Optional arrays (omit or leave empty when no ops occurred):
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: X | Time: XXXX | Loc: X | Funds: X]`
-When multiple party members: `[Date: X | Time: XXXX | Loc: X | Funds: Aedina 32 gp, Orrophim 18 gp]`
-With a shared pool: `[Date: X | Time: XXXX | Loc: X | Funds: party chest 500 gp, Aedina 32 gp, Orrophim 18 gp]`
-If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]`
-Advance time/date based on in-world passage. Update funds if transactions occurred. Update trackables if resources changed.
+`[Date: X | Time: XXXX | Loc: X]`
+If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
+Advance time/date based on in-world passage. Update trackables if resources changed.
 Game-specific stats come from injected game-state blocks, NOT from hud_state.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only).
 

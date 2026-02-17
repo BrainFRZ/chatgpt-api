@@ -464,7 +464,7 @@ CHARACTER STATES:
 
 SHIP COMBAT HUD:
 - During ship combat, include ship status in the HUD or dramatic_notes
-- Format: [Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y | Funds: X]
+- Format: [Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y]
 - Reference [SHIP STATE] injection for current values and apply ship_ops changes
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
@@ -570,10 +570,9 @@ Optional arrays (omit or leave empty when no ops occurred):
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line.
-Standard format: `[Date: X | Time: XXXX | Loc: X | Funds: X]`
-When multiple party members: `[Date: X | Time: XXXX | Loc: X | Funds: ship 97,572 cr, Sara 2,500 cr, Cross 1,200 cr]`
-If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Funds: X | Fuel: 72% | Ammo: 14/20]`
-During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y | Funds: X]`
+Standard format: `[Date: X | Time: XXXX | Loc: X]`
+If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
+During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y]`
 Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
 Advance time/date based on in-world passage. Update trackables if they changed. Funds are auto-derived from ship.credits — do NOT set funds in hud_state; use ship_ops credits to change balances.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, trackables only — funds auto-derived).

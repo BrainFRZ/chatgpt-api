@@ -500,7 +500,7 @@ Glitch: 🎲 [Description]: [Pool Xd6] **Y hits** — GLITCH (>half 1s)
 Opposed: 🎲 [Description]: [Pool Xd6] **Y hits** vs [Opponent Pool Xd6] **Z hits** ✓/✗
 
 HUD:
-- Format: [Date: 2082-XX-XX | Time: XXXX | Loc: X | Nuyen: X | Edge: X/Y | P: X/Y | S: X/Y]
+- Format: [Date: 2082-XX-XX | Time: XXXX | Loc: X | Edge: X/Y | P: X/Y | S: X/Y]
 - Build from hud_state, advance time by time_passed
 - Include per-runner Edge and CM when relevant
 
@@ -607,11 +607,9 @@ Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops.
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: 2082-XX-XX | Time: XXXX | Loc: X | Nuyen: X | Edge: X/Y | P: X/Y | S: X/Y]`
-When multiple party members: `[Date: 2082-XX-XX | Time: XXXX | Loc: X | Nuyen: Raven 15,000¥, Chrome 8,200¥ | Edge: X/Y | P: X/Y | S: X/Y]`
-With a shared pool: `[Date: 2082-XX-XX | Time: XXXX | Loc: X | Nuyen: team fund 50,000¥, Raven 15,000¥, Chrome 8,200¥ | Edge: X/Y | P: X/Y | S: X/Y]`
+`[Date: 2082-XX-XX | Time: XXXX | Loc: X | Edge: X/Y | P: X/Y | S: X/Y]`
 Include per-runner Edge and condition monitors from `[RUNNER STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage. Update nuyen if transactions occurred.
+Advance time/date based on in-world passage.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — Edge/CM come from runner_ops).
 
 ### Bootstrap (first turn or empty state):

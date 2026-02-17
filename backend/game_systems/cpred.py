@@ -515,7 +515,7 @@ Fumble: 🎲 [Description]: d10[**1** - **roll2**] +STAT X +Skill Y = Total vs D
 With Luck: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +Luck N = Total vs DV Z ✓/✗
 
 HUD:
-- Format: [Date: 2045-XX-XX | Time: XXXX | Loc: X | EB: X | HP: X/Y | Humanity: X/Y]
+- Format: [Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]
 - Build from hud_state, advance time by time_passed
 
 IMPORTANT:
@@ -621,11 +621,9 @@ HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are track
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: 2045-XX-XX | Time: XXXX | Loc: X | EB: X | HP: X/Y | Humanity: X/Y]`
-When multiple party members: `[Date: 2045-XX-XX | Time: XXXX | Loc: X | EB: V 2,350, Jackie 1,800 | HP: X/Y | Humanity: X/Y]`
-With a shared pool: `[Date: 2045-XX-XX | Time: XXXX | Loc: X | EB: crew fund 5,000, V 2,350, Jackie 1,800 | HP: X/Y | Humanity: X/Y]`
+`[Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]`
 Include per-edgerunner HP and Humanity from `[EDGERUNNER STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage. Update EB if transactions occurred.
+Advance time/date based on in-world passage.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — HP/Humanity come from edgerunner_ops).
 
 ### Bootstrap (first turn or empty state):

@@ -477,7 +477,7 @@ COMBAT (CoC 7E):
 - Major Wound: single attack ≥ half max HP
 
 HUD:
-- Format: [Date: X | Time: XXXX | Loc: X | Funds: X | SAN: X/Y | Luck: Z]
+- Format: [Date: X | Time: XXXX | Loc: X | SAN: X/Y | Luck: Z]
 - Include per-investigator SAN and Luck in the HUD
 - Build from hud_state, advance time by time_passed
 
@@ -568,11 +568,9 @@ SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_state
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: X | Time: XXXX | Loc: X | Funds: X | SAN: X/Y | Luck: Z]`
-When multiple party members: `[Date: X | Time: XXXX | Loc: X | Funds: Harvey $127, Gloria $84 | SAN: X/Y | Luck: Z]`
-With a shared pool: `[Date: X | Time: XXXX | Loc: X | Funds: group fund $500, Harvey $127, Gloria $84 | SAN: X/Y | Luck: Z]`
+`[Date: X | Time: XXXX | Loc: X | SAN: X/Y | Luck: Z]`
 Include per-investigator SAN and Luck from `[INVESTIGATOR STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage. Update funds if transactions occurred.
+Advance time/date based on in-world passage.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — SAN/Luck come from investigator_ops).
 
 ### Bootstrap (first turn or empty state):
