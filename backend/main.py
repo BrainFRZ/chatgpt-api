@@ -88,6 +88,15 @@ ProviderRegistry.register(AnthropicOpusProvider())
 # Default model for new chats
 DEFAULT_MODEL = "gpt-5.2"
 
+
+def get_default_model_for_user(username: str) -> str:
+    """Return DEFAULT_MODEL if user has OpenAI key, else claude-opus-4.6 if Anthropic key."""
+    if get_api_key(username, "openai"):
+        return DEFAULT_MODEL
+    if get_api_key(username, "anthropic"):
+        return "claude-opus-4.6"
+    return DEFAULT_MODEL
+
 # ============================================================
 # Utility Functions
 # ============================================================
@@ -1302,7 +1311,7 @@ def login(request: LoginRequest):
         raise HTTPException(status_code=400, detail="Username must be alphanumeric")
     
     is_new = ensure_user_exists(username)
-    has_key = get_api_key(username) is not None
+    has_key = get_api_key(username, "openai") is not None or get_api_key(username, "anthropic") is not None
     
     return LoginResponse(username=username, has_api_key=has_key, is_new_user=is_new)
 
@@ -1563,7 +1572,7 @@ async def create_chat(request: CreateChatRequest):
         "stats": create_empty_stats()
     }
 
-    # Set model: priority is request.model > project.model > DEFAULT_MODEL
+    # Set model: priority is request.model > project.model > user-default
     if request.model:
         data["model"] = request.model
     elif request.project:
@@ -1571,6 +1580,10 @@ async def create_chat(request: CreateChatRequest):
         project_metadata = load_project_metadata(username, request.project)
         if project_metadata.get("model"):
             data["model"] = project_metadata["model"]
+        else:
+            data["model"] = get_default_model_for_user(username)
+    else:
+        data["model"] = get_default_model_for_user(username)
 
     save_chat(username, chat_name, data, request.project)
 

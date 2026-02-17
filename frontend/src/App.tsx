@@ -869,10 +869,9 @@ function App() {
     const projectForNewChat = currentProject;
     const chatName = newItemName.trim();
 
-    // When in a project, use project's model; for free chats, always use gpt-5.2 default
-    // Note: backend will also inherit from project if model is not passed,
-    // but passing it explicitly ensures UI consistency
-    const modelForNewChat = projectForNewChat ? (projectModel || 'gpt-5.2') : 'gpt-5.2';
+    // Pass explicit model only if project has one set; otherwise let backend pick
+    // based on user's available API keys
+    const modelForNewChat = projectForNewChat ? (projectModel || undefined) : undefined;
 
     try {
       const response = await fetch('/api/create-chat', {
@@ -959,8 +958,8 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setApiKeysStatus(data);
-        // Consider API key set if at least OpenAI key is configured
-        if (data.has_openai) {
+        // Consider API key set if at least one key is configured
+        if (data.has_openai || data.has_anthropic) {
           setNeedsApiKey(false);
           setUser({ ...user, has_api_key: true });
         }
@@ -2250,7 +2249,7 @@ function App() {
       <div style={styles.container}>
         <div style={styles.loginBox}>
           <h1 style={styles.title}>Welcome, {user.username}!</h1>
-          <p style={styles.subtitle}>Enter your API keys (at least OpenAI required):</p>
+          <p style={styles.subtitle}>Enter your API keys (at least one required):</p>
 
           <div style={{ marginBottom: '12px' }}>
             <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
@@ -2267,7 +2266,7 @@ function App() {
 
           <div style={{ marginBottom: '16px' }}>
             <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
-              Anthropic API Key (optional) {apiKeysStatus.has_anthropic && <span style={{ color: '#4ade80' }}>(configured)</span>}
+              Anthropic API Key {apiKeysStatus.has_anthropic && <span style={{ color: '#4ade80' }}>(configured)</span>}
             </label>
             <input
               type="password"
