@@ -102,6 +102,7 @@ class PipelineResult:
     service_tier_label: str  # e.g. "flex+standard"
     injected_state: Optional[str] = None  # Snapshot of pipeline_state injected into Events
     stage_usage: Optional[dict] = None  # Per-stage usage: {"events": {...}, "mechanics": {...}, "narration": {...}}
+    trim_anchor_id: Optional[str] = None  # Message ID of first message in trimmed context window
 
 
 # ============================================================
@@ -248,25 +249,61 @@ def build_message_content(msg: dict) -> str:
     return content
 
 
-def get_context_pairs(branch_path: list[dict], threshold_pairs: int, target_pairs: int) -> list[dict]:
+def get_context_pairs(
+    branch_path: list[dict],
+    threshold_pairs: int,
+    target_pairs: int,
+    trim_anchor_id: Optional[str] = None
+) -> tuple[list[dict], Optional[str], bool]:
     """
-    Extract context pairs using threshold/target for prefix-cache-friendly behavior.
+    Extract context pairs using a sawtooth trim pattern for cache efficiency.
 
-    Context grows by appending (preserving the prefix for caching) until
-    total pairs exceed threshold_pairs, then trims back to target_pairs.
-    Skips the system message (index 0) and the current user message (last).
-    Returns pairs as a flat list of {role, content} dicts.
+    Uses a trim anchor (message ID) to maintain a stable context prefix.
+    Context grows from the anchor until it exceeds threshold_pairs, then
+    trims to target_pairs and sets a new anchor. The prefix stays stable
+    between trims (~20 turns), maximizing Anthropic prompt cache hits.
+
+    Returns (pairs, new_anchor_id, did_trim):
+    - pairs: flat list of {role, content} dicts
+    - new_anchor_id: anchor ID for next turn (store in chat data)
+    - did_trim: True if a trim happened this turn
     """
     # branch_path: [system, ...history..., current_user]
     history = branch_path[1:-1]  # All messages between system and current user
-    total_pairs = len(history) // 2
 
-    if total_pairs > threshold_pairs:
-        pair_messages = history[-(target_pairs * 2):]  # trim to target
+    # Find anchor position in history
+    anchor_idx = 0
+    if trim_anchor_id:
+        found = False
+        for i, msg in enumerate(history):
+            if msg.get("id") == trim_anchor_id:
+                anchor_idx = i
+                found = True
+                break
+        if not found:
+            # Anchor not in current branch (branch switch) — include all
+            anchor_idx = 0
+            trim_anchor_id = None
+
+    context = history[anchor_idx:]
+    context_pair_count = len(context) // 2
+
+    if context_pair_count > threshold_pairs:
+        # Trim to target_pairs from the end of history
+        new_start = len(history) - target_pairs * 2
+        pair_messages = history[new_start:]
+        new_anchor_id = pair_messages[0].get("id") if pair_messages else None
+        return (
+            [{"role": msg["role"], "content": build_message_content(msg)} for msg in pair_messages],
+            new_anchor_id,
+            True
+        )
     else:
-        pair_messages = history  # include all — prefix preserved for caching
-
-    return [{"role": msg["role"], "content": build_message_content(msg)} for msg in pair_messages]
+        return (
+            [{"role": msg["role"], "content": build_message_content(msg)} for msg in context],
+            trim_anchor_id,
+            False
+        )
 
 
 # ============================================================
@@ -814,7 +851,8 @@ def run_pipeline(
     agent_instructions: dict[str, str],
     agent_files: dict[str, str],
     pipeline_state: Optional[dict],
-    game_system: str = "dnd5e"
+    game_system: str = "dnd5e",
+    trim_anchor_id: Optional[str] = None
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -847,7 +885,9 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "events", "status": "thinking"})
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
-    recent_events_pairs = get_context_pairs(branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS)
+    recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
+        branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
+    )
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
     events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs)
 
@@ -941,7 +981,8 @@ def run_pipeline(
             reasoning_summaries=reasoning_summaries,
             service_tier_label="standard",
             injected_state=injected_state_snapshot,
-            stage_usage=_build_stage_usage(stage_results, provider)
+            stage_usage=_build_stage_usage(stage_results, provider),
+            trim_anchor_id=new_trim_anchor_id
         ))
         return
 
@@ -986,7 +1027,8 @@ def run_pipeline(
             reasoning_summaries=reasoning_summaries,
             service_tier_label="standard",
             injected_state=injected_state_snapshot,
-            stage_usage=_build_stage_usage(stage_results, provider)
+            stage_usage=_build_stage_usage(stage_results, provider),
+            trim_anchor_id=new_trim_anchor_id
         ))
         return
 
@@ -994,8 +1036,8 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "narration", "status": "thinking"})
 
     narration_system = build_agent_system_prompt(gs["narration_contract"], agent_instructions["narration"], agent_files["narration"])
-    recent_pairs = get_context_pairs(branch_path, NARRATION_THRESHOLD_PAIRS, NARRATION_TARGET_PAIRS)
-    narration_messages = build_narration_messages(narration_system, recent_pairs, mechanics_data)
+    # Reuse events pairs — same thresholds, same branch_path, same anchor → same result
+    narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data)
 
     narration_params = provider.build_pipeline_request(
         messages=narration_messages,
@@ -1051,7 +1093,8 @@ def run_pipeline(
         reasoning_summaries=reasoning_summaries,
         service_tier_label="flex+standard",
         injected_state=injected_state_snapshot,
-        stage_usage=_build_stage_usage(stage_results, provider)
+        stage_usage=_build_stage_usage(stage_results, provider),
+        trim_anchor_id=new_trim_anchor_id
     ))
 
 

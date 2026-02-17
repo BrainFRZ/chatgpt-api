@@ -2368,15 +2368,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     docs_refreshed = False
 
     if use_stateful:
-        # Pair-based context trimming (same approach as pipeline agents)
+        # Pair-based context trimming (sawtooth pattern for cache efficiency)
         import copy as _copy
         stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
 
-        # Detect if trimming will fire — refresh system prompt from disk
-        history = branch_path[1:-1]
-        total_pairs = len(history) // 2
-        if total_pairs > SINGLE_AGENT_THRESHOLD_PAIRS:
+        trim_anchor_id = data.get("_trim_anchor_id")
+        context_pairs, new_anchor_id, did_trim = get_context_pairs(
+            branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
+        )
+        data["_trim_anchor_id"] = new_anchor_id
+        data.pop("_stateful_trimming", None)  # clean up legacy flag
+
+        if did_trim:
             docs_refreshed = True
             fresh_instructions = get_instructions(username, request.project)
             fresh_files = load_project_files(username, request.project)
@@ -2384,19 +2388,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 fresh_system = fresh_instructions + "\n\n" + fresh_files
             else:
                 fresh_system = fresh_instructions
-            # branch_path[0] is the same dict ref as data["messages"][0] (via get_path_to_root)
             branch_path[0]["content"] = fresh_system
             branch_path[0].pop("total_tokens", None)
             branch_path[0].pop("total_gpt_tokens", None)
             branch_path[0].pop("total_claude_tokens", None)
             logger.info(f"Stateful: refreshed system prompt on context trim for {username}/{request.project}/{request.chat_name}")
 
-        context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
-
         # Override token-based context_start_index with pair-based value
         # so the frontend greys out messages matching what the API actually sees
-        if total_pairs > SINGLE_AGENT_THRESHOLD_PAIRS:
-            context_start_index = len(history) - SINGLE_AGENT_TARGET_PAIRS * 2 + 1
+        if new_anchor_id:
+            context_start_index = 1
+            for idx, msg in enumerate(branch_path):
+                if msg.get("id") == new_anchor_id:
+                    context_start_index = idx
+                    break
         else:
             context_start_index = 1
 
@@ -2503,6 +2508,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             logger.info(f"Pipeline: defensive fallback loaded {len(all_staged)} chars for all agents")
 
                 pipeline_state_prev = data.get("pipeline_state")
+                pipeline_trim_anchor_id = data.get("_trim_anchor_id")
 
                 pipeline_result = None
                 pipeline_current_stage = "starting"
@@ -2527,7 +2533,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     agent_instructions=agent_instructions,
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
-                    game_system=gs["id"]
+                    game_system=gs["id"],
+                    trim_anchor_id=pipeline_trim_anchor_id
                 )
 
                 client_disconnected = False
@@ -2587,6 +2594,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 reasoning_summary = "\n".join(pipeline_result.reasoning_summaries) if pipeline_result.reasoning_summaries else None
                 usage = pipeline_result.aggregate_usage
                 service_tier = pipeline_result.service_tier_label
+
+                # Save trim anchor for sawtooth context trimming
+                data["_trim_anchor_id"] = pipeline_result.trim_anchor_id
+
+                # Override context_start_index from trim anchor
+                if pipeline_result.trim_anchor_id:
+                    context_start_index = 1
+                    for idx, msg in enumerate(branch_path):
+                        if msg.get("id") == pipeline_result.trim_anchor_id:
+                            context_start_index = idx
+                            break
 
                 # Save pipeline state for next turn
                 if pipeline_result.pipeline_state is not None:
