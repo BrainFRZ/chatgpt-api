@@ -2381,6 +2381,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
+        # Override token-based context_start_index with pair-based value
+        # so the frontend greys out messages matching what the API actually sees
+        if total_pairs > SINGLE_AGENT_THRESHOLD_PAIRS:
+            context_start_index = len(history) - SINGLE_AGENT_TARGET_PAIRS * 2 + 1
+        else:
+            context_start_index = 1
+
         # Build injections for user message
         injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
 
