@@ -80,7 +80,7 @@ export default function CharacterPanel({
   };
 
   const getCharData = (name: string) => {
-    const cs = pipelineState.character_states || {};
+    const cs = state.character_states || {};
     const entry = cs[name];
     if (!entry) return { type: 'npc' };
     return entry.data || entry || {};
@@ -93,6 +93,10 @@ export default function CharacterPanel({
     const vitals = data.vitals || [];
     const conditions = data.conditions || [];
     const resources = (data.resources || []).slice(0, 2);
+    const summary = data.summary || '';
+    const charClass = data.class || '';
+    const barVitals = vitals.filter((v: any) => 'current' in v && 'max' in v);
+    const flatVitals = vitals.filter((v: any) => 'value' in v && !('current' in v && 'max' in v));
     return (
       <div
         key={name}
@@ -107,7 +111,7 @@ export default function CharacterPanel({
         onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#2a2a4e')}
         onMouseLeave={e => (e.currentTarget.style.backgroundColor = '#1e1e3a')}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: vitals.length ? '4px' : 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: barVitals.length || charClass || flatVitals.length || summary ? '4px' : 0 }}>
           <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
           <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
             {isActive && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#4a4ae8', letterSpacing: '0.05em' }}>ACTING</span>}
@@ -117,23 +121,32 @@ export default function CharacterPanel({
             }}>{type.toUpperCase()}</span>
           </div>
         </div>
-        {vitals.map((v: any, i: number) => (
-          'current' in v && 'max' in v ? (
-            <div key={i} style={{ marginBottom: '2px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '1px' }}>
-                <span>{v.label}</span><span>{v.current}/{v.max}</span>
-              </div>
-              <div style={{ height: '4px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: vitalColor(v.current, v.max, v.label), borderRadius: '2px', transition: 'width 0.3s' }} />
-              </div>
+        {(charClass || flatVitals.length > 0) && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+            {charClass ? <span style={{ fontSize: '0.68rem', color: '#888' }}>{charClass}</span> : <span />}
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {flatVitals.map((v: any, i: number) => (
+                <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                  <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
+                  <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+                </div>
+              ))}
             </div>
-          ) : 'value' in v ? (
-            <div key={i} style={{ display: 'inline-block', marginRight: '6px', marginBottom: '2px' }}>
-              <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
-              <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+          </div>
+        )}
+        {barVitals.map((v: any, i: number) => (
+          <div key={i} style={{ marginBottom: '2px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '1px' }}>
+              <span>{v.label}</span><span>{v.current}/{v.max}</span>
             </div>
-          ) : null
+            <div style={{ height: '4px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: vitalColor(v.current, v.max, v.label), borderRadius: '2px', transition: 'width 0.3s' }} />
+            </div>
+          </div>
         ))}
+        {barVitals.length === 0 && !charClass && flatVitals.length === 0 && summary && (
+          <div style={{ fontSize: '0.7rem', color: '#888', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{summary}</div>
+        )}
         {resources.length > 0 && (
           <div style={{ display: 'flex', gap: '8px', marginTop: '3px', flexWrap: 'wrap' }}>
             {resources.map((r: any, i: number) => (
@@ -157,13 +170,16 @@ export default function CharacterPanel({
     );
   };
 
+  // Use pipelineState if available, otherwise empty fallback for project chats
+  const state = pipelineState || { character_states: {}, scene_state: {}, npc_memories: {}, combat: null };
+
   // --- Desktop Right Panel ---
   const renderDesktopPanel = () => {
-    if (!(!isMobile && pipelineState)) return null;
+    if (isMobile) return null;
 
-    const cs = pipelineState.character_states || {};
-    const scene = pipelineState.scene_state || {};
-    const combat = pipelineState.combat;
+    const cs = state.character_states || {};
+    const scene = state.scene_state || {};
+    const combat = state.combat;
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const charCount = new Set([...pcsPresent, ...npcsPresent]).size;
@@ -247,7 +263,7 @@ export default function CharacterPanel({
         </div>
 
         {/* Panel footer */}
-        {Object.keys(cs).length + Object.keys(pipelineState.npc_memories || {}).length > 0 && (
+        {Object.keys(cs).length + Object.keys(state.npc_memories || {}).length > 0 && (
           <div style={{ padding: '8px 12px', borderTop: '1px solid #333' }}>
             <button
               onClick={() => setShowAllCharactersModal(true)}
@@ -255,7 +271,7 @@ export default function CharacterPanel({
               onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#2a2a4e'; e.currentTarget.style.color = '#ccc'; }}
               onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#1e1e3a'; e.currentTarget.style.color = '#888'; }}
             >
-              View All ({new Set([...Object.keys(cs), ...Object.keys(pipelineState.npc_memories || {})]).size})
+              View All ({new Set([...Object.keys(cs), ...Object.keys(state.npc_memories || {})]).size})
             </button>
           </div>
         )}
@@ -265,10 +281,9 @@ export default function CharacterPanel({
 
   // --- Mobile Bottom Sheet ---
   const renderMobileBottomSheet = () => {
-    if (!(isMobile && pipelineState)) return null;
+    if (!isMobile) return null;
 
-    const cs = pipelineState.character_states || {};
-    const scene = pipelineState.scene_state || {};
+    const scene = state.scene_state || {};
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
@@ -331,9 +346,9 @@ export default function CharacterPanel({
 
   // --- Character Sheet Modal ---
   const renderCharacterSheetModal = () => {
-    if (!(showCharacterSheet && selectedCharacter && pipelineState)) return null;
+    if (!(showCharacterSheet && selectedCharacter)) return null;
 
-    const cs = pipelineState.character_states || {};
+    const cs = state.character_states || {};
     const entry = cs[selectedCharacter];
     const data = entry?.data || entry || {};
     const vitals = data.vitals || [];
@@ -341,9 +356,9 @@ export default function CharacterPanel({
     const conditions = data.conditions || [];
     const type = data.type || 'npc';
     const summary = data.summary || '';
-    const gameState = pipelineState.game_state || {};
-    const hudFunds = pipelineState.hud_state?.funds?.[selectedCharacter];
-    const memories = (pipelineState.npc_memories || {})[selectedCharacter];
+    const gameState = state.game_state || {};
+    const hudFunds = state.hud_state?.funds?.[selectedCharacter];
+    const memories = (state.npc_memories || {})[selectedCharacter];
 
     // Find character section in .md sheet
     const sheetSection = (() => {
@@ -362,22 +377,61 @@ export default function CharacterPanel({
       const parts: React.ReactNode[] = [];
 
       // D&D 5E / D&D 5E Cyber: Relationships
-      if ((gs === 'dnd5e' || gs === 'dnd5e_cyber') && gameState.relationships) {
-        const rels = Object.entries(gameState.relationships || {}).filter(([_, r]: [string, any]) => r && typeof r === 'object');
-        if (rels.length > 0) {
+      if ((gs === 'dnd5e' || gs === 'dnd5e_cyber') && gameState.relationships && selectedCharacter) {
+        const rel = gameState.relationships[selectedCharacter];
+        if (type === 'pc') {
+          // PC view: show all NPC relationships
+          const rels = Object.entries(gameState.relationships).filter(([_, r]: [string, any]) => r && typeof r === 'object');
+          if (rels.length > 0) {
+            parts.push(
+              <div key="rels" style={{ marginTop: '12px' }}>
+                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Relationships</div>
+                {rels.map(([npc, r]: [string, any]) => {
+                  const rs = r.rs || 0;
+                  const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
+                  return (
+                    <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
+                      <span style={{ color: '#ccc' }}>{npc}</span>
+                      <span style={{ color: tierColor, fontWeight: 500 }}>RS {rs}{r.roms > 0 ? ` \u2665${r.roms}` : ''}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          }
+        } else if (rel && typeof rel === 'object') {
+          // NPC view: show only this NPC's scores
+          const rs = rel.rs || 0;
+          const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
           parts.push(
             <div key="rels" style={{ marginTop: '12px' }}>
               <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Relationships</div>
-              {rels.map(([npc, r]: [string, any]) => {
-                const rs = r.rs || 0;
-                const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
-                return (
-                  <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
-                    <span style={{ color: '#ccc' }}>{npc}</span>
-                    <span style={{ color: tierColor, fontWeight: 500 }}>RS {rs} — {r.tier || '?'}{r.roms > 0 ? ` \u2665${r.roms}` : ''}</span>
-                  </div>
-                );
-              })}
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem' }}>
+                <span style={{ color: '#ccc' }}>Relationship Score</span>
+                <span style={{ color: tierColor, fontWeight: 500 }}>{rs}</span>
+              </div>
+              {rel.roms > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem' }}>
+                  <span style={{ color: '#ccc' }}>Romance Score</span>
+                  <span style={{ color: '#f472b6', fontWeight: 500 }}>{rel.roms}</span>
+                </div>
+              )}
+              {/* Inter-NPC relationships nested under this NPC */}
+              {rel.npc_relationships && typeof rel.npc_relationships === 'object' && Object.keys(rel.npc_relationships).length > 0 && (
+                <>
+                  <div style={{ fontSize: '0.68rem', fontWeight: 600, color: '#666', marginTop: '8px', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Inter-NPC Relationships</div>
+                  {Object.entries(rel.npc_relationships).map(([npc, r]: [string, any]) => {
+                    const npcRs = r?.rs || 0;
+                    const npcColor = npcRs <= -3 ? '#ef4444' : npcRs <= 0 ? '#94a3b8' : npcRs <= 3 ? '#4ade80' : '#a78bfa';
+                    return (
+                      <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontSize: '0.75rem', borderBottom: '1px solid #2a2a4e' }}>
+                        <span style={{ color: '#aaa' }}>{npc}</span>
+                        <span style={{ color: npcColor, fontWeight: 500 }}>RS {npcRs}{r?.roms > 0 ? ` \u2665${r.roms}` : ''}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
           );
         }
@@ -421,7 +475,17 @@ export default function CharacterPanel({
               </div>
             )}
             {ship.credits != null && (
-              <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '4px' }}>Credits: {ship.credits}</div>
+              typeof ship.credits === 'object' ? (
+                <div style={{ marginTop: '4px' }}>
+                  {Object.entries(ship.credits).map(([k, v]: [string, any]) => (
+                    <div key={k} style={{ fontSize: '0.72rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>{k}</span><span>{typeof v === 'number' ? v.toLocaleString() : v}¤</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '4px' }}>Credits: {typeof ship.credits === 'number' ? ship.credits.toLocaleString() : ship.credits}¤</div>
+              )
             )}
           </div>
         );
@@ -616,11 +680,11 @@ export default function CharacterPanel({
 
   // --- All Characters Modal ---
   const renderAllCharactersModal = () => {
-    if (!(showAllCharactersModal && pipelineState)) return null;
+    if (!showAllCharactersModal) return null;
 
-    const cs = pipelineState.character_states || {};
-    const npcMem = pipelineState.npc_memories || {};
-    const scene = pipelineState.scene_state || {};
+    const cs = state.character_states || {};
+    const npcMem = state.npc_memories || {};
+    const scene = state.scene_state || {};
     const inScene = new Set([...(scene.pcs_present || []), ...(scene.npcs_present || [])]);
     const allNamesArr = Object.keys(cs).concat(Object.keys(npcMem)).filter((v, i, a) => a.indexOf(v) === i);
     const inSceneNames = allNamesArr.filter(n => inScene.has(n));
@@ -685,9 +749,9 @@ export default function CharacterPanel({
 
   // --- NPC Memories Modal ---
   const renderNpcMemoriesModal = () => {
-    if (!(showNpcMemories && pipelineState)) return null;
+    if (!showNpcMemories) return null;
 
-    const memories = (pipelineState.npc_memories || {})[showNpcMemories] || [];
+    const memories = (state.npc_memories || {})[showNpcMemories] || [];
     const sorted = [...memories].sort((a: any, b: any) => (b.impact || 0) - (a.impact || 0) || (b.turn_created || 0) - (a.turn_created || 0));
     const memBorderColor = (impact: number) => impact >= 4 ? '#fbbf24' : impact >= 3 ? '#3b82f6' : '#4a4a6e';
 

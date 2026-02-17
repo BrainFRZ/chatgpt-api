@@ -112,6 +112,38 @@ def apply_game_state(game_state, agent_json, turn):
                     factions[target] = {"fr": 0}
                 factions[target]["fr"] = max(-100, min(100, factions[target].get("fr", 0) + change))
 
+            # Inter-NPC relationship ops
+            elif op == "npc_rs":
+                other = op_data.get("other")
+                change = int(op_data.get("change", 0))
+                if target and other:
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0}
+                    npc_rels = relationships[target].setdefault("npc_relationships", {})
+                    if other not in npc_rels:
+                        npc_rels[other] = {"rs": 0, "roms": 0}
+                    npc_rels[other]["rs"] = max(-100, min(100, npc_rels[other].get("rs", 0) + change))
+
+            elif op == "npc_roms":
+                other = op_data.get("other")
+                change = int(op_data.get("change", 0))
+                if target and other:
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0}
+                    npc_rels = relationships[target].setdefault("npc_relationships", {})
+                    if other not in npc_rels:
+                        npc_rels[other] = {"rs": 0, "roms": 0}
+                    npc_rels[other]["roms"] = max(0, min(100, npc_rels[other].get("roms", 0) + change))
+
+            elif op == "npc_set":
+                other = op_data.get("other")
+                fields = copy.deepcopy(op_data.get("fields", {}))
+                if target and other:
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0}
+                    npc_rels = relationships[target].setdefault("npc_relationships", {})
+                    npc_rels[other] = fields
+
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"dnd5e apply_game_state: error processing op {op_data}: {e}")
             continue
@@ -135,7 +167,30 @@ def _format_npc_line(name, data):
             parts.append(f"RomS {roms} ({roms_label} \u2014 {roms_bonus})")
         else:
             parts.append(f"RomS {roms} ({roms_label})")
-    return f"  {name}: {' | '.join(parts)}"
+    line = f"  {name}: {' | '.join(parts)}"
+
+    # Append inter-NPC relationships indented under this NPC
+    npc_rels = data.get("npc_relationships", {})
+    if npc_rels:
+        for other in sorted(npc_rels):
+            nr = npc_rels[other]
+            nr_rs = nr.get("rs", 0)
+            nr_roms = nr.get("roms", 0)
+            nr_parts = []
+            nr_label, nr_bonus = _rs_tier(nr_rs)
+            if nr_bonus:
+                nr_parts.append(f"RS {nr_rs} ({nr_label} \u2014 {nr_bonus})")
+            else:
+                nr_parts.append(f"RS {nr_rs} ({nr_label})")
+            if nr_roms > 0:
+                r_label, r_bonus = _roms_tier(nr_roms)
+                if r_bonus:
+                    nr_parts.append(f"RomS {nr_roms} ({r_label} \u2014 {r_bonus})")
+                else:
+                    nr_parts.append(f"RomS {nr_roms} ({r_label})")
+            line += f"\n    \u2192 {other}: {' | '.join(nr_parts)}"
+
+    return line
 
 
 def _format_faction_line(name, data):
@@ -273,13 +328,20 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
 - Use "relationship_ops" to update scores. Operations:
   * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
-    Relationship Score change. Clamped -100 to +100.
+    Relationship Score change (PC → NPC). Clamped -100 to +100.
   * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
-    Romance Score change. Clamped 0 to 100.
+    Romance Score change (PC → NPC). Clamped 0 to 100.
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
+  * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
+    Bootstrap inter-NPC relationship. Use on first turn or when inter-NPC relationships are missing.
+- Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (close bonds, rivalries, romances between crew members, etc.).
 - "new_total" is for Narration display only — the system uses "change" to compute the actual score.
 - Scoring guidelines:
   * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
@@ -598,13 +660,20 @@ Optional arrays (omit or leave empty when no ops occurred):
 - **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **relationship_ops**: Track RS/RomS/FR changes. Operations:
   * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
-    Relationship Score change. Clamped -100 to +100.
+    Relationship Score change (PC → NPC). Clamped -100 to +100.
   * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
-    Romance Score change. Clamped 0 to 100.
+    Romance Score change (PC → NPC). Clamped 0 to 100.
   * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Faction Reputation change. Clamped -100 to +100.
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+    Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
+  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+    Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
+  * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
+    Bootstrap inter-NPC relationship.
+  - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant.
   - "new_total" is for your narrative display only — the system uses "change" to compute the actual score.
   - Scoring guidelines:
     * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
@@ -729,8 +798,48 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy'|'ship', vitals: [{label, current, max} or {label, value}], resources: [{label, current, max}], conditions: [strings], summary: string}",
-                "additionalProperties": True
+                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["type", "vitals"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
+                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Druid' or 'Bard (College of Eloquence)'."},
+                        "vitals": {
+                            "type": "array",
+                            "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"},
+                                    "value": {}
+                                },
+                                "required": ["label"]
+                            }
+                        },
+                        "resources": {
+                            "type": "array",
+                            "description": "Tracked resources: spell slots, ki points, etc. Each {label, current, max}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"}
+                                },
+                                "required": ["label", "current", "max"]
+                            }
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
+                        },
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                    }
+                }
             },
             "combat": {
                 "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
@@ -775,18 +884,19 @@ STATE_REPORT_TOOL = {
             },
             "relationship_ops": {
                 "type": "array",
-                "description": "RS/RomS/FR changes: relationship scores, romance scores, faction reputation",
+                "description": "RS/RomS/FR changes: relationship scores, romance scores, faction reputation, inter-NPC relationships",
                 "items": {
                     "type": "object",
                     "required": ["op", "target"],
                     "properties": {
-                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set"]},
+                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"]},
                         "target": {"type": "string", "description": "NPC or faction name"},
+                        "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer", "description": "Signed change amount"},
                         "new_total": {"type": "integer", "description": "Display-only total after change"},
                         "reason": {"type": "string", "description": "Why the change occurred"},
                         "type": {"type": "string", "enum": ["npc", "faction"], "description": "Entity type (for set ops)"},
-                        "fields": {"type": "object", "description": "Full replacement fields (for set ops)"}
+                        "fields": {"type": "object", "description": "Full replacement fields (for set/npc_set ops)"}
                     }
                 }
             },

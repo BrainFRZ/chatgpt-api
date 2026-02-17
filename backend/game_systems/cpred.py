@@ -713,8 +713,48 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy', vitals: [{label, current, max}], resources: [{label, current, max}], conditions: [strings], summary: string}",
-                "additionalProperties": True
+                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["type", "vitals"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
+                        "class": {"type": "string", "description": "Role, e.g. 'Solo' or 'Netrunner'."},
+                        "vitals": {
+                            "type": "array",
+                            "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"},
+                                    "value": {}
+                                },
+                                "required": ["label"]
+                            }
+                        },
+                        "resources": {
+                            "type": "array",
+                            "description": "Tracked resources. Each {label, current, max}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"}
+                                },
+                                "required": ["label", "current", "max"]
+                            }
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Active conditions."
+                        },
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                    }
+                }
             },
             "combat": {
                 "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",

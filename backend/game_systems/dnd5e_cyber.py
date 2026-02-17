@@ -268,13 +268,20 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
 - Use "relationship_ops" to update scores. Operations:
   * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
-    Relationship Score change. Clamped -100 to +100.
+    Relationship Score change (PC → NPC). Clamped -100 to +100.
   * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
-    Romance Score change. Clamped 0 to 100.
+    Romance Score change (PC → NPC). Clamped 0 to 100.
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
+  * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
+    Bootstrap inter-NPC relationship.
+- Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (close bonds, rivalries, romances between crew members, etc.).
 - "new_total" is for Narration display only — the system uses "change" to compute the actual score.
 - Scoring guidelines:
   * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
@@ -545,9 +552,13 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
   * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
+  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
   - Tier boundary checking: Note new tier in reason, narratively reflect the shift, show 📊 line.
   - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty.
+  - Inter-NPC relationships: Track NPC-NPC dynamics (close bonds, rivalries, romances between crew). Bootstrap with "npc_set" ops.
 - **ship_ops**: Track ship state changes. Operations:
   * `{"op": "hull", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "shields", "change": <signed int>, "reason": "<why>"}`
@@ -677,8 +688,48 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to structured state object: {type: 'pc'|'npc'|'enemy'|'ship', vitals: [{label, current, max} or {label, value}], resources: [{label, current, max}], conditions: [strings], summary: string}",
-                "additionalProperties": True
+                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["type", "vitals"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
+                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Fighter (Champion)'."},
+                        "vitals": {
+                            "type": "array",
+                            "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"},
+                                    "value": {}
+                                },
+                                "required": ["label"]
+                            }
+                        },
+                        "resources": {
+                            "type": "array",
+                            "description": "Tracked resources: spell slots, ki points, etc. Each {label, current, max}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "current": {"type": "number"},
+                                    "max": {"type": "number"}
+                                },
+                                "required": ["label", "current", "max"]
+                            }
+                        },
+                        "conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
+                        },
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                    }
+                }
             },
             "combat": {
                 "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
@@ -723,13 +774,14 @@ STATE_REPORT_TOOL = {
             },
             "relationship_ops": {
                 "type": "array",
-                "description": "RS/RomS/FR changes: relationship scores, romance scores, faction reputation",
+                "description": "RS/RomS/FR changes: relationship scores, romance scores, faction reputation, inter-NPC relationships",
                 "items": {
                     "type": "object",
                     "required": ["op", "target"],
                     "properties": {
-                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set"]},
+                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"]},
                         "target": {"type": "string"},
+                        "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer"},
                         "new_total": {"type": "integer"},
                         "reason": {"type": "string"},
