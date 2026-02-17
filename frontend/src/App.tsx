@@ -1,175 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-
-// Convert LaTeX-style math delimiters to dollar-sign style for remark-math
-const convertMathDelimiters = (text: string): string => {
-  return text
-    .replace(/\\\[/g, '$$')      // \[ to $$
-    .replace(/\\\]/g, '$$')      // \] to $$
-    .replace(/\\\(/g, '$')       // \( to $
-    .replace(/\\\)/g, '$');      // \) to $
-};
-
-// Format timestamp to "Month Day, Year  HH:MM" in Eastern time
-const formatTimestamp = (timestamp: string | undefined): string => {
-  if (!timestamp) return '';
-  try {
-    const date = new Date(timestamp);
-    const options: Intl.DateTimeFormatOptions = {
-      timeZone: 'America/New_York',
-      month: 'long',
-      day: 'numeric',
-      year: 'numeric',
-    };
-    const timeOptions: Intl.DateTimeFormatOptions = {
-      timeZone: 'America/New_York',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    };
-    const datePart = date.toLocaleDateString('en-US', options);
-    const timePart = date.toLocaleTimeString('en-US', timeOptions);
-    return `${datePart}  ${timePart}`;
-  } catch {
-    return '';
-  }
-};
-
-interface LoginResponse {
-  username: string;
-  has_api_key: boolean;
-  is_new_user: boolean;
-}
-
-interface ChatMessage {
-  id?: string;  // Unique message ID (for branching)
-  parent_id?: string | null;  // ID of parent message (for branching)
-  role: string;
-  content: string;
-  timestamp?: string;
-  tokens?: string;
-  cost?: string;
-  reasoning?: string;
-  attached_files?: {filename: string, content: string}[];
-  model?: string;  // Model used for this response (assistant messages only)
-  service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
-}
-
-interface ChatStats {
-  total_input_tokens: number;
-  total_cached_tokens: number;
-  total_output_tokens: number;
-  total_cost: number;
-  total_prompts: number;
-  gpt_prompts?: number;
-  sonnet_prompts?: number;
-  avg_gpt_context_growth?: number;
-  avg_sonnet_context_growth?: number;
-  first_prompt_date?: string;
-  last_accessed?: string;
-}
-
-interface UserStats {
-  lifetime_prompts: number;
-  lifetime_gpt_prompts: number;
-  lifetime_sonnet_prompts: number;
-  lifetime_input_tokens: number;
-  lifetime_cached_tokens: number;
-  lifetime_output_tokens: number;
-  lifetime_reasoning_tokens: number;
-  lifetime_cost: number;
-  lifetime_cache_miss_percent: number;
-  monthly_active_days: number;
-  monthly_prompts: number;
-  monthly_gpt_prompts: number;
-  monthly_sonnet_prompts: number;
-  monthly_input_tokens: number;
-  monthly_cached_tokens: number;
-  monthly_output_tokens: number;
-  monthly_reasoning_tokens: number;
-  monthly_total_tokens: number;
-  monthly_cost: number;
-  today_prompts: number;
-  today_gpt_prompts: number;
-  today_sonnet_prompts: number;
-  today_input_tokens: number;
-  today_cached_tokens: number;
-  today_output_tokens: number;
-  today_reasoning_tokens: number;
-  today_total_tokens: number;
-  today_cost: number;
-  avg_prompts_per_day: number;
-  avg_gpt_prompts_per_day: number;
-  avg_sonnet_prompts_per_day: number;
-  avg_input_per_day: number;
-  avg_cached_per_day: number;
-  avg_output_per_day: number;
-  avg_reasoning_per_day: number;
-  avg_total_per_day: number;
-  avg_cost_per_day: number;
-  avg_gpt_context_growth: number;
-  avg_sonnet_context_growth: number;
-  days_since_first: number;
-}
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  pricing: {
-    input_new: number;
-    input_cached: number;
-    output: number;
-    reasoning: number;
-  };
-  context_limits: {
-    threshold: number;
-    target: number;
-  };
-}
-
-interface ApiKeysStatus {
-  has_openai: boolean;
-  has_anthropic: boolean;
-}
-
-interface FreeTokens {
-  total_free: number;
-  used: number;
-  remaining: number;
-  resets_at_eastern: string;
-}
-
-interface ProjectFileInfo {
-  filename: string;
-  tokens: number;
-  size_bytes: number;
-  staged: boolean;
-  agents: string[];
-}
-
-interface ProjectFilesResponse {
-  files: ProjectFileInfo[];
-  total_tokens: number;
-  staged_tokens: number;
-}
-
-interface ProjectInstructions {
-  instructions: string;
-  tokens: number;
-}
-
-interface ChatCardInfo {
-  name: string;
-  lastMessage: string;
-  lastActive: string;
-  messageCount: number;
-}
+import { styles } from './styles';
+import {
+  LoginResponse, ChatMessage, ChatStats, UserStats, ModelInfo,
+  ApiKeysStatus, FreeTokens, ProjectFileInfo, ProjectFilesResponse,
+  ProjectInstructions, ChatCardInfo
+} from './types';
+import { useMessaging } from './hooks/useMessaging';
+import { useSync } from './hooks/useSync';
+import Sidebar from './components/Sidebar';
+import ChatView from './components/ChatView';
+import CharacterPanel from './components/CharacterPanel';
+import ProjectLanding from './components/ProjectLanding';
+import Modals from './components/Modals';
 
 function App() {
   const [username, setUsername] = useState('');
-  
+
   // Inject markdown styles once
   useEffect(() => {
     const styleId = 'markdown-styles';
@@ -179,7 +25,7 @@ function App() {
       katexLink.rel = 'stylesheet';
       katexLink.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
       document.head.appendChild(katexLink);
-      
+
       const style = document.createElement('style');
       style.id = styleId;
       style.textContent = `
@@ -241,7 +87,7 @@ function App() {
           display: inline;
           margin: 0;
         }
-        .messageContent h1, .messageContent h2, .messageContent h3, 
+        .messageContent h1, .messageContent h2, .messageContent h3,
         .messageContent h4, .messageContent h5, .messageContent h6 {
           margin: 0.8em 0 0.4em 0;
           font-weight: bold;
@@ -296,7 +142,7 @@ function App() {
       document.head.appendChild(style);
     }
   }, []);
-  
+
   const [user, setUser] = useState<LoginResponse | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
@@ -342,8 +188,6 @@ function App() {
   const currentProjectRef = useRef<string | null>(null); // Track current project for async operations
   const currentChatRef = useRef<string | null>(null); // Track current chat for async operations
   const [stats, setStats] = useState<ChatStats | null>(null);
-  const [newMessage, setNewMessage] = useState('');
-  const [textareaHeight, setTextareaHeight] = useState(85); // Initial height in pixels
   const [updatesText, setUpdatesText] = useState('');
   const [updatesTokenCount, setUpdatesTokenCount] = useState(0);
   const [showUpdatesModal, setShowUpdatesModal] = useState(false);
@@ -384,11 +228,7 @@ function App() {
   const filenameTooltipTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Chat file attachment state
-  const [stagedFiles, setStagedFiles] = useState<{filename: string, content: string}[]>([]);
-  const [showAttachMenu, setShowAttachMenu] = useState(false);
-  const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const chatFileInputRef = useRef<HTMLInputElement>(null);
+  // Ref for attach menu (needed by ChatView)
   const attachMenuRef = useRef<HTMLDivElement>(null);
 
   // Right panel — character state
@@ -402,18 +242,6 @@ function App() {
   const [characterSheetMd, setCharacterSheetMd] = useState<string>('');
   const [mobileBottomSheetOpen, setMobileBottomSheetOpen] = useState(false);
 
-  // Close attach menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (showAttachMenu && attachMenuRef.current && !attachMenuRef.current.contains(event.target as Node)) {
-        setShowAttachMenu(false);
-      }
-    };
-    
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showAttachMenu]);
-
   // Detect mobile screen size
   useEffect(() => {
     const checkMobile = () => {
@@ -423,7 +251,7 @@ function App() {
         setSidebarOpen(false); // Collapse sidebar on mobile by default
       }
     };
-    
+
     checkMobile();
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
@@ -455,17 +283,6 @@ function App() {
   const isPipelineProject = projectModel === 'gpt-5.2';
   const [projectGameSystem, setProjectGameSystem] = useState<string | null>(null);
   const [availableGameSystems, setAvailableGameSystems] = useState<{id: string, name: string}[]>([]);
-
-  // Real-time sync state
-  const [viewerCount, setViewerCount] = useState(1);
-  const [needsSyncReload, setNeedsSyncReload] = useState(false);
-  const syncWsRef = useRef<WebSocket | null>(null);
-  const syncReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const syncHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  // User-level WebSocket for chat list sync (always connected when logged in)
-  const userWsRef = useRef<WebSocket | null>(null);
-  const userWsReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const userWsHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -499,22 +316,6 @@ function App() {
   const resetChatState = () => {
     clearPendingTimeouts();
 
-    // Close sync WebSocket
-    if (syncWsRef.current) {
-      syncWsRef.current.close();
-      syncWsRef.current = null;
-    }
-    if (syncReconnectTimeoutRef.current) {
-      clearTimeout(syncReconnectTimeoutRef.current);
-      syncReconnectTimeoutRef.current = null;
-    }
-    if (syncHeartbeatIntervalRef.current) {
-      clearInterval(syncHeartbeatIntervalRef.current);
-      syncHeartbeatIntervalRef.current = null;
-    }
-    setViewerCount(1);
-    setNeedsSyncReload(false);
-
     setCurrentChat(null);
     currentChatRef.current = null;
     setMessages([]);
@@ -526,7 +327,6 @@ function App() {
     setIsLoadingMoreMessages(false);
     setMessageOffset(0);
     setStats(null);
-    setNewMessage('');
     setUpdatesText('');
     setDraftUpdatesText('');
     setUpdatesTokenCount(0);
@@ -535,9 +335,6 @@ function App() {
     setExpandedReasoning(new Set());
     setEditingMessageIndex(null);
     setEditingMessageContent('');
-    setStagedFiles([]);
-    setShowAttachMenu(false);
-    setIsDraggingFile(false);
     setIsResizing(false);
     setPipelineState(null);
     setChatGameSystem(null);
@@ -546,7 +343,7 @@ function App() {
     setShowAllCharactersModal(false);
     setShowNpcMemories(null);
     setMobileBottomSheetOpen(false);
-    
+
     // Reset load cooldown
     lastLoadTimeRef.current = 0;
   };
@@ -577,7 +374,7 @@ function App() {
   // Reset all user session state (called on logout)
   const resetAllState = () => {
     resetProjectState();
-    
+
     // Clear restoration timeout if pending
     if (restorationTimeoutRef.current) {
       clearTimeout(restorationTimeoutRef.current);
@@ -585,7 +382,7 @@ function App() {
     }
     // Reset restoration flag for next login
     isRestoringRef.current = true;
-    
+
     setUser(null);
     setNeedsApiKey(false);
     setApiKey('');
@@ -726,10 +523,10 @@ function App() {
       if (!response.ok) return null;
       const data = await response.json();
       const chatList = data.chats || [];
-      
+
       // Update cache (always safe - keyed by project name)
       setProjectChatsCache(prev => ({ ...prev, [projectName]: chatList }));
-      
+
       // Only update current view state if still on this project
       if (currentProjectRef.current === projectName) {
         setChats(chatList);
@@ -756,7 +553,7 @@ function App() {
       loadChatList();
       fetchUserStats();
       fetchFreeTokens();
-      
+
       // Restore last viewed project and chat after a brief delay to ensure everything is loaded
       restorationTimeoutRef.current = setTimeout(async () => {
         // Check if user is still logged in (could have logged out during the timeout)
@@ -764,10 +561,10 @@ function App() {
           isRestoringRef.current = false;
           return;
         }
-        
+
         const savedProject = localStorage.getItem('chatgpt-current-project');
         const savedChat = localStorage.getItem('chatgpt-current-chat');
-        
+
         try {
           if (savedProject) {
             await enterProject(savedProject);
@@ -792,7 +589,7 @@ function App() {
       // If user doesn't have API key, still re-enable saving
       isRestoringRef.current = false;
     }
-    
+
     // Cleanup: clear timeout if user changes or component unmounts
     return () => {
       if (restorationTimeoutRef.current) {
@@ -821,389 +618,9 @@ function App() {
     }
   }, [currentProject, currentChat, user]);
 
-  // Real-time sync WebSocket connection
-  useEffect(() => {
-    if (!user || !currentChat) {
-      // Clean up if no chat is open
-      if (syncWsRef.current) {
-        syncWsRef.current.close();
-        syncWsRef.current = null;
-      }
-      setViewerCount(1);
-      return;
-    }
-
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const baseReconnectDelay = 1000;
-
-    const connect = () => {
-      // Build WebSocket URL
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const projectParam = currentProject ? `?project=${encodeURIComponent(currentProject)}` : '';
-      const wsUrl = `${protocol}//${window.location.host}/api/ws/chat/${encodeURIComponent(user.username)}/${encodeURIComponent(currentChat)}${projectParam}`;
-
-      const ws = new WebSocket(wsUrl);
-      syncWsRef.current = ws;
-
-      ws.onopen = () => {
-        reconnectAttempts = 0;
-
-        // Start heartbeat
-        syncHeartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-          }
-        }, 30000); // Ping every 30 seconds
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          // Skip user-level events here - they're handled by the user-level WebSocket
-          if (data.type === 'chat_created' || data.type === 'chat_deleted') return;
-          handleSyncEvent(data);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      };
-
-      ws.onclose = (event) => {
-        // Clear heartbeat
-        if (syncHeartbeatIntervalRef.current) {
-          clearInterval(syncHeartbeatIntervalRef.current);
-          syncHeartbeatIntervalRef.current = null;
-        }
-
-        // Don't reconnect if:
-        // - Intentionally closed (1000)
-        // - Chat no longer exists (4004 from server)
-        // - Chat changed in the UI
-        if (event.code === 1000 || event.code === 4004 || currentChatRef.current !== currentChat) {
-          return;
-        }
-
-        // Attempt reconnect with exponential backoff
-        if (reconnectAttempts < maxReconnectAttempts) {
-          const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts);
-          reconnectAttempts++;
-          syncReconnectTimeoutRef.current = setTimeout(connect, delay);
-        }
-      };
-
-      ws.onerror = () => {
-        // Error will trigger onclose
-      };
-    };
-
-    connect();
-
-    // Cleanup on unmount or chat change
-    return () => {
-      if (syncWsRef.current) {
-        syncWsRef.current.close(1000); // Normal closure
-        syncWsRef.current = null;
-      }
-      if (syncReconnectTimeoutRef.current) {
-        clearTimeout(syncReconnectTimeoutRef.current);
-        syncReconnectTimeoutRef.current = null;
-      }
-      if (syncHeartbeatIntervalRef.current) {
-        clearInterval(syncHeartbeatIntervalRef.current);
-        syncHeartbeatIntervalRef.current = null;
-      }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.username, currentChat, currentProject]);
-
-  // User-level WebSocket for chat list sync (always connected when logged in)
-  useEffect(() => {
-    if (!user) {
-      // Clean up if not logged in
-      if (userWsRef.current) {
-        userWsRef.current.close();
-        userWsRef.current = null;
-      }
-      if (userWsReconnectTimeoutRef.current) {
-        clearTimeout(userWsReconnectTimeoutRef.current);
-        userWsReconnectTimeoutRef.current = null;
-      }
-      if (userWsHeartbeatIntervalRef.current) {
-        clearInterval(userWsHeartbeatIntervalRef.current);
-        userWsHeartbeatIntervalRef.current = null;
-      }
-      return;
-    }
-
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const baseReconnectDelay = 1000;
-
-    const connect = () => {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/ws/user/${encodeURIComponent(user.username)}`;
-
-      const ws = new WebSocket(wsUrl);
-      userWsRef.current = ws;
-
-      ws.onopen = () => {
-        reconnectAttempts = 0;
-
-        // Start heartbeat
-        userWsHeartbeatIntervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }));
-          }
-        }, 30000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          // Only handle user-level events (chat_created, chat_deleted)
-          if (data.type === 'chat_created' || data.type === 'chat_deleted') {
-            handleSyncEvent(data);
-          }
-        } catch (e) {
-          // Ignore parse errors
-        }
-      };
-
-      ws.onclose = (event) => {
-        if (userWsHeartbeatIntervalRef.current) {
-          clearInterval(userWsHeartbeatIntervalRef.current);
-          userWsHeartbeatIntervalRef.current = null;
-        }
-
-        // Don't reconnect if intentionally closed
-        if (event.code === 1000) {
-          return;
-        }
-
-        // Attempt reconnect with exponential backoff
-        if (reconnectAttempts < maxReconnectAttempts) {
-          const delay = baseReconnectDelay * Math.pow(2, reconnectAttempts);
-          reconnectAttempts++;
-          userWsReconnectTimeoutRef.current = setTimeout(connect, delay);
-        }
-      };
-
-      ws.onerror = () => {
-        // Error will trigger onclose
-      };
-    };
-
-    connect();
-
-    return () => {
-      if (userWsRef.current) {
-        userWsRef.current.close(1000);
-        userWsRef.current = null;
-      }
-      if (userWsReconnectTimeoutRef.current) {
-        clearTimeout(userWsReconnectTimeoutRef.current);
-        userWsReconnectTimeoutRef.current = null;
-      }
-      if (userWsHeartbeatIntervalRef.current) {
-        clearInterval(userWsHeartbeatIntervalRef.current);
-        userWsHeartbeatIntervalRef.current = null;
-      }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.username]);
-
-  // Handle sync events from WebSocket
-  const handleSyncEvent = useCallback((event: { type: string; data: any }) => {
-    // If we're currently streaming (loading) for the current chat, ignore streaming-related
-    // sync events since we're already handling them via SSE. This prevents duplicates.
-    const isCurrentlyStreaming = currentChatRef.current && isLoadingRef.current.has(currentChatRef.current);
-
-    switch (event.type) {
-      case 'client_joined':
-      case 'client_left':
-        setViewerCount(event.data.connection_count);
-        break;
-
-      case 'user_message_added':
-        // Ignore if we're the one streaming - we already added our own message
-        if (isCurrentlyStreaming) break;
-        // Another client sent a message - add it to our view
-        setMessages(prev => [...prev, event.data.message]);
-        setAllMessages(prev => [...prev, event.data.message]);
-        setTotalMessages(prev => prev + 1);
-        setCurrentLeafId(event.data.current_leaf_id);
-        // Add streaming placeholder for the upcoming assistant response
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString()
-        }]);
-        break;
-
-      case 'stream_content':
-        // Ignore if we're the one streaming - we handle this via SSE
-        if (isCurrentlyStreaming) break;
-        // Append content delta to the streaming message
-        setMessages(prev => {
-          const newMessages = [...prev];
-          const lastIdx = newMessages.length - 1;
-          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-            newMessages[lastIdx] = {
-              ...newMessages[lastIdx],
-              content: (newMessages[lastIdx].content || '') + event.data.delta
-            };
-          }
-          return newMessages;
-        });
-        break;
-
-      case 'stream_thinking':
-        // Ignore if we're the one streaming - we handle this via SSE
-        if (isCurrentlyStreaming) break;
-        // Append thinking delta to the streaming message
-        setMessages(prev => {
-          const newMessages = [...prev];
-          const lastIdx = newMessages.length - 1;
-          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-            newMessages[lastIdx] = {
-              ...newMessages[lastIdx],
-              reasoning: (newMessages[lastIdx].reasoning || '') + event.data.delta
-            };
-          }
-          return newMessages;
-        });
-        break;
-
-      case 'stream_done':
-        // Ignore if we're the one streaming - we handle this via SSE
-        if (isCurrentlyStreaming) break;
-        // Replace streaming placeholder with complete message
-        setMessages(prev => {
-          const newMessages = [...prev];
-          const lastIdx = newMessages.length - 1;
-          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-            newMessages[lastIdx] = event.data.assistant_message;
-          }
-          return newMessages;
-        });
-        setAllMessages(prev => [...prev, event.data.assistant_message]);
-        setTotalMessages(prev => prev + 1);
-        setCurrentLeafId(event.data.current_leaf_id);
-        setStats(event.data.stats);
-        setContextStartIndex(event.data.context_start_index || 1);
-        setPipelineStage(prev => {
-          if (!currentChatRef.current) return prev;
-          const next = new Map(prev);
-          next.delete(currentChatRef.current);
-          return next;
-        });
-        break;
-
-      case 'stream_error':
-        // Ignore if we're the one streaming - we handle this via SSE
-        if (isCurrentlyStreaming) break;
-        // Remove the streaming placeholder on error
-        setMessages(prev => {
-          if (prev.length > 0 && prev[prev.length - 1].role === 'assistant' && !prev[prev.length - 1].id) {
-            return prev.slice(0, -1);
-          }
-          return prev;
-        });
-        setPipelineStage(prev => {
-          if (!currentChatRef.current) return prev;
-          const next = new Map(prev);
-          next.delete(currentChatRef.current);
-          return next;
-        });
-        break;
-
-      case 'pipeline_stage':
-        if (isCurrentlyStreaming) break;
-        if (currentChatRef.current) {
-          setPipelineStage(prev => {
-            const next = new Map(prev);
-            next.set(currentChatRef.current!, event.data);
-            return next;
-          });
-        }
-        break;
-
-      case 'branch_switched':
-        // Another client switched branches - trigger a reload via state
-        // Using state instead of calling handleReloadChat directly avoids stale closure
-        setNeedsSyncReload(true);
-        break;
-
-      case 'chat_settings_changed':
-        // Another client changed model or sync setting
-        if (event.data.model !== undefined) {
-          setSelectedModel(event.data.model);
-          if (event.data.context_start_index !== undefined) {
-            setContextStartIndex(event.data.context_start_index);
-          }
-        }
-        if (event.data.anthropic_sync !== undefined) {
-          setAnthropicSync(event.data.anthropic_sync);
-        }
-        break;
-
-      case 'docs_refreshed':
-        setDocsRefreshed(true);
-        setTimeout(() => setDocsRefreshed(false), 4000);
-        break;
-
-      case 'state_update':
-        if (event.data?.pipeline_state) {
-          setPipelineState(event.data.pipeline_state);
-        }
-        break;
-
-      case 'chat_created':
-        // Another client created a chat - update the chat list
-        // Add to appropriate list based on whether it's a project chat or root chat
-        if (event.data.project) {
-          setProjectChatsCache(prev => {
-            const projectChats = prev[event.data.project] || [];
-            if (!projectChats.includes(event.data.chat_name)) {
-              return { ...prev, [event.data.project]: [event.data.chat_name, ...projectChats] };
-            }
-            return prev;
-          });
-        } else {
-          setChats(prev => {
-            if (!prev.includes(event.data.chat_name)) {
-              return [event.data.chat_name, ...prev];
-            }
-            return prev;
-          });
-          setRootChatsCache(prev => {
-            if (prev && !prev.includes(event.data.chat_name)) {
-              return [event.data.chat_name, ...prev];
-            }
-            return prev;
-          });
-        }
-        break;
-
-      case 'chat_deleted':
-        // Another client deleted a chat - update the chat list
-        if (event.data.project) {
-          setProjectChatsCache(prev => {
-            const projectChats = prev[event.data.project] || [];
-            return { ...prev, [event.data.project]: projectChats.filter(c => c !== event.data.chat_name) };
-          });
-        } else {
-          setChats(prev => prev.filter(c => c !== event.data.chat_name));
-          setRootChatsCache(prev => prev ? prev.filter(c => c !== event.data.chat_name) : null);
-        }
-        // If the deleted chat is currently open (same name AND same project), close it
-        if (currentChatRef.current === event.data.chat_name &&
-            (currentProjectRef.current || null) === (event.data.project || null)) {
-          resetChatState();
-        }
-        break;
-    }
-  }, []);
+  // ============================================================================
+  // BUSINESS LOGIC (auth, CRUD, file management, model switching, etc.)
+  // ============================================================================
 
   useEffect(() => {
     const savedUsername = localStorage.getItem('chatgpt-username');
@@ -1264,12 +681,12 @@ function App() {
 
   const loadChatList = async () => {
     if (!user) return;
-    
+
     // If we have cached root chats, use them immediately
     if (rootChatsCache !== null) {
       setChats(rootChatsCache);
     }
-    
+
     // Still fetch to get any updates
     try {
       const response = await fetch(`/api/chats/${user.username}`);
@@ -1278,16 +695,16 @@ function App() {
         return;
       }
       const data = await response.json();
-      
+
       // Handle both old format {chats, projects} and new format {chats, total, has_more, projects}
       const chatList = data.chats || [];
-      
+
       setChats(chatList);
       setProjects(data.projects || []);
-      
+
       // Update cache
       setRootChatsCache(chatList);
-      
+
       // Preload chats for visible projects (first 5-6)
       const visibleProjects = (data.projects || []).slice(0, 6);
       preloadProjectChats(visibleProjects);
@@ -1298,17 +715,17 @@ function App() {
 
   const preloadProjectChats = async (projectNames: string[]) => {
     if (!user) return;
-    
+
     // Fetch chats for each visible project in parallel
     const fetchPromises = projectNames.map(async (projectName) => {
       // Skip if already cached
       if (projectChatsCache[projectName]) return;
-      
+
       try {
         const response = await fetch(`/api/project-chats/${user.username}/${projectName}`);
         if (!response.ok) return; // Silent fail for preload
         const data = await response.json();
-        
+
         // Update cache
         setProjectChatsCache(prev => ({
           ...prev,
@@ -1318,7 +735,7 @@ function App() {
         // Silent fail - preloading is not critical
       }
     });
-    
+
     // Fire all requests in parallel (don't wait)
     Promise.all(fetchPromises);
   };
@@ -1489,25 +906,25 @@ function App() {
 
   const handleLogin = async () => {
     if (!username.trim()) return;
-    
+
     try {
       const response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim() })
       });
-      
+
       if (!response.ok) {
         const data = await response.json();
         setError(data.detail || 'Login failed');
         return;
       }
-      
+
       const data: LoginResponse = await response.json();
       setUser(data);
       localStorage.setItem('chatgpt-username', data.username);
       setError('');
-      
+
       if (!data.has_api_key) {
         setNeedsApiKey(true);
       }
@@ -1823,7 +1240,7 @@ function App() {
       const response = await fetch(`/api/project-files/${user.username}/${projectName}`);
       // Check if we're still on the same project after await
       if (currentProjectRef.current !== projectName) return;
-      
+
       if (response.ok) {
         const data: ProjectFilesResponse = await response.json();
         // Double-check after second await
@@ -1843,7 +1260,7 @@ function App() {
       const response = await fetch(`/api/project-instructions/${user.username}/${projectName}`);
       // Check if we're still on the same project after await
       if (currentProjectRef.current !== projectName) return;
-      
+
       if (response.ok) {
         const data: ProjectInstructions = await response.json();
         // Double-check after second await
@@ -2153,32 +1570,31 @@ function App() {
 
   const openChat = async (chatName: string, explicitProject?: string | null) => {
     if (!user) return;
-    
+
     // Determine project to use before any state changes
     const projectToUse = explicitProject !== undefined ? explicitProject : currentProject;
-    
+
     // Update ref IMMEDIATELY to signal "we're loading this chat now"
     // This must happen BEFORE any await so racing calls can detect staleness
     currentChatRef.current = chatName;
-    
+
     // Clear timeouts and UI state before fetch
     clearPendingTimeouts();
     resetUIState();
     setIsLoadingMoreMessages(false);
-    setIsDraggingFile(false);
     setUpdatesLoading(false);
     setIsResizing(false);
     lastLoadTimeRef.current = 0;
 
     try {
-      const url = projectToUse 
+      const url = projectToUse
         ? `/api/chat/${user.username}/${chatName}?project=${projectToUse}&limit=30&offset=0`
         : `/api/chat/${user.username}/${chatName}?limit=30&offset=0`;
       const response = await fetch(url);
-      
+
       // Check if another openChat was called while we were fetching
       if (currentChatRef.current !== chatName) return;
-      
+
       if (!response.ok) {
         const data = await response.json();
         setError(data.detail || 'Could not open chat');
@@ -2190,33 +1606,33 @@ function App() {
         }
         return;
       }
-      
+
       const data = await response.json();
-      
+
       // Check again after parsing
       if (currentChatRef.current !== chatName) return;
-      
+
       // Set new chat state (ref already set above)
       setCurrentChat(chatName);
-      setStagedFiles([]);
-      setShowAttachMenu(false);
+      messaging.setStagedFiles([]);
+      messaging.setShowAttachMenu(false);
       setEditingMessageIndex(null);
       setEditingMessageContent('');
-      setNewMessage('');
+      messaging.setNewMessage('');
       setShowUpdatesModal(false);
-      
+
       // Close sidebar on mobile when chat is opened
       if (isMobile) {
         setSidebarOpen(false);
       }
-      
+
       // Defensive check for malformed API response
       if (!data.messages || !Array.isArray(data.messages)) {
         console.error('Invalid API response: missing messages array', data);
         setError('Server returned invalid data. Please try again.');
         return;
       }
-      
+
       // Debug: log what we got from API
       console.log('Chat data from API:', {
         messagesCount: data.messages?.length,
@@ -2255,22 +1671,22 @@ function App() {
       // Use backend's message count for offset (includes system message)
       // This keeps offset in sync with backend pagination expectations
       setMessageOffset(data.messages.length);
-      
+
       // Fetch updates for this chat
       try {
-        const updatesUrl = projectToUse 
+        const updatesUrl = projectToUse
           ? `/api/updates/${user.username}/${chatName}?project=${projectToUse}`
           : `/api/updates/${user.username}/${chatName}`;
         const updatesResponse = await fetch(updatesUrl);
         if (currentChatRef.current !== chatName) return;
-        
+
         if (updatesResponse.ok) {
           const updatesData = await updatesResponse.json();
           if (currentChatRef.current !== chatName) return;
-          
+
           const loadedUpdates = updatesData.updates || '';
           setUpdatesText(loadedUpdates);
-          
+
           if (loadedUpdates.trim()) {
             try {
               const tokenResponse = await fetch('/api/count-tokens', {
@@ -2279,7 +1695,7 @@ function App() {
                 body: JSON.stringify({ text: loadedUpdates })
               });
               if (currentChatRef.current !== chatName) return;
-              
+
               if (tokenResponse.ok) {
                 const tokenData = await tokenResponse.json();
                 if (currentChatRef.current !== chatName) return;
@@ -2299,7 +1715,7 @@ function App() {
           setUpdatesTokenCount(0);
         }
       }
-      
+
       // Scroll to bottom
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -2347,30 +1763,30 @@ function App() {
 
   const updateUpdatesText = (text: string) => {
     setDraftUpdatesText(text);
-    
+
     const ctx = createContextGuard();
-    
+
     if (tokenCountTimeoutRef.current) {
       clearTimeout(tokenCountTimeoutRef.current);
     }
-    
+
     if (!text.trim()) {
       setUpdatesTokenCount(0);
       return;
     }
-    
+
     tokenCountTimeoutRef.current = setTimeout(async () => {
       if (ctx.isChatStale()) return;
-      
+
       try {
         const response = await fetch('/api/count-tokens', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
         });
-        
+
         if (ctx.isChatStale()) return;
-        
+
         if (response.ok) {
           const data = await response.json();
           setUpdatesTokenCount(data.tokens);
@@ -2383,48 +1799,48 @@ function App() {
 
   const loadMoreMessages = useCallback(async () => {
     if (!user || !currentChat || isLoadingMoreMessages || !hasMoreMessages) return;
-    
+
     const ctx = createContextGuard();
-    
+
     // Prevent rapid-fire calls (minimum 500ms between loads)
     const now = Date.now();
     if (now - lastLoadTimeRef.current < 500) {
       return;
     }
     lastLoadTimeRef.current = now;
-    
+
     setIsLoadingMoreMessages(true);
-    
+
     try {
-      const url = ctx.project 
+      const url = ctx.project
         ? `/api/chat/${user.username}/${ctx.chat}?project=${ctx.project}&limit=30&offset=${messageOffset}`
         : `/api/chat/${user.username}/${ctx.chat}?limit=30&offset=${messageOffset}`;
-      
+
       const response = await fetch(url);
       if (ctx.isChatStale()) return;
-      
+
       if (!response.ok) {
         console.error('Failed to load more messages: server returned', response.status);
         setError('Could not load older messages');
         return;
       }
       const data = await response.json();
-      
+
       if (ctx.isChatStale()) return;
-      
+
       // Defensive check for malformed API response
       if (!data.messages || !Array.isArray(data.messages)) {
         console.error('Invalid API response: missing messages array', data);
         setError('Server returned invalid data');
         return;
       }
-      
+
       const olderMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
 
       const container = messagesContainerRef.current;
       const oldScrollHeight = container?.scrollHeight || 0;
       const oldScrollTop = container?.scrollTop || 0;
-      
+
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
       // Use backend's message count for offset (may include system message on oldest page)
@@ -2485,66 +1901,6 @@ function App() {
     }
   };
 
-  // Handle sync-triggered reload (when another client switches branches)
-  // Just reload messages, don't rebuild system prompt
-  useEffect(() => {
-    if (needsSyncReload && currentChat) {
-      setNeedsSyncReload(false);
-      openChat(currentChat, currentProject);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsSyncReload]);
-
-  // Textarea resize handlers
-  const handleResizeStart = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-    setResizeStartY(e.clientY);
-    setResizeStartHeight(textareaHeight);
-  };
-
-  const handleResizeMove = (e: MouseEvent) => {
-    if (!isResizing) return;
-    
-    // Calculate new height (inverted: dragging up increases height)
-    const deltaY = resizeStartY - e.clientY;
-    const newHeight = Math.min(400, Math.max(44, resizeStartHeight + deltaY));
-    setTextareaHeight(newHeight);
-  };
-
-  const handleResizeEnd = () => {
-    setIsResizing(false);
-  };
-
-  // Add/remove mouse event listeners for resize
-  useEffect(() => {
-    if (isResizing) {
-      document.addEventListener('mousemove', handleResizeMove);
-      document.addEventListener('mouseup', handleResizeEnd);
-      return () => {
-        document.removeEventListener('mousemove', handleResizeMove);
-        document.removeEventListener('mouseup', handleResizeEnd);
-      };
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isResizing, resizeStartY, resizeStartHeight]);
-
-  // Scroll handler for lazy loading more messages
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container || !currentChat) return;
-
-    const handleScroll = () => {
-      // Check if scrolled near the top (within 100px)
-      if (container.scrollTop < 100 && hasMoreMessages && !isLoadingMoreMessages) {
-        loadMoreMessages();
-      }
-    };
-
-    container.addEventListener('scroll', handleScroll);
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, [currentChat, hasMoreMessages, isLoadingMoreMessages, loadMoreMessages]);
-
   const startEditMessage = (index: number) => {
     if (index < 0 || index >= messages.length) return;
     setEditingMessageIndex(index);
@@ -2554,535 +1910,6 @@ function App() {
   const cancelEditMessage = () => {
     setEditingMessageIndex(null);
     setEditingMessageContent('');
-  };
-
-  const saveEditedMessage = async () => {
-    if (!user || !currentChat || editingMessageIndex === null || !editingMessageContent.trim()) return;
-
-    // Bounds check - messages array might have changed since edit started
-    if (editingMessageIndex < 0 || editingMessageIndex >= messages.length) {
-      setError('Message index out of bounds. Please cancel and try again.');
-      cancelEditMessage();
-      return;
-    }
-
-    const ctx = createContextGuard();
-
-    // Save original state for rollback
-    const originalMessages = [...messages];
-    const originalAllMessages = [...allMessages];
-    const originalLeafId = currentLeafId;
-
-    setIsLoading(prev => new Set(prev).add(ctx.chat!));
-
-    try {
-      // Get original message to preserve attached files and find parent
-      const originalMessage = messages[editingMessageIndex];
-      const parentId = originalMessage.parent_id || null;
-
-      // Optimistically show truncated messages + edited user msg + streaming placeholder
-      const truncatedMessages = messages.slice(0, editingMessageIndex);
-      const editedMessage: ChatMessage = {
-        role: 'user',
-        content: editingMessageContent.trim(),
-        attached_files: originalMessage.attached_files
-      };
-      const streamingAssistantMsg: ChatMessage = {
-        role: 'assistant',
-        content: '',
-        timestamp: new Date().toISOString()
-      };
-      setMessages([...truncatedMessages, editedMessage, streamingAssistantMsg]);
-
-      // Clear editing state
-      setEditingMessageIndex(null);
-      setEditingMessageContent('');
-
-      let accumulatedContent = '';
-      let accumulatedThinking = '';
-      let userMsgId: string | null = null;
-
-      const response = await fetch('/api/send-message-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: user.username,
-          chat_name: ctx.chat,
-          message: editedMessage.content,
-          project: ctx.project,
-          parent_id: parentId,
-          attached_files: originalMessage.attached_files || undefined,
-          model: selectedModel
-        })
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        setError(data.detail || 'Failed to regenerate response');
-        if (!ctx.isStale()) {
-          setMessages(originalMessages);
-          setAllMessages(originalAllMessages);
-          setCurrentLeafId(originalLeafId);
-        }
-        return;
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = parseSSEEvents(buffer);
-        const lastNewline = buffer.lastIndexOf('\n\n');
-        if (lastNewline !== -1) {
-          buffer = buffer.slice(lastNewline + 2);
-        }
-
-        for (const event of events) {
-          if (ctx.isStale()) break;
-
-          if (event.type === 'init') {
-            userMsgId = event.data.user_message_id;
-          } else if (event.type === 'docs_refreshed') {
-            setDocsRefreshed(true);
-            setTimeout(() => setDocsRefreshed(false), 4000);
-          } else if (event.type === 'pipeline_stage') {
-            setPipelineStage(prev => {
-              const next = new Map(prev);
-              next.set(ctx.chat!, { stage: event.data.stage, status: event.data.status });
-              return next;
-            });
-          } else if (event.type === 'content') {
-            accumulatedContent += event.data.delta;
-            setMessages(prev => {
-              const newMessages = [...prev];
-              const lastIdx = newMessages.length - 1;
-              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = { ...newMessages[lastIdx], content: accumulatedContent };
-              }
-              return newMessages;
-            });
-          } else if (event.type === 'thinking') {
-            accumulatedThinking += event.data.delta;
-            setMessages(prev => {
-              const newMessages = [...prev];
-              const lastIdx = newMessages.length - 1;
-              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = { ...newMessages[lastIdx], reasoning: accumulatedThinking };
-              }
-              return newMessages;
-            });
-          } else if (event.type === 'state_update') {
-            setPipelineState(event.data);
-          } else if (event.type === 'done') {
-            const data = event.data;
-
-            const newUserMessage: ChatMessage = {
-              id: data.user_message_id,
-              parent_id: parentId,
-              role: 'user',
-              content: editedMessage.content,
-              timestamp: new Date().toISOString(),
-              attached_files: originalMessage.attached_files
-            };
-
-            const assistantMessage: ChatMessage = {
-              id: data.assistant_message_id,
-              parent_id: data.user_message_id,
-              role: 'assistant',
-              content: data.assistant_message,
-              timestamp: new Date().toISOString(),
-              tokens: data.tokens,
-              cost: data.cost,
-              reasoning: data.reasoning,
-              model: data.model,
-              service_tier: data.service_tier
-            };
-
-            if (!ctx.isStale()) {
-              const finalMessages = [...truncatedMessages, newUserMessage, assistantMessage];
-              setMessages(finalMessages);
-              setAllMessages(prev => [...prev, newUserMessage, assistantMessage]);
-              setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
-              setStats(data.stats);
-              setContextStartIndex(data.context_start_index || 1);
-
-              const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
-              setTotalMessages(branchTotalMessages);
-              setHasMoreMessages(branchTotalMessages > finalMessages.length + 1);
-              setMessageOffset(finalMessages.length);
-
-              fetchUserStats();
-              fetchFreeTokens();
-            }
-          } else if (event.type === 'error') {
-            setError(event.data.detail || 'Failed to regenerate response');
-            if (!ctx.isStale()) {
-              setMessages(originalMessages);
-              setAllMessages(originalAllMessages);
-              setCurrentLeafId(originalLeafId);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        if (!ctx.isStale()) {
-          setMessages(originalMessages);
-          setAllMessages(originalAllMessages);
-          setCurrentLeafId(originalLeafId);
-        }
-      } else {
-        console.error('Error saving edited message:', err);
-        setError(`Could not save edited message: ${(err as Error).message || err}`);
-        if (!ctx.isStale()) {
-          setMessages(originalMessages);
-          setAllMessages(originalAllMessages);
-          setCurrentLeafId(originalLeafId);
-        }
-      }
-    } finally {
-      setIsLoading(prev => {
-        const next = new Set(prev);
-        next.delete(ctx.chat!);
-        return next;
-      });
-      setPipelineStage(prev => {
-        const next = new Map(prev);
-        next.delete(ctx.chat!);
-        return next;
-      });
-    }
-  };
-
-  // Chat file attachment handlers
-  const handleChatFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (!event.target.files) return;
-    
-    const files = Array.from(event.target.files);
-    const newStagedFiles: {filename: string, content: string}[] = [];
-    
-    for (const file of files) {
-      // Check extension
-      const ext = file.name.split('.').pop()?.toLowerCase();
-      if (!['txt', 'md', 'yaml', 'yml'].includes(ext || '')) {
-        setError(`${file.name}: Only .txt, .md, .yaml, and .yml files are allowed`);
-        continue;
-      }
-      
-      try {
-        const content = await file.text();
-        newStagedFiles.push({ filename: file.name, content });
-      } catch (err) {
-        setError(`Could not read ${file.name}`);
-      }
-    }
-    
-    if (newStagedFiles.length > 0) {
-      setStagedFiles(prev => [...prev, ...newStagedFiles]);
-    }
-    
-    // Clear input so same file can be selected again
-    if (chatFileInputRef.current) {
-      chatFileInputRef.current.value = '';
-    }
-    setShowAttachMenu(false);
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingFile(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingFile(false);
-  };
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingFile(false);
-    
-    const files = Array.from(e.dataTransfer.files);
-    const newStagedFiles: {filename: string, content: string}[] = [];
-    
-    for (const file of files) {
-      const ext = file.name.split('.').pop()?.toLowerCase();
-      if (!['txt', 'md', 'yaml', 'yml'].includes(ext || '')) {
-        setError(`${file.name}: Only .txt, .md, .yaml, and .yml files are allowed`);
-        continue;
-      }
-      
-      try {
-        const content = await file.text();
-        newStagedFiles.push({ filename: file.name, content });
-      } catch (err) {
-        setError(`Could not read ${file.name}`);
-      }
-    }
-    
-    if (newStagedFiles.length > 0) {
-      setStagedFiles(prev => [...prev, ...newStagedFiles]);
-    }
-  };
-
-  const removeStagedFile = (index: number) => {
-    setStagedFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  // Parse SSE events from a chunk of text
-  const parseSSEEvents = (text: string): Array<{type: string, data: any}> => {
-    const events: Array<{type: string, data: any}> = [];
-    const lines = text.split('\n');
-    let currentEvent: string | null = null;
-    let currentData: string[] = [];
-
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7);
-      } else if (line.startsWith('data: ')) {
-        currentData.push(line.slice(6));
-      } else if (line === '' && currentEvent && currentData.length > 0) {
-        try {
-          const dataStr = currentData.join('\n');
-          events.push({
-            type: currentEvent,
-            data: JSON.parse(dataStr)
-          });
-        } catch (e) {
-          console.error('Failed to parse SSE data:', e);
-        }
-        currentEvent = null;
-        currentData = [];
-      }
-    }
-
-    return events;
-  };
-
-  const sendMessage = async () => {
-    if (!newMessage.trim() || !user || !currentChat || isLoading.has(currentChat)) return;
-
-    const ctx = createContextGuard();
-    const messageText = newMessage;
-    const filesToSend = [...stagedFiles];
-
-    setNewMessage('');
-    setStagedFiles([]);
-    setIsLoading(prev => new Set(prev).add(ctx.chat!));
-
-    // Optimistically add user message (without ID yet - will be updated from response)
-    const optimisticUserMsg: ChatMessage = {
-      role: 'user',
-      content: messageText,
-      timestamp: new Date().toISOString(),
-      attached_files: filesToSend.length > 0 ? filesToSend : undefined
-    };
-    setMessages(prev => [...prev, optimisticUserMsg]);
-    setTotalMessages(prev => prev + 1);
-
-    // Add placeholder for streaming assistant message
-    const streamingAssistantMsg: ChatMessage = {
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString()
-    };
-    setMessages(prev => [...prev, streamingAssistantMsg]);
-    // Scroll to show the start of the new message, then stop auto-scrolling
-    // so user can read from the top as it streams
-    requestAnimationFrame(() => scrollToBottom());
-
-    // Track accumulated content for the streaming message
-    let accumulatedContent = '';
-    let accumulatedThinking = '';
-    let userMsgId: string | null = null;
-
-    // Create AbortController for cancellation
-    const abortController = new AbortController();
-
-    try {
-      const response = await fetch('/api/send-message-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: user.username,
-          chat_name: ctx.chat,
-          message: messageText,
-          project: ctx.project,
-          attached_files: filesToSend.length > 0 ? filesToSend : undefined,
-          model: selectedModel
-        }),
-        signal: abortController.signal
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        setError(data.detail || 'Failed to send message');
-        if (!ctx.isStale()) {
-          // Remove both optimistic messages
-          setMessages(prev => prev.slice(0, -2));
-          setTotalMessages(prev => prev - 1);
-          setNewMessage(messageText);
-          setStagedFiles(filesToSend);
-        }
-        return;
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete events from buffer
-        const events = parseSSEEvents(buffer);
-
-        // Keep any incomplete event data in the buffer
-        const lastNewline = buffer.lastIndexOf('\n\n');
-        if (lastNewline !== -1) {
-          buffer = buffer.slice(lastNewline + 2);
-        }
-
-        for (const event of events) {
-          if (ctx.isStale()) break;
-
-          if (event.type === 'init') {
-            userMsgId = event.data.user_message_id;
-          } else if (event.type === 'docs_refreshed') {
-            setDocsRefreshed(true);
-            setTimeout(() => setDocsRefreshed(false), 4000);
-          } else if (event.type === 'pipeline_stage') {
-            setPipelineStage(prev => {
-              const next = new Map(prev);
-              next.set(ctx.chat!, { stage: event.data.stage, status: event.data.status });
-              return next;
-            });
-          } else if (event.type === 'content') {
-            accumulatedContent += event.data.delta;
-            // Update the streaming message with new content
-            setMessages(prev => {
-              const newMessages = [...prev];
-              const lastIdx = newMessages.length - 1;
-              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = {
-                  ...newMessages[lastIdx],
-                  content: accumulatedContent
-                };
-              }
-              return newMessages;
-            });
-            // Don't auto-scroll during streaming - let user read from the top
-          } else if (event.type === 'thinking') {
-            accumulatedThinking += event.data.delta;
-            // Update reasoning in real-time
-            setMessages(prev => {
-              const newMessages = [...prev];
-              const lastIdx = newMessages.length - 1;
-              if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = {
-                  ...newMessages[lastIdx],
-                  reasoning: accumulatedThinking
-                };
-              }
-              return newMessages;
-            });
-          } else if (event.type === 'state_update') {
-            setPipelineState(event.data);
-          } else if (event.type === 'done') {
-            const data = event.data;
-
-            // Build complete messages with IDs from response
-            const userMsgWithId: ChatMessage = {
-              ...optimisticUserMsg,
-              id: data.user_message_id,
-              parent_id: currentLeafId
-            };
-
-            const assistantMessage: ChatMessage = {
-              id: data.assistant_message_id,
-              parent_id: data.user_message_id,
-              role: 'assistant',
-              content: data.assistant_message,
-              timestamp: new Date().toISOString(),
-              tokens: data.tokens,
-              cost: data.cost,
-              reasoning: data.reasoning,
-              model: data.model,
-              service_tier: data.service_tier
-            };
-
-            // Replace optimistic messages with complete ones
-            setMessages(prev => [...prev.slice(0, -2), userMsgWithId, assistantMessage]);
-
-            // Add to the full message tree
-            setAllMessages(prev => [...prev, userMsgWithId, assistantMessage]);
-
-            // Update current leaf
-            setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
-
-            setTotalMessages(prev => prev + 1);
-            setMessageOffset(prev => prev + 2);
-            setStats(data.stats);
-            setContextStartIndex(data.context_start_index || 1);
-            fetchUserStats();
-            fetchFreeTokens();
-            // Don't scroll on done - let user stay where they were reading
-          } else if (event.type === 'error') {
-            setError(event.data.detail || 'Failed to send message');
-            if (!ctx.isStale()) {
-              setMessages(prev => prev.slice(0, -2));
-              setTotalMessages(prev => prev - 1);
-              setNewMessage(messageText);
-              setStagedFiles(filesToSend);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        // Request was cancelled - clean up
-        if (!ctx.isStale()) {
-          setMessages(prev => prev.slice(0, -2));
-          setTotalMessages(prev => prev - 1);
-        }
-      } else {
-        setError(`Could not send message: ${(err as Error).message || err}`);
-        if (!ctx.isStale()) {
-          setMessages(prev => prev.slice(0, -2));
-          setTotalMessages(prev => prev - 1);
-          setNewMessage(messageText);
-          setStagedFiles(filesToSend);
-        }
-      }
-    } finally {
-      setIsLoading(prev => {
-        const next = new Set(prev);
-        next.delete(ctx.chat!);
-        return next;
-      });
-      setPipelineStage(prev => {
-        const next = new Map(prev);
-        next.delete(ctx.chat!);
-        return next;
-      });
-    }
   };
 
   const startRenameChat = (chatName: string) => {
@@ -3128,7 +1955,7 @@ function App() {
           setCurrentChat(newName);
           currentChatRef.current = newName;
         }
-        
+
         // Reload the appropriate chat list
         if (ctx.project) {
           const chatList = await refreshProjectChats(ctx.project, true);
@@ -3139,7 +1966,7 @@ function App() {
         } else {
           await loadChatList();
         }
-        
+
         cancelRename();
       } else {
         const data = await response.json();
@@ -3178,7 +2005,7 @@ function App() {
         } else {
           loadChatList();
         }
-        
+
         if (ctx.chat === chatName) {
           resetChatState();
         }
@@ -3233,9 +2060,9 @@ function App() {
           }
           return newCache;
         });
-        
+
         cancelRenameProject();
-        
+
         if (ctx.project === oldName) {
           enterProject(newName);
         } else {
@@ -3272,9 +2099,9 @@ function App() {
           delete newCache[projectName];
           return newCache;
         });
-        
+
         loadChatList();
-        
+
         if (ctx.project === projectName) {
           resetProjectState();
         }
@@ -3286,6 +2113,113 @@ function App() {
       setError('Could not delete project');
     }
   };
+
+  // ============================================================================
+  // HOOK CALLS
+  // ============================================================================
+
+  const messaging = useMessaging({
+    user, currentChat, currentProject,
+    currentChatRef, currentProjectRef,
+    messages, setMessages, allMessages, setAllMessages,
+    currentLeafId, setCurrentLeafId,
+    totalMessages, setTotalMessages, setHasMoreMessages, setMessageOffset,
+    selectedModel, contextStartIndex, setContextStartIndex,
+    stats, setStats,
+    isLoading, setIsLoading,
+    setPipelineStage, setPipelineState, setDocsRefreshed, setError,
+    editingMessageIndex, editingMessageContent,
+    setEditingMessageIndex, setEditingMessageContent,
+    fetchUserStats, fetchFreeTokens,
+  });
+
+  const sync = useSync({
+    user, currentChat, currentProject,
+    currentChatRef, currentProjectRef,
+    isLoadingRef,
+    setMessages, setAllMessages, setTotalMessages,
+    setCurrentLeafId, setStats, setContextStartIndex,
+    setPipelineStage, setPipelineState,
+    setSelectedModel, setAnthropicSync, setDocsRefreshed,
+    setChats, setProjectChatsCache, setRootChatsCache,
+    resetChatState,
+  });
+
+  // Close attach menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (messaging.showAttachMenu && attachMenuRef.current && !attachMenuRef.current.contains(event.target as Node)) {
+        messaging.setShowAttachMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [messaging.showAttachMenu]);
+
+  // Handle sync-triggered reload (when another client switches branches)
+  // Just reload messages, don't rebuild system prompt
+  useEffect(() => {
+    if (sync.needsSyncReload && currentChat) {
+      sync.setNeedsSyncReload(false);
+      openChat(currentChat, currentProject);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.needsSyncReload]);
+
+  // Textarea resize handlers
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setResizeStartY(e.clientY);
+    setResizeStartHeight(messaging.textareaHeight);
+  };
+
+  const handleResizeMove = (e: MouseEvent) => {
+    if (!isResizing) return;
+
+    // Calculate new height (inverted: dragging up increases height)
+    const deltaY = resizeStartY - e.clientY;
+    const newHeight = Math.min(400, Math.max(44, resizeStartHeight + deltaY));
+    messaging.setTextareaHeight(newHeight);
+  };
+
+  const handleResizeEnd = () => {
+    setIsResizing(false);
+  };
+
+  // Add/remove mouse event listeners for resize
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleResizeMove);
+      document.addEventListener('mouseup', handleResizeEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleResizeMove);
+        document.removeEventListener('mouseup', handleResizeEnd);
+      };
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isResizing, resizeStartY, resizeStartHeight]);
+
+  // Scroll handler for lazy loading more messages
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container || !currentChat) return;
+
+    const handleScroll = () => {
+      // Check if scrolled near the top (within 100px)
+      if (container.scrollTop < 100 && hasMoreMessages && !isLoadingMoreMessages) {
+        loadMoreMessages();
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [currentChat, hasMoreMessages, isLoadingMoreMessages, loadMoreMessages]);
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
 
   // Login screen
   if (!user) {
@@ -3354,395 +2288,58 @@ function App() {
     );
   }
 
+  // Notes click handler - fetches latest notes from backend before opening modal
+  const handleNotesClick = async () => {
+    try {
+      const url = currentProject
+        ? `/api/updates/${user?.username}/${currentChat}?project=${currentProject}`
+        : `/api/updates/${user?.username}/${currentChat}`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const data = await resp.json();
+        const latest = data.updates || '';
+        setUpdatesText(latest);
+        setDraftUpdatesText(latest);
+      } else {
+        setDraftUpdatesText(updatesText);
+      }
+    } catch {
+      setDraftUpdatesText(updatesText);
+    }
+    setShowUpdatesModal(true);
+  };
+
   // Main chat interface
   return (
     <div style={styles.container}>
       <div style={styles.mainLayout}>
-        {/* Mobile hamburger button */}
-        {isMobile && (
-          <button 
-            style={styles.hamburgerButton}
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-          >
-            ☰
-          </button>
-        )}
-        
-        {/* Mobile overlay when sidebar is open */}
-        {isMobile && sidebarOpen && (
-          <div
-            style={styles.sidebarOverlay}
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
+        {/* Sidebar (includes hamburger, overlay, collapsed strip) */}
+        <Sidebar
+          isMobile={isMobile} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}
+          user={user!} handleLogout={handleLogout}
+          showStatsTooltip={showStatsTooltip} setShowStatsTooltip={setShowStatsTooltip}
+          userStats={userStats} freeTokens={freeTokens}
+          projectsExpanded={projectsExpanded} setProjectsExpanded={setProjectsExpanded}
+          projects={projects} currentProject={currentProject}
+          editingProject={editingProject} editingProjectName={editingProjectName}
+          setEditingProjectName={setEditingProjectName}
+          startRenameProject={startRenameProject} saveRenameProject={saveRenameProject}
+          cancelRenameProject={cancelRenameProject} handleDeleteProject={handleDeleteProject}
+          enterProject={enterProject}
+          creatingProject={creatingProject} startCreateProject={startCreateProject}
+          newItemName={newItemName} setNewItemName={setNewItemName}
+          saveNewProject={saveNewProject} cancelCreate={cancelCreate}
+          setViewMode={setViewMode}
+          chatsExpanded={chatsExpanded} setChatsExpanded={setChatsExpanded}
+          chats={chats} currentChat={currentChat}
+          editingChat={editingChat} editingName={editingName} setEditingName={setEditingName}
+          startRenameChat={startRenameChat} saveRename={saveRename} cancelRename={cancelRename}
+          handleDeleteChat={handleDeleteChat} openChat={openChat}
+          creatingChat={creatingChat} startCreateChat={startCreateChat}
+          saveNewChat={saveNewChat} exitProject={exitProject}
+          stats={stats}
+        />
 
-        {/* Collapsed sidebar strip (desktop only) */}
-        {!isMobile && !sidebarOpen && (
-          <div style={styles.collapsedSidebarStrip}>
-            <button
-              onClick={() => setSidebarOpen(true)}
-              style={styles.expandSidebarButton}
-              title="Expand sidebar (Ctrl+\)"
-            >
-              »
-            </button>
-          </div>
-        )}
-
-        {/* Sidebar */}
-        <div style={{
-          ...styles.sidebar,
-          ...(isMobile ? styles.sidebarMobile : {}),
-          ...(isMobile && !sidebarOpen ? styles.sidebarHidden : {}),
-          ...(!isMobile && !sidebarOpen ? styles.sidebarCollapsed : {}),
-        }}>
-          <div style={styles.sidebarHeader}>
-            <div style={styles.sidebarHeaderRow}>
-              <h2 style={styles.sidebarTitle}>Chorus AI</h2>
-              {isMobile && (
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  style={styles.closeSidebarButton}
-                >
-                  ✕
-                </button>
-              )}
-              <button onClick={handleLogout} style={styles.logoutButton} title="Logout">↩</button>
-              {!isMobile && (
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  style={styles.collapseSidebarButton}
-                  title="Collapse sidebar (Ctrl+\)"
-                >
-                  «
-                </button>
-              )}
-            </div>
-            <p style={styles.muted}>
-              {user.username}
-              <span 
-                style={styles.statsIcon}
-                onMouseEnter={() => setShowStatsTooltip(true)}
-                onMouseLeave={() => setShowStatsTooltip(false)}
-              >
-                ⓘ
-              </span>
-              {showStatsTooltip && userStats && (
-                <div style={styles.statsTooltip}>
-                  {freeTokens && (
-                    <>
-                      <div style={styles.statsSection}>
-                        <div style={styles.statsSectionTitle}>Free Tokens (Resets {freeTokens.resets_at_eastern})</div>
-                        <div style={styles.statsRow}>{Math.max(0, freeTokens.remaining).toLocaleString()} / {freeTokens.total_free.toLocaleString()}</div>
-                      </div>
-                      <div style={styles.statsSeparator} />
-                    </>
-                  )}
-                  <div style={styles.statsSection}>
-                    <div style={styles.statsSectionTitle}>Lifetime</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.lifetime_gpt_prompts.toLocaleString()} GPT | {userStats.lifetime_sonnet_prompts.toLocaleString()} Sonnet | {userStats.lifetime_prompts.toLocaleString()} Total</div>
-                    <div style={styles.statsRow}>
-                      Tokens: I:{userStats.lifetime_input_tokens.toLocaleString()} C:{userStats.lifetime_cached_tokens.toLocaleString()} O:{userStats.lifetime_output_tokens.toLocaleString()} R:{userStats.lifetime_reasoning_tokens.toLocaleString()}
-                    </div>
-                    <div style={styles.statsRow}>Cache Miss: {userStats.lifetime_cache_miss_percent.toFixed(1)}%</div>
-                  </div>
-                  <div style={styles.statsSeparator} />
-                  <div style={styles.statsSection}>
-                    <div style={styles.statsSectionTitle}>Current Month</div>
-                    <div style={styles.statsRow}>Active Days: {userStats.monthly_active_days}</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.monthly_gpt_prompts.toLocaleString()} GPT | {userStats.monthly_sonnet_prompts.toLocaleString()} Sonnet | {userStats.monthly_prompts.toLocaleString()} Total</div>
-                    <div style={styles.statsRow}>
-                      Tokens: I:{userStats.monthly_input_tokens.toLocaleString()} C:{userStats.monthly_cached_tokens.toLocaleString()} O:{userStats.monthly_output_tokens.toLocaleString()} R:{userStats.monthly_reasoning_tokens.toLocaleString()}
-                    </div>
-                  </div>
-                  <div style={styles.statsSeparator} />
-                  <div style={styles.statsSection}>
-                    <div style={styles.statsSectionTitle}>Today</div>
-                    <div style={styles.statsRow}>Prompts: {userStats.today_gpt_prompts.toLocaleString()} GPT | {userStats.today_sonnet_prompts.toLocaleString()} Sonnet | {userStats.today_prompts.toLocaleString()} Total</div>
-                    <div style={styles.statsRow}>
-                      Tokens: I:{userStats.today_input_tokens.toLocaleString()} C:{userStats.today_cached_tokens.toLocaleString()} O:{userStats.today_output_tokens.toLocaleString()} R:{userStats.today_reasoning_tokens.toLocaleString()}
-                    </div>
-                  </div>
-                  <div style={styles.statsSeparator} />
-                  <div style={styles.statsSection}>
-                    <div style={styles.statsSectionTitle}>Daily Averages ({userStats.days_since_first} days)</div>
-                    <div style={styles.statsRow}>Prompts/day: {userStats.avg_gpt_prompts_per_day.toFixed(1)} GPT | {userStats.avg_sonnet_prompts_per_day.toFixed(1)} Sonnet | {userStats.avg_prompts_per_day.toFixed(1)} Total</div>
-                    <div style={styles.statsRow}>
-                      TPD: I:{userStats.avg_input_per_day.toFixed(0)} C:{userStats.avg_cached_per_day.toFixed(0)} O:{userStats.avg_output_per_day.toFixed(0)} R:{userStats.avg_reasoning_per_day.toFixed(0)}
-                    </div>
-                  </div>
-                  <div style={styles.statsSeparator} />
-                  <div style={styles.statsSection}>
-                    <div style={styles.statsSectionTitle}>Avg Context Growth</div>
-                    <div style={styles.statsRow}>GPT: {Math.round(userStats.avg_gpt_context_growth).toLocaleString()} tokens</div>
-                    <div style={styles.statsRow}>Sonnet: {Math.round(userStats.avg_sonnet_context_growth).toLocaleString()} tokens</div>
-                  </div>
-                </div>
-              )}
-            </p>
-          </div>
-
-          {/* Projects Section */}
-          <div style={styles.section}>
-            <div style={styles.sectionHeader}>
-              <span 
-                style={styles.sectionHeaderClickable}
-                onClick={() => setProjectsExpanded(!projectsExpanded)}
-              >
-                <span style={styles.expandIcon}>{projectsExpanded ? '▼' : '▶'}</span>
-                <span>Projects</span>
-              </span>
-              <button 
-                onClick={startCreateProject}
-                style={styles.addButton}
-                title="New project"
-              >
-                +
-              </button>
-            </div>
-            {projectsExpanded && (
-              <div style={styles.sectionList}>
-                {creatingProject && (
-                  <div style={styles.listItem}>
-                    <input
-                      type="text"
-                      value={newItemName}
-                      onChange={(e) => setNewItemName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveNewProject();
-                        if (e.key === 'Escape') cancelCreate();
-                      }}
-                      autoFocus
-                      placeholder="Project name"
-                      style={styles.editInput}
-                    />
-                    <div style={styles.chatActions}>
-                      <button onClick={saveNewProject} style={styles.iconButtonCheck} title="Save">✓</button>
-                      <button onClick={cancelCreate} style={styles.iconButtonX} title="Cancel">✕</button>
-                    </div>
-                  </div>
-                )}
-                {projects.slice(0, projects.length > 6 ? 5 : 6).map(project => (
-                  <div
-                    key={project}
-                    style={{
-                      ...styles.listItem,
-                      backgroundColor: project === currentProject ? '#3a3a5e' : 'transparent'
-                    }}
-                  >
-                    {editingProject === project ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingProjectName}
-                          onChange={(e) => setEditingProjectName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveRenameProject();
-                            if (e.key === 'Escape') cancelRenameProject();
-                          }}
-                          autoFocus
-                          style={styles.editInput}
-                        />
-                        <div style={styles.chatActions}>
-                          <button onClick={saveRenameProject} style={styles.iconButtonCheck} title="Save">✓</button>
-                          <button onClick={cancelRenameProject} style={styles.iconButtonX} title="Cancel">✕</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <span 
-                          onClick={() => enterProject(project)}
-                          style={styles.chatName}
-                        >
-                          📁 {project}
-                        </span>
-                        <div style={styles.chatActions}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRenameProject(project);
-                            }}
-                            style={styles.iconButton}
-                            title="Rename"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteProject(project);
-                            }}
-                            style={styles.iconButton}
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-                {projects.length > 6 && (
-                  <div 
-                    style={styles.seeMoreLink}
-                    onClick={() => setViewMode('projectList')}
-                  >
-                    See More... ({projects.length - 5} more)
-                  </div>
-                )}
-                {projects.length === 0 && !creatingProject && <p style={styles.mutedSmall}>No projects yet</p>}
-              </div>
-            )}
-          </div>
-
-          {/* Chats Section */}
-          <div style={styles.section}>
-            <div style={styles.sectionHeader}>
-              <span 
-                style={styles.sectionHeaderClickable}
-                onClick={() => setChatsExpanded(!chatsExpanded)}
-              >
-                <span style={styles.expandIcon}>{chatsExpanded ? '▼' : '▶'}</span>
-                <span>{currentProject ? `Chats in ${currentProject}` : 'Chats'}</span>
-              </span>
-              {currentProject && (
-                <button 
-                  onClick={(e) => { e.stopPropagation(); exitProject(); }}
-                  style={styles.exitProjectButton}
-                  title="Exit project"
-                >
-                  ✕
-                </button>
-              )}
-              <button 
-                onClick={startCreateChat}
-                style={styles.addButton}
-                title="New chat"
-              >
-                +
-              </button>
-            </div>
-            {chatsExpanded && (
-              <div style={styles.sectionList}>
-                {creatingChat && (
-                  <div style={styles.listItem}>
-                    <input
-                      type="text"
-                      value={newItemName}
-                      onChange={(e) => setNewItemName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveNewChat();
-                        if (e.key === 'Escape') cancelCreate();
-                      }}
-                      autoFocus
-                      placeholder="Chat name"
-                      style={styles.editInput}
-                    />
-                    <div style={styles.chatActions}>
-                      <button onClick={saveNewChat} style={styles.iconButtonCheck} title="Save">✓</button>
-                      <button onClick={cancelCreate} style={styles.iconButtonX} title="Cancel">✕</button>
-                    </div>
-                  </div>
-                )}
-                {chats.slice(0, chats.length > 6 ? 5 : 6).map(chat => (
-                  <div
-                    key={chat}
-                    style={{
-                      ...styles.listItem,
-                      backgroundColor: chat === currentChat ? '#3a3a5e' : 'transparent'
-                    }}
-                  >
-                    {editingChat === chat ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingName}
-                          onChange={(e) => setEditingName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveRename();
-                            if (e.key === 'Escape') cancelRename();
-                          }}
-                          autoFocus
-                          style={styles.editInput}
-                        />
-                        <div style={styles.chatActions}>
-                          <button onClick={saveRename} style={styles.iconButtonCheck} title="Save">✓</button>
-                          <button onClick={cancelRename} style={styles.iconButtonX} title="Cancel">✕</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <span 
-                          onClick={() => openChat(chat)}
-                          style={styles.chatName}
-                        >
-                          {chat}
-                        </span>
-                        <div style={styles.chatActions}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRenameChat(chat);
-                            }}
-                            style={styles.iconButton}
-                            title="Rename"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteChat(chat);
-                            }}
-                            style={styles.iconButton}
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-                {chats.length > 6 && (
-                  <div 
-                    style={styles.seeMoreLink}
-                    onClick={() => setViewMode('chatList')}
-                  >
-                    See More... ({chats.length - 5} more)
-                  </div>
-                )}
-                {chats.length === 0 && !creatingChat && <p style={styles.mutedSmall}>No chats yet</p>}
-              </div>
-            )}
-          </div>
-
-          {stats && (
-            <div style={styles.statsBox}>
-              <p style={styles.statsText}>Prompts: {stats.gpt_prompts ?? 0} GPT | {stats.sonnet_prompts ?? 0} Sonnet | {stats.total_prompts} Total</p>
-              {stats.first_prompt_date && (() => {
-                const firstDate = new Date(stats.first_prompt_date);
-                const today = new Date();
-                const daysSinceStart = Math.max(1, Math.floor((today.getTime() - firstDate.getTime()) / (1000 * 60 * 60 * 24)));
-                const totalTokens = (stats.total_input_tokens || 0) + (stats.total_cached_tokens || 0) + (stats.total_output_tokens || 0);
-                const avgTPD = totalTokens / daysSinceStart;
-                const cacheMisses = stats.total_input_tokens || 0;
-                const totalInputToAPI = cacheMisses + (stats.total_cached_tokens || 0);
-                const missPercent = totalInputToAPI > 0 ? (cacheMisses / totalInputToAPI) * 100 : 0;
-
-                return (
-                  <>
-                    <p style={styles.statsText}>Cache Misses: {cacheMisses.toLocaleString()} ({missPercent.toFixed(1)}%)</p>
-                    <p style={styles.statsText}>Avg TPD: {avgTPD.toFixed(0)}</p>
-                    <p style={styles.statsText}>Days: {daysSinceStart}</p>
-                    <p style={styles.statsText}>Avg Context: {Math.round(stats.avg_gpt_context_growth ?? 0).toLocaleString()} GPT | {Math.round(stats.avg_sonnet_context_growth ?? 0).toLocaleString()} Sonnet</p>
-                  </>
-                );
-              })()}
-            </div>
-          )}
-        </div>
-        
         {/* Main content area - shows chat OR list view */}
         <div style={{
           ...styles.chatArea,
@@ -3757,1872 +2354,237 @@ function App() {
           {viewMode === 'chat' ? (
             // Normal chat interface
             currentChat ? (
-              <>
-                <div style={{...styles.chatHeader, ...(isMobile ? styles.chatHeaderMobile : {})}}>
-                  <h2 style={styles.chatTitle}>{currentChat}</h2>
-                  {viewerCount > 1 && (
-                    <span style={styles.viewerCount} title={`${viewerCount} viewers connected`}>
-                      {viewerCount} viewing
-                    </span>
-                  )}
-                  {currentProject && availableGameSystems.length > 0 && (
-                    <select
-                      value={projectGameSystem || 'dnd5e'}
-                      onChange={(e) => handleProjectGameSystemChange(e.target.value)}
-                      style={styles.modelSelector}
-                      title="Select game system"
-                    >
-                      {availableGameSystems.map(gs => (
-                        <option key={gs.id} value={gs.id}>{gs.name}</option>
-                      ))}
-                    </select>
-                  )}
-                  {availableModels.length > 0 && (
-                    <select
-                      value={selectedModel}
-                      onChange={(e) => handleModelChange(e.target.value)}
-                      style={styles.modelSelector}
-                      title="Select AI model"
-                    >
-                      {availableModels.map(m => (
-                        <option key={m.id} value={m.id}>{m.name}</option>
-                      ))}
-                    </select>
-                  )}
-                  {selectedModel.startsWith('claude') && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                      <span style={{ fontSize: '0.75rem', color: '#999', userSelect: 'none' as const }}>Async</span>
-                      <div
-                        onClick={handleAnthropicSyncToggle}
-                        style={{
-                          width: 40, height: 20, borderRadius: 10,
-                          background: anthropicSync ? '#4ade80' : '#4a4a6e',
-                          cursor: 'pointer', position: 'relative' as const,
-                          transition: 'background 0.2s',
-                        }}
-                        title={anthropicSync ? 'Sync mode: prompt caching enabled (cost-efficient for live conversations)' : 'Async mode: prompt caching disabled (cost-efficient for infrequent turns)'}
-                      >
-                        <div style={{
-                          width: 16, height: 16, borderRadius: '50%',
-                          background: 'white', position: 'absolute' as const,
-                          top: 2, left: 2,
-                          transform: anthropicSync ? 'translateX(20px)' : 'translateX(0)',
-                          transition: 'transform 0.2s',
-                        }} />
-                      </div>
-                      <span style={{ fontSize: '0.75rem', color: '#999', userSelect: 'none' as const }}>Sync</span>
-                    </div>
-                  )}
-                  <button
-                    onClick={handleReloadChat}
-                    style={styles.reloadButton}
-                    title="Reload instructions and files"
-                  >
-                    🔄
-                  </button>
-                </div>
-
-                <div ref={messagesContainerRef} style={styles.messagesContainer}>
-                  {isLoadingMoreMessages && (
-                    <div style={styles.loadingMoreMessages}>Loading older messages...</div>
-                  )}
-                  {messages.map((msg, i) => {
-                    // Determine if this message is in context
-                    // Map display index to actual backend index
-                    // totalMessages includes system message, messages.length does not
-                    // So first displayed message is at backend index (totalMessages - messages.length)
-                    const firstDisplayedBackendIndex = totalMessages - messages.length;
-                    const actualBackendIndex = firstDisplayedBackendIndex + i;
-                    const isInContext = actualBackendIndex >= contextStartIndex;
-                    
-                    // Choose background color based on context and role
-                    let backgroundColor;
-                    if (!isInContext) {
-                      // Out of context: grayed out versions
-                      backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
-                    } else {
-                      // In context: normal colors
-                      backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
-                    }
-                    
-                    return (
-                      <div
-                        key={i}
-                        className="message"
-                        style={{
-                          ...styles.message,
-                          backgroundColor
-                        }}
-                      >
-                        <div style={styles.messageRole}>
-                          {msg.role === 'user' ? 'You' : 'Assistant'}
-                          {msg.role === 'user' && editingMessageIndex !== i && (
-                            <button
-                              onClick={() => startEditMessage(i)}
-                              style={styles.editMessageButton}
-                              title="Edit message"
-                              className="editMessageButton"
-                            >
-                              ✏️
-                            </button>
-                          )}
-                        </div>
-                        
-                        {editingMessageIndex === i ? (
-                          <>
-                            {/* Show attached files in edit mode (read-only) */}
-                            {msg.attached_files && msg.attached_files.length > 0 && (
-                              <div style={styles.editModeAttachedFiles}>
-                                <span style={styles.editModeFilesLabel}>📎 Attached files will be preserved:</span>
-                                {msg.attached_files.map((file, idx) => (
-                                  <span key={idx} style={styles.editModeFileName}>{file.filename}</span>
-                                ))}
-                              </div>
-                            )}
-                            <textarea
-                              value={editingMessageContent}
-                              onChange={(e) => setEditingMessageContent(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault();
-                                  saveEditedMessage();
-                                }
-                                if (e.key === 'Escape') {
-                                  e.preventDefault();
-                                  cancelEditMessage();
-                                }
-                              }}
-                              style={styles.editMessageTextarea}
-                              autoFocus
-                            />
-                            <div style={styles.editMessageActions}>
-                              <button onClick={saveEditedMessage} style={styles.iconButtonCheck} title="Save & Regenerate (Enter)">✓</button>
-                              <button onClick={cancelEditMessage} style={styles.iconButtonX} title="Cancel (Esc)">✕</button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            {/* Collapsible reasoning section for assistant messages */}
-                            {msg.role === 'assistant' && msg.reasoning && (
-                              <div 
-                                className="reasoningContainer"
-                                style={styles.reasoningContainer}
-                                onClick={() => {
-                                  setExpandedReasoning(prev => {
-                                    const next = new Set(prev);
-                                    if (next.has(i)) {
-                                      next.delete(i);
-                                    } else {
-                                      next.add(i);
-                                    }
-                                    return next;
-                                  });
-                                }}
-                              >
-                                <div style={styles.reasoningHeader}>
-                                  <span>{expandedReasoning.has(i) ? '▲' : '▼'}</span>
-                                  <span style={styles.reasoningLabel}>Reasoning...</span>
-                                </div>
-                                {expandedReasoning.has(i) && (
-                                  <div style={styles.reasoningContent} className="messageContent">
-                                    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.reasoning || '')}</ReactMarkdown>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                            {/* Attached files display */}
-                            {msg.role === 'user' && msg.attached_files && msg.attached_files.length > 0 && (
-                              <div style={styles.attachedFilesDisplay}>
-                                {msg.attached_files.length === 1 ? (
-                                  <span style={styles.attachedFilesSingle}>📎 {msg.attached_files[0].filename}</span>
-                                ) : (
-                                  <details style={styles.attachedFilesDetails}>
-                                    <summary style={styles.attachedFilesSummary}>
-                                      📎 {msg.attached_files.length} files attached
-                                    </summary>
-                                    <div style={styles.attachedFilesExpanded}>
-                                      {msg.attached_files.map((file, idx) => (
-                                        <div key={idx} style={styles.attachedFileItem}>📄 {file.filename}</div>
-                                      ))}
-                                    </div>
-                                  </details>
-                                )}
-                              </div>
-                            )}
-                            <div style={styles.messageContent} className="messageContent">
-                              <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
-                            </div>
-                            <div style={styles.messageFooter}>
-                              {msg.tokens && (
-                                <span style={styles.messageTokens}>
-                                  {msg.tokens}
-                                  {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
-                                  {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model}`}
-                                </span>
-                              )}
-                              {/* Branch navigation - show only for user messages with siblings */}
-                              {msg.role === 'user' && (() => {
-                                // Debug: log message info
-                                console.log('User message:', { id: msg.id, parent_id: msg.parent_id, timestamp: msg.timestamp, allMessagesLength: allMessages.length });
-                                if (!msg.id) {
-                                  console.log('No msg.id - skipping branch nav');
-                                  return null;
-                                }
-                                const siblings = getSiblings(allMessages, msg.id);
-                                console.log('Siblings for', msg.id, ':', siblings.map(s => ({ id: s.id, parent_id: s.parent_id })));
-                                if (siblings.length <= 1) return null;
-                                const currentIndex = siblings.findIndex(s => s.id === msg.id);
-                                const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
-                                const nextSibling = currentIndex < siblings.length - 1 ? siblings[currentIndex + 1] : null;
-                                return (
-                                  <span style={styles.branchNav}>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); if (prevSibling?.id) switchBranch(prevSibling.id); }}
-                                      disabled={!prevSibling}
-                                      style={{
-                                        ...styles.branchNavButton,
-                                        opacity: prevSibling ? 1 : 0.3,
-                                        cursor: prevSibling ? 'pointer' : 'default'
-                                      }}
-                                      title="Previous edit"
-                                    >
-                                      ◀
-                                    </button>
-                                    <span style={styles.branchNavText}>{currentIndex + 1}/{siblings.length}</span>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); if (nextSibling?.id) switchBranch(nextSibling.id); }}
-                                      disabled={!nextSibling}
-                                      style={{
-                                        ...styles.branchNavButton,
-                                        opacity: nextSibling ? 1 : 0.3,
-                                        cursor: nextSibling ? 'pointer' : 'default'
-                                      }}
-                                      title="Next edit"
-                                    >
-                                      ▶
-                                    </button>
-                                  </span>
-                                );
-                              })()}
-                              {(() => {
-                                // Debug: always log timestamp status
-                                if (!msg.timestamp) console.log('No timestamp for message:', msg.role, msg.id?.slice(0, 8) || 'no-id');
-                                return msg.timestamp ? (
-                                  <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
-                                ) : null;
-                              })()}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {(isLoading.has(currentChat) || pipelineStage.has(currentChat)) &&
-                   !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && messages[messages.length - 1].content) && (
-                    <div style={styles.message}>
-                      <div style={styles.messageRole}>Assistant</div>
-                      <div style={styles.messageContent}>
-                        {(() => {
-                          const ps = pipelineStage.get(currentChat);
-                          if (!ps) return 'Thinking...';
-                          const stages = ['events', 'mechanics', 'narration'];
-                          const currentIdx = stages.indexOf(ps.stage);
-                          return (
-                            <span>
-                              {stages.map((s, i) => {
-                                const label = s.charAt(0).toUpperCase() + s.slice(1);
-                                let icon: string;
-                                let color: string;
-                                if (i < currentIdx || (i === currentIdx && ps.status === 'complete')) {
-                                  icon = '✓';
-                                  color = '#4caf50';
-                                } else if (i === currentIdx) {
-                                  icon = '●';
-                                  color = '#e0e0e0';
-                                } else {
-                                  icon = '○';
-                                  color = '#666';
-                                }
-                                return (
-                                  <span key={s} style={{ color, marginRight: i < stages.length - 1 ? '12px' : '0' }}>
-                                    {icon} {label}
-                                  </span>
-                                );
-                              })}
-                            </span>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                  )}
-                  <div ref={messagesEndRef} />
-                </div>
-
-                <div className="inputArea" style={styles.inputArea}>
-                  {/* Staged files bar */}
-                  {stagedFiles.length > 0 && (
-                    <div style={styles.stagedFilesBar}>
-                      {stagedFiles.map((file, idx) => (
-                        <div key={idx} style={styles.stagedFileChip}>
-                          <span style={styles.stagedFileName}>📄 {file.filename}</span>
-                          <button
-                            onClick={() => removeStagedFile(idx)}
-                            style={styles.stagedFileRemove}
-                            title="Remove file"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  
-                  <div style={styles.inputRow}>
-                    {/* Attach button with dropdown */}
-                    <div ref={attachMenuRef} style={styles.attachButtonContainer}>
-                      <button
-                        onClick={() => setShowAttachMenu(!showAttachMenu)}
-                        style={styles.attachButton}
-                        title="Attach files"
-                      >
-                        +
-                      </button>
-                      {showAttachMenu && (
-                        <div style={styles.attachMenu}>
-                          <button
-                            onClick={() => chatFileInputRef.current?.click()}
-                            style={styles.attachMenuItem}
-                          >
-                            📄 Add a file
-                          </button>
-                        </div>
-                      )}
-                      <input
-                        type="file"
-                        ref={chatFileInputRef}
-                        onChange={handleChatFileSelect}
-                        multiple
-                        accept=".txt,.md,.yaml,.yml"
-                        style={{ display: 'none' }}
-                      />
-                    </div>
-                    
-                    <div 
-                      style={{ 
-                        position: 'relative', 
-                        flex: 1,
-                        ...(isDraggingFile ? { outline: '2px dashed #4a4ae8', borderRadius: '8px' } : {})
-                      }}
-                      onDragOver={handleDragOver}
-                      onDragLeave={handleDragLeave}
-                      onDrop={handleDrop}
-                    >
-                      <div
-                        className="resizeHandle"
-                        style={styles.resizeHandle}
-                        onMouseDown={handleResizeStart}
-                        title="Drag to resize"
-                      >
-                        ⋮⋮
-                      </div>
-                      <textarea
-                        placeholder={isDraggingFile ? "Drop files here..." : "Type a message..."}
-                        value={newMessage}
-                        onChange={(e) => setNewMessage(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            sendMessage();
-                          }
-                        }}
-                        style={{
-                          ...styles.messageInput,
-                          height: isMobile ? '60px' : `${textareaHeight}px`
-                        }}
-                      />
-                    </div>
-                    
-                    <div style={styles.buttonColumn}>
-                      <button
-                        onClick={async () => {
-                          // Fetch latest notes from backend before opening modal
-                          try {
-                            const url = currentProject
-                              ? `/api/updates/${user?.username}/${currentChat}?project=${currentProject}`
-                              : `/api/updates/${user?.username}/${currentChat}`;
-                            const resp = await fetch(url);
-                            if (resp.ok) {
-                              const data = await resp.json();
-                              const latest = data.updates || '';
-                              setUpdatesText(latest);
-                              setDraftUpdatesText(latest);
-                            } else {
-                              setDraftUpdatesText(updatesText);
-                            }
-                          } catch {
-                            setDraftUpdatesText(updatesText);
-                          }
-                          setShowUpdatesModal(true);
-                        }}
-                        style={{
-                          ...styles.updateButton,
-                          backgroundColor: updatesText.trim() ? '#2d6a4f' : '#2a2a4e'
-                        }}
-                        title={updatesText.trim() ? 'Notes (click to edit)' : 'Add notes'}
-                      >
-                        Notes
-                      </button>
-                      <button
-                        onClick={sendMessage}
-                        disabled={isLoading.has(currentChat)}
-                        style={{
-                          ...styles.sendButton,
-                          opacity: isLoading.has(currentChat) ? 0.5 : 1
-                        }}
-                      >
-                        Send
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </>
+              <ChatView
+                isMobile={isMobile}
+                currentChat={currentChat}
+                currentProject={currentProject}
+                viewerCount={sync.viewerCount}
+                projectGameSystem={projectGameSystem}
+                availableGameSystems={availableGameSystems}
+                handleProjectGameSystemChange={handleProjectGameSystemChange}
+                availableModels={availableModels}
+                selectedModel={selectedModel}
+                handleModelChange={handleModelChange}
+                anthropicSync={anthropicSync}
+                handleAnthropicSyncToggle={handleAnthropicSyncToggle}
+                handleReloadChat={handleReloadChat}
+                messagesContainerRef={messagesContainerRef}
+                messagesEndRef={messagesEndRef}
+                isLoadingMoreMessages={isLoadingMoreMessages}
+                messages={messages}
+                allMessages={allMessages}
+                totalMessages={totalMessages}
+                contextStartIndex={contextStartIndex}
+                editingMessageIndex={editingMessageIndex}
+                editingMessageContent={editingMessageContent}
+                setEditingMessageContent={setEditingMessageContent}
+                startEditMessage={startEditMessage}
+                saveEditedMessage={messaging.saveEditedMessage}
+                cancelEditMessage={cancelEditMessage}
+                expandedReasoning={expandedReasoning}
+                setExpandedReasoning={setExpandedReasoning}
+                getSiblings={getSiblings}
+                switchBranch={switchBranch}
+                isLoading={isLoading}
+                pipelineStage={pipelineStage}
+                stagedFiles={messaging.stagedFiles}
+                removeStagedFile={messaging.removeStagedFile}
+                showAttachMenu={messaging.showAttachMenu}
+                setShowAttachMenu={messaging.setShowAttachMenu}
+                attachMenuRef={attachMenuRef}
+                chatFileInputRef={messaging.chatFileInputRef}
+                handleChatFileSelect={messaging.handleChatFileSelect}
+                isDraggingFile={messaging.isDraggingFile}
+                handleDragOver={messaging.handleDragOver}
+                handleDragLeave={messaging.handleDragLeave}
+                handleDrop={messaging.handleDrop}
+                handleResizeStart={handleResizeStart}
+                newMessage={messaging.newMessage}
+                setNewMessage={messaging.setNewMessage}
+                textareaHeight={messaging.textareaHeight}
+                sendMessage={messaging.sendMessage}
+                updatesText={updatesText}
+                onNotesClick={handleNotesClick}
+              />
             ) : currentProject ? (
-              // Project landing page
-              <div style={styles.projectLanding}>
-                <div style={styles.projectLandingHeader}>
-                  <h2 style={styles.projectLandingTitle}>📁 {currentProject}</h2>
-                </div>
-                
-                <div style={styles.projectLandingContent}>
-                  {/* Center column: Chats */}
-                  <div style={styles.projectChatsColumn}>
-                    <div style={styles.projectSectionHeader}>
-                      <h3 style={styles.projectSectionTitle}>Chats</h3>
-                      <button onClick={startCreateChat} style={styles.projectAddButton}>+ New Chat</button>
-                    </div>
-                    
-                    <input
-                      type="text"
-                      placeholder="Search chats..."
-                      value={chatSearchQuery}
-                      onChange={(e) => setChatSearchQuery(e.target.value)}
-                      style={styles.chatSearchInput}
-                    />
-                    
-                    <div style={styles.projectChatsList}>
-                      {(() => {
-                        // Filter and group chats by date
-                        const filtered = projectChatsDetailed.filter(chat =>
-                          chat.name.toLowerCase().includes(chatSearchQuery.toLowerCase())
-                        );
-                        
-                        if (filtered.length === 0) {
-                          return <p style={styles.mutedSmall}>No chats found</p>;
-                        }
-                        
-                        // Group by date
-                        const now = new Date();
-                        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                        const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-                        const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-                        
-                        const groups: { [key: string]: ChatCardInfo[] } = {};
-                        
-                        filtered.forEach(chat => {
-                          const chatDate = chat.lastActive ? new Date(chat.lastActive) : new Date(0);
-                          const chatDay = new Date(chatDate.getFullYear(), chatDate.getMonth(), chatDate.getDate());
-                          
-                          let groupKey: string;
-                          if (chatDay.getTime() === today.getTime()) {
-                            groupKey = 'Today';
-                          } else if (chatDay.getTime() === yesterday.getTime()) {
-                            groupKey = 'Yesterday';
-                          } else if (chatDay.getTime() > weekAgo.getTime()) {
-                            groupKey = chatDay.toLocaleDateString('en-US', { weekday: 'long' });
-                          } else {
-                            groupKey = chatDay.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-                          }
-                          
-                          if (!groups[groupKey]) {
-                            groups[groupKey] = [];
-                          }
-                          groups[groupKey].push(chat);
-                        });
-                        
-                        // Sort group keys by date (most recent first)
-                        // Build dynamic sort order based on today's day
-                        const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                        const todayDayIndex = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
-                        // Create order: today's weekday going backwards
-                        // If today is Wednesday (3), order should be: Wednesday, Tuesday, Monday, Sunday, Saturday, Friday, Thursday
-                        const dynamicWeekdays: string[] = [];
-                        for (let i = 0; i < 7; i++) {
-                          const dayIndex = (todayDayIndex - i + 7) % 7;
-                          dynamicWeekdays.push(weekdays[dayIndex]);
-                        }
-                        const sortOrder = ['Today', 'Yesterday', ...dynamicWeekdays.slice(2)]; // Skip first two (Today/Yesterday cover those)
-                        
-                        const sortedKeys = Object.keys(groups).sort((a, b) => {
-                          const aIdx = sortOrder.indexOf(a);
-                          const bIdx = sortOrder.indexOf(b);
-                          if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
-                          if (aIdx !== -1) return -1;
-                          if (bIdx !== -1) return 1;
-                          // For month groups, sort by date descending
-                          return b.localeCompare(a);
-                        });
-                        
-                        return sortedKeys.map(groupKey => (
-                          <div key={groupKey}>
-                            <div style={styles.chatGroupHeader}>{groupKey}</div>
-                            {groups[groupKey].map(chat => (
-                              <div
-                                key={chat.name}
-                                style={styles.chatCard}
-                                onClick={() => openChat(chat.name)}
-                              >
-                                <div style={styles.chatCardName}>{chat.name}</div>
-                                <div style={styles.chatCardPreview}>
-                                  {chat.lastMessage?.substring(0, 80) || 'No messages yet'}
-                                  {chat.lastMessage && chat.lastMessage.length > 80 ? '...' : ''}
-                                </div>
-                                <div style={styles.chatCardMeta}>
-                                  <span>{chat.lastActive ? formatTimestamp(chat.lastActive).split('  ')[1] || 'Unknown' : 'Never'}</span>
-                                  <span>{chat.messageCount} msgs</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ));
-                      })()}
-                    </div>
-                  </div>
-                  
-                  {/* Right column: Model + Instructions + Files */}
-                  <div style={styles.projectConfigColumn}>
-                    {/* Default Model section */}
-                    <div style={styles.projectSection}>
-                      <div style={styles.projectSectionHeader}>
-                        <h3 style={styles.projectSectionTitle}>Default Model</h3>
-                      </div>
-                      <select
-                        value={projectModel || 'gpt-5.2'}
-                        onChange={(e) => handleProjectModelChange(e.target.value)}
-                        style={styles.projectModelSelector}
-                      >
-                        {availableModels.map(model => (
-                          <option key={model.id} value={model.id}>{model.name}</option>
-                        ))}
-                      </select>
-                      <p style={styles.projectModelHelperText}>New chats will use this model by default</p>
-                    </div>
-
-                    {/* Game System section */}
-                    <div style={styles.projectSection}>
-                      <div style={styles.projectSectionHeader}>
-                        <h3 style={styles.projectSectionTitle}>Game System</h3>
-                      </div>
-                      <select
-                        value={projectGameSystem || 'dnd5e'}
-                        onChange={(e) => handleProjectGameSystemChange(e.target.value)}
-                        style={styles.projectModelSelector}
-                      >
-                        {availableGameSystems.map(gs => (
-                          <option key={gs.id} value={gs.id}>{gs.name}</option>
-                        ))}
-                      </select>
-                      <p style={styles.projectModelHelperText}>Determines dice mechanics, state tracking, and narrative style</p>
-                    </div>
-
-                    {/* Instructions section */}
-                    <div style={styles.projectSection}>
-                      <div style={styles.projectSectionHeader}>
-                        <h3 style={styles.projectSectionTitle}>Instructions</h3>
-                        {isPipelineProject ? (
-                          <span style={styles.tokenBadge}>
-                            {Object.values(agentInstructions).reduce((sum, a) => sum + (a.tokens || projectInstructionsTokens), 0).toLocaleString()} tokens (agents)
-                          </span>
-                        ) : (
-                          <span style={styles.tokenBadge}>{projectInstructionsTokens.toLocaleString()} tokens</span>
-                        )}
-                      </div>
-                      {isPipelineProject ? (
-                        <>
-                          <div style={styles.instructionsPreview}>
-                            {['events', 'mechanics', 'narration'].map(agent => {
-                              const ai = agentInstructions[agent];
-                              const hasContent = ai && ai.instructions && ai.instructions.trim();
-                              return (
-                                <span key={agent} style={{ marginRight: 8, color: hasContent ? '#e0e0e0' : '#666' }}>
-                                  {agent.charAt(0).toUpperCase() + agent.slice(1)}: {hasContent ? `${ai.tokens} tok` : 'shared'}
-                                </span>
-                              );
-                            })}
-                          </div>
-                          <button
-                            onClick={() => {
-                              const editing: Record<string, string> = {};
-                              for (const agent of ['events', 'mechanics', 'narration']) {
-                                editing[agent] = agentInstructions[agent]?.instructions || '';
-                              }
-                              setEditingAgentInstructions(editing);
-                              setActiveInstructionsTab('events');
-                              setShowInstructionsModal(true);
-                            }}
-                            style={styles.editInstructionsButton}
-                          >
-                            Edit Agent Instructions
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <div style={styles.instructionsPreview}>
-                            {projectInstructions.substring(0, 200)}
-                            {projectInstructions.length > 200 ? '...' : ''}
-                          </div>
-                          <button
-                            onClick={() => {
-                              setEditingInstructions(projectInstructions);
-                              setShowInstructionsModal(true);
-                            }}
-                            style={styles.editInstructionsButton}
-                          >
-                            Edit Instructions
-                          </button>
-                        </>
-                      )}
-                    </div>
-                    
-                    {/* Files section */}
-                    <div style={styles.projectSection}>
-                      <div style={styles.projectSectionHeader}>
-                        <h3 style={styles.projectSectionTitle}>Project Files</h3>
-                        <span style={styles.tokenBadge}>{projectFilesTotalTokens.toLocaleString()} tokens</span>
-                      </div>
-                      
-                      <div style={styles.filesList}>
-                        {projectFiles.length === 0 ? (
-                          <p style={styles.mutedSmall}>No files uploaded</p>
-                        ) : (
-                          projectFiles.map(file => (
-                            <div key={file.filename} style={{
-                              ...styles.fileItem,
-                              opacity: file.staged ? 1 : 0.5
-                            }}>
-                              <input
-                                type="checkbox"
-                                checked={file.staged}
-                                onChange={() => handleToggleFileStaged(file.filename, file.staged)}
-                                style={styles.fileCheckbox}
-                                title={file.staged ? "Uncheck to exclude from chats" : "Check to include in chats"}
-                              />
-                              <span
-                                style={{
-                                  ...styles.fileName,
-                                  textDecoration: file.staged ? 'none' : 'line-through'
-                                }}
-                                onMouseEnter={(e) => {
-                                  const rect = e.currentTarget.getBoundingClientRect();
-                                  setFilenameTooltipPos({x: rect.left, y: rect.bottom + 4});
-                                  filenameTooltipTimeoutRef.current = setTimeout(() => {
-                                    setHoveredFilename(file.filename);
-                                  }, 200);
-                                }}
-                                onMouseLeave={() => {
-                                  if (filenameTooltipTimeoutRef.current) {
-                                    clearTimeout(filenameTooltipTimeoutRef.current);
-                                    filenameTooltipTimeoutRef.current = null;
-                                  }
-                                  setHoveredFilename(null);
-                                }}
-                              >{file.filename}</span>
-                              {hoveredFilename === file.filename && (
-                                <div style={{...styles.filenameTooltip, left: filenameTooltipPos.x, top: filenameTooltipPos.y}}>
-                                  {file.filename}
-                                </div>
-                              )}
-                              <span style={styles.fileTokens}>{file.tokens.toLocaleString()}</span>
-                              {isPipelineProject && file.staged && (
-                                <span style={styles.agentBadges}>
-                                  {[{key: 'events', label: 'E'}, {key: 'mechanics', label: 'M'}, {key: 'narration', label: 'N'}].map(({key, label}) => {
-                                    const active = (file.agents || ['events', 'mechanics', 'narration']).includes(key);
-                                    return (
-                                      <span
-                                        key={key}
-                                        onClick={() => handleToggleFileAgent(file.filename, key)}
-                                        style={active ? styles.agentBadgeActive : styles.agentBadgeInactive}
-                                        title={`${active ? 'Remove from' : 'Add to'} ${key} agent`}
-                                      >
-                                        {label}
-                                      </span>
-                                    );
-                                  })}
-                                </span>
-                              )}
-                              <button
-                                onClick={() => handleDeleteProjectFile(file.filename)}
-                                style={styles.fileDeleteButton}
-                                title="Delete file"
-                              >
-                                🗑️
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                      
-                      <input
-                        type="file"
-                        ref={fileInputRef}
-                        onChange={handleFileUpload}
-                        multiple
-                        accept=".txt,.md,.yaml,.yml"
-                        style={{ display: 'none' }}
-                      />
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={filesUploading}
-                        style={styles.uploadButton}
-                      >
-                        {filesUploading ? 'Uploading...' : '+ Add Files'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Instructions edit modal */}
-                {showInstructionsModal && (
-                  <div style={styles.modalOverlay} onClick={() => setShowInstructionsModal(false)}>
-                    <div style={styles.modal} onClick={e => e.stopPropagation()}>
-                      {isPipelineProject ? (
-                        <>
-                          <h3 style={styles.modalTitle}>Edit Agent Instructions</h3>
-                          <p style={styles.modalDescription}>
-                            Per-agent instructions. Leave empty to use the shared instructions.
-                          </p>
-                          <div style={styles.agentTabBar}>
-                            {['events', 'mechanics', 'narration'].map(agent => (
-                              <button
-                                key={agent}
-                                onClick={() => setActiveInstructionsTab(agent)}
-                                style={activeInstructionsTab === agent ? {...styles.agentTab, ...styles.agentTabActive} : styles.agentTab}
-                              >
-                                {agent.charAt(0).toUpperCase() + agent.slice(1)}
-                                <span style={styles.agentTabTokens}>
-                                  ~{editingAgentInstructions[agent] ? Math.ceil(editingAgentInstructions[agent].length / 4) : 0}
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                          <textarea
-                            value={editingAgentInstructions[activeInstructionsTab] || ''}
-                            onChange={(e) => setEditingAgentInstructions(prev => ({
-                              ...prev,
-                              [activeInstructionsTab]: e.target.value
-                            }))}
-                            placeholder="Leave empty to use shared instructions"
-                            style={styles.updatesTextarea}
-                            rows={12}
-                          />
-                          <div style={styles.modalFooter}>
-                            <span style={styles.tokenCount}>
-                              Total: ~{Object.values(editingAgentInstructions).reduce((sum, t) => sum + (t ? Math.ceil(t.length / 4) : 0), 0)} tokens (estimate)
-                            </span>
-                            <div style={styles.modalActions}>
-                              <button onClick={() => setShowInstructionsModal(false)} style={styles.modalCancelButton}>
-                                Cancel
-                              </button>
-                              <button
-                                onClick={handleSaveAllAgentInstructions}
-                                disabled={instructionsSaving}
-                                style={styles.modalSaveButton}
-                              >
-                                {instructionsSaving ? 'Saving...' : 'Save All'}
-                              </button>
-                            </div>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <h3 style={styles.modalTitle}>Edit Instructions</h3>
-                          <p style={styles.modalDescription}>
-                            These instructions are added to the system prompt for all chats in this project.
-                          </p>
-                          <textarea
-                            value={editingInstructions}
-                            onChange={(e) => setEditingInstructions(e.target.value)}
-                            style={styles.updatesTextarea}
-                            rows={12}
-                          />
-                          <div style={styles.modalFooter}>
-                            <span style={styles.tokenCount}>
-                              ~{editingInstructions ? Math.ceil(editingInstructions.length / 4) : 0} tokens (estimate)
-                            </span>
-                            <div style={styles.modalActions}>
-                              <button onClick={() => setShowInstructionsModal(false)} style={styles.modalCancelButton}>
-                                Cancel
-                              </button>
-                              <button
-                                onClick={updateProjectInstructions}
-                                disabled={instructionsSaving}
-                                style={styles.modalSaveButton}
-                              >
-                                {instructionsSaving ? 'Saving...' : 'Save'}
-                              </button>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-              </div>
+              <ProjectLanding
+                viewMode={viewMode} setViewMode={setViewMode}
+                currentProject={currentProject} currentChat={currentChat}
+                openChat={openChat} startCreateChat={startCreateChat} startCreateProject={startCreateProject}
+                chatSearchQuery={chatSearchQuery} setChatSearchQuery={setChatSearchQuery}
+                projectChatsDetailed={projectChatsDetailed}
+                availableModels={availableModels}
+                projectModel={projectModel}
+                handleProjectModelChange={handleProjectModelChange}
+                isPipelineProject={isPipelineProject}
+                projectGameSystem={projectGameSystem}
+                availableGameSystems={availableGameSystems}
+                handleProjectGameSystemChange={handleProjectGameSystemChange}
+                agentInstructions={agentInstructions}
+                projectInstructions={projectInstructions}
+                projectInstructionsTokens={projectInstructionsTokens}
+                showInstructionsModal={showInstructionsModal}
+                setShowInstructionsModal={setShowInstructionsModal}
+                editingInstructions={editingInstructions}
+                setEditingInstructions={setEditingInstructions}
+                instructionsSaving={instructionsSaving}
+                updateProjectInstructions={updateProjectInstructions}
+                editingAgentInstructions={editingAgentInstructions}
+                setEditingAgentInstructions={setEditingAgentInstructions}
+                activeInstructionsTab={activeInstructionsTab}
+                setActiveInstructionsTab={setActiveInstructionsTab}
+                handleSaveAllAgentInstructions={handleSaveAllAgentInstructions}
+                projectFiles={projectFiles}
+                projectFilesTotalTokens={projectFilesTotalTokens}
+                handleToggleFileStaged={handleToggleFileStaged}
+                handleDeleteProjectFile={handleDeleteProjectFile}
+                handleToggleFileAgent={handleToggleFileAgent}
+                hoveredFilename={hoveredFilename}
+                setHoveredFilename={setHoveredFilename}
+                filenameTooltipPos={filenameTooltipPos}
+                setFilenameTooltipPos={setFilenameTooltipPos}
+                filenameTooltipTimeoutRef={filenameTooltipTimeoutRef}
+                fileInputRef={fileInputRef}
+                handleFileUpload={handleFileUpload}
+                filesUploading={filesUploading}
+                projects={projects}
+                editingProject={editingProject}
+                editingProjectName={editingProjectName}
+                setEditingProjectName={setEditingProjectName}
+                startRenameProject={startRenameProject}
+                saveRenameProject={saveRenameProject}
+                cancelRenameProject={cancelRenameProject}
+                handleDeleteProject={handleDeleteProject}
+                enterProject={enterProject}
+                creatingProject={creatingProject}
+                newItemName={newItemName}
+                setNewItemName={setNewItemName}
+                saveNewProject={saveNewProject}
+                cancelCreate={cancelCreate}
+                chats={chats}
+                editingChat={editingChat}
+                editingName={editingName}
+                setEditingName={setEditingName}
+                startRenameChat={startRenameChat}
+                saveRename={saveRename}
+                cancelRename={cancelRename}
+                handleDeleteChat={handleDeleteChat}
+                creatingChat={creatingChat}
+                saveNewChat={saveNewChat}
+              />
             ) : (
               <div style={styles.noChat}>
                 <p>Select or create a chat to start</p>
               </div>
             )
-          ) : viewMode === 'projectList' ? (
-            // Full project list view
-            <>
-              <div style={styles.listViewHeader}>
-                <button 
-                  onClick={() => setViewMode('chat')}
-                  style={styles.backButton}
-                >
-                  ← Back
-                </button>
-                <h2 style={styles.listViewTitle}>All Projects</h2>
-                <button 
-                  onClick={startCreateProject}
-                  style={styles.listViewAddButton}
-                >
-                  + New Project
-                </button>
-              </div>
-              <div style={styles.listViewContent}>
-                {creatingProject && (
-                  <div style={styles.listViewItem}>
-                    <input
-                      type="text"
-                      value={newItemName}
-                      onChange={(e) => setNewItemName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveNewProject();
-                        if (e.key === 'Escape') cancelCreate();
-                      }}
-                      autoFocus
-                      placeholder="Project name"
-                      style={styles.editInput}
-                    />
-                    <div style={styles.chatActions}>
-                      <button onClick={saveNewProject} style={styles.iconButtonCheck} title="Save">✓</button>
-                      <button onClick={cancelCreate} style={styles.iconButtonX} title="Cancel">✕</button>
-                    </div>
-                  </div>
-                )}
-                {projects.map(project => (
-                  <div
-                    key={project}
-                    style={{
-                      ...styles.listViewItem,
-                      backgroundColor: project === currentProject ? '#3a3a5e' : 'transparent'
-                    }}
-                  >
-                    {editingProject === project ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingProjectName}
-                          onChange={(e) => setEditingProjectName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveRenameProject();
-                            if (e.key === 'Escape') cancelRenameProject();
-                          }}
-                          autoFocus
-                          style={styles.editInput}
-                        />
-                        <div style={styles.chatActions}>
-                          <button onClick={saveRenameProject} style={styles.iconButtonCheck} title="Save">✓</button>
-                          <button onClick={cancelRenameProject} style={styles.iconButtonX} title="Cancel">✕</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <span 
-                          onClick={() => {
-                            enterProject(project);
-                            setViewMode('chat');
-                          }}
-                          style={styles.listViewItemName}
-                        >
-                          📁 {project}
-                        </span>
-                        <div style={styles.chatActions}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRenameProject(project);
-                            }}
-                            style={styles.iconButton}
-                            title="Rename"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteProject(project);
-                            }}
-                            style={styles.iconButton}
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-                {projects.length === 0 && !creatingProject && (
-                  <div style={styles.listViewEmpty}>
-                    <p>No projects yet</p>
-                    <p style={styles.mutedSmall}>Create your first project to get started</p>
-                  </div>
-                )}
-              </div>
-            </>
           ) : (
-            // Full chat list view
-            <>
-              <div style={styles.listViewHeader}>
-                <button 
-                  onClick={() => setViewMode('chat')}
-                  style={styles.backButton}
-                >
-                  ← Back
-                </button>
-                <h2 style={styles.listViewTitle}>
-                  {currentProject ? `All Chats in ${currentProject}` : 'All Chats'}
-                </h2>
-                <button 
-                  onClick={startCreateChat}
-                  style={styles.listViewAddButton}
-                >
-                  + New Chat
-                </button>
-              </div>
-              <div style={styles.listViewContent}>
-                {creatingChat && (
-                  <div style={styles.listViewItem}>
-                    <input
-                      type="text"
-                      value={newItemName}
-                      onChange={(e) => setNewItemName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveNewChat();
-                        if (e.key === 'Escape') cancelCreate();
-                      }}
-                      autoFocus
-                      placeholder="Chat name"
-                      style={styles.editInput}
-                    />
-                    <div style={styles.chatActions}>
-                      <button onClick={saveNewChat} style={styles.iconButtonCheck} title="Save">✓</button>
-                      <button onClick={cancelCreate} style={styles.iconButtonX} title="Cancel">✕</button>
-                    </div>
-                  </div>
-                )}
-                {chats.map(chat => (
-                  <div
-                    key={chat}
-                    style={{
-                      ...styles.listViewItem,
-                      backgroundColor: chat === currentChat ? '#3a3a5e' : 'transparent'
-                    }}
-                  >
-                    {editingChat === chat ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingName}
-                          onChange={(e) => setEditingName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveRename();
-                            if (e.key === 'Escape') cancelRename();
-                          }}
-                          autoFocus
-                          style={styles.editInput}
-                        />
-                        <div style={styles.chatActions}>
-                          <button onClick={saveRename} style={styles.iconButtonCheck} title="Save">✓</button>
-                          <button onClick={cancelRename} style={styles.iconButtonX} title="Cancel">✕</button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <span 
-                          onClick={() => {
-                            openChat(chat);
-                            setViewMode('chat');
-                          }}
-                          style={styles.listViewItemName}
-                        >
-                          {chat}
-                        </span>
-                        <div style={styles.chatActions}>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startRenameChat(chat);
-                            }}
-                            style={styles.iconButton}
-                            title="Rename"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteChat(chat);
-                            }}
-                            style={styles.iconButton}
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-                {chats.length === 0 && !creatingChat && (
-                  <div style={styles.listViewEmpty}>
-                    <p>No chats yet</p>
-                    <p style={styles.mutedSmall}>Create your first chat to get started</p>
-                  </div>
-                )}
-              </div>
-            </>
+            <ProjectLanding
+              viewMode={viewMode} setViewMode={setViewMode}
+              currentProject={currentProject} currentChat={currentChat}
+              openChat={openChat} startCreateChat={startCreateChat} startCreateProject={startCreateProject}
+              chatSearchQuery={chatSearchQuery} setChatSearchQuery={setChatSearchQuery}
+              projectChatsDetailed={projectChatsDetailed}
+              availableModels={availableModels}
+              projectModel={projectModel}
+              handleProjectModelChange={handleProjectModelChange}
+              isPipelineProject={isPipelineProject}
+              projectGameSystem={projectGameSystem}
+              availableGameSystems={availableGameSystems}
+              handleProjectGameSystemChange={handleProjectGameSystemChange}
+              agentInstructions={agentInstructions}
+              projectInstructions={projectInstructions}
+              projectInstructionsTokens={projectInstructionsTokens}
+              showInstructionsModal={showInstructionsModal}
+              setShowInstructionsModal={setShowInstructionsModal}
+              editingInstructions={editingInstructions}
+              setEditingInstructions={setEditingInstructions}
+              instructionsSaving={instructionsSaving}
+              updateProjectInstructions={updateProjectInstructions}
+              editingAgentInstructions={editingAgentInstructions}
+              setEditingAgentInstructions={setEditingAgentInstructions}
+              activeInstructionsTab={activeInstructionsTab}
+              setActiveInstructionsTab={setActiveInstructionsTab}
+              handleSaveAllAgentInstructions={handleSaveAllAgentInstructions}
+              projectFiles={projectFiles}
+              projectFilesTotalTokens={projectFilesTotalTokens}
+              handleToggleFileStaged={handleToggleFileStaged}
+              handleDeleteProjectFile={handleDeleteProjectFile}
+              handleToggleFileAgent={handleToggleFileAgent}
+              hoveredFilename={hoveredFilename}
+              setHoveredFilename={setHoveredFilename}
+              filenameTooltipPos={filenameTooltipPos}
+              setFilenameTooltipPos={setFilenameTooltipPos}
+              filenameTooltipTimeoutRef={filenameTooltipTimeoutRef}
+              fileInputRef={fileInputRef}
+              handleFileUpload={handleFileUpload}
+              filesUploading={filesUploading}
+              projects={projects}
+              editingProject={editingProject}
+              editingProjectName={editingProjectName}
+              setEditingProjectName={setEditingProjectName}
+              startRenameProject={startRenameProject}
+              saveRenameProject={saveRenameProject}
+              cancelRenameProject={cancelRenameProject}
+              handleDeleteProject={handleDeleteProject}
+              enterProject={enterProject}
+              creatingProject={creatingProject}
+              newItemName={newItemName}
+              setNewItemName={setNewItemName}
+              saveNewProject={saveNewProject}
+              cancelCreate={cancelCreate}
+              chats={chats}
+              editingChat={editingChat}
+              editingName={editingName}
+              setEditingName={setEditingName}
+              startRenameChat={startRenameChat}
+              saveRename={saveRename}
+              cancelRename={cancelRename}
+              handleDeleteChat={handleDeleteChat}
+              creatingChat={creatingChat}
+              saveNewChat={saveNewChat}
+            />
           )}
         </div>
 
-        {/* Right Panel — Character State */}
-        {!isMobile && pipelineState && (() => {
-          const cs = pipelineState.character_states || {};
-          const scene = pipelineState.scene_state || {};
-          const combat = pipelineState.combat;
-          const pcsPresent = scene.pcs_present || [];
-          const npcsPresent = scene.npcs_present || [];
-
-          const getCharData = (name: string) => {
-            const entry = cs[name];
-            if (!entry) return { type: 'npc' };
-            return entry.data || entry || {};
-          };
-
-          const charCount = new Set([...pcsPresent, ...npcsPresent]).size;
-
-          // Vital bar color by percentage
-          const vitalColor = (cur: number, max: number, label?: string) => {
-            const pct = max > 0 ? cur / max : 1;
-            const l = (label || '').toLowerCase();
-            if (l.includes('san')) return pct > 0.6 ? '#60a5fa' : pct > 0.3 ? '#a78bfa' : '#7c3aed';
-            if (l.includes('human')) return pct > 0.6 ? '#2dd4bf' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-            if (l.includes('hull')) return pct > 0.6 ? '#94a3b8' : pct > 0.3 ? '#fb923c' : '#ef4444';
-            if (l.includes('shield')) return pct > 0.6 ? '#38bdf8' : pct > 0.3 ? '#fb923c' : '#ef4444';
-            return pct > 0.6 ? '#4ade80' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-          };
-
-          // Condition pill color
-          const condColor = (c: string) => {
-            const cl = c.toLowerCase();
-            if (/poison|bleed|burn|wound|dying|dead|critical/.test(cl)) return '#ef4444';
-            if (/exhaust|fright|stun|prone|restrain|shock|disabl|immobi/.test(cl)) return '#fb923c';
-            if (/bless|haste|shield|invis|inspir|protect|rage|enhance/.test(cl)) return '#4ade80';
-            return '#94a3b8';
-          };
-
-          // Type badge color
-          const typeBadgeColor = (t: string) => {
-            const tl = (t || '').toLowerCase();
-            if (tl === 'pc') return '#3b82f6';
-            if (tl === 'enemy') return '#ef4444';
-            if (tl === 'ship') return '#94a3b8';
-            return '#f59e0b';
-          };
-
-          // Resource label color
-          const resourceColor = (label: string) => {
-            const l = label.toLowerCase();
-            if (/spell/.test(l)) return '#a78bfa';
-            if (/tech|cyber/.test(l)) return '#22d3ee';
-            if (/ki|channel|rage|wild/.test(l)) return '#f472b6';
-            if (/ammo|round/.test(l)) return '#fb923c';
-            if (/edge|luck/.test(l)) return '#fbbf24';
-            return '#60a5fa';
-          };
-
-          // Render a single card
-          const renderCard = (name: string, isActive?: boolean) => {
-            const data = getCharData(name);
-            const type = data.type || 'npc';
-            const vitals = data.vitals || [];
-            const conditions = data.conditions || [];
-            const resources = (data.resources || []).slice(0, 2);
-            return (
-              <div
-                key={name}
-                onClick={() => { setSelectedCharacter(name); setShowCharacterSheet(true); }}
-                style={{
-                  padding: '8px 10px', margin: '0 0 4px', borderRadius: '6px',
-                  backgroundColor: '#1e1e3a', cursor: 'pointer',
-                  border: isActive ? '1.5px solid #4a4ae8' : '1px solid #2a2a4e',
-                  transition: 'background 0.15s',
-                  ...(isActive ? { animation: 'pulse 2s ease-in-out infinite' } : {}),
-                }}
-                onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#2a2a4e')}
-                onMouseLeave={e => (e.currentTarget.style.backgroundColor = '#1e1e3a')}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: vitals.length ? '4px' : 0 }}>
-                  <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
-                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                    {isActive && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#4a4ae8', letterSpacing: '0.05em' }}>ACTING</span>}
-                    <span style={{
-                      fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', fontWeight: 600,
-                      backgroundColor: typeBadgeColor(type) + '22', color: typeBadgeColor(type),
-                    }}>{type.toUpperCase()}</span>
-                  </div>
-                </div>
-                {vitals.map((v: any, i: number) => (
-                  'current' in v && 'max' in v ? (
-                    <div key={i} style={{ marginBottom: '2px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '1px' }}>
-                        <span>{v.label}</span><span>{v.current}/{v.max}</span>
-                      </div>
-                      <div style={{ height: '4px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                        <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: vitalColor(v.current, v.max, v.label), borderRadius: '2px', transition: 'width 0.3s' }} />
-                      </div>
-                    </div>
-                  ) : 'value' in v ? (
-                    <div key={i} style={{ display: 'inline-block', marginRight: '6px', marginBottom: '2px' }}>
-                      <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
-                      <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
-                    </div>
-                  ) : null
-                ))}
-                {resources.length > 0 && (
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '3px', flexWrap: 'wrap' }}>
-                    {resources.map((r: any, i: number) => (
-                      <div key={i} style={{ fontSize: '0.65rem', color: '#999' }}>
-                        <span>{r.label}: </span>
-                        {Array.from({ length: r.max || 0 }, (_, pi) => (
-                          <span key={pi} style={{ color: pi < (r.current || 0) ? resourceColor(r.label) : '#3a3a5e', fontSize: '0.75rem' }}>{pi < (r.current || 0) ? '●' : '○'}</span>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {conditions.length > 0 && (
-                  <div style={{ display: 'flex', gap: '3px', marginTop: '3px', flexWrap: 'wrap' }}>
-                    {conditions.map((c: string, i: number) => (
-                      <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '8px', backgroundColor: condColor(c) + '22', color: condColor(c), fontWeight: 500 }}>{c}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          };
-
-          if (!rightPanelOpen) {
-            return (
-              <div style={{
-                width: '40px', minWidth: '40px', backgroundColor: '#16162a',
-                borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column' as const,
-                alignItems: 'center', paddingTop: '16px',
-              }}>
-                <button
-                  onClick={() => setRightPanelOpen(true)}
-                  style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer', padding: '4px 8px' }}
-                  title="Open character panel (Ctrl+])"
-                >«</button>
-                {charCount > 0 && (
-                  <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
-                )}
-              </div>
-            );
-          }
-
-          return (
-            <div style={{
-              width: '280px', minWidth: '280px', backgroundColor: '#16162a',
-              borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column' as const,
-              overflow: 'hidden',
-            }}>
-              {/* Panel header */}
-              <div style={{
-                padding: '12px 12px 8px', borderBottom: '1px solid #333', display: 'flex',
-                justifyContent: 'space-between', alignItems: 'center',
-                backgroundColor: combat ? '#2a1a1a' : 'transparent',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span style={{ fontWeight: 600, fontSize: '0.85rem', color: '#ccc' }}>
-                    {combat ? `Combat — Round ${combat.round || '?'}` : 'Scene'}
-                  </span>
-                  {combat && (
-                    <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
-                  )}
-                </div>
-                <button
-                  onClick={() => setRightPanelOpen(false)}
-                  style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer', padding: '2px 6px' }}
-                  title="Close character panel (Ctrl+])"
-                >»</button>
-              </div>
-
-              {/* Panel body */}
-              <div style={{ flex: 1, overflowY: 'auto', padding: '8px', scrollbarWidth: 'thin' as any }}>
-                {combat ? (
-                  // Combat mode: initiative order
-                  <>
-                    {(combat.initiative_order || []).map((name: string) => renderCard(name, combat.current_turn === name))}
-                    {(combat.initiative_order || []).length === 0 && (
-                      <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No initiative order set</div>
-                    )}
-                  </>
-                ) : (
-                  // Normal mode: PCs then NPCs
-                  <>
-                    {pcsPresent.length > 0 && (
-                      <>
-                        <div style={{ fontSize: '0.65rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '4px', padding: '0 2px' }}>PCs</div>
-                        {pcsPresent.map((name: string) => renderCard(name))}
-                      </>
-                    )}
-                    {npcsPresent.length > 0 && (
-                      <>
-                        <div style={{ fontSize: '0.65rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '4px', marginTop: '8px', padding: '0 2px' }}>NPCs</div>
-                        {npcsPresent.map((name: string) => renderCard(name))}
-                      </>
-                    )}
-                    {pcsPresent.length === 0 && npcsPresent.length === 0 && (
-                      <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No characters in scene</div>
-                    )}
-                  </>
-                )}
-              </div>
-
-              {/* Panel footer */}
-              {Object.keys(cs).length + Object.keys(pipelineState.npc_memories || {}).length > 0 && (
-                <div style={{ padding: '8px 12px', borderTop: '1px solid #333' }}>
-                  <button
-                    onClick={() => setShowAllCharactersModal(true)}
-                    style={{ width: '100%', padding: '6px', fontSize: '0.75rem', color: '#888', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer' }}
-                    onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#2a2a4e'; e.currentTarget.style.color = '#ccc'; }}
-                    onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#1e1e3a'; e.currentTarget.style.color = '#888'; }}
-                  >
-                    View All ({new Set([...Object.keys(cs), ...Object.keys(pipelineState.npc_memories || {})]).size})
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* Mobile bottom sheet for character panel */}
-        {isMobile && pipelineState && (() => {
-          const cs = pipelineState.character_states || {};
-          const scene = pipelineState.scene_state || {};
-          const pcsPresent = scene.pcs_present || [];
-          const npcsPresent = scene.npcs_present || [];
-          const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
-          if (allPresent.length === 0) return null;
-
-          const getCharData = (name: string) => {
-            const entry = cs[name];
-            if (!entry) return { type: 'npc' };
-            return entry.data || entry || {};
-          };
-
-          const vitalColor = (cur: number, max: number) => {
-            const pct = max > 0 ? cur / max : 1;
-            return pct > 0.6 ? '#4ade80' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-          };
-          const typeBadgeColor = (t: string) => {
-            const tl = (t || '').toLowerCase();
-            if (tl === 'pc') return '#3b82f6';
-            if (tl === 'enemy') return '#ef4444';
-            if (tl === 'ship') return '#94a3b8';
-            return '#f59e0b';
-          };
-
-          return (
-            <div style={{
-              position: 'fixed', bottom: 0, left: 0, right: 0,
-              height: mobileBottomSheetOpen ? '55vh' : '34px',
-              backgroundColor: '#16162a', borderTop: '1px solid #333',
-              zIndex: 1500, transition: 'height 0.25s ease',
-              display: 'flex', flexDirection: 'column' as const,
-            }}>
-              {/* Tab handle */}
-              <div
-                onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-                style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? '1px solid #333' : 'none' }}
-              >
-                <div style={{ width: '32px', height: '3px', backgroundColor: '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
-                {mobileBottomSheetOpen ? '▼' : '▲'} {allPresent.length} characters in scene
-              </div>
-              {/* Scrollable card list */}
-              {mobileBottomSheetOpen && (
-                <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-                  {allPresent.map((name: string) => {
-                    const data = getCharData(name);
-                    const type = data.type || 'npc';
-                    const vitals = data.vitals || [];
-                    return (
-                      <div
-                        key={name}
-                        onClick={(e) => { e.stopPropagation(); setMobileBottomSheetOpen(false); setSelectedCharacter(name); setShowCharacterSheet(true); }}
-                        style={{ padding: '8px 10px', marginBottom: '4px', borderRadius: '6px', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e' }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: vitals.length ? '4px' : 0 }}>
-                          <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
-                          <span style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', fontWeight: 600, backgroundColor: typeBadgeColor(type) + '22', color: typeBadgeColor(type) }}>{type.toUpperCase()}</span>
-                        </div>
-                        {vitals.filter((v: any) => 'current' in v && 'max' in v).slice(0, 2).map((v: any, i: number) => (
-                          <div key={i} style={{ marginBottom: '2px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999' }}><span>{v.label}</span><span>{v.current}/{v.max}</span></div>
-                            <div style={{ height: '4px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                              <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: vitalColor(v.current, v.max), borderRadius: '2px' }} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        {/* Right Panel -- Character State */}
+        <CharacterPanel
+          isMobile={isMobile}
+          pipelineState={pipelineState}
+          chatGameSystem={chatGameSystem}
+          rightPanelOpen={rightPanelOpen}
+          setRightPanelOpen={setRightPanelOpen}
+          selectedCharacter={selectedCharacter}
+          setSelectedCharacter={setSelectedCharacter}
+          showCharacterSheet={showCharacterSheet}
+          setShowCharacterSheet={setShowCharacterSheet}
+          showAllCharactersModal={showAllCharactersModal}
+          setShowAllCharactersModal={setShowAllCharactersModal}
+          showNpcMemories={showNpcMemories}
+          setShowNpcMemories={setShowNpcMemories}
+          mobileBottomSheetOpen={mobileBottomSheetOpen}
+          setMobileBottomSheetOpen={setMobileBottomSheetOpen}
+          characterSheetMd={characterSheetMd}
+        />
       </div>
 
-      {/* Character Sheet Modal */}
-      {showCharacterSheet && selectedCharacter && pipelineState && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 1900, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => { setShowCharacterSheet(false); setSelectedCharacter(null); }}>
-          <div style={{ backgroundColor: '#1a1a2e', borderRadius: '12px', maxWidth: '700px', width: '90%', maxHeight: '85vh', overflow: 'auto', padding: '24px', border: '1px solid #333', scrollbarWidth: 'thin' as any }} onClick={e => e.stopPropagation()}>
-            {(() => {
-              const cs = pipelineState.character_states || {};
-              const entry = cs[selectedCharacter];
-              const data = entry?.data || entry || {};
-              const vitals = data.vitals || [];
-              const resources = data.resources || [];
-              const conditions = data.conditions || [];
-              const type = data.type || 'npc';
-              const summary = data.summary || '';
-              const gameState = pipelineState.game_state || {};
-              const hudFunds = pipelineState.hud_state?.funds?.[selectedCharacter];
-              const memories = (pipelineState.npc_memories || {})[selectedCharacter];
-
-              const vitalColor = (cur: number, max: number, label?: string) => {
-                const pct = max > 0 ? cur / max : 1;
-                const l = (label || '').toLowerCase();
-                if (l.includes('san')) return pct > 0.6 ? '#60a5fa' : pct > 0.3 ? '#a78bfa' : '#7c3aed';
-                if (l.includes('human')) return pct > 0.6 ? '#2dd4bf' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-                if (l.includes('hull')) return pct > 0.6 ? '#94a3b8' : pct > 0.3 ? '#fb923c' : '#ef4444';
-                if (l.includes('shield')) return pct > 0.6 ? '#38bdf8' : pct > 0.3 ? '#fb923c' : '#ef4444';
-                return pct > 0.6 ? '#4ade80' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-              };
-              const condColor = (c: string) => {
-                const cl = c.toLowerCase();
-                if (/poison|bleed|burn|wound|dying|dead|critical/.test(cl)) return '#ef4444';
-                if (/exhaust|fright|stun|prone|restrain|shock|disabl/.test(cl)) return '#fb923c';
-                if (/bless|haste|shield|invis|inspir|protect|rage|enhance/.test(cl)) return '#4ade80';
-                return '#94a3b8';
-              };
-              const resourceColor = (label: string) => {
-                const l = label.toLowerCase();
-                if (/spell/.test(l)) return '#a78bfa';
-                if (/tech|cyber/.test(l)) return '#22d3ee';
-                if (/ki|channel|rage|wild/.test(l)) return '#f472b6';
-                if (/ammo|round/.test(l)) return '#fb923c';
-                if (/edge|luck/.test(l)) return '#fbbf24';
-                return '#60a5fa';
-              };
-              const typeBadgeColor = (t: string) => {
-                const tl = (t || '').toLowerCase();
-                if (tl === 'pc') return '#3b82f6';
-                if (tl === 'enemy') return '#ef4444';
-                if (tl === 'ship') return '#94a3b8';
-                return '#f59e0b';
-              };
-
-              // Find character section in .md sheet
-              const sheetSection = (() => {
-                if (!characterSheetMd) return '';
-                const sections = characterSheetMd.split(/(?=^## )/m);
-                const match = sections.find(s => {
-                  const heading = s.split('\n')[0].replace(/^## /, '').trim();
-                  return heading.toLowerCase() === selectedCharacter.toLowerCase() || heading.toLowerCase().includes(selectedCharacter.toLowerCase());
-                });
-                return match || '';
-              })();
-
-              // Game-specific state sections
-              const renderGameState = () => {
-                const gs = chatGameSystem || 'dnd5e';
-                const parts: React.ReactNode[] = [];
-
-                // D&D 5E / D&D 5E Cyber: Relationships
-                if ((gs === 'dnd5e' || gs === 'dnd5e_cyber') && gameState.relationships) {
-                  const rels = Object.entries(gameState.relationships || {}).filter(([_, r]: [string, any]) => r && typeof r === 'object');
-                  if (rels.length > 0) {
-                    parts.push(
-                      <div key="rels" style={{ marginTop: '12px' }}>
-                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Relationships</div>
-                        {rels.map(([npc, r]: [string, any]) => {
-                          const rs = r.rs || 0;
-                          const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
-                          return (
-                            <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
-                              <span style={{ color: '#ccc' }}>{npc}</span>
-                              <span style={{ color: tierColor, fontWeight: 500 }}>RS {rs} — {r.tier || '?'}{r.roms > 0 ? ` ♥${r.roms}` : ''}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  }
-                  // Factions
-                  const factions = Object.entries(gameState.factions || {});
-                  if (factions.length > 0) {
-                    parts.push(
-                      <div key="factions" style={{ marginTop: '12px' }}>
-                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Factions</div>
-                        {factions.map(([name, f]: [string, any]) => (
-                          <div key={name} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
-                            <span style={{ color: '#ccc' }}>{name}</span>
-                            <span style={{ color: '#94a3b8' }}>FR {f.fr || 0} — {f.tier || '?'}</span>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  }
-                }
-
-                // D&D 5E Cyber: Ship
-                if (gs === 'dnd5e_cyber' && gameState.ship) {
-                  const ship = gameState.ship;
-                  parts.push(
-                    <div key="ship" style={{ marginTop: '12px' }}>
-                      <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Ship — {ship.name || 'Unnamed'}</div>
-                      {ship.hull_hp != null && (
-                        <div style={{ marginBottom: '4px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>Hull</span><span>{ship.hull_hp}/{ship.hull_max || ship.hull_hp}</span></div>
-                          <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${(ship.hull_max || ship.hull_hp) ? (ship.hull_hp / (ship.hull_max || ship.hull_hp)) * 100 : 0}%`, backgroundColor: '#94a3b8', borderRadius: '2px' }} />
-                          </div>
-                        </div>
-                      )}
-                      {ship.shields != null && (
-                        <div style={{ marginBottom: '4px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>Shields</span><span>{typeof ship.shields === 'object' ? `${ship.shields.current}/${ship.shields.max}` : ship.shields}</span></div>
-                          <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${typeof ship.shields === 'object' && ship.shields.max > 0 ? (ship.shields.current / ship.shields.max) * 100 : 100}%`, backgroundColor: '#38bdf8', borderRadius: '2px' }} />
-                          </div>
-                        </div>
-                      )}
-                      {ship.credits != null && (
-                        <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '4px' }}>Credits: {ship.credits}</div>
-                      )}
-                    </div>
-                  );
-                }
-
-                // CoC 7E: Investigator state
-                if (gs === 'coc7e' && gameState.investigators) {
-                  const inv = gameState.investigators[selectedCharacter];
-                  if (inv) {
-                    parts.push(
-                      <div key="inv" style={{ marginTop: '12px' }}>
-                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Investigator State</div>
-                        {inv.san != null && inv.san_max != null && (
-                          <div style={{ marginBottom: '4px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>SAN</span><span>{inv.san}/{inv.san_max}</span></div>
-                            <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                              <div style={{ height: '100%', width: `${inv.san_max > 0 ? (inv.san / inv.san_max) * 100 : 0}%`, backgroundColor: inv.san_max > 0 ? ((inv.san / inv.san_max) > 0.6 ? '#60a5fa' : (inv.san / inv.san_max) > 0.3 ? '#a78bfa' : '#7c3aed') : '#7c3aed', borderRadius: '2px' }} />
-                            </div>
-                          </div>
-                        )}
-                        {inv.luck != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '2px' }}>Luck: {inv.luck}</div>}
-                        {inv.mythos_pct != null && <div style={{ fontSize: '0.72rem', color: '#a78bfa', marginTop: '2px' }}>Cthulhu Mythos: {inv.mythos_pct}%</div>}
-                        {inv.bonds && Object.keys(inv.bonds).length > 0 && (
-                          <div style={{ marginTop: '6px' }}>
-                            <div style={{ fontSize: '0.68rem', color: '#666' }}>Bonds:</div>
-                            {Object.entries(inv.bonds).map(([b, v]: [string, any]) => (
-                              <div key={b} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '8px' }}>{b}: {v}</div>
-                            ))}
-                          </div>
-                        )}
-                        {inv.phobias && inv.phobias.length > 0 && <div style={{ fontSize: '0.72rem', color: '#ef4444', marginTop: '4px' }}>Phobias: {inv.phobias.join(', ')}</div>}
-                        {inv.manias && inv.manias.length > 0 && <div style={{ fontSize: '0.72rem', color: '#fb923c', marginTop: '2px' }}>Manias: {inv.manias.join(', ')}</div>}
-                      </div>
-                    );
-                  }
-                }
-
-                // SR6E: Runner state
-                if (gs === 'sr6e' && gameState.runners) {
-                  const runner = gameState.runners[selectedCharacter];
-                  if (runner) {
-                    parts.push(
-                      <div key="runner" style={{ marginTop: '12px' }}>
-                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Runner State</div>
-                        {runner.edge != null && runner.edge_max != null && (
-                          <div style={{ fontSize: '0.72rem', color: '#999', marginBottom: '4px' }}>
-                            Edge: {Array.from({ length: runner.edge_max }, (_, i) => (
-                              <span key={i} style={{ color: i < runner.edge ? '#fbbf24' : '#3a3a5e', fontSize: '0.85rem' }}>{i < runner.edge ? '●' : '○'}</span>
-                            ))}
-                          </div>
-                        )}
-                        {runner.essence != null && <div style={{ fontSize: '0.72rem', color: '#a78bfa' }}>Essence: {runner.essence}</div>}
-                        {runner.nuyen != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>Nuyen: ¥{runner.nuyen}</div>}
-                      </div>
-                    );
-                  }
-                }
-
-                // Cyberpunk RED: Edgerunner state
-                if (gs === 'cpred' && gameState.edgerunners) {
-                  const er = gameState.edgerunners[selectedCharacter];
-                  if (er) {
-                    parts.push(
-                      <div key="er" style={{ marginTop: '12px' }}>
-                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Edgerunner State</div>
-                        {er.humanity != null && er.humanity_max != null && (
-                          <div style={{ marginBottom: '4px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>Humanity</span><span>{er.humanity}/{er.humanity_max}</span></div>
-                            <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                              <div style={{ height: '100%', width: `${er.humanity_max > 0 ? (er.humanity / er.humanity_max) * 100 : 0}%`, backgroundColor: er.humanity_max > 0 ? ((er.humanity / er.humanity_max) > 0.6 ? '#2dd4bf' : (er.humanity / er.humanity_max) > 0.3 ? '#fbbf24' : '#ef4444') : '#ef4444', borderRadius: '2px' }} />
-                            </div>
-                          </div>
-                        )}
-                        {er.luck != null && er.luck_max != null && (
-                          <div style={{ fontSize: '0.72rem', color: '#999', marginBottom: '2px' }}>
-                            Luck: {Array.from({ length: er.luck_max }, (_, i) => (
-                              <span key={i} style={{ color: i < er.luck ? '#fbbf24' : '#3a3a5e', fontSize: '0.85rem' }}>{i < er.luck ? '●' : '○'}</span>
-                            ))}
-                          </div>
-                        )}
-                        {er.eurobucks != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>Eurobucks: €${er.eurobucks}</div>}
-                        {er.critical_injuries && er.critical_injuries.length > 0 && (
-                          <div style={{ marginTop: '4px' }}>
-                            {er.critical_injuries.map((ci: string, i: number) => (
-                              <div key={i} style={{ fontSize: '0.7rem', color: '#ef4444' }}>• {ci}</div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-                }
-
-                return parts.length > 0 ? <>{parts}</> : null;
-              };
-
-              return (
-                <>
-                  {/* Header */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#e0e0e0' }}>{selectedCharacter}</h3>
-                      <span style={{
-                        fontSize: '0.65rem', padding: '2px 7px', borderRadius: '3px', fontWeight: 600,
-                        backgroundColor: typeBadgeColor(type) + '22', color: typeBadgeColor(type),
-                      }}>{type.toUpperCase()}</span>
-                    </div>
-                    <button onClick={() => { setShowCharacterSheet(false); setSelectedCharacter(null); }} style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer' }}>✕</button>
-                  </div>
-
-                  {/* Live State */}
-                  {(vitals.length > 0 || resources.length > 0 || conditions.length > 0 || summary) && (
-                    <div style={{ marginBottom: '16px' }}>
-                      <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '8px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Live State</div>
-                      {vitals.map((v: any, i: number) => (
-                        'current' in v && 'max' in v ? (
-                          <div key={i} style={{ marginBottom: '6px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: '#bbb', marginBottom: '2px' }}>
-                              <span>{v.label}</span><span style={{ fontWeight: 500 }}>{v.current}/{v.max}</span>
-                            </div>
-                            <div style={{ height: '6px', backgroundColor: '#2a2a4e', borderRadius: '3px', overflow: 'hidden' }}>
-                              <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: vitalColor(v.current, v.max, v.label), borderRadius: '3px', transition: 'width 0.3s' }} />
-                            </div>
-                          </div>
-                        ) : 'value' in v ? (
-                          <div key={i} style={{ marginBottom: '4px' }}>
-                            <span style={{ fontSize: '0.78rem', color: '#bbb' }}>{v.label}: </span>
-                            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '1px 6px', borderRadius: '3px' }}>{v.value}</span>
-                          </div>
-                        ) : null
-                      ))}
-                      {resources.map((r: any, i: number) => (
-                        <div key={i} style={{ marginBottom: '4px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#999', marginBottom: '1px' }}>
-                            <span>{r.label}</span><span>{r.current}/{r.max}</span>
-                          </div>
-                          <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${Math.max(0, Math.min(100, ((r.current || 0) / (r.max || 1)) * 100))}%`, backgroundColor: resourceColor(r.label), borderRadius: '2px' }} />
-                          </div>
-                        </div>
-                      ))}
-                      {conditions.length > 0 && (
-                        <div style={{ display: 'flex', gap: '4px', marginTop: '6px', flexWrap: 'wrap' }}>
-                          {conditions.map((c: string, i: number) => (
-                            <span key={i} style={{ fontSize: '0.7rem', padding: '2px 8px', borderRadius: '10px', backgroundColor: condColor(c) + '22', color: condColor(c), fontWeight: 500 }}>{c}</span>
-                          ))}
-                        </div>
-                      )}
-                      {summary && <div style={{ fontSize: '0.78rem', color: '#999', marginTop: '6px', lineHeight: 1.4 }}>{summary}</div>}
-                    </div>
-                  )}
-
-                  {/* Game-specific state */}
-                  {renderGameState()}
-
-                  {/* Funds */}
-                  {hudFunds && (
-                    <div style={{ marginTop: '12px' }}>
-                      <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-                      <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : JSON.stringify(hudFunds)}</div>
-                    </div>
-                  )}
-
-                  {/* NPC Memories button */}
-                  {memories && memories.length > 0 && (
-                    <div style={{ marginTop: '12px' }}>
-                      <button
-                        onClick={() => setShowNpcMemories(selectedCharacter)}
-                        style={{ padding: '6px 12px', fontSize: '0.78rem', color: '#888', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer' }}
-                        onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#2a2a4e'; e.currentTarget.style.color = '#ccc'; }}
-                        onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#1e1e3a'; e.currentTarget.style.color = '#888'; }}
-                      >
-                        View Memories ({memories.length})
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Character sheet .md (collapsed) */}
-                  {sheetSection && (
-                    <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
-                      <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
-                      <div style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px', whiteSpace: 'pre-wrap' }}>
-                        {sheetSection.split('\n').slice(1).join('\n').trim()}
-                      </div>
-                    </details>
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* All Characters Modal */}
-      {showAllCharactersModal && pipelineState && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 2000, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => setShowAllCharactersModal(false)}>
-          <div style={{ backgroundColor: '#1a1a2e', borderRadius: '12px', maxWidth: '900px', width: '90%', maxHeight: '85vh', overflow: 'auto', padding: '24px', border: '1px solid #333', scrollbarWidth: 'thin' as any }} onClick={e => e.stopPropagation()}>
-            {(() => {
-              const cs = pipelineState.character_states || {};
-              const npcMem = pipelineState.npc_memories || {};
-              const scene = pipelineState.scene_state || {};
-              const inScene = new Set([...(scene.pcs_present || []), ...(scene.npcs_present || [])]);
-              const allNamesArr = Object.keys(cs).concat(Object.keys(npcMem)).filter((v, i, a) => a.indexOf(v) === i);
-              const inSceneNames = allNamesArr.filter(n => inScene.has(n));
-              const otherNames = allNamesArr.filter(n => !inScene.has(n));
-
-              const typeBadgeColor = (t: string) => {
-                const tl = (t || '').toLowerCase();
-                if (tl === 'pc') return '#3b82f6';
-                if (tl === 'enemy') return '#ef4444';
-                if (tl === 'ship') return '#94a3b8';
-                return '#f59e0b';
-              };
-
-              const renderMiniCard = (name: string) => {
-                const entry = cs[name];
-                const data = entry?.data || entry || {};
-                const type = data.type || 'npc';
-                const memCount = npcMem[name]?.length || 0;
-                return (
-                  <div
-                    key={name}
-                    onClick={() => { setSelectedCharacter(name); setShowCharacterSheet(true); }}
-                    style={{
-                      padding: '8px 12px', borderRadius: '6px', backgroundColor: '#1e1e3a',
-                      border: '1px solid #2a2a4e', cursor: 'pointer', display: 'flex',
-                      justifyContent: 'space-between', alignItems: 'center',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#2a2a4e')}
-                    onMouseLeave={e => (e.currentTarget.style.backgroundColor = '#1e1e3a')}
-                  >
-                    <span style={{ fontWeight: 500, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
-                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                      {memCount > 0 && <span style={{ fontSize: '0.6rem', color: '#888' }}>{memCount} memories</span>}
-                      <span style={{
-                        fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', fontWeight: 600,
-                        backgroundColor: typeBadgeColor(type) + '22', color: typeBadgeColor(type),
-                      }}>{type.toUpperCase()}</span>
-                    </div>
-                  </div>
-                );
-              };
-
-              return (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#e0e0e0' }}>All Characters ({allNamesArr.length})</h3>
-                    <button onClick={() => setShowAllCharactersModal(false)} style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer' }}>✕</button>
-                  </div>
-                  {inSceneNames.length > 0 && (
-                    <>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '6px' }}>In Scene</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '16px' }}>
-                        {inSceneNames.map(renderMiniCard)}
-                      </div>
-                    </>
-                  )}
-                  {otherNames.length > 0 && (
-                    <>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '6px' }}>Other Characters</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        {otherNames.map(renderMiniCard)}
-                      </div>
-                    </>
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* NPC Memories Modal */}
-      {showNpcMemories && pipelineState && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 2100, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => setShowNpcMemories(null)}>
-          <div style={{ backgroundColor: '#1a1a2e', borderRadius: '12px', maxWidth: '600px', width: '90%', maxHeight: '80vh', overflow: 'auto', padding: '24px', border: '1px solid #333', scrollbarWidth: 'thin' as any }} onClick={e => e.stopPropagation()}>
-            {(() => {
-              const memories = (pipelineState.npc_memories || {})[showNpcMemories] || [];
-              const sorted = [...memories].sort((a: any, b: any) => (b.impact || 0) - (a.impact || 0) || (b.turn_created || 0) - (a.turn_created || 0));
-              const memBorderColor = (impact: number) => impact >= 4 ? '#fbbf24' : impact >= 3 ? '#3b82f6' : '#4a4a6e';
-              return (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                    <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#e0e0e0' }}>{showNpcMemories} — Memories ({memories.length})</h3>
-                    <button onClick={() => setShowNpcMemories(null)} style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer' }}>✕</button>
-                  </div>
-                  {sorted.map((m: any, i: number) => (
-                    <div key={i} style={{
-                      padding: '10px 12px', marginBottom: '8px', borderRadius: '6px',
-                      backgroundColor: '#1e1e3a', borderLeft: `3px solid ${memBorderColor(m.impact || 0)}`,
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                        <span style={{ fontSize: '0.7rem', color: '#888' }}>{m.date || `Turn ${m.turn_created || '?'}`}</span>
-                        <span style={{ fontSize: '0.7rem', color: '#fbbf24' }}>{'★'.repeat(Math.min(5, m.impact || 0))}{'☆'.repeat(Math.max(0, 5 - Math.min(5, m.impact || 0)))}</span>
-                      </div>
-                      <div style={{ fontSize: '0.82rem', color: '#ccc', lineHeight: 1.4 }}>{m.text || m.memory || ''}</div>
-                      {m.quote && <div style={{ fontSize: '0.78rem', color: '#999', fontStyle: 'italic', marginTop: '4px' }}>"{m.quote}"</div>}
-                    </div>
-                  ))}
-                  {memories.length === 0 && (
-                    <div style={{ fontSize: '0.82rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No memories recorded</div>
-                  )}
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-
-      {/* Updates Modal */}
-      {showUpdatesModal && (
-        <div style={styles.modalOverlay} onClick={() => setShowUpdatesModal(false)}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <h3 style={styles.modalTitle}>Notes</h3>
-            <p style={styles.modalDescription}>
-              A personal notepad for this chat. Not sent to the model.
-            </p>
-            <textarea
-              value={draftUpdatesText}
-              onChange={(e) => updateUpdatesText(e.target.value)}
-              placeholder="e.g., Session notes, reminders, character details..."
-              style={styles.updatesTextarea}
-            />
-            <div style={styles.modalFooter}>
-              <span style={{
-                ...styles.tokenCount,
-                color: updatesTokenCount > 1000 ? '#ff6b6b' : updatesTokenCount > 800 ? '#ffa94d' : '#888'
-              }}>
-                {updatesTokenCount} tokens {updatesTokenCount > 1000 ? '(high)' : updatesTokenCount > 800 ? '(moderate)' : ''}
-              </span>
-              <div style={styles.modalActions}>
-                <button 
-                  onClick={() => setShowUpdatesModal(false)} 
-                  style={styles.modalCancelButton}
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={saveUpdates}
-                  disabled={updatesLoading}
-                  style={{
-                    ...styles.modalSaveButton,
-                    opacity: updatesLoading ? 0.5 : 1
-                  }}
-                >
-                  {updatesLoading ? 'Saving...' : 'Save'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      
-      {/* API Key modal for model switching - at root level so it's always visible */}
-      {showApiKeyModal && pendingModelSwitch && (
-        <div style={styles.modalOverlay} onClick={handleApiKeyModalCancel}>
-          <div style={{...styles.modal, maxWidth: '400px'}} onClick={e => e.stopPropagation()}>
-            <h3 style={styles.modalTitle}>
-              {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API Key Required
-            </h3>
-            <p style={styles.modalDescription}>
-              To use {availableModels.find(m => m.id === pendingModelSwitch)?.name || pendingModelSwitch},
-              please enter your {pendingModelSwitch.startsWith('claude') ? 'Anthropic' : 'OpenAI'} API key.
-            </p>
-            <input
-              type="password"
-              placeholder={pendingModelSwitch.startsWith('claude') ? 'sk-ant-...' : 'sk-...'}
-              value={modalApiKey}
-              onChange={(e) => setModalApiKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleApiKeyModalSave()}
-              style={{...styles.input, width: '100%', marginBottom: '16px'}}
-              autoFocus
-            />
-            <div style={styles.modalActions}>
-              <button onClick={handleApiKeyModalCancel} style={styles.modalCancelButton}>
-                Cancel
-              </button>
-              <button
-                onClick={handleApiKeyModalSave}
-                disabled={savingApiKey || !modalApiKey.trim()}
-                style={styles.modalSaveButton}
-              >
-                {savingApiKey ? 'Saving...' : 'Save & Switch'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Modals */}
+      <Modals
+        showUpdatesModal={showUpdatesModal}
+        setShowUpdatesModal={setShowUpdatesModal}
+        draftUpdatesText={draftUpdatesText}
+        updateUpdatesText={updateUpdatesText}
+        updatesTokenCount={updatesTokenCount}
+        updatesLoading={updatesLoading}
+        saveUpdates={saveUpdates}
+        showApiKeyModal={showApiKeyModal}
+        pendingModelSwitch={pendingModelSwitch}
+        modalApiKey={modalApiKey}
+        setModalApiKey={setModalApiKey}
+        handleApiKeyModalSave={handleApiKeyModalSave}
+        handleApiKeyModalCancel={handleApiKeyModalCancel}
+        savingApiKey={savingApiKey}
+        availableModels={availableModels}
+      />
 
       {docsRefreshed && (
         <div style={styles.docsRefreshedBanner}>
@@ -5640,1169 +2602,5 @@ function App() {
     </div>
   );
 }
-
-const styles: { [key: string]: React.CSSProperties } = {
-  container: {
-    height: '100dvh', // Dynamic viewport height for mobile
-    overflow: 'hidden',
-    backgroundColor: '#1a1a2e',
-    color: '#eee',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  loginBox: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: '100vh',
-    gap: '16px',
-  },
-  title: {
-    margin: 0,
-    fontSize: '2rem',
-  },
-  subtitle: {
-    margin: 0,
-    color: '#aaa',
-  },
-  input: {
-    padding: '12px 16px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    width: '280px',
-  },
-  button: {
-    padding: '12px 32px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: 'none',
-    backgroundColor: '#4a4ae8',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  error: {
-    color: '#ff6b6b',
-    margin: 0,
-  },
-  muted: {
-    color: '#888',
-    margin: 0,
-    fontSize: '0.9rem',
-    position: 'relative',
-  },
-  statsIcon: {
-    marginLeft: '8px',
-    cursor: 'help',
-    color: '#6b6bff',
-    fontSize: '1rem',
-    fontWeight: 'bold',
-  },
-  statsTooltip: {
-    position: 'fixed',
-    top: '100px',
-    left: '20px',
-    backgroundColor: '#2a2a4e',
-    border: '1px solid #4a4ae8',
-    borderRadius: '8px',
-    padding: '12px',
-    zIndex: 1001,
-    minWidth: '320px',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-  },
-  statsSection: {
-    marginBottom: '8px',
-  },
-  statsSectionTitle: {
-    fontWeight: 'bold',
-    color: '#6b6bff',
-    marginBottom: '6px',
-    fontSize: '0.85rem',
-  },
-  statsRow: {
-    fontSize: '0.8rem',
-    marginBottom: '4px',
-    color: '#ddd',
-  },
-  statsSeparator: {
-    height: '1px',
-    backgroundColor: '#444',
-    margin: '10px 0',
-  },
-  mainLayout: {
-    display: 'flex',
-    height: '100dvh', // Dynamic viewport height for mobile (falls back to 100vh)
-    overflow: 'hidden',
-  },
-  sidebar: {
-    width: '280px',
-    backgroundColor: '#16162a',
-    display: 'flex',
-    flexDirection: 'column',
-    borderRight: '1px solid #333',
-    overflow: 'hidden',
-    transition: 'width 0.2s ease',
-  },
-  sidebarCollapsed: {
-    width: '0px',
-    minWidth: 0,
-    overflow: 'hidden',
-    borderRight: 'none',
-    padding: 0,
-  },
-  collapsedSidebarStrip: {
-    width: '40px',
-    minWidth: '40px',
-    backgroundColor: '#16162a',
-    borderRight: '1px solid #333',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    paddingTop: '16px',
-  },
-  expandSidebarButton: {
-    background: 'none',
-    border: 'none',
-    fontSize: '1.2rem',
-    color: '#888',
-    cursor: 'pointer',
-    padding: '4px 8px',
-  },
-  collapseSidebarButton: {
-    background: 'none',
-    border: 'none',
-    fontSize: '1.2rem',
-    color: '#888',
-    cursor: 'pointer',
-    marginLeft: '4px',
-    padding: '2px 6px',
-  },
-  sidebarMobile: {
-    position: 'fixed' as const,
-    top: 0,
-    left: 0,
-    height: '100vh',
-    zIndex: 1000,
-    transition: 'transform 0.3s ease',
-  },
-  sidebarHidden: {
-    transform: 'translateX(-100%)',
-  },
-  sidebarOverlay: {
-    position: 'fixed' as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    zIndex: 999,
-  },
-  hamburgerButton: {
-    position: 'fixed' as const,
-    top: '12px',
-    left: '12px',
-    zIndex: 998,
-    backgroundColor: '#2a2a4e',
-    border: 'none',
-    borderRadius: '8px',
-    padding: '8px 12px',
-    fontSize: '1.5rem',
-    color: '#eee',
-    cursor: 'pointer',
-  },
-  closeSidebarButton: {
-    background: 'none',
-    border: 'none',
-    fontSize: '1.2rem',
-    color: '#888',
-    cursor: 'pointer',
-    marginLeft: '8px',
-  },
-  sidebarHeader: {
-    padding: '20px',
-    borderBottom: '1px solid #333',
-  },
-  sidebarHeaderRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  sidebarTitle: {
-    margin: 0,
-    fontSize: '1.2rem',
-  },
-  exitProjectButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    color: '#888',
-    marginLeft: 'auto',
-    fontSize: '0.9rem',
-  },
-  logoutButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '1.2rem',
-    color: '#888',
-  },
-  editInput: {
-    flex: 1,
-    padding: '4px 8px',
-    fontSize: '0.95rem',
-    borderRadius: '4px',
-    border: '1px solid #4a4ae8',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    marginRight: '8px',
-    minWidth: 0,
-    overflow: 'visible',
-  },
-  statsBox: {
-    padding: '16px',
-    borderTop: '1px solid #333',
-  },
-  statsText: {
-    margin: '4px 0',
-    fontSize: '0.85rem',
-    color: '#aaa',
-  },
-  chatArea: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    minHeight: 0, // Important for flex children to allow shrinking
-    maxHeight: '100%',
-    overflow: 'hidden',
-  },
-  chatHeader: {
-    padding: '16px 20px',
-    borderBottom: '1px solid #333',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    flexShrink: 0,
-    overflowX: 'auto',
-  },
-  chatHeaderMobile: {
-    paddingLeft: '56px', // Clear the fixed hamburger button
-    WebkitOverflowScrolling: 'touch',
-  },
-  chatTitle: {
-    margin: 0,
-    fontSize: '1.1rem',
-    flex: 1,
-    minWidth: '80px',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  viewerCount: {
-    fontSize: '0.8rem',
-    color: '#8f8fa0',
-    background: '#2a2a4e',
-    padding: '4px 10px',
-    borderRadius: '12px',
-    whiteSpace: 'nowrap' as const,
-  },
-  modelSelector: {
-    background: '#2a2a4e',
-    color: '#fff',
-    border: '1px solid #4a4a6e',
-    borderRadius: '6px',
-    padding: '6px 10px',
-    fontSize: '0.9rem',
-    cursor: 'pointer',
-    marginRight: '8px',
-    flexShrink: 0,
-  },
-  reloadButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '1.2rem',
-    padding: '4px 8px',
-    borderRadius: '4px',
-    transition: 'background-color 0.2s',
-  } as React.CSSProperties & { ':hover'?: React.CSSProperties },
-  messagesContainer: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '20px',
-    minHeight: 0, // Important for flex children to allow shrinking
-  },
-  message: {
-    padding: '16px',
-    borderRadius: '8px',
-    marginBottom: '12px',
-  },
-  messageRole: {
-    fontWeight: 'bold',
-    marginBottom: '8px',
-    fontSize: '0.85rem',
-    color: '#aaa',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-  },
-  editMessageButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '0.9rem',
-    padding: '2px 6px',
-    borderRadius: '4px',
-    opacity: 1,  // Fully visible always
-    transition: 'background-color 0.2s',
-  },
-  editMessageTextarea: {
-    width: '100%',
-    minHeight: '100px',
-    padding: '12px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: '1px solid #555',
-    backgroundColor: '#1a1a2e',
-    color: '#eee',
-    resize: 'vertical',
-    fontFamily: 'inherit',
-    lineHeight: 1.5,
-    marginBottom: '8px',
-  } as React.CSSProperties,
-  editMessageActions: {
-    display: 'flex',
-    gap: '8px',
-    justifyContent: 'flex-end',
-  },
-  messageContent: {
-    lineHeight: 1.5,
-  },
-  messageTokens: {
-    fontSize: '0.75rem',
-    color: '#666',
-  },
-  messageFooter: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: '8px',
-  },
-  messageTimestamp: {
-    fontSize: '0.75rem',
-    color: '#666',
-    marginLeft: 'auto',
-  },
-  branchNav: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    fontSize: '0.75rem',
-    color: '#888',
-  },
-  branchNavButton: {
-    background: 'none',
-    border: 'none',
-    color: '#888',
-    cursor: 'pointer',
-    padding: '2px 4px',
-    fontSize: '0.7rem',
-    borderRadius: '3px',
-    transition: 'background-color 0.2s, color 0.2s',
-  },
-  branchNavText: {
-    minWidth: '30px',
-    textAlign: 'center' as const,
-  },
-  reasoningContainer: {
-    backgroundColor: '#252540',
-    borderRadius: '6px',
-    marginBottom: '12px',
-    cursor: 'pointer',
-    border: '1px solid #3a3a5e',
-  },
-  reasoningHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '8px 12px',
-    fontSize: '0.85rem',
-    color: '#888',
-  },
-  reasoningLabel: {
-    fontStyle: 'italic',
-  },
-  reasoningContent: {
-    padding: '0 12px 12px 12px',
-    fontSize: '0.9rem',
-    color: '#aaa',
-    lineHeight: 1.5,
-    whiteSpace: 'pre-wrap' as const,
-    borderTop: '1px solid #3a3a5e',
-    paddingTop: '12px',
-  },
-  inputArea: {
-    padding: '16px',
-    borderTop: '1px solid #333',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '8px',
-    flexShrink: 0, // Prevent input area from shrinking
-    backgroundColor: '#1a1a2e', // Ensure background is visible
-  },
-  messageInput: {
-    width: '100%',
-    padding: '12px 30px 12px 12px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    resize: 'none',
-    fontFamily: 'inherit',
-    boxSizing: 'border-box',
-    lineHeight: '1.5',
-  },
-  sendButton: {
-    padding: '12px 24px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: 'none',
-    backgroundColor: '#4a4ae8',
-    color: '#fff',
-    cursor: 'pointer',
-    alignSelf: 'flex-end',
-  },
-  buttonColumn: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '8px',
-    alignSelf: 'flex-end',
-  },
-  updateButton: {
-    padding: '8px 16px',
-    fontSize: '0.85rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    color: '#ccc',
-    cursor: 'pointer',
-  },
-  modalOverlay: {
-    position: 'fixed' as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 2000,
-  },
-  modal: {
-    backgroundColor: '#1e1e3a',
-    borderRadius: '12px',
-    padding: '24px',
-    width: '90%',
-    maxWidth: '600px',
-    maxHeight: '80vh',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    border: '1px solid #4a4ae8',
-  },
-  modalTitle: {
-    margin: '0 0 8px 0',
-    fontSize: '1.3rem',
-    color: '#eee',
-  },
-  modalDescription: {
-    margin: '0 0 16px 0',
-    fontSize: '0.9rem',
-    color: '#888',
-  },
-  updatesTextarea: {
-    width: '100%',
-    minHeight: '200px',
-    padding: '12px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    resize: 'vertical',
-    fontFamily: 'inherit',
-    lineHeight: 1.5,
-    marginBottom: '16px',
-    boxSizing: 'border-box',
-  } as React.CSSProperties,
-  modalFooter: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  tokenCount: {
-    fontSize: '0.85rem',
-  },
-  modalActions: {
-    display: 'flex',
-    gap: '12px',
-    justifyContent: 'flex-end',
-  },
-  modalCancelButton: {
-    padding: '10px 20px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: 'transparent',
-    color: '#ccc',
-    cursor: 'pointer',
-  },
-  modalSaveButton: {
-    padding: '10px 20px',
-    fontSize: '1rem',
-    borderRadius: '8px',
-    border: 'none',
-    backgroundColor: '#4a4ae8',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  resizeHandle: {
-    position: 'absolute',
-    top: '0px',
-    right: '0px',
-    width: '24px',
-    height: '24px',
-    cursor: 'ns-resize',
-    color: '#666',
-    fontSize: '12px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    userSelect: 'none',
-    zIndex: 10,
-    fontWeight: 'bold',
-    letterSpacing: '-2px',
-    backgroundColor: '#2a2a4e',
-    borderTopRightRadius: '8px',
-  },
-  noChat: {
-    flex: 1,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: '#666',
-  },
-  errorBanner: {
-    position: 'fixed',
-    bottom: '20px',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    backgroundColor: '#ff6b6b',
-    color: '#fff',
-    padding: '12px 20px',
-    borderRadius: '8px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-  },
-  docsRefreshedBanner: {
-    position: 'fixed',
-    bottom: '60px',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    backgroundColor: '#4caf50',
-    color: '#fff',
-    padding: '12px 20px',
-    borderRadius: '8px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-  },
-  errorClose: {
-    background: 'none',
-    border: 'none',
-    color: '#fff',
-    fontSize: '1.2rem',
-    cursor: 'pointer',
-  },
-  chatName: {
-    flex: 1,
-    cursor: 'pointer',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  chatActions: {
-    display: 'flex',
-    gap: '4px',
-  },
-  iconButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: '4px',
-    fontSize: '0.9rem',
-    opacity: 0.6,
-  },
-  iconButtonCheck: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: '4px',
-    fontSize: '0.9rem',
-    color: '#4ade80',
-  },
-  iconButtonX: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: '4px',
-    fontSize: '0.9rem',
-    color: 'hsl(0, 98%, 75%)',
-  },
-  section: {
-    borderBottom: '1px solid #333',
-  },
-  sectionHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '12px 16px',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-    fontSize: '0.9rem',
-    color: '#aaa',
-  },
-  sectionHeaderClickable: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    cursor: 'pointer',
-  },
-  addButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '1.2rem',
-    color: '#4a4ae8',
-    marginLeft: 'auto',
-    padding: '0 4px',
-  },
-  expandIcon: {
-    fontSize: '0.7rem',
-  },
-  sectionList: {
-    padding: '0 8px 8px 8px',
-  },
-  listItem: {
-    padding: '10px 12px',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    marginBottom: '2px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  mutedSmall: {
-    color: '#666',
-    fontSize: '0.85rem',
-    margin: '8px 12px',
-  },
-  seeMoreLink: {
-    padding: '8px 12px',
-    color: '#4a4ae8',
-    fontSize: '0.9rem',
-    cursor: 'pointer',
-    textAlign: 'center' as const,
-    marginTop: '4px',
-  },
-  listViewHeader: {
-    padding: '20px',
-    borderBottom: '1px solid #333',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: '16px',
-  },
-  listViewTitle: {
-    margin: 0,
-    fontSize: '1.5rem',
-    flex: 1,
-    textAlign: 'center' as const,
-  },
-  backButton: {
-    padding: '8px 16px',
-    fontSize: '1rem',
-    borderRadius: '6px',
-    border: 'none',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    cursor: 'pointer',
-  },
-  listViewAddButton: {
-    padding: '8px 16px',
-    fontSize: '1rem',
-    borderRadius: '6px',
-    border: 'none',
-    backgroundColor: '#4a4ae8',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  listViewContent: {
-    flex: 1,
-    overflowY: 'auto' as const,
-    padding: '20px',
-  },
-  listViewItem: {
-    padding: '16px 20px',
-    borderRadius: '8px',
-    marginBottom: '8px',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    border: '1px solid #333',
-  },
-  listViewItemName: {
-    flex: 1,
-    fontSize: '1.1rem',
-    cursor: 'pointer',
-  },
-  listViewEmpty: {
-    textAlign: 'center' as const,
-    marginTop: '60px',
-    color: '#666',
-  },
-  loadingMore: {
-    textAlign: 'center' as const,
-    padding: '12px',
-    color: '#888',
-    fontSize: '0.9rem',
-    fontStyle: 'italic',
-  },
-  loadingMoreMessages: {
-    textAlign: 'center' as const,
-    padding: '12px',
-    color: '#888',
-    fontSize: '0.9rem',
-    fontStyle: 'italic',
-    backgroundColor: '#1a1a2e',
-  },
-  
-  // Project Landing Page Styles
-  projectLanding: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    height: '100%',
-    overflow: 'hidden',
-  },
-  projectLandingHeader: {
-    padding: '20px',
-    borderBottom: '1px solid #333',
-    flexShrink: 0,
-  },
-  projectLandingTitle: {
-    margin: 0,
-    fontSize: '1.5rem',
-    color: '#eee',
-  },
-  projectLandingContent: {
-    display: 'flex',
-    flex: 1,
-    overflow: 'hidden',
-    gap: '1px',
-    backgroundColor: '#333',
-  },
-  projectChatsColumn: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column' as const,
-    backgroundColor: '#1a1a2e',
-    overflow: 'hidden',
-    minWidth: 0,
-  },
-  projectConfigColumn: {
-    width: '380px',
-    flexShrink: 0,
-    display: 'flex',
-    flexDirection: 'column' as const,
-    backgroundColor: '#1a1a2e',
-    overflow: 'auto',
-  },
-  projectSection: {
-    padding: '16px',
-    borderBottom: '1px solid #333',
-  },
-  projectSectionHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: '12px',
-  },
-  projectSectionTitle: {
-    margin: 0,
-    fontSize: '1rem',
-    color: '#aaa',
-    fontWeight: 600,
-  },
-  projectAddButton: {
-    padding: '6px 12px',
-    fontSize: '0.85rem',
-    borderRadius: '6px',
-    border: 'none',
-    backgroundColor: '#4a4ae8',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  chatSearchInput: {
-    margin: '0 16px 12px 16px',
-    padding: '10px 12px',
-    fontSize: '0.95rem',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#eee',
-    outline: 'none',
-  },
-  projectChatsList: {
-    flex: 1,
-    overflow: 'auto',
-    padding: '0 16px 16px 16px',
-  },
-  chatGroupHeader: {
-    fontSize: '0.8rem',
-    fontWeight: 600,
-    color: '#666',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-    marginTop: '16px',
-    marginBottom: '8px',
-  },
-  chatCard: {
-    padding: '12px 14px',
-    marginBottom: '8px',
-    borderRadius: '8px',
-    backgroundColor: '#252542',
-    border: '1px solid #333',
-    cursor: 'pointer',
-    transition: 'background-color 0.15s',
-  },
-  chatCardName: {
-    fontSize: '1rem',
-    fontWeight: 500,
-    color: '#eee',
-    marginBottom: '4px',
-  },
-  chatCardPreview: {
-    fontSize: '0.85rem',
-    color: '#888',
-    marginBottom: '8px',
-    lineHeight: 1.4,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-  },
-  chatCardMeta: {
-    display: 'flex',
-    gap: '12px',
-    fontSize: '0.75rem',
-    color: '#666',
-  },
-  tokenBadge: {
-    fontSize: '0.8rem',
-    color: '#888',
-    backgroundColor: '#2a2a4e',
-    padding: '2px 8px',
-    borderRadius: '4px',
-  },
-  instructionsPreview: {
-    fontSize: '0.9rem',
-    color: '#aaa',
-    lineHeight: 1.5,
-    marginBottom: '12px',
-    whiteSpace: 'pre-wrap' as const,
-    wordBreak: 'break-word' as const,
-  },
-  editInstructionsButton: {
-    padding: '8px 16px',
-    fontSize: '0.9rem',
-    borderRadius: '6px',
-    border: '1px solid #4a4ae8',
-    backgroundColor: 'transparent',
-    color: '#4a4ae8',
-    cursor: 'pointer',
-    width: '100%',
-  },
-  projectModelSelector: {
-    padding: '8px 12px',
-    backgroundColor: '#2a2a4e',
-    border: '1px solid #3a3a5e',
-    borderRadius: '4px',
-    color: '#e0e0e0',
-    fontSize: '14px',
-    width: '100%',
-    marginBottom: '8px',
-    cursor: 'pointer',
-  },
-  projectModelHelperText: {
-    fontSize: '0.8rem',
-    color: '#888',
-    margin: 0,
-  },
-  filesList: {
-    marginBottom: '12px',
-  },
-  fileItem: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: '8px 0',
-    borderBottom: '1px solid #333',
-    gap: '8px',
-  },
-  fileName: {
-    flex: 1,
-    fontSize: '0.9rem',
-    color: '#ccc',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-  },
-  filenameTooltip: {
-    position: 'fixed' as const,
-    backgroundColor: '#2a2a4e',
-    border: '1px solid #4a4ae8',
-    borderRadius: '6px',
-    padding: '6px 10px',
-    zIndex: 1001,
-    fontSize: '0.85rem',
-    color: '#eee',
-    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-    maxWidth: '400px',
-    wordBreak: 'break-all' as const,
-  },
-  fileTokens: {
-    fontSize: '0.8rem',
-    color: '#888',
-    flexShrink: 0,
-  },
-  fileDeleteButton: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: '4px',
-    fontSize: '0.85rem',
-    opacity: 0.6,
-    flexShrink: 0,
-  },
-  fileCheckbox: {
-    width: '16px',
-    height: '16px',
-    cursor: 'pointer',
-    flexShrink: 0,
-    accentColor: '#4a4ae8',
-  },
-  uploadButton: {
-    padding: '8px 16px',
-    fontSize: '0.9rem',
-    borderRadius: '6px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#ccc',
-    cursor: 'pointer',
-    width: '100%',
-  },
-
-  // Agent badge styles (pipeline file routing)
-  agentBadges: {
-    display: 'inline-flex' as const,
-    gap: '3px',
-    marginLeft: '4px',
-    flexShrink: 0,
-  },
-  agentBadgeActive: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    width: '20px',
-    height: '18px',
-    fontSize: '0.7rem',
-    fontWeight: 700,
-    borderRadius: '3px',
-    cursor: 'pointer',
-    backgroundColor: '#6b5ce7',
-    color: '#fff',
-    userSelect: 'none' as const,
-  },
-  agentBadgeInactive: {
-    display: 'inline-flex' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    width: '20px',
-    height: '18px',
-    fontSize: '0.7rem',
-    fontWeight: 700,
-    borderRadius: '3px',
-    cursor: 'pointer',
-    backgroundColor: 'transparent',
-    color: '#666',
-    border: '1px solid #444',
-    userSelect: 'none' as const,
-  },
-  agentTabBar: {
-    display: 'flex' as const,
-    gap: '2px',
-    marginBottom: '12px',
-    borderBottom: '1px solid #333',
-    paddingBottom: '0',
-  },
-  agentTab: {
-    padding: '8px 16px',
-    fontSize: '0.9rem',
-    background: 'none',
-    border: 'none',
-    borderBottom: '2px solid transparent',
-    color: '#888',
-    cursor: 'pointer',
-    display: 'flex' as const,
-    alignItems: 'center' as const,
-    gap: '6px',
-  },
-  agentTabActive: {
-    color: '#e0e0e0',
-    borderBottomColor: '#6b5ce7',
-  },
-  agentTabTokens: {
-    fontSize: '0.75rem',
-    color: '#666',
-  },
-
-  // Chat file attachment styles
-  inputRow: {
-    display: 'flex',
-    gap: '8px',
-    alignItems: 'flex-end',
-    width: '100%',
-  },
-  attachButtonContainer: {
-    position: 'relative' as const,
-    flexShrink: 0,
-  },
-  attachButton: {
-    width: '40px',
-    height: '40px',
-    borderRadius: '8px',
-    border: '1px solid #444',
-    backgroundColor: '#2a2a4e',
-    color: '#ccc',
-    fontSize: '1.5rem',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachMenu: {
-    position: 'absolute' as const,
-    bottom: '48px',
-    left: 0,
-    backgroundColor: '#2a2a4e',
-    border: '1px solid #444',
-    borderRadius: '8px',
-    padding: '4px',
-    minWidth: '140px',
-    zIndex: 100,
-    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-  },
-  attachMenuItem: {
-    display: 'block',
-    width: '100%',
-    padding: '10px 12px',
-    border: 'none',
-    backgroundColor: 'transparent',
-    color: '#ccc',
-    fontSize: '0.9rem',
-    textAlign: 'left' as const,
-    cursor: 'pointer',
-    borderRadius: '6px',
-  },
-  stagedFilesBar: {
-    display: 'flex',
-    flexWrap: 'wrap' as const,
-    gap: '8px',
-    padding: '8px',
-    backgroundColor: '#252542',
-    borderRadius: '8px',
-    width: '100%',
-    boxSizing: 'border-box' as const,
-  },
-  stagedFileChip: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '4px 8px',
-    backgroundColor: '#3a3a5e',
-    borderRadius: '6px',
-    fontSize: '0.85rem',
-  },
-  stagedFileName: {
-    color: '#ccc',
-  },
-  stagedFileRemove: {
-    background: 'none',
-    border: 'none',
-    color: '#888',
-    cursor: 'pointer',
-    padding: '2px',
-    fontSize: '0.8rem',
-    lineHeight: 1,
-  },
-  attachedFilesDisplay: {
-    marginBottom: '8px',
-    padding: '6px 10px',
-    backgroundColor: 'rgba(74, 74, 232, 0.15)',
-    borderRadius: '6px',
-    fontSize: '0.85rem',
-  },
-  attachedFilesSingle: {
-    color: '#aaa',
-  },
-  attachedFilesDetails: {
-    cursor: 'pointer',
-  },
-  attachedFilesSummary: {
-    color: '#aaa',
-    outline: 'none',
-  },
-  attachedFilesExpanded: {
-    marginTop: '6px',
-    paddingLeft: '8px',
-  },
-  attachedFileItem: {
-    color: '#888',
-    fontSize: '0.8rem',
-    padding: '2px 0',
-  },
-  editModeAttachedFiles: {
-    marginBottom: '8px',
-    padding: '8px 10px',
-    backgroundColor: 'rgba(74, 74, 232, 0.1)',
-    borderRadius: '6px',
-    fontSize: '0.85rem',
-    display: 'flex',
-    flexWrap: 'wrap' as const,
-    gap: '8px',
-    alignItems: 'center',
-  },
-  editModeFilesLabel: {
-    color: '#888',
-    marginRight: '4px',
-  },
-  editModeFileName: {
-    color: '#aaa',
-    backgroundColor: 'rgba(74, 74, 232, 0.2)',
-    padding: '2px 8px',
-    borderRadius: '4px',
-  },
-};
 
 export default App;
