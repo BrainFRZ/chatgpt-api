@@ -805,6 +805,7 @@ STATE_REPORT_TOOL = {
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
                         "class": {"type": "string", "description": "Class and subclass, e.g. 'Druid' or 'Bard (College of Eloquence)'."},
+                        "level": {"type": "integer", "description": "Character level."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",

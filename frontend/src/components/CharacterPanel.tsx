@@ -1,4 +1,5 @@
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
 import { styles } from '../styles';
 
 export interface CharacterPanelProps {
@@ -59,6 +60,34 @@ export default function CharacterPanel({
     return '#94a3b8';
   };
 
+  // Relationship tier derivation (mirrors backend _rs_tier / _roms_tier)
+  const rsTier = (score: number): [string, string] => {
+    if (score >= 95) return ['T7: Ride-or-Die', '+5 all checks; fight together; share all'];
+    if (score >= 85) return ['T6: Ally', '+4 CHA checks; auto-success Persuasion; backup'];
+    if (score >= 70) return ['T5: Close', '+3 CHA checks; Adv Persuasion/Deception'];
+    if (score >= 55) return ['T4: Good', '+2 CHA checks; Adv Persuasion'];
+    if (score >= 40) return ['T3: Friend', '+2 Persuasion/Insight; request favors no roll'];
+    if (score >= 25) return ['T2: Friendly', '+1 Persuasion'];
+    if (score >= 10) return ['T1: Acquaintance', 'no social penalties'];
+    if (score >= -9) return ['Neutral', ''];
+    if (score >= -24) return ['-T1: Annoyed', 'Disadv Persuasion'];
+    if (score >= -39) return ['-T2: Disliked', '-2 CHA checks'];
+    if (score >= -54) return ['-T3: Enemy', '-3 CHA checks; passive sabotage'];
+    if (score >= -69) return ['-T4: Adversary', '-4 all checks; 1 obstacle/episode'];
+    if (score >= -84) return ['-T5: Nemesis', '-5 all checks; 2 complications/episode'];
+    if (score >= -94) return ['-T6: Sworn Enemy', '-6 all checks; ambushes'];
+    return ['-T7: Hatred', '-7 all checks; attack regardless'];
+  };
+  const romsTier = (score: number): [string, string] => {
+    if (score >= 95) return ['T6: Unbreakable', '+6 all checks; redirect dmg 1/LR; telepathy'];
+    if (score >= 85) return ['T5: Married', '+5 all checks; shared HP pool; Adv Fear/Charm'];
+    if (score >= 65) return ['T4: Engaged', '+4 all checks; gain 1 NPC skill; 1 Inspiration/ep'];
+    if (score >= 45) return ['T3: Partner', '+3 CHA; fight together; reroll 1 save/LR'];
+    if (score >= 25) return ['T2: Dating', '+2 Persuasion; Adv Insight; +1 Death saves'];
+    if (score >= 10) return ['T1: Flirting', '+1 Persuasion; receptive to advances'];
+    return ['None', ''];
+  };
+
   // Type badge color
   const typeBadgeColor = (t: string) => {
     const tl = (t || '').toLowerCase();
@@ -95,6 +124,7 @@ export default function CharacterPanel({
     const resources = (data.resources || []).slice(0, 2);
     const summary = data.summary || '';
     const charClass = data.class || '';
+    const level = data.level;
     const barVitals = vitals.filter((v: any) => 'current' in v && 'max' in v);
     const flatVitals = vitals.filter((v: any) => 'value' in v && !('current' in v && 'max' in v));
     return (
@@ -111,7 +141,7 @@ export default function CharacterPanel({
         onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#2a2a4e')}
         onMouseLeave={e => (e.currentTarget.style.backgroundColor = '#1e1e3a')}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: barVitals.length || charClass || flatVitals.length || summary ? '4px' : 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: barVitals.length || charClass || level || flatVitals.length || summary ? '4px' : 0 }}>
           <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
           <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
             {isActive && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#4a4ae8', letterSpacing: '0.05em' }}>ACTING</span>}
@@ -121,9 +151,9 @@ export default function CharacterPanel({
             }}>{type.toUpperCase()}</span>
           </div>
         </div>
-        {(charClass || flatVitals.length > 0) && (
+        {(charClass || level || flatVitals.length > 0) && (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-            {charClass ? <span style={{ fontSize: '0.68rem', color: '#888' }}>{charClass}</span> : <span />}
+            <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ') || ''}</span>
             <div style={{ display: 'flex', gap: '6px' }}>
               {flatVitals.map((v: any, i: number) => (
                 <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
@@ -144,7 +174,7 @@ export default function CharacterPanel({
             </div>
           </div>
         ))}
-        {barVitals.length === 0 && !charClass && flatVitals.length === 0 && summary && (
+        {barVitals.length === 0 && !charClass && !level && flatVitals.length === 0 && summary && (
           <div style={{ fontSize: '0.7rem', color: '#888', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{summary}</div>
         )}
         {resources.length > 0 && (
@@ -289,11 +319,6 @@ export default function CharacterPanel({
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
     if (allPresent.length === 0) return null;
 
-    const mobileVitalColor = (cur: number, max: number) => {
-      const pct = max > 0 ? cur / max : 1;
-      return pct > 0.6 ? '#4ade80' : pct > 0.3 ? '#fbbf24' : '#ef4444';
-    };
-
     return (
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
@@ -313,31 +338,7 @@ export default function CharacterPanel({
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
           <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-            {allPresent.map((name: string) => {
-              const data = getCharData(name);
-              const type = data.type || 'npc';
-              const vitals = data.vitals || [];
-              return (
-                <div
-                  key={name}
-                  onClick={(e) => { e.stopPropagation(); setMobileBottomSheetOpen(false); setSelectedCharacter(name); setShowCharacterSheet(true); }}
-                  style={{ padding: '8px 10px', marginBottom: '4px', borderRadius: '6px', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e' }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: vitals.length ? '4px' : 0 }}>
-                    <span style={{ fontWeight: 600, fontSize: '0.82rem', color: '#e0e0e0' }}>{name}</span>
-                    <span style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', fontWeight: 600, backgroundColor: typeBadgeColor(type) + '22', color: typeBadgeColor(type) }}>{type.toUpperCase()}</span>
-                  </div>
-                  {vitals.filter((v: any) => 'current' in v && 'max' in v).slice(0, 2).map((v: any, i: number) => (
-                    <div key={i} style={{ marginBottom: '2px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999' }}><span>{v.label}</span><span>{v.current}/{v.max}</span></div>
-                      <div style={{ height: '4px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                        <div style={{ height: '100%', width: `${v.max > 0 ? Math.max(0, Math.min(100, (v.current / v.max) * 100)) : 0}%`, backgroundColor: mobileVitalColor(v.current, v.max), borderRadius: '2px' }} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              );
-            })}
+            {allPresent.map((name: string) => renderCard(name))}
           </div>
         )}
       </div>
@@ -360,15 +361,36 @@ export default function CharacterPanel({
     const hudFunds = state.hud_state?.funds?.[selectedCharacter];
     const memories = (state.npc_memories || {})[selectedCharacter];
 
-    // Find character section in .md sheet
+    // Find character section in .md or .yaml sheet
     const sheetSection = (() => {
       if (!characterSheetMd) return '';
-      const sections = characterSheetMd.split(/(?=^## )/m);
-      const match = sections.find(s => {
-        const heading = s.split('\n')[0].replace(/^## /, '').trim();
-        return heading.toLowerCase() === selectedCharacter.toLowerCase() || heading.toLowerCase().includes(selectedCharacter.toLowerCase());
-      });
-      return match || '';
+      const charLower = selectedCharacter.toLowerCase();
+      // Try markdown ## headers first
+      let sections = characterSheetMd.split(/(?=^## )/m);
+      if (sections.length > 1) {
+        const match = sections.find(s => {
+          const heading = s.split('\n')[0].replace(/^## /, '').trim();
+          return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
+        });
+        if (match) return match;
+      }
+      // Try YAML-style: split on banner blocks (# ===...title...# ===)
+      const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
+      const yamlSections: { name: string; start: number; }[] = [];
+      let m;
+      while ((m = yamlPattern.exec(characterSheetMd)) !== null) {
+        yamlSections.push({ name: m[1].trim(), start: m.index });
+      }
+      if (yamlSections.length > 0) {
+        for (let i = 0; i < yamlSections.length; i++) {
+          if (yamlSections[i].name.toLowerCase().includes(charLower)) {
+            const start = yamlSections[i].start;
+            const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : characterSheetMd.length;
+            return characterSheetMd.slice(start, end).trim();
+          }
+        }
+      }
+      return '';
     })();
 
     // Game-specific state sections
@@ -380,7 +402,7 @@ export default function CharacterPanel({
       if ((gs === 'dnd5e' || gs === 'dnd5e_cyber') && gameState.relationships && selectedCharacter) {
         const rel = gameState.relationships[selectedCharacter];
         if (type === 'pc') {
-          // PC view: show all NPC relationships
+          // PC view: show all NPC relationships with tier info
           const rels = Object.entries(gameState.relationships).filter(([_, r]: [string, any]) => r && typeof r === 'object');
           if (rels.length > 0) {
             parts.push(
@@ -388,11 +410,18 @@ export default function CharacterPanel({
                 <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Relationships</div>
                 {rels.map(([npc, r]: [string, any]) => {
                   const rs = r.rs || 0;
-                  const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
+                  const [rsLabel, rsBonus] = rsTier(rs);
+                  const tierColor = rs >= 40 ? '#a78bfa' : rs >= 10 ? '#4ade80' : rs >= -9 ? '#94a3b8' : '#ef4444';
+                  const romsVal = r.roms || 0;
+                  const [romsLabel, romsBonus] = romsTier(romsVal);
+                  const allBonuses = [rsBonus, romsBonus].filter(Boolean).join(' · ');
                   return (
-                    <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
-                      <span style={{ color: '#ccc' }}>{npc}</span>
-                      <span style={{ color: tierColor, fontWeight: 500 }}>RS {rs}{r.roms > 0 ? ` \u2665${r.roms}` : ''}</span>
+                    <div key={npc} style={{ padding: '4px 0', borderBottom: '1px solid #2a2a4e' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                        <span style={{ color: '#ccc' }}>{npc}</span>
+                        <span style={{ color: tierColor, fontWeight: 500 }}>RS {rs} ({rsLabel}){romsVal > 0 ? ` | \u2665${romsVal} (${romsLabel})` : ''}</span>
+                      </div>
+                      {allBonuses && <div style={{ fontSize: '0.65rem', color: '#666', textAlign: 'right' as const }}>{allBonuses}</div>}
                     </div>
                   );
                 })}
@@ -400,33 +429,45 @@ export default function CharacterPanel({
             );
           }
         } else if (rel && typeof rel === 'object') {
-          // NPC view: show only this NPC's scores
+          // NPC view: show only this NPC's scores with tier info
           const rs = rel.rs || 0;
-          const tierColor = rs <= -3 ? '#ef4444' : rs <= 0 ? '#94a3b8' : rs <= 3 ? '#4ade80' : '#a78bfa';
+          const [rsLabel, rsBonus] = rsTier(rs);
+          const tierColor = rs >= 40 ? '#a78bfa' : rs >= 10 ? '#4ade80' : rs >= -9 ? '#94a3b8' : '#ef4444';
+          const romsVal = rel.roms || 0;
+          const [romsLabel, romsBonus] = romsTier(romsVal);
+          const allBonuses = [rsBonus, romsBonus].filter(Boolean).join(' · ');
           parts.push(
             <div key="rels" style={{ marginTop: '12px' }}>
               <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Relationships</div>
               <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem' }}>
                 <span style={{ color: '#ccc' }}>Relationship Score</span>
-                <span style={{ color: tierColor, fontWeight: 500 }}>{rs}</span>
+                <span style={{ color: tierColor, fontWeight: 500 }}>{rs} — {rsLabel}</span>
               </div>
-              {rel.roms > 0 && (
+              {romsVal > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem' }}>
                   <span style={{ color: '#ccc' }}>Romance Score</span>
-                  <span style={{ color: '#f472b6', fontWeight: 500 }}>{rel.roms}</span>
+                  <span style={{ color: '#f472b6', fontWeight: 500 }}>{romsVal} — {romsLabel}</span>
                 </div>
               )}
+              {allBonuses && <div style={{ fontSize: '0.65rem', color: '#666', marginTop: '2px' }}>{allBonuses}</div>}
               {/* Inter-NPC relationships nested under this NPC */}
               {rel.npc_relationships && typeof rel.npc_relationships === 'object' && Object.keys(rel.npc_relationships).length > 0 && (
                 <>
                   <div style={{ fontSize: '0.68rem', fontWeight: 600, color: '#666', marginTop: '8px', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Inter-NPC Relationships</div>
                   {Object.entries(rel.npc_relationships).map(([npc, r]: [string, any]) => {
                     const npcRs = r?.rs || 0;
-                    const npcColor = npcRs <= -3 ? '#ef4444' : npcRs <= 0 ? '#94a3b8' : npcRs <= 3 ? '#4ade80' : '#a78bfa';
+                    const [npcRsLabel, npcRsBonus] = rsTier(npcRs);
+                    const npcColor = npcRs >= 40 ? '#a78bfa' : npcRs >= 10 ? '#4ade80' : npcRs >= -9 ? '#94a3b8' : '#ef4444';
+                    const npcRoms = r?.roms || 0;
+                    const [npcRomsLabel, npcRomsBonus] = romsTier(npcRoms);
+                    const npcAllBonuses = [npcRsBonus, npcRomsBonus].filter(Boolean).join(' · ');
                     return (
-                      <div key={npc} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontSize: '0.75rem', borderBottom: '1px solid #2a2a4e' }}>
-                        <span style={{ color: '#aaa' }}>{npc}</span>
-                        <span style={{ color: npcColor, fontWeight: 500 }}>RS {npcRs}{r?.roms > 0 ? ` \u2665${r.roms}` : ''}</span>
+                      <div key={npc} style={{ padding: '3px 0', borderBottom: '1px solid #2a2a4e' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}>
+                          <span style={{ color: '#aaa' }}>{npc}</span>
+                          <span style={{ color: npcColor, fontWeight: 500 }}>RS {npcRs} ({npcRsLabel}){npcRoms > 0 ? ` | \u2665${npcRoms} (${npcRomsLabel})` : ''}</span>
+                        </div>
+                        {npcAllBonuses && <div style={{ fontSize: '0.6rem', color: '#555', textAlign: 'right' as const }}>{npcAllBonuses}</div>}
                       </div>
                     );
                   })}
@@ -435,25 +476,27 @@ export default function CharacterPanel({
             </div>
           );
         }
-        // Factions
-        const factions = Object.entries(gameState.factions || {});
-        if (factions.length > 0) {
-          parts.push(
-            <div key="factions" style={{ marginTop: '12px' }}>
-              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Factions</div>
-              {factions.map(([name, f]: [string, any]) => (
-                <div key={name} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
-                  <span style={{ color: '#ccc' }}>{name}</span>
-                  <span style={{ color: '#94a3b8' }}>FR {f.fr || 0} — {f.tier || '?'}</span>
-                </div>
-              ))}
-            </div>
-          );
+        // Factions (PC only)
+        if (type === 'pc') {
+          const factions = Object.entries(gameState.factions || {});
+          if (factions.length > 0) {
+            parts.push(
+              <div key="factions" style={{ marginTop: '12px' }}>
+                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Factions</div>
+                {factions.map(([name, f]: [string, any]) => (
+                  <div key={name} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '0.78rem', borderBottom: '1px solid #2a2a4e' }}>
+                    <span style={{ color: '#ccc' }}>{name}</span>
+                    <span style={{ color: '#94a3b8' }}>FR {f.fr || 0} — {f.tier || '?'}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          }
         }
       }
 
-      // D&D 5E Cyber: Ship
-      if (gs === 'dnd5e_cyber' && gameState.ship) {
+      // D&D 5E Cyber: Ship (only on ship card)
+      if (gs === 'dnd5e_cyber' && gameState.ship && type === 'ship') {
         const ship = gameState.ship;
         parts.push(
           <div key="ship" style={{ marginTop: '12px' }}>
@@ -583,7 +626,7 @@ export default function CharacterPanel({
     };
 
     return (
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 1900, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => { setShowCharacterSheet(false); setSelectedCharacter(null); }}>
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 2100, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => { setShowCharacterSheet(false); setSelectedCharacter(null); }}>
         <div style={{ backgroundColor: '#1a1a2e', borderRadius: '12px', maxWidth: '700px', width: '90%', maxHeight: '85vh', overflow: 'auto', padding: '24px', border: '1px solid #333', scrollbarWidth: 'thin' as any }} onClick={e => e.stopPropagation()}>
           {/* Header */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
@@ -596,6 +639,13 @@ export default function CharacterPanel({
             </div>
             <button onClick={() => { setShowCharacterSheet(false); setSelectedCharacter(null); }} style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer' }}>{'\u2715'}</button>
           </div>
+
+          {/* Class & Level */}
+          {(data.class || data.level != null) && (
+            <div style={{ fontSize: '0.85rem', color: '#999', marginBottom: '12px', marginTop: '-8px' }}>
+              {[data.class, data.level != null ? `Level ${data.level}` : ''].filter(Boolean).join(' · ')}
+            </div>
+          )}
 
           {/* Live State */}
           {(vitals.length > 0 || resources.length > 0 || conditions.length > 0 || summary) && (
@@ -642,13 +692,47 @@ export default function CharacterPanel({
           {/* Game-specific state */}
           {renderGameState()}
 
-          {/* Funds */}
-          {hudFunds && (
-            <div style={{ marginTop: '12px' }}>
-              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-              <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : JSON.stringify(hudFunds)}</div>
-            </div>
-          )}
+          {/* Funds: Ship shows all, PC shows own (or all if no ship in game), NPC hidden */}
+          {(() => {
+            const allFunds = state.hud_state?.funds || {};
+            const hasShipInScene = Object.values(cs).some((e: any) => (e?.data || e)?.type === 'ship');
+            if (type === 'ship') {
+              const entries = Object.entries(allFunds);
+              if (entries.length > 0) return (
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
+                  {entries.map(([k, v]: [string, any]) => (
+                    <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                      <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            } else if (type === 'pc') {
+              if (!hasShipInScene) {
+                // No ship — PC shows all funds
+                const entries = Object.entries(allFunds);
+                if (entries.length > 0) return (
+                  <div style={{ marginTop: '12px' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
+                    {entries.map(([k, v]: [string, any]) => (
+                      <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                        <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              } else if (hudFunds) {
+                return (
+                  <div style={{ marginTop: '12px' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
+                    <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : hudFunds}</div>
+                  </div>
+                );
+              }
+            }
+            return null;
+          })()}
 
           {/* NPC Memories button */}
           {memories && memories.length > 0 && (
@@ -664,13 +748,60 @@ export default function CharacterPanel({
             </div>
           )}
 
-          {/* Character sheet .md (collapsed) */}
+          {/* Character sheet (collapsed, rendered as markdown or styled YAML) */}
           {sheetSection && (
             <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
               <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
-              <div style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px', whiteSpace: 'pre-wrap' }}>
-                {sheetSection.split('\n').slice(1).join('\n').trim()}
-              </div>
+              {(() => {
+                // Strip the header line(s) — ## heading for md, # === banner for yaml
+                let body = sheetSection;
+                if (body.startsWith('## ')) {
+                  body = body.split('\n').slice(1).join('\n').trim();
+                } else if (body.startsWith('# ===')) {
+                  // Strip the 3-line banner (# ===, # Title, # ===)
+                  body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
+                }
+                const isYaml = /^- \w+:|^\w+:/.test(body.trim());
+                if (isYaml) {
+                  return (
+                    <div style={{ fontSize: '0.75rem', color: '#ccc', lineHeight: 1.6, marginTop: '8px', fontFamily: "'Consolas', 'Monaco', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {body.split('\n').map((line, i) => {
+                        const commentStyle = { color: '#5a8a6a', fontStyle: 'italic' as const };
+                        // Render inline # comments in green
+                        const renderWithComment = (text: string, baseStyle: React.CSSProperties) => {
+                          const cIdx = text.indexOf('  #');
+                          if (cIdx >= 0) return <><span style={baseStyle}>{text.slice(0, cIdx)}</span><span style={commentStyle}>{text.slice(cIdx)}</span></>;
+                          return <span style={baseStyle}>{text}</span>;
+                        };
+                        // Full-line # comments
+                        if (/^\s*#/.test(line)) return <div key={i} style={commentStyle}>{line}</div>;
+                        // Style keys (- name:, class:, etc.) with inline comment support
+                        const keyMatch = line.match(/^(\s*-?\s*)(\w[\w\s]*?)(:)(.*)/);
+                        if (keyMatch) return (
+                          <div key={i}>
+                            <span>{keyMatch[1]}</span>
+                            <span style={{ color: '#60a5fa', fontWeight: 500 }}>{keyMatch[2]}</span>
+                            <span style={{ color: '#666' }}>{keyMatch[3]}</span>
+                            {renderWithComment(keyMatch[4], { color: '#e0e0e0' })}
+                          </div>
+                        );
+                        // List items with inline comment support
+                        if (/^\s+-\s/.test(line)) {
+                          const cIdx = line.indexOf('  #');
+                          if (cIdx >= 0) return <div key={i}><span style={{ color: '#ccc' }}>{line.slice(0, cIdx)}</span><span style={commentStyle}>{line.slice(cIdx)}</span></div>;
+                          return <div key={i} style={{ color: '#ccc' }}>{line}</div>;
+                        }
+                        return <div key={i}>{line}</div>;
+                      })}
+                    </div>
+                  );
+                }
+                return (
+                  <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>
+                    <ReactMarkdown>{body}</ReactMarkdown>
+                  </div>
+                );
+              })()}
             </details>
           )}
         </div>

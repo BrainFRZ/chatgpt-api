@@ -720,6 +720,7 @@ STATE_REPORT_TOOL = {
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
                         "class": {"type": "string", "description": "Role, e.g. 'Solo' or 'Netrunner'."},
+                        "level": {"type": "integer", "description": "Character level or rank, if applicable."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",

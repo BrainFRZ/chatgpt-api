@@ -708,6 +708,7 @@ STATE_REPORT_TOOL = {
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
                         "class": {"type": "string", "description": "Archetype, e.g. 'Street Samurai' or 'Decker'."},
+                        "level": {"type": "integer", "description": "Character level or street cred tier, if applicable."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",
