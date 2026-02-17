@@ -656,7 +656,7 @@ class TestRetryStateApplicationIC:
         apply_single_agent_state_updates(state, retry_result, state["turn_counter"])
 
         assert "Hero" in state["character_states"]
-        assert state["character_states"]["Hero"]["state"] == "HP 20/20, no conditions"
+        assert state["character_states"]["Hero"]["data"] == {"summary": "HP 20/20, no conditions"}
 
     def test_data_pipeline_state_set(self):
         """data['pipeline_state'] should point to the updated state."""
@@ -771,7 +771,7 @@ class TestRetryStateApplicationMinimal:
         assert state["scene_state"]["location"] == "Forest Path"
         assert state["callback_ledger"]["open"] == []  # unchanged
         assert state["npc_memories"] == {}  # unchanged
-        assert state["character_states"]["Hero"]["state"] == "50/50 HP"
+        assert state["character_states"]["Hero"]["data"] == {"summary": "50/50 HP"}
 
     def test_empty_optional_arrays(self):
         state = _fresh_pipeline_state()
@@ -925,7 +925,7 @@ class TestRetryMergeWithExistingState:
         state["turn_counter"] += 1
         apply_single_agent_state_updates(state, retry_result, state["turn_counter"])
 
-        assert state["character_states"]["Hero"]["state"] == "HP 35/50, poisoned"
+        assert state["character_states"]["Hero"]["data"] == {"summary": "HP 35/50, poisoned"}
         assert state["character_states"]["Hero"]["last_updated"] == 4
 
 

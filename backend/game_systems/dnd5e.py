@@ -152,7 +152,7 @@ def build_game_injection(game_state):
     relationships = game_state.get("relationships", {})
     factions = game_state.get("factions", {})
     if not relationships and not factions:
-        return ""
+        return "[RELATIONSHIP STATE]\n(empty — bootstrap with relationship_ops \"set\")\n[/RELATIONSHIP STATE]"
 
     lines = ["[RELATIONSHIP STATE]"]
     if relationships:

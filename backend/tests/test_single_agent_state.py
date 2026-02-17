@@ -414,7 +414,13 @@ class TestStateInterceptor:
 class TestBuildSingleAgentInjections:
     def test_empty_state(self, fresh_state):
         result = build_single_agent_injections(fresh_state)
-        assert result == ""
+        # Bootstrap markers should be present for scene and character states
+        assert "[SCENE STATE]" in result
+        assert "[CHARACTER STATES]" in result
+        assert "(empty" in result
+        # No other injection blocks
+        assert "[CALLBACK LEDGER]" not in result
+        assert "[PIPELINE STATE]" not in result
 
     def test_populated_state(self, populated_state):
         result = build_single_agent_injections(populated_state)
@@ -463,7 +469,7 @@ class TestApplySingleAgentStateUpdates:
         assert len(result["callback_ledger"]["open"]) == 1
         assert "NPC1" in result["npc_memories"]
         assert result["scene_state"]["location"] == "Town square"
-        assert result["character_states"]["Hero"]["state"] == "50/50 HP, AC 16"
+        assert result["character_states"]["Hero"]["data"] == {"summary": "50/50 HP, AC 16"}
 
     def test_partial_apply(self, populated_state):
         """Only pacing and scene — no callbacks, memories, or characters."""
@@ -656,7 +662,7 @@ class TestToolInputProcessing:
         assert result["pacing"]["episode"] == "Session 5"
         assert result["scene_state"]["location"] == "Battlefield"
         assert result["scene_state"]["atmosphere"] == "Dust and chaos"
-        assert result["character_states"]["Hero"]["state"] == "45/50 HP, AC 16"
+        assert result["character_states"]["Hero"]["data"] == {"summary": "45/50 HP, AC 16"}
         assert len(result["callback_ledger"]["open"]) == 1
         assert "Goblin Chief" in result["npc_memories"]
 
@@ -697,7 +703,7 @@ class TestToolInputProcessing:
         }
         result = apply_single_agent_state_updates(state, tool_input, current_turn=1)
         assert result["pacing"]["beat"] == "Intro"
-        assert result["character_states"]["Hero"]["state"] == "50/50 HP"
+        assert result["character_states"]["Hero"]["data"] == {"summary": "50/50 HP"}
 
 
 # ============================================================

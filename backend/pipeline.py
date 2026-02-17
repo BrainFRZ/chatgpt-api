@@ -173,13 +173,11 @@ def build_events_messages(
 
     # 4. Scene state
     scene_injection = build_scene_state_injection(pipeline_state.get("scene_state", {}))
-    if scene_injection:
-        injections.append(scene_injection)
+    injections.append(scene_injection)
 
     # 5. Character states
     cs_injection = build_character_states_injection(pipeline_state.get("character_states", {}))
-    if cs_injection:
-        injections.append(cs_injection)
+    injections.append(cs_injection)
 
     # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
@@ -664,7 +662,7 @@ def build_npc_memories_injection(memories: dict, scene_state: dict) -> str:
 def build_scene_state_injection(scene: dict) -> str:
     """Build human-readable scene state injection for Events."""
     if not scene:
-        return ""
+        return "[SCENE STATE]\n(empty — bootstrap from current story context)\n[/SCENE STATE]"
 
     lines = ["[SCENE STATE]"]
 
@@ -729,7 +727,7 @@ def build_character_states_injection(character_states: dict) -> str:
     Falls back gracefully for old formats.
     """
     if not character_states:
-        return ""
+        return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt)\n[/CHARACTER STATES]"
     lines = ["[CHARACTER STATES]"]
     for name, entry in character_states.items():
         if isinstance(entry, dict):
@@ -1912,13 +1910,11 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
 
     # 4. Scene state
     scene = build_scene_state_injection(pipeline_state.get("scene_state", {}))
-    if scene:
-        injections.append(scene)
+    injections.append(scene)
 
     # 5. Character states
     cs = build_character_states_injection(pipeline_state.get("character_states", {}))
-    if cs:
-        injections.append(cs)
+    injections.append(cs)
 
     # 6. HUD state (with scene-scoped funds, backfilled from game_state)
     hud = build_hud_state_injection(

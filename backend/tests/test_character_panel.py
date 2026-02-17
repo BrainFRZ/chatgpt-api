@@ -321,7 +321,10 @@ class TestFormatCharacterData:
 
 class TestBuildCharacterStatesInjection:
     def test_empty_returns_empty(self):
-        assert build_character_states_injection({}) == ""
+        result = build_character_states_injection({})
+        assert "[CHARACTER STATES]" in result
+        assert "(empty" in result
+        assert "[/CHARACTER STATES]" in result
 
     def test_new_data_format(self):
         cs = {
@@ -441,8 +444,10 @@ class TestBuildSingleAgentInjections:
     def test_empty_state_returns_empty_or_minimal(self):
         state = _fresh_pipeline_state()
         result = build_single_agent_injections(state)
-        # Fresh state has all empty dicts — injection should be empty or minimal
-        assert "[CHARACTER STATES]" not in result  # No characters to inject
+        # Fresh state injects bootstrap markers for scene and character states
+        assert "[CHARACTER STATES]" in result
+        assert "[SCENE STATE]" in result
+        assert "(empty" in result
 
 
 # ============================================================
@@ -626,9 +631,14 @@ class TestCharacterSheetEndpoint:
 class TestFrontendIntegration:
     @pytest.fixture(autouse=True)
     def setup_frontend_path(self):
-        self.app_path = os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'src', 'App.tsx')
-        with open(self.app_path, 'r') as f:
-            self.content = f.read()
+        src_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'src')
+        parts = []
+        for rel in ['App.tsx', 'components/CharacterPanel.tsx', 'hooks/useMessaging.ts', 'hooks/useSync.ts']:
+            path = os.path.join(src_dir, rel)
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    parts.append(f.read())
+        self.content = '\n'.join(parts)
 
     def test_state_variables_exist(self):
         assert 'rightPanelOpen' in self.content
@@ -667,16 +677,16 @@ class TestFrontendIntegration:
 
     def test_right_panel_collapsed_strip(self):
         """Collapsed strip should have « button and character count badge."""
-        # Check for the expand button character
-        assert '«' in self.content
-        assert '»' in self.content
+        # Check for the expand/collapse button characters (JS unicode escapes)
+        assert '\\u00AB' in self.content
+        assert '\\u00BB' in self.content
 
     def test_right_panel_expanded(self):
         """Expanded panel should have 280px width."""
         assert "width: '280px'" in self.content
 
     def test_combat_mode_rendering(self):
-        assert 'Combat — Round' in self.content
+        assert 'Combat \\u2014 Round' in self.content
         assert 'COMBAT' in self.content
         assert 'initiative_order' in self.content
         assert 'current_turn' in self.content
@@ -694,8 +704,8 @@ class TestFrontendIntegration:
 
     def test_npc_memories_modal(self):
         assert 'NPC Memories Modal' in self.content
-        assert '★' in self.content
-        assert '☆' in self.content
+        assert '\\u2605' in self.content  # filled star
+        assert '\\u2606' in self.content  # empty star
 
     def test_game_specific_state_sections(self):
         """Should render state for all 5 game systems."""

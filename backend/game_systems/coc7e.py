@@ -157,7 +157,7 @@ def build_game_injection(game_state):
     """Build [INVESTIGATOR STATE] injection block from structured state."""
     investigators = game_state.get("investigators", {})
     if not investigators:
-        return ""
+        return "[INVESTIGATOR STATE]\n(empty — bootstrap from character sheets)\n[/INVESTIGATOR STATE]"
 
     lines = ["[INVESTIGATOR STATE]"]
     for name, inv in sorted(investigators.items()):

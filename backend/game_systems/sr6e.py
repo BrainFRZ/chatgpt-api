@@ -181,7 +181,7 @@ def build_game_injection(game_state):
     """Build [RUNNER STATE] injection block from structured state."""
     runners = game_state.get("runners", {})
     if not runners:
-        return ""
+        return "[RUNNER STATE]\n(empty — bootstrap from character sheets)\n[/RUNNER STATE]"
 
     lines = ["[RUNNER STATE]"]
     for name, runner in sorted(runners.items()):

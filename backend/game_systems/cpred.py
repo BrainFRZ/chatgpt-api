@@ -179,7 +179,7 @@ def build_game_injection(game_state):
     """Build [EDGERUNNER STATE] injection block from structured state."""
     edgerunners = game_state.get("edgerunners", {})
     if not edgerunners:
-        return ""
+        return "[EDGERUNNER STATE]\n(empty — bootstrap from character sheets)\n[/EDGERUNNER STATE]"
 
     lines = ["[EDGERUNNER STATE]"]
     for name, er in sorted(edgerunners.items()):

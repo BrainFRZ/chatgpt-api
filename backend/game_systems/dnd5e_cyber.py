@@ -99,10 +99,9 @@ def build_game_injection(game_state):
     """Build [RELATIONSHIP STATE] + [SHIP STATE] injection blocks."""
     parts = []
 
-    # Relationship injection from base dnd5e
+    # Relationship injection from base dnd5e (always returns content, including bootstrap marker)
     rel_injection = _dnd5e_build_injection(game_state)
-    if rel_injection:
-        parts.append(rel_injection)
+    parts.append(rel_injection)
 
     # Ship state injection
     ship = game_state.get("ship", {})
@@ -141,8 +140,10 @@ def build_game_injection(game_state):
 
         lines.append("[/SHIP STATE]")
         parts.append("\n".join(lines))
+    else:
+        parts.append("[SHIP STATE]\n(empty — bootstrap with ship_ops \"set\")\n[/SHIP STATE]")
 
-    return "\n\n".join(parts) if parts else ""
+    return "\n\n".join(parts)
 
 
 # ============================================================

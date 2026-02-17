@@ -276,7 +276,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "turn_counter"}
 
 
 # ============================================================
@@ -809,7 +809,10 @@ class TestBuildSceneStateInjection:
         assert "Atmosphere: Tense, low lighting" in result
 
     def test_empty_scene(self):
-        assert build_scene_state_injection({}) == ""
+        result = build_scene_state_injection({})
+        assert "[SCENE STATE]" in result
+        assert "(empty" in result
+        assert "[/SCENE STATE]" in result
 
     def test_empty_lists_show_none(self):
         scene = {"location": "Tavern", "npcs_present": [], "active_tensions": []}
@@ -872,14 +875,16 @@ class TestBuildEventsMessages:
             pipeline_state=fresh_state,
         )
         user_content = messages[-1]["content"]
-        # Empty state should not inject callback/memory/scene blocks
+        # Empty state should not inject callback/memory blocks
         assert "[CALLBACK LEDGER]" not in user_content
         assert "[NPC MEMORIES:" not in user_content
-        assert "[SCENE STATE]" not in user_content
         # Pacing is empty too
         assert "[PIPELINE STATE]" not in user_content
-        # Just the user message
-        assert user_content == "hello"
+        # Bootstrap markers should be present for scene and character states
+        assert "[SCENE STATE]" in user_content
+        assert "(empty" in user_content
+        assert "[CHARACTER STATES]" in user_content
+        assert "hello" in user_content
 
     def test_no_context_updates_ever(self, full_pipeline_state):
         """CONTEXT UPDATES injection was removed — verify it never appears."""
@@ -1392,7 +1397,7 @@ class TestRunPipelineE2E:
         state = result.pipeline_state
 
         # Verify full nested structure exists
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "turn_counter"}
 
         # Turn counter should be 1 (migrated from 0 + increment)
         assert state["turn_counter"] == 1
@@ -2240,13 +2245,15 @@ class TestEventsReceivesInjections:
         user_msg = events_call["messages"][-1]
         content = user_msg["content"]
 
-        # No injection blocks should be present on fresh state
+        # No injection blocks for callback/memory/pacing on fresh state
         assert "[CALLBACK LEDGER]" not in content
         assert "[NPC MEMORIES:" not in content
-        assert "[SCENE STATE]" not in content
         assert "[PIPELINE STATE]" not in content
-        # Just the user message
-        assert content == "I attack the guard"
+        # Bootstrap markers should be present for scene and character states
+        assert "[SCENE STATE]" in content
+        assert "[CHARACTER STATES]" in content
+        assert "(empty" in content
+        assert "I attack the guard" in content
 
 
     def test_pipeline_state_preserved_across_turns(self):
@@ -2326,7 +2333,10 @@ class TestEventsReceivesInjections:
 
 class TestBuildCharacterStatesInjection:
     def test_empty_returns_empty(self):
-        assert build_character_states_injection({}) == ""
+        result = build_character_states_injection({})
+        assert "[CHARACTER STATES]" in result
+        assert "(empty" in result
+        assert "[/CHARACTER STATES]" in result
 
     def test_populated_structured_format(self):
         cs = {
@@ -2398,7 +2408,7 @@ class TestCharacterStatesMigration:
         }
         result = migrate_pipeline_state(state)
         # Flat string migrated to structured format
-        assert result["character_states"]["Aedina"]["state"] == "50 HP"
+        assert result["character_states"]["Aedina"]["data"] == {"summary": "50 HP"}
         assert result["character_states"]["Aedina"]["last_updated"] == 3
 
     def test_already_structured_character_states_unchanged(self):
@@ -2408,11 +2418,11 @@ class TestCharacterStatesMigration:
             "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
             "npc_memories": {},
             "scene_state": {},
-            "character_states": {"Aedina": {"state": "50 HP", "last_updated": 3}},
+            "character_states": {"Aedina": {"data": {"summary": "50 HP"}, "last_updated": 3}},
             "turn_counter": 5,
         }
         result = migrate_pipeline_state(state)
-        assert result["character_states"]["Aedina"] == {"state": "50 HP", "last_updated": 3}
+        assert result["character_states"]["Aedina"] == {"data": {"summary": "50 HP"}, "last_updated": 3}
 
 
 class TestCharacterStatesE2E:
@@ -2456,9 +2466,9 @@ class TestCharacterStatesE2E:
         done_event = [e for e in events if e[0] == "pipeline_done"][0]
         result = done_event[1]
         cs = result.pipeline_state["character_states"]
-        assert cs["Aedina"]["state"] == "42/50 HP, 1/3 spell slots"
+        assert cs["Aedina"]["data"] == {"summary": "42/50 HP, 1/3 spell slots"}
         assert cs["Aedina"]["last_updated"] == 1
-        assert cs["Orrophim"]["state"] == "38/38 HP, rage 1/3"
+        assert cs["Orrophim"]["data"] == {"summary": "38/38 HP, rage 1/3"}
         assert cs["Orrophim"]["last_updated"] == 1
 
     def test_mechanics_without_character_states_preserves_existing(self):
@@ -2492,7 +2502,7 @@ class TestCharacterStatesE2E:
             "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
             "npc_memories": {},
             "scene_state": {},
-            "character_states": {"Aedina": {"state": "50/50 HP", "last_updated": 2}},
+            "character_states": {"Aedina": {"data": {"summary": "50/50 HP"}, "last_updated": 2}},
             "turn_counter": 2,
         }
 
@@ -2508,7 +2518,7 @@ class TestCharacterStatesE2E:
         result = done_event[1]
         # Existing character_states should persist when Mechanics doesn't output them
         cs = result.pipeline_state["character_states"]
-        assert cs["Aedina"]["state"] == "50/50 HP"
+        assert cs["Aedina"]["data"] == {"summary": "50/50 HP"}
         assert cs["Aedina"]["last_updated"] == 2  # Not updated this turn
 
     def test_character_states_injected_into_events(self):
@@ -2577,32 +2587,32 @@ class TestApplyCharacterStates:
     def test_merge_into_empty(self):
         existing = {}
         result = apply_character_states(existing, {"Aedina": "50 HP"}, current_turn=1)
-        assert result["Aedina"] == {"state": "50 HP", "last_updated": 1}
+        assert result["Aedina"] == {"data": {"summary": "50 HP"}, "last_updated": 1}
 
     def test_merge_updates_existing(self):
-        existing = {"Aedina": {"state": "50 HP", "last_updated": 1}}
+        existing = {"Aedina": {"data": {"summary": "50 HP"}, "last_updated": 1}}
         result = apply_character_states(existing, {"Aedina": "42 HP"}, current_turn=2)
-        assert result["Aedina"] == {"state": "42 HP", "last_updated": 2}
+        assert result["Aedina"] == {"data": {"summary": "42 HP"}, "last_updated": 2}
 
     def test_merge_preserves_untouched(self):
         existing = {
-            "Aedina": {"state": "50 HP", "last_updated": 5},
-            "Orrophim": {"state": "38 HP", "last_updated": 5},
+            "Aedina": {"data": {"summary": "50 HP"}, "last_updated": 5},
+            "Orrophim": {"data": {"summary": "38 HP"}, "last_updated": 5},
         }
         result = apply_character_states(existing, {"Aedina": "42 HP"}, current_turn=6)
-        assert result["Aedina"] == {"state": "42 HP", "last_updated": 6}
-        assert result["Orrophim"] == {"state": "38 HP", "last_updated": 5}
+        assert result["Aedina"] == {"data": {"summary": "42 HP"}, "last_updated": 6}
+        assert result["Orrophim"] == {"data": {"summary": "38 HP"}, "last_updated": 5}
 
     def test_merge_adds_new_character(self):
-        existing = {"Aedina": {"state": "50 HP", "last_updated": 5}}
+        existing = {"Aedina": {"data": {"summary": "50 HP"}, "last_updated": 5}}
         result = apply_character_states(existing, {"Vex": "68 HP, AC 16"}, current_turn=6)
         assert "Aedina" in result
-        assert result["Vex"] == {"state": "68 HP, AC 16", "last_updated": 6}
+        assert result["Vex"] == {"data": {"summary": "68 HP, AC 16"}, "last_updated": 6}
 
     def test_ttl_prunes_stale(self):
         existing = {
-            "Aedina": {"state": "50 HP", "last_updated": 5},
-            "Old Guard": {"state": "dead", "last_updated": 1},
+            "Aedina": {"data": {"summary": "50 HP"}, "last_updated": 5},
+            "Old Guard": {"data": {"summary": "dead"}, "last_updated": 1},
         }
         # Turn 1 + TTL(150) + 1 = 152 — Old Guard should be pruned
         result = apply_character_states(existing, {"Aedina": "45 HP"}, current_turn=152)
@@ -2611,8 +2621,8 @@ class TestApplyCharacterStates:
 
     def test_ttl_keeps_within_window(self):
         existing = {
-            "Aedina": {"state": "50 HP", "last_updated": 5},
-            "Guard": {"state": "68 HP", "last_updated": 5},
+            "Aedina": {"data": {"summary": "50 HP"}, "last_updated": 5},
+            "Guard": {"data": {"summary": "68 HP"}, "last_updated": 5},
         }
         # Turn 155 — Guard updated at 5, TTL is 150, so 155 - 5 = 150 which is NOT > 150
         result = apply_character_states(existing, {}, current_turn=155)
@@ -2634,7 +2644,7 @@ class TestApplyCharacterStates:
         result = apply_character_states(existing, mechanics_output, current_turn=1)
         assert len(result) == 3
         for name in mechanics_output:
-            assert result[name]["state"] == mechanics_output[name]
+            assert result[name]["data"] == {"summary": mechanics_output[name]}
             assert result[name]["last_updated"] == 1
 
 
