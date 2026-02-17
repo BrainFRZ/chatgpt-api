@@ -26,6 +26,7 @@ interface UseMessagingDeps {
   setIsLoading: React.Dispatch<React.SetStateAction<Set<string>>>;
   setPipelineStage: React.Dispatch<React.SetStateAction<Map<string, {stage: string, status: string}>>>;
   setPipelineState: (v: any) => void;
+  setStateNotifications: (v: any[]) => void;
   setDocsRefreshed: (v: boolean) => void;
   setError: (v: string) => void;
   editingMessageIndex: number | null;
@@ -89,6 +90,7 @@ export function useMessaging(deps: UseMessagingDeps) {
 
   const saveEditedMessage = async () => {
     if (!deps.user || !deps.currentChat || deps.editingMessageIndex === null || !deps.editingMessageContent.trim()) return;
+    deps.setStateNotifications([]);
 
     // Bounds check - messages array might have changed since edit started
     if (deps.editingMessageIndex < 0 || deps.editingMessageIndex >= deps.messages.length) {
@@ -212,6 +214,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             });
           } else if (event.type === 'state_update') {
             deps.setPipelineState(event.data);
+          } else if (event.type === 'state_notifications') {
+            deps.setStateNotifications(event.data);
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -295,6 +299,7 @@ export function useMessaging(deps: UseMessagingDeps) {
 
   const sendMessage = async () => {
     if (!newMessage.trim() || !deps.user || !deps.currentChat || deps.isLoading.has(deps.currentChat)) return;
+    deps.setStateNotifications([]);
 
     const ctx = createContextGuard();
     const messageText = newMessage;
@@ -426,6 +431,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             });
           } else if (event.type === 'state_update') {
             deps.setPipelineState(event.data);
+          } else if (event.type === 'state_notifications') {
+            deps.setStateNotifications(event.data);
           } else if (event.type === 'done') {
             const data = event.data;
 

@@ -1941,3 +1941,47 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
             injections.append(game_injection)
 
     return "\n\n".join(injections) if injections else ""
+
+
+def extract_state_notifications(ops_source: dict) -> list:
+    """Extract user-visible notifications from relationship_ops and npc_memory_ops.
+
+    Returns a list of notification dicts for the frontend to display.
+    Skips bootstrap ops (set/npc_set) and drop actions — only meaningful changes.
+    """
+    notifications = []
+
+    for op in ops_source.get("relationship_ops", []):
+        op_type = op.get("op")
+        if op_type in ("set", "npc_set"):
+            continue
+        if op_type in ("rs", "roms", "fr"):
+            notifications.append({
+                "type": f"{op_type}_change",
+                "target": op.get("target"),
+                "change": op.get("change"),
+                "new_total": op.get("new_total"),
+                "reason": op.get("reason"),
+            })
+        elif op_type in ("npc_rs", "npc_roms"):
+            notifications.append({
+                "type": f"{op_type}_change",
+                "target": op.get("target"),
+                "other": op.get("other"),
+                "change": op.get("change"),
+                "new_total": op.get("new_total"),
+                "reason": op.get("reason"),
+            })
+
+    for op in ops_source.get("npc_memory_ops", []):
+        if op.get("action") != "add":
+            continue
+        notifications.append({
+            "type": "npc_memory",
+            "npc": op.get("npc"),
+            "text": op.get("text"),
+            "quote": op.get("quote"),
+            "impact": op.get("impact"),
+        })
+
+    return notifications

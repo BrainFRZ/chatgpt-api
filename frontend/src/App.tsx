@@ -234,6 +234,7 @@ function App() {
   // Right panel — character state
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [pipelineState, setPipelineState] = useState<any>(null);
+  const [stateNotifications, setStateNotifications] = useState<any[]>([]);
   const [chatGameSystem, setChatGameSystem] = useState<string | null>(null);
   const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null);
   const [showCharacterSheet, setShowCharacterSheet] = useState(false);
@@ -337,6 +338,7 @@ function App() {
     setEditingMessageContent('');
     setIsResizing(false);
     setPipelineState(null);
+    setStateNotifications([]);
     setChatGameSystem(null);
     setSelectedCharacter(null);
     setShowCharacterSheet(false);
@@ -2126,7 +2128,7 @@ function App() {
     selectedModel, contextStartIndex, setContextStartIndex,
     stats, setStats,
     isLoading, setIsLoading,
-    setPipelineStage, setPipelineState, setDocsRefreshed, setError,
+    setPipelineStage, setPipelineState, setStateNotifications, setDocsRefreshed, setError,
     editingMessageIndex, editingMessageContent,
     setEditingMessageIndex, setEditingMessageContent,
     fetchUserStats, fetchFreeTokens,
@@ -2138,7 +2140,7 @@ function App() {
     isLoadingRef,
     setMessages, setAllMessages, setTotalMessages,
     setCurrentLeafId, setStats, setContextStartIndex,
-    setPipelineStage, setPipelineState,
+    setPipelineStage, setPipelineState, setStateNotifications,
     setSelectedModel, setAnthropicSync, setDocsRefreshed,
     setChats, setProjectChatsCache, setRootChatsCache,
     resetChatState,
@@ -2404,6 +2406,7 @@ function App() {
                 sendMessage={messaging.sendMessage}
                 updatesText={updatesText}
                 onNotesClick={handleNotesClick}
+                stateNotifications={stateNotifications}
               />
             ) : currentProject ? (
               <ProjectLanding

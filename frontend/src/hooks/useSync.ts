@@ -16,6 +16,7 @@ interface UseSyncDeps {
   setContextStartIndex: (v: number) => void;
   setPipelineStage: React.Dispatch<React.SetStateAction<Map<string, {stage: string, status: string}>>>;
   setPipelineState: (v: any) => void;
+  setStateNotifications: (v: any[]) => void;
   setSelectedModel: (v: string) => void;
   setAnthropicSync: (v: boolean) => void;
   setDocsRefreshed: (v: boolean) => void;
@@ -179,6 +180,12 @@ export function useSync(deps: UseSyncDeps) {
       case 'state_update':
         if (event.data?.pipeline_state) {
           deps.setPipelineState(event.data.pipeline_state);
+        }
+        break;
+
+      case 'state_notifications':
+        if (event.data?.notifications) {
+          deps.setStateNotifications(event.data.notifications);
         }
         break;
 

@@ -56,6 +56,7 @@ interface ChatViewProps {
   sendMessage: () => void;
   updatesText: string;
   onNotesClick: () => void;
+  stateNotifications: any[];
 }
 
 export default function ChatView({
@@ -109,6 +110,7 @@ export default function ChatView({
   sendMessage,
   updatesText,
   onNotesClick,
+  stateNotifications,
 }: ChatViewProps) {
   return (
     <>
@@ -407,6 +409,46 @@ export default function ChatView({
                 );
               })()}
             </div>
+          </div>
+        )}
+        {stateNotifications.length > 0 && (
+          <div style={{
+            ...styles.stateNotificationsContainer,
+            ...(isMobile ? styles.stateNotificationsContainerMobile : {}),
+          }}>
+            {stateNotifications.map((n: any, i: number) => {
+              if (n.type === 'npc_memory') {
+                return (
+                  <div key={i} style={styles.memoryNotification}>
+                    <span style={styles.notificationLabel}>{n.npc}</span>
+                    {' remembered'}
+                    {n.impact ? ` (impact ${n.impact})` : ''}
+                    {': '}
+                    {n.text}
+                    {n.quote && (
+                      <div style={styles.notificationQuote}>Quote: "{n.quote}"</div>
+                    )}
+                  </div>
+                );
+              }
+              // RS/RomS/FR/npc_rs/npc_roms change
+              const isNeg = (n.change ?? 0) < 0;
+              const label = n.type.replace('_change', '').toUpperCase();
+              const sign = n.change > 0 ? '+' : '';
+              return (
+                <div key={i} style={{
+                  ...styles.rsNotification,
+                  ...(isNeg ? styles.rsNotificationNegative : {}),
+                }}>
+                  <span style={styles.notificationLabel}>{sign}{n.change} {label}</span>
+                  ({n.target}){n.other ? ` → ${n.other}` : ''}
+                  {n.new_total != null && ` [${n.new_total}]`}
+                  {n.reason && (
+                    <span style={styles.notificationReason}> — {n.reason}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
         <div ref={messagesEndRef} />

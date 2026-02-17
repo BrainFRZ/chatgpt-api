@@ -1162,4 +1162,49 @@ export const styles: { [key: string]: React.CSSProperties } = {
     padding: '2px 8px',
     borderRadius: '4px',
   },
+
+  // State change notification cards
+  stateNotificationsContainer: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '4px',
+    padding: '8px 60px 4px 60px',
+  },
+  stateNotificationsContainerMobile: {
+    padding: '8px 12px 4px 12px',
+  },
+  rsNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(255,255,255,0.03)',
+    color: '#ccc',
+    borderLeft: '3px solid #4caf50',
+  },
+  rsNotificationNegative: {
+    borderLeft: '3px solid #f44336',
+  },
+  memoryNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(255,255,255,0.03)',
+    color: '#ccc',
+    borderLeft: '3px solid #9c27b0',
+  },
+  notificationLabel: {
+    fontWeight: 600,
+    marginRight: '4px',
+  },
+  notificationReason: {
+    color: '#999',
+    fontStyle: 'italic' as const,
+  },
+  notificationQuote: {
+    color: '#888',
+    fontSize: '11px',
+    marginTop: '2px',
+  },
 };
