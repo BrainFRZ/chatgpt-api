@@ -34,7 +34,7 @@ from pipeline import (
     run_pipeline, PipelineResult, generate_debug_transcript,
     apply_single_agent_state_updates,
     build_single_agent_injections, migrate_pipeline_state,
-    get_context_pairs,
+    get_context_pairs, extract_state_notifications,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -994,6 +994,18 @@ def load_project_files_for_agent(username: str, project: str, agent_name: str) -
             combined += f"FILE: {filename}\n"
             combined += f"{'='*60}\n\n"
             combined += f.read()
+
+    if not combined.strip() and project_files:
+        skipped_reasons = []
+        for filename in sorted(project_files):
+            file_cache = tokens_cache.get(filename, {})
+            staged = file_cache.get("staged", True)
+            file_agents = file_cache.get("agents", PIPELINE_AGENT_NAMES)
+            if not staged:
+                skipped_reasons.append(f"{filename}: unstaged")
+            elif agent_name not in file_agents:
+                skipped_reasons.append(f"{filename}: agents={file_agents}, need={agent_name}")
+        logger.warning(f"load_project_files_for_agent({agent_name}): 0 files loaded from {len(project_files)} on disk. Skipped: {skipped_reasons}")
 
     return combined
 
@@ -2471,6 +2483,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 for agent_name in PIPELINE_AGENT_NAMES:
                     agent_instructions[agent_name] = get_instructions_for_agent(username, request.project, agent_name)
                     agent_files[agent_name] = load_project_files_for_agent(username, request.project, agent_name)
+
+                # Diagnostic: warn if pipeline loaded no files but files exist on disk
+                uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                if os.path.exists(uploads_dir):
+                    all_files = [f for f in os.listdir(uploads_dir) if os.path.splitext(f)[1].lower() in ALLOWED_FILE_EXTENSIONS]
+                    any_agent_has_files = any(agent_files[a].strip() for a in PIPELINE_AGENT_NAMES)
+                    if all_files and not any_agent_has_files:
+                        tokens_cache = load_file_tokens_cache(username, request.project)
+                        cache_snapshot = {f: {k: v for k, v in tokens_cache.get(f, {}).items() if k in ("staged", "agents")} for f in all_files}
+                        logger.warning(f"Pipeline: NO files loaded for ANY agent despite {len(all_files)} files on disk. "
+                                       f"Project model: {load_project_metadata(username, request.project).get('model')}. "
+                                       f"Cache state: {cache_snapshot}")
+                        # DEFENSIVE FALLBACK: load all staged files for all agents
+                        all_staged = load_project_files(username, request.project)
+                        if all_staged.strip():
+                            for agent_name in PIPELINE_AGENT_NAMES:
+                                agent_files[agent_name] = all_staged
+                            logger.info(f"Pipeline: defensive fallback loaded {len(all_staged)} chars for all agents")
+
                 pipeline_state_prev = data.get("pipeline_state")
 
                 pipeline_result = None
@@ -2566,6 +2597,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         chat_key,
                         SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                     )
+
+                # Emit state change notifications (pipeline path)
+                if pipeline_result.events_json:
+                    try:
+                        events_parsed = json.loads(pipeline_result.events_json)
+                        notifs = extract_state_notifications(events_parsed)
+                        if notifs:
+                            yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
+                            await sync_manager.broadcast_to_chat(chat_key,
+                                SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": notifs}))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
                 # Get cross-model providers for token counting
                 gpt_provider = ProviderRegistry.get("gpt-5.2")
@@ -2878,6 +2921,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 chat_key,
                                 SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                             )
+
+                        # Emit state change notifications (single-agent path)
+                        if stateful_tool_input:
+                            notifs = extract_state_notifications(stateful_tool_input)
+                            if notifs:
+                                yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
+                                await sync_manager.broadcast_to_chat(chat_key,
+                                    SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": notifs}))
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
