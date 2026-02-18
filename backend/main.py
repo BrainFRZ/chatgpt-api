@@ -2444,7 +2444,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Auto + strong contract instructions achieves the same result.
         request_params["tool_choice"] = {"type": "auto"}
 
+    # Store for use inside event_generator (assignments there make it local)
+    _outer_context_start_index = context_start_index
+
     async def event_generator():
+        context_start_index = _outer_context_start_index
         accumulated_content = ""
         accumulated_thinking = ""
 
@@ -2605,6 +2609,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if msg.get("id") == pipeline_result.trim_anchor_id:
                             context_start_index = idx
                             break
+                else:
+                    context_start_index = 1  # No trim anchor — include all history
 
                 # Save pipeline state for next turn
                 if pipeline_result.pipeline_state is not None:
