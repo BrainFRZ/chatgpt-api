@@ -47,6 +47,7 @@ interface SidebarProps {
   startCreateChat: () => void;
   saveNewChat: () => void;
   exitProject: () => void;
+  pipelineState: any;
   stats: ChatStats | null;
 }
 
@@ -96,6 +97,7 @@ export default function Sidebar(props: SidebarProps) {
     startCreateChat,
     saveNewChat,
     exitProject,
+    pipelineState,
     stats,
   } = props;
 
@@ -459,6 +461,14 @@ export default function Sidebar(props: SidebarProps) {
             </div>
           )}
         </div>
+
+        {pipelineState?.pacing && (
+          <div style={styles.statsBox}>
+            <p style={styles.statsText}>{pipelineState.pacing.episode}</p>
+            <p style={styles.statsText}>Beat: {pipelineState.pacing.beat}</p>
+            <p style={styles.statsText}>Responses: {pipelineState.pacing.responses}</p>
+          </div>
+        )}
 
         {stats && (
           <div style={styles.statsBox}>

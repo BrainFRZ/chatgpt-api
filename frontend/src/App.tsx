@@ -2338,6 +2338,7 @@ function App() {
           handleDeleteChat={handleDeleteChat} openChat={openChat}
           creatingChat={creatingChat} startCreateChat={startCreateChat}
           saveNewChat={saveNewChat} exitProject={exitProject}
+          pipelineState={pipelineState}
           stats={stats}
         />
 
