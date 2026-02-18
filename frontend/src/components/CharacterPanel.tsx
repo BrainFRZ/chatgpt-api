@@ -495,41 +495,32 @@ export default function CharacterPanel({
         }
       }
 
-      // D&D 5E Cyber: Ship (only on ship card)
-      if (gs === 'dnd5e_cyber' && gameState.ship && type === 'ship') {
+      // D&D 5E Cyber: Ship (only on ship card, only if hull/shields data exists)
+      if (gs === 'dnd5e_cyber' && gameState.ship && type === 'ship' && (gameState.ship.hull || gameState.ship.shields)) {
         const ship = gameState.ship;
+        const hull = ship.hull;
+        const shields = ship.shields;
         parts.push(
           <div key="ship" style={{ marginTop: '12px' }}>
-            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Ship — {ship.name || 'Unnamed'}</div>
-            {ship.hull_hp != null && (
-              <div style={{ marginBottom: '4px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>Hull</span><span>{ship.hull_hp}/{ship.hull_max || ship.hull_hp}</span></div>
-                <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${(ship.hull_max || ship.hull_hp) ? (ship.hull_hp / (ship.hull_max || ship.hull_hp)) * 100 : 0}%`, backgroundColor: '#94a3b8', borderRadius: '2px' }} />
+            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '6px', textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>Ship</div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              {hull && (
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999', marginBottom: '1px' }}><span>Hull</span><span>{hull.current}/{hull.max}</span></div>
+                  <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${hull.max > 0 ? (hull.current / hull.max) * 100 : 0}%`, backgroundColor: '#94a3b8', borderRadius: '2px' }} />
+                  </div>
                 </div>
-              </div>
-            )}
-            {ship.shields != null && (
-              <div style={{ marginBottom: '4px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999' }}><span>Shields</span><span>{typeof ship.shields === 'object' ? `${ship.shields.current}/${ship.shields.max}` : ship.shields}</span></div>
-                <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${typeof ship.shields === 'object' && ship.shields.max > 0 ? (ship.shields.current / ship.shields.max) * 100 : 100}%`, backgroundColor: '#38bdf8', borderRadius: '2px' }} />
+              )}
+              {shields && (
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#999', marginBottom: '1px' }}><span>Shields</span><span>{shields.current}/{shields.max}</span></div>
+                  <div style={{ height: '5px', backgroundColor: '#2a2a4e', borderRadius: '2px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${shields.max > 0 ? (shields.current / shields.max) * 100 : 0}%`, backgroundColor: '#38bdf8', borderRadius: '2px' }} />
+                  </div>
                 </div>
-              </div>
-            )}
-            {ship.credits != null && (
-              typeof ship.credits === 'object' ? (
-                <div style={{ marginTop: '4px' }}>
-                  {Object.entries(ship.credits).map(([k, v]: [string, any]) => (
-                    <div key={k} style={{ fontSize: '0.72rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between' }}>
-                      <span>{k}</span><span>{typeof v === 'number' ? v.toLocaleString() : v}¤</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '4px' }}>Credits: {typeof ship.credits === 'number' ? ship.credits.toLocaleString() : ship.credits}¤</div>
-              )
-            )}
+              )}
+            </div>
           </div>
         );
       }
