@@ -183,7 +183,7 @@ export default function Sidebar(props: SidebarProps) {
                 )}
                 <div style={styles.statsSection}>
                   <div style={styles.statsSectionTitle}>Lifetime</div>
-                  <div style={styles.statsRow}>Prompts: {userStats.lifetime_gpt_prompts.toLocaleString()} GPT | {userStats.lifetime_sonnet_prompts.toLocaleString()} Sonnet | {userStats.lifetime_prompts.toLocaleString()} Total</div>
+                  <div style={styles.statsRow}>Prompts: {userStats.lifetime_gpt_prompts.toLocaleString()} GPT | {userStats.lifetime_sonnet_prompts.toLocaleString()} Opus | {userStats.lifetime_prompts.toLocaleString()} Total</div>
                   <div style={styles.statsRow}>
                     Tokens: I:{userStats.lifetime_input_tokens.toLocaleString()} C:{userStats.lifetime_cached_tokens.toLocaleString()} O:{userStats.lifetime_output_tokens.toLocaleString()} R:{userStats.lifetime_reasoning_tokens.toLocaleString()}
                   </div>
@@ -193,7 +193,7 @@ export default function Sidebar(props: SidebarProps) {
                 <div style={styles.statsSection}>
                   <div style={styles.statsSectionTitle}>Current Month</div>
                   <div style={styles.statsRow}>Active Days: {userStats.monthly_active_days}</div>
-                  <div style={styles.statsRow}>Prompts: {userStats.monthly_gpt_prompts.toLocaleString()} GPT | {userStats.monthly_sonnet_prompts.toLocaleString()} Sonnet | {userStats.monthly_prompts.toLocaleString()} Total</div>
+                  <div style={styles.statsRow}>Prompts: {userStats.monthly_gpt_prompts.toLocaleString()} GPT | {userStats.monthly_sonnet_prompts.toLocaleString()} Opus | {userStats.monthly_prompts.toLocaleString()} Total</div>
                   <div style={styles.statsRow}>
                     Tokens: I:{userStats.monthly_input_tokens.toLocaleString()} C:{userStats.monthly_cached_tokens.toLocaleString()} O:{userStats.monthly_output_tokens.toLocaleString()} R:{userStats.monthly_reasoning_tokens.toLocaleString()}
                   </div>
@@ -201,7 +201,7 @@ export default function Sidebar(props: SidebarProps) {
                 <div style={styles.statsSeparator} />
                 <div style={styles.statsSection}>
                   <div style={styles.statsSectionTitle}>Today</div>
-                  <div style={styles.statsRow}>Prompts: {userStats.today_gpt_prompts.toLocaleString()} GPT | {userStats.today_sonnet_prompts.toLocaleString()} Sonnet | {userStats.today_prompts.toLocaleString()} Total</div>
+                  <div style={styles.statsRow}>Prompts: {userStats.today_gpt_prompts.toLocaleString()} GPT | {userStats.today_sonnet_prompts.toLocaleString()} Opus | {userStats.today_prompts.toLocaleString()} Total</div>
                   <div style={styles.statsRow}>
                     Tokens: I:{userStats.today_input_tokens.toLocaleString()} C:{userStats.today_cached_tokens.toLocaleString()} O:{userStats.today_output_tokens.toLocaleString()} R:{userStats.today_reasoning_tokens.toLocaleString()}
                   </div>
@@ -209,7 +209,7 @@ export default function Sidebar(props: SidebarProps) {
                 <div style={styles.statsSeparator} />
                 <div style={styles.statsSection}>
                   <div style={styles.statsSectionTitle}>Daily Averages ({userStats.days_since_first} days)</div>
-                  <div style={styles.statsRow}>Prompts/day: {userStats.avg_gpt_prompts_per_day.toFixed(1)} GPT | {userStats.avg_sonnet_prompts_per_day.toFixed(1)} Sonnet | {userStats.avg_prompts_per_day.toFixed(1)} Total</div>
+                  <div style={styles.statsRow}>Prompts/day: {userStats.avg_gpt_prompts_per_day.toFixed(1)} GPT | {userStats.avg_sonnet_prompts_per_day.toFixed(1)} Opus | {userStats.avg_prompts_per_day.toFixed(1)} Total</div>
                   <div style={styles.statsRow}>
                     TPD: I:{userStats.avg_input_per_day.toFixed(0)} C:{userStats.avg_cached_per_day.toFixed(0)} O:{userStats.avg_output_per_day.toFixed(0)} R:{userStats.avg_reasoning_per_day.toFixed(0)}
                   </div>
@@ -218,7 +218,7 @@ export default function Sidebar(props: SidebarProps) {
                 <div style={styles.statsSection}>
                   <div style={styles.statsSectionTitle}>Avg Context Growth</div>
                   <div style={styles.statsRow}>GPT: {Math.round(userStats.avg_gpt_context_growth).toLocaleString()} tokens</div>
-                  <div style={styles.statsRow}>Sonnet: {Math.round(userStats.avg_sonnet_context_growth).toLocaleString()} tokens</div>
+                  <div style={styles.statsRow}>Opus: {Math.round(userStats.avg_sonnet_context_growth).toLocaleString()} tokens</div>
                 </div>
               </div>
             )}
@@ -462,7 +462,7 @@ export default function Sidebar(props: SidebarProps) {
 
         {stats && (
           <div style={styles.statsBox}>
-            <p style={styles.statsText}>Prompts: {stats.gpt_prompts ?? 0} GPT | {stats.sonnet_prompts ?? 0} Sonnet | {stats.total_prompts} Total</p>
+            <p style={styles.statsText}>Prompts: {stats.gpt_prompts ?? 0} GPT | {stats.sonnet_prompts ?? 0} Opus | {stats.total_prompts} Total</p>
             {stats.first_prompt_date && (() => {
               const firstDate = new Date(stats.first_prompt_date);
               const today = new Date();
@@ -478,7 +478,7 @@ export default function Sidebar(props: SidebarProps) {
                   <p style={styles.statsText}>Cache Misses: {cacheMisses.toLocaleString()} ({missPercent.toFixed(1)}%)</p>
                   <p style={styles.statsText}>Avg TPD: {avgTPD.toFixed(0)}</p>
                   <p style={styles.statsText}>Days: {daysSinceStart}</p>
-                  <p style={styles.statsText}>Avg Context: {Math.round(stats.avg_gpt_context_growth ?? 0).toLocaleString()} GPT | {Math.round(stats.avg_sonnet_context_growth ?? 0).toLocaleString()} Sonnet</p>
+                  <p style={styles.statsText}>Avg Context: {Math.round(stats.avg_gpt_context_growth ?? 0).toLocaleString()} GPT | {Math.round(stats.avg_sonnet_context_growth ?? 0).toLocaleString()} Opus</p>
                 </>
               );
             })()}
