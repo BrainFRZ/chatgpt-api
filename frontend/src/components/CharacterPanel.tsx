@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { styles } from '../styles';
 
@@ -39,6 +39,8 @@ export default function CharacterPanel({
   setMobileBottomSheetOpen,
   characterSheetMd,
 }: CharacterPanelProps) {
+
+  const [showCallbacksModal, setShowCallbacksModal] = useState(false);
 
   // Vital bar color by percentage
   const vitalColor = (cur: number, max: number, label?: string) => {
@@ -210,6 +212,7 @@ export default function CharacterPanel({
     const cs = state.character_states || {};
     const scene = state.scene_state || {};
     const combat = state.combat;
+    const ledger = state.callback_ledger;
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const charCount = new Set([...pcsPresent, ...npcsPresent]).size;
@@ -239,6 +242,19 @@ export default function CharacterPanel({
         borderLeft: '1px solid #333', display: 'flex', flexDirection: 'column' as const,
         overflow: 'hidden',
       }}>
+        {/* Callbacks button */}
+        {ledger && (ledger.open?.length > 0 || ledger.recently_resolved?.length > 0) && (
+          <div style={{ padding: '8px 12px 0' }}>
+            <button
+              onClick={() => setShowCallbacksModal(true)}
+              style={{ width: '100%', padding: '6px', fontSize: '0.75rem', color: '#888', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer' }}
+              onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#2a2a4e'; e.currentTarget.style.color = '#ccc'; }}
+              onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#1e1e3a'; e.currentTarget.style.color = '#888'; }}
+            >
+              Callbacks ({ledger.open?.length || 0} open)
+            </button>
+          </div>
+        )}
         {/* Panel header */}
         <div style={{
           padding: '12px 12px 8px', borderBottom: '1px solid #333', display: 'flex',
@@ -905,6 +921,62 @@ export default function CharacterPanel({
     );
   };
 
+  // --- Callbacks Modal ---
+  const renderCallbacksModal = () => {
+    if (!showCallbacksModal) return null;
+    const ledger = state.callback_ledger || { open: [], recently_resolved: [] };
+    const turnCounter = state.turn_counter || 0;
+    const openCbs = ledger.open || [];
+    const resolvedCbs = ledger.recently_resolved || [];
+
+    const renderCallbackCard = (cb: any, isResolved: boolean, accent: string) => (
+      <div key={cb.id} style={{
+        padding: '10px 12px', marginBottom: '8px',
+        backgroundColor: '#16162a', borderRadius: '6px',
+        borderLeft: `3px solid ${accent}`,
+      }}>
+        {cb.source_npc && (
+          <div style={{ fontSize: '0.7rem', color: '#888', marginBottom: '4px' }}>
+            {cb.source_npc}
+          </div>
+        )}
+        <div style={{ fontSize: '0.8rem', color: '#d0d0d0', lineHeight: 1.4 }}>
+          {cb.original_text}
+        </div>
+        <div style={{ fontSize: '0.65rem', color: '#666', marginTop: '6px' }}>
+          {isResolved ? `Resolved \u2014 turn ${cb.resolved_turn}` : `Turn ${cb.created_turn}`}
+          {!isResolved && turnCounter - cb.created_turn >= 20 && ' \u26A0 aging'}
+        </div>
+      </div>
+    );
+
+    return (
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 2100, display: 'flex', justifyContent: 'center', alignItems: 'center' }} onClick={() => setShowCallbacksModal(false)}>
+        <div style={{ backgroundColor: '#1a1a2e', borderRadius: '12px', maxWidth: '600px', width: '90%', maxHeight: '80vh', overflow: 'auto', padding: '24px', border: '1px solid #333', scrollbarWidth: 'thin' as any }} onClick={e => e.stopPropagation()}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#e0e0e0' }}>Callbacks</h3>
+            <button onClick={() => setShowCallbacksModal(false)} style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer' }}>{'\u2715'}</button>
+          </div>
+          {openCbs.length > 0 && (
+            <>
+              <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '8px' }}>Open ({openCbs.length})</div>
+              {openCbs.map((cb: any) => renderCallbackCard(cb, false, '#f59e0b'))}
+            </>
+          )}
+          {resolvedCbs.length > 0 && (
+            <>
+              <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#666', textTransform: 'uppercase' as const, letterSpacing: '0.08em', marginBottom: '8px', marginTop: openCbs.length > 0 ? '12px' : '0' }}>Recently Resolved ({resolvedCbs.length})</div>
+              {resolvedCbs.map((cb: any) => renderCallbackCard(cb, true, '#22c55e'))}
+            </>
+          )}
+          {openCbs.length === 0 && resolvedCbs.length === 0 && (
+            <div style={{ fontSize: '0.82rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No callbacks</div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       {renderDesktopPanel()}
@@ -912,6 +984,7 @@ export default function CharacterPanel({
       {renderCharacterSheetModal()}
       {renderAllCharactersModal()}
       {renderNpcMemoriesModal()}
+      {renderCallbacksModal()}
     </>
   );
 }
