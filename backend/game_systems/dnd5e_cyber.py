@@ -349,7 +349,7 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Full replacement every turn, same as standard pipeline
-- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD (funds are derived from ship.credits and auto-scoped to scene).
+- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the character panel (funds are derived from ship.credits and auto-scoped to scene).
 
 CHARACTER STATES:
 - You may receive a [CHARACTER STATES] block with each character's persisted mechanical state from the previous turn (HP, spell slots, conditions, resources, equipment)
@@ -528,14 +528,14 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
-- **[HUD STATE]**: Previous turn's date, time, location, funds (auto-derived from ship.credits), trackables (your source of truth after context trims)
+- **[HUD STATE]**: Previous turn's date, time, location, trackables (your source of truth after context trims). Funds are auto-derived from ship.credits for the character panel only — they do NOT appear in the HUD line.
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 - **[SHIP STATE]**: Hull, shields, ammo, and credits for the party's ship
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
-- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD (funds derived from ship.credits).
+- **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the character panel (funds derived from ship.credits).
 - **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat (including ship combat). Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
@@ -574,7 +574,8 @@ Standard format: `[Date: X | Time: XXXX | Loc: X]`
 If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
 During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y]`
 Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage. Update trackables if they changed. Funds are auto-derived from ship.credits — do NOT set funds in hud_state; use ship_ops credits to change balances.
+**Do NOT include funds/credits in the HUD line — funds are displayed in the character panel only.**
+Advance time/date based on in-world passage. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
 Report updated values via `report_state` tool's `hud_state` field (date, time, location, trackables only — funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
