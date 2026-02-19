@@ -14,15 +14,17 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
-import javax.inject.Inject
-import javax.inject.Singleton
+import java.util.concurrent.TimeUnit
 
-@Singleton
-class SseClient @Inject constructor(
-    private val okHttpClient: OkHttpClient,
+class SseClient(
+    okHttpClient: OkHttpClient,
     private val gson: Gson,
     private val baseUrl: String
 ) {
+    private val sseHttpClient = okHttpClient.newBuilder()
+        .readTimeout(10, TimeUnit.MINUTES)
+        .build()
+
     fun streamMessage(requestBody: Map<String, Any?>): Flow<SseEvent> = callbackFlow {
         val json = gson.toJson(requestBody)
         val body = json.toRequestBody("application/json".toMediaType())
@@ -52,7 +54,7 @@ class SseClient @Inject constructor(
             }
         }
 
-        val factory = EventSources.createFactory(okHttpClient)
+        val factory = EventSources.createFactory(sseHttpClient)
         val eventSource = factory.newEventSource(request, listener)
 
         awaitClose {

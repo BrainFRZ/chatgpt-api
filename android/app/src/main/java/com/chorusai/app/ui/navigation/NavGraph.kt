@@ -24,6 +24,23 @@ fun NavGraph(navController: NavHostController = rememberNavController()) {
         }
 
         composable(
+            route = Screen.ApiKeySetup.route,
+            arguments = listOf(
+                navArgument("username") { type = NavType.StringType },
+                navArgument("isNewUser") {
+                    type = NavType.BoolType
+                    defaultValue = true
+                }
+            )
+        ) { backStackEntry ->
+            ApiKeySetupScreen(
+                username = backStackEntry.arguments?.getString("username") ?: "",
+                isNewUser = backStackEntry.arguments?.getBoolean("isNewUser") ?: true,
+                navController = navController
+            )
+        }
+
+        composable(
             route = Screen.Chat.route,
             arguments = listOf(
                 navArgument("chatName") { type = NavType.StringType },

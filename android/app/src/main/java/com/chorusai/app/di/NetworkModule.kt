@@ -14,6 +14,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
+import javax.inject.Named
 import javax.inject.Singleton
 
 @Module
@@ -44,11 +45,12 @@ object NetworkModule {
 
     @Provides
     @Singleton
+    @Named("baseUrl")
     fun provideBaseUrl(): String = BuildConfig.BASE_URL.trimEnd('/') + "/"
 
     @Provides
     @Singleton
-    fun provideRetrofit(okHttpClient: OkHttpClient, gson: Gson, baseUrl: String): Retrofit =
+    fun provideRetrofit(okHttpClient: OkHttpClient, gson: Gson, @Named("baseUrl") baseUrl: String): Retrofit =
         Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(okHttpClient)
@@ -62,6 +64,6 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    fun provideSseClient(okHttpClient: OkHttpClient, gson: Gson, baseUrl: String): SseClient =
+    fun provideSseClient(okHttpClient: OkHttpClient, gson: Gson, @Named("baseUrl") baseUrl: String): SseClient =
         SseClient(okHttpClient, gson, baseUrl)
 }

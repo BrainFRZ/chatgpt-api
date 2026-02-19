@@ -18,6 +18,8 @@ android {
         versionName = "0.1.0"
 
         buildConfigField("String", "BASE_URL", "\"https://redvelveteer.com:8000\"")
+
+        testInstrumentationRunner = "com.chorusai.app.HiltTestRunner"
     }
 
     buildTypes {
@@ -90,4 +92,26 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.15.0")
+
+    // Unit Test
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("io.mockk:mockk:1.13.13")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("app.cash.turbine:turbine:1.2.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("com.google.truth:truth:1.4.4")
+
+    // Android Instrumented Test
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation("androidx.navigation:navigation-testing:2.8.5")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("com.google.dagger:hilt-android-testing:2.54")
+    kspAndroidTest("com.google.dagger:hilt-android-compiler:2.54")
+    androidTestImplementation("io.mockk:mockk-android:1.13.13")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    androidTestImplementation("app.cash.turbine:turbine:1.2.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
