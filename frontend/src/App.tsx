@@ -113,6 +113,12 @@ function App() {
         .editMessageButton:hover {
           background-color: rgba(255, 255, 255, 0.1);
         }
+        .bookmarkButton:hover {
+          background-color: rgba(100, 100, 255, 0.2);
+        }
+        .bookmarkInput::-webkit-scrollbar {
+          display: none;
+        }
         .reasoningContainer:hover {
           background-color: #2a2a4e;
         }
@@ -181,6 +187,9 @@ function App() {
   const [contextStartIndex, setContextStartIndex] = useState(1); // Index of first message in context (1 = all in context)
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
   const [editingMessageContent, setEditingMessageContent] = useState('');
+  const [bookmarkingMessageIndex, setBookmarkingMessageIndex] = useState<number | null>(null);
+  const [bookmarkText, setBookmarkText] = useState('');
+  const [bookmarkTooltip, setBookmarkTooltip] = useState<{index: number, x: number, y: number} | null>(null);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [isLoadingMoreMessages, setIsLoadingMoreMessages] = useState(false);
   const [messageOffset, setMessageOffset] = useState(0);
@@ -1913,6 +1922,91 @@ function App() {
     setEditingMessageContent('');
   };
 
+  const startBookmark = (index: number) => {
+    if (index < 0 || index >= messages.length) return;
+    setBookmarkingMessageIndex(index);
+    setBookmarkText(messages[index].bookmark || '');
+  };
+
+  const cancelBookmark = () => {
+    setBookmarkingMessageIndex(null);
+    setBookmarkText('');
+  };
+
+  const deleteBookmark = async (index: number) => {
+    if (!user || !currentChat || index < 0 || index >= messages.length) return;
+    const msg = messages[index];
+    if (!msg.id) return;
+    try {
+      await fetch('/api/set-bookmark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          chat_name: currentChat,
+          message_id: msg.id,
+          bookmark: '',
+          project: currentProject || undefined,
+        }),
+      });
+      const updateMsg = (m: ChatMessage) => {
+        if (m.id === msg.id) {
+          const updated = { ...m };
+          delete updated.bookmark;
+          return updated;
+        }
+        return m;
+      };
+      setMessages(prev => prev.map(updateMsg));
+      setAllMessages(prev => prev.map(updateMsg));
+    } catch {
+      setError('Failed to remove bookmark');
+    }
+  };
+
+  const saveBookmark = async () => {
+    if (bookmarkingMessageIndex === null || !user || !currentChat) {
+      cancelBookmark();
+      return;
+    }
+    const msg = messages[bookmarkingMessageIndex];
+    if (!msg.id) { cancelBookmark(); return; }
+    const trimmed = bookmarkText.trim();
+    // Skip API call if unchanged
+    if (trimmed === (msg.bookmark || '')) {
+      cancelBookmark();
+      return;
+    }
+    try {
+      await fetch('/api/set-bookmark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          chat_name: currentChat,
+          message_id: msg.id,
+          bookmark: trimmed,
+          project: currentProject || undefined,
+        }),
+      });
+      const msgId = msg.id;
+      const updateMsg = (m: ChatMessage) => {
+        if (m.id === msgId) {
+          const updated = { ...m };
+          if (trimmed) updated.bookmark = trimmed;
+          else delete updated.bookmark;
+          return updated;
+        }
+        return m;
+      };
+      setMessages(prev => prev.map(updateMsg));
+      setAllMessages(prev => prev.map(updateMsg));
+    } catch {
+      setError('Failed to save bookmark');
+    }
+    cancelBookmark();
+  };
+
   const startRenameChat = (chatName: string) => {
     setEditingChat(chatName);
     setEditingName(chatName);
@@ -2408,6 +2502,15 @@ function App() {
                 updatesText={updatesText}
                 onNotesClick={handleNotesClick}
                 stateNotifications={stateNotifications}
+                bookmarkingMessageIndex={bookmarkingMessageIndex}
+                bookmarkText={bookmarkText}
+                setBookmarkText={setBookmarkText}
+                startBookmark={startBookmark}
+                saveBookmark={saveBookmark}
+                cancelBookmark={cancelBookmark}
+                deleteBookmark={deleteBookmark}
+                bookmarkTooltip={bookmarkTooltip}
+                setBookmarkTooltip={setBookmarkTooltip}
               />
             ) : currentProject ? (
               <ProjectLanding

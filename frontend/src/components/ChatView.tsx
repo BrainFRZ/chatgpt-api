@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -57,6 +57,15 @@ interface ChatViewProps {
   updatesText: string;
   onNotesClick: () => void;
   stateNotifications: any[];
+  bookmarkingMessageIndex: number | null;
+  bookmarkText: string;
+  setBookmarkText: (v: string) => void;
+  startBookmark: (i: number) => void;
+  saveBookmark: () => void;
+  cancelBookmark: () => void;
+  deleteBookmark: (i: number) => void;
+  bookmarkTooltip: {index: number, x: number, y: number} | null;
+  setBookmarkTooltip: (v: {index: number, x: number, y: number} | null) => void;
 }
 
 export default function ChatView({
@@ -111,7 +120,30 @@ export default function ChatView({
   updatesText,
   onNotesClick,
   stateNotifications,
+  bookmarkingMessageIndex,
+  bookmarkText,
+  setBookmarkText,
+  startBookmark,
+  saveBookmark,
+  cancelBookmark,
+  deleteBookmark,
+  bookmarkTooltip,
+  setBookmarkTooltip,
 }: ChatViewProps) {
+  const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  const scheduleTooltipHide = useCallback(() => {
+    if (tooltipHideTimeout.current) clearTimeout(tooltipHideTimeout.current);
+    tooltipHideTimeout.current = setTimeout(() => setBookmarkTooltip(null), 150);
+  }, [setBookmarkTooltip]);
+
+  const cancelTooltipHide = useCallback(() => {
+    if (tooltipHideTimeout.current) {
+      clearTimeout(tooltipHideTimeout.current);
+      tooltipHideTimeout.current = null;
+    }
+  }, []);
+
   return (
     <>
       <div style={{...styles.chatHeader, ...(isMobile ? styles.chatHeaderMobile : {})}}>
@@ -222,7 +254,55 @@ export default function ChatView({
                     ✏️
                   </button>
                 )}
+                {msg.id && bookmarkingMessageIndex !== i && (
+                  <button
+                    onClick={() => msg.bookmark ? deleteBookmark(i) : startBookmark(i)}
+                    style={styles.bookmarkButton}
+                    title={msg.bookmark ? 'Remove bookmark' : 'Add bookmark'}
+                    className="bookmarkButton"
+                    onMouseEnter={(e) => {
+                      cancelTooltipHide();
+                      if (msg.bookmark) {
+                        const rect = (e.target as HTMLElement).getBoundingClientRect();
+                        setBookmarkTooltip({ index: i, x: rect.left, y: rect.bottom + 4 });
+                      }
+                    }}
+                    onMouseLeave={() => scheduleTooltipHide()}
+                  >
+                    {msg.bookmark ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="#4a4ae8">
+                        <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="2">
+                        <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
+                      </svg>
+                    )}
+                  </button>
+                )}
               </div>
+
+              {bookmarkingMessageIndex === i && (
+                <div style={styles.bookmarkInputContainer}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#4a4ae8" style={{flexShrink: 0}}>
+                    <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
+                  </svg>
+                  <textarea
+                    value={bookmarkText}
+                    onChange={(e) => setBookmarkText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveBookmark(); }
+                      if (e.key === 'Escape') { e.preventDefault(); cancelBookmark(); }
+                    }}
+                    onBlur={() => saveBookmark()}
+                    style={styles.bookmarkInput}
+                    className="bookmarkInput"
+                    placeholder="Bookmark this message..."
+                    autoFocus
+                    rows={1}
+                  />
+                </div>
+              )}
 
               {editingMessageIndex === i ? (
                 <>
@@ -562,6 +642,24 @@ export default function ChatView({
           </div>
         </div>
       </div>
+      {bookmarkTooltip && messages[bookmarkTooltip.index]?.bookmark && (
+        <div
+          style={{
+            ...styles.bookmarkTooltip,
+            left: bookmarkTooltip.x,
+            top: bookmarkTooltip.y,
+          }}
+          onMouseEnter={() => cancelTooltipHide()}
+          onMouseLeave={() => scheduleTooltipHide()}
+          onClick={() => {
+            const idx = bookmarkTooltip.index;
+            setBookmarkTooltip(null);
+            startBookmark(idx);
+          }}
+        >
+          {messages[bookmarkTooltip.index].bookmark}
+        </div>
+      )}
     </>
   );
 }

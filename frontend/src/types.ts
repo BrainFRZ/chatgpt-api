@@ -50,6 +50,7 @@ export interface ChatMessage {
   attached_files?: {filename: string, content: string}[];
   model?: string;  // Model used for this response (assistant messages only)
   service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
+  bookmark?: string;  // User-defined bookmark annotation
 }
 
 export interface ChatStats {

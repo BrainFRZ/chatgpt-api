@@ -189,6 +189,27 @@ export function useSync(deps: UseSyncDeps) {
         }
         break;
 
+      case 'bookmark_updated':
+        deps.setMessages(prev => prev.map(m => {
+          if (m.id === event.data.message_id) {
+            const updated = { ...m };
+            if (event.data.bookmark) updated.bookmark = event.data.bookmark;
+            else delete updated.bookmark;
+            return updated;
+          }
+          return m;
+        }));
+        deps.setAllMessages(prev => prev.map(m => {
+          if (m.id === event.data.message_id) {
+            const updated = { ...m };
+            if (event.data.bookmark) updated.bookmark = event.data.bookmark;
+            else delete updated.bookmark;
+            return updated;
+          }
+          return m;
+        }));
+        break;
+
       case 'chat_created':
         // Another client created a chat - update the chat list
         // Add to appropriate list based on whether it's a project chat or root chat

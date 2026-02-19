@@ -28,6 +28,7 @@ class SyncEventType(Enum):
     STREAM_ERROR = "stream_error"
     PIPELINE_STAGE = "pipeline_stage"
     MESSAGE_EDITED = "message_edited"
+    BOOKMARK_UPDATED = "bookmark_updated"
     BRANCH_SWITCHED = "branch_switched"
     CLIENT_JOINED = "client_joined"
     CLIENT_LEFT = "client_left"

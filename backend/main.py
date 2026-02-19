@@ -1152,6 +1152,7 @@ class ChatMessage(BaseModel):
     attached_files: list[AttachedFile] | None = None  # Files attached to this message
     model: str | None = None  # Model used for this message (for multi-model chats)
     service_tier: str | None = None  # OpenAI service tier (flex or standard)
+    bookmark: str | None = None  # User-defined bookmark annotation
     events_stage: str | None = None  # Pipeline: raw Events JSON (for debugging)
     mechanics_stage: str | None = None  # Pipeline: raw Mechanics JSON (for debugging)
 
@@ -1472,6 +1473,46 @@ async def set_chat_model(request: SetChatModelRequest):
     )
 
     return {"status": "ok", "model": request.model, "context_start_index": context_start_index}
+
+class SetBookmarkRequest(BaseModel):
+    username: str
+    chat_name: str
+    message_id: str
+    bookmark: str  # Empty string = remove bookmark
+    project: str | None = None
+
+@app.post("/api/set-bookmark")
+async def set_bookmark(request: SetBookmarkRequest):
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    found = False
+    for msg in data.get("messages", []):
+        if msg.get("id") == request.message_id:
+            if request.bookmark.strip():
+                msg["bookmark"] = request.bookmark.strip()
+            else:
+                msg.pop("bookmark", None)
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    save_chat(username, request.chat_name, data, request.project)
+
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.BOOKMARK_UPDATED,
+            data={"message_id": request.message_id, "bookmark": request.bookmark.strip()}
+        )
+    )
+
+    return {"success": True}
 
 class SetAnthropicSyncRequest(BaseModel):
     username: str
