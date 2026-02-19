@@ -54,3 +54,5 @@
 !backend/tests/test_bookmarks.py
 !backend/tests/test_docs_refresh.py
 !PIPELINE_PLAN.md
+!android/
+!android/**

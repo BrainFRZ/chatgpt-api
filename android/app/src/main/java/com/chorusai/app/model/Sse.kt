@@ -1,0 +1,45 @@
+package com.chorusai.app.model
+
+sealed class SseEvent {
+    data class Init(
+        val userMessageId: String? = null
+    ) : SseEvent()
+
+    data class Content(
+        val delta: String
+    ) : SseEvent()
+
+    data class Thinking(
+        val delta: String
+    ) : SseEvent()
+
+    data class PipelineStage(
+        val stage: String,
+        val status: String
+    ) : SseEvent()
+
+    data class StateUpdate(
+        val data: Map<String, Any>
+    ) : SseEvent()
+
+    data class StateNotifications(
+        val notifications: List<String>
+    ) : SseEvent()
+
+    data object DocsRefreshed : SseEvent()
+
+    data class Done(
+        val tokens: String? = null,
+        val cost: String? = null,
+        val stats: Map<String, Any>? = null,
+        val assistantMessageId: String? = null,
+        val currentLeafId: String? = null,
+        val totalMessages: Int? = null,
+        val model: String? = null,
+        val pipelineState: Map<String, Any>? = null
+    ) : SseEvent()
+
+    data class Error(
+        val detail: String
+    ) : SseEvent()
+}
