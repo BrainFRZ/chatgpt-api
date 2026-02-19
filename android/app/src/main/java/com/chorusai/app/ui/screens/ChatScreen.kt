@@ -39,7 +39,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -113,21 +112,23 @@ fun ChatScreen(
                         }
                     }
                 }
-                state.messages.isEmpty() -> {
-                    Text(
-                        text = "No messages yet",
-                        color = TextMuted,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                }
                 else -> {
-                    MessageList(
-                        messages = state.messages,
-                        hasMoreMessages = state.hasMoreMessages,
-                        isLoadingMore = state.isLoadingMore,
-                        onLoadMore = { viewModel.loadMore() }
-                    )
+                    val visibleMessages = state.messages.filter { it.role != "system" }
+                    if (visibleMessages.isEmpty()) {
+                        Text(
+                            text = "No messages yet",
+                            color = TextMuted,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
+                    } else {
+                        MessageList(
+                            messages = visibleMessages,
+                            hasMoreMessages = state.hasMoreMessages,
+                            isLoadingMore = state.isLoadingMore,
+                            onLoadMore = { viewModel.loadMore() }
+                        )
+                    }
                 }
             }
         }
@@ -239,26 +240,8 @@ private fun MessageList(
 @Composable
 private fun MessageBubble(message: ChatMessage) {
     when (message.role) {
-        "system" -> SystemMessage(message)
         "user" -> UserMessage(message)
         "assistant" -> AssistantMessage(message)
-    }
-}
-
-@Composable
-private fun SystemMessage(message: ChatMessage) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = message.content,
-            color = TextMuted,
-            style = MaterialTheme.typography.bodySmall,
-            fontStyle = FontStyle.Italic
-        )
     }
 }
 
