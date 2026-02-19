@@ -336,6 +336,17 @@ export default function CharacterPanel({
     if (allPresent.length === 0) return null;
 
     return (
+      <>
+      {mobileBottomSheetOpen && (
+        <div
+          onClick={() => setMobileBottomSheetOpen(false)}
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.3)',
+            zIndex: 1499,
+          }}
+        />
+      )}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
@@ -353,11 +364,35 @@ export default function CharacterPanel({
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-            {allPresent.map((name: string) => renderCard(name))}
-          </div>
+          <>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
+              {allPresent.map((name: string) => renderCard(name))}
+            </div>
+            <div style={{ padding: '8px 12px', borderTop: '1px solid #333', flexShrink: 0, display: 'flex', flexDirection: 'column' as const, gap: '6px' }}>
+              {(() => {
+                const ledger = state.callback_ledger;
+                return ledger && (ledger.open?.length > 0 || ledger.recently_resolved?.length > 0) ? (
+                  <button
+                    onClick={() => setShowCallbacksModal(true)}
+                    style={{ width: '100%', padding: '6px', fontSize: '0.75rem', color: '#888', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer' }}
+                  >
+                    Callbacks ({ledger.open?.length || 0} open)
+                  </button>
+                ) : null;
+              })()}
+              {Object.keys(state.character_states || {}).length + Object.keys(state.npc_memories || {}).length > 0 && (
+                <button
+                  onClick={() => setShowAllCharactersModal(true)}
+                  style={{ width: '100%', padding: '6px', fontSize: '0.75rem', color: '#888', backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer' }}
+                >
+                  View All ({new Set([...Object.keys(state.character_states || {}), ...Object.keys(state.npc_memories || {})]).size})
+                </button>
+              )}
+            </div>
+          </>
         )}
       </div>
+      </>
     );
   };
 
