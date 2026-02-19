@@ -220,6 +220,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Private Investigator",
+      "level": null,
       "vitals": [
         {"label": "HP", "current": 8, "max": 11},
         {"label": "MP", "current": 10, "max": 14}
@@ -293,8 +295,10 @@ Use "investigator_ops" to update this state. Operations:
 IMPORTANT: SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. Luck is tracked via investigator_ops but mirrored in character_states resources for HUD display.
 
 CHARACTER STATES (structured format):
-- "character_states" uses a structured object per character with type, vitals, resources, conditions, and summary
+- "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
 - "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
+- "class": occupation, e.g. "Private Investigator" or "Professor"
+- "level": null (CoC does not use levels)
 - "vitals": array of {label, current, max} for HP, MP
 - "resources": array of {label, current, max} for Luck (mirrored from investigator_ops for HUD display)
 - "conditions": array of active conditions (e.g. "Temporary Insanity", "Major Wound", "Poisoned")
@@ -415,6 +419,8 @@ SCHEMA A - Route to Narration (default):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Private Investigator",
+      "level": null,
       "vitals": [
         {"label": "HP", "current": 8, "max": 11},
         {"label": "MP", "current": 10, "max": 14}
@@ -542,7 +548,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`
+- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "class": "Private Investigator", "level": null, "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -576,7 +582,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Bootstrap (first turn or empty state):
 - Set pacing from scenario context
 - Build scene_state from current location
-- Set character_states (structured objects with type, vitals, resources, conditions, summary)
+- Set character_states (structured objects with type, class, level, vitals, resources, conditions, summary)
 - Use investigator_ops "set" to initialize SAN, Luck, Mythos, Bonds from character sheets
 - Add callback_ops for open investigation threads
 
@@ -667,11 +673,11 @@ STATE_REPORT_TOOL = {
                 "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
                 "additionalProperties": {
                     "type": "object",
-                    "required": ["type", "vitals"],
+                    "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
                         "class": {"type": "string", "description": "Occupation, e.g. 'Private Investigator' or 'Professor'."},
-                        "level": {"type": "integer", "description": "Character level or experience tier, if applicable."},
+                        "level": {"type": ["integer", "null"], "description": "Character level or experience tier, if applicable."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",

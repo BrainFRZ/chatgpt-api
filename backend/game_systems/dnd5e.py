@@ -251,6 +251,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
+      "class": "Fighter (Champion)",
+      "level": 5,
       "vitals": [
         {"label": "HP", "current": 25, "max": 30},
         {"label": "AC", "value": 16}
@@ -525,6 +527,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
+      "class": "Fighter (Champion)",
+      "level": 5,
       "vitals": [
         {"label": "HP", "current": 22, "max": 30},
         {"label": "AC", "value": 16}
@@ -646,7 +650,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class and subclass, e.g. "Fighter (Champion)"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
@@ -798,11 +802,11 @@ STATE_REPORT_TOOL = {
                 "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
                 "additionalProperties": {
                     "type": "object",
-                    "required": ["type", "vitals"],
+                    "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
                         "class": {"type": "string", "description": "Class and subclass, e.g. 'Druid' or 'Bard (College of Eloquence)'."},
-                        "level": {"type": "integer", "description": "Character level."},
+                        "level": {"type": ["integer", "null"], "description": "Character level."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",

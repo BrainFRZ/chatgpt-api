@@ -241,6 +241,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Solo",
+      "level": null,
       "vitals": [
         {"label": "HP", "current": 35, "max": 40},
         {"label": "Humanity", "current": 48, "max": 60}
@@ -324,8 +326,10 @@ Use "edgerunner_ops" to update this state. Operations:
 IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
 
 CHARACTER STATES (structured format):
-- "character_states" uses a structured object per character with type, vitals, resources, conditions, and summary
+- "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
 - "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
+- "class": role, e.g. "Solo" or "Netrunner"
+- "level": null (CPRED does not use levels)
 - "vitals": array of {label, current, max} for HP, Humanity
 - "resources": array of {label, current, max} for Luck (mirrored from edgerunner_ops for HUD display)
 - "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
@@ -460,6 +464,8 @@ SCHEMA A - Route to Narration (default):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Solo",
+      "level": null,
       "vitals": [
         {"label": "HP", "current": 27, "max": 40},
         {"label": "Humanity", "current": 48, "max": 60}
@@ -579,7 +585,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
+- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (role, e.g. "Solo" or "Netrunner"), `level` (null — CPRED does not use levels), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: true only for pure OOC turns
 
@@ -714,11 +720,11 @@ STATE_REPORT_TOOL = {
                 "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
                 "additionalProperties": {
                     "type": "object",
-                    "required": ["type", "vitals"],
+                    "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
                         "class": {"type": "string", "description": "Role, e.g. 'Solo' or 'Netrunner'."},
-                        "level": {"type": "integer", "description": "Character level or rank, if applicable."},
+                        "level": {"type": ["integer", "null"], "description": "Character level or rank, if applicable."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",

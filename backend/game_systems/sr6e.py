@@ -244,6 +244,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Street Samurai",
+      "level": null,
       "vitals": [
         {"label": "Physical", "current": 8, "max": 11},
         {"label": "Stun", "current": 7, "max": 10}
@@ -325,7 +327,9 @@ Use "runner_ops" to update this state. Operations:
 IMPORTANT: Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops. character_states uses structured format with vitals (Physical/Stun CM), resources (Edge), conditions, and summary (equipment, cyberware).
 
 CHARACTER STATES:
-- "character_states" uses structured format: each character maps to {type, vitals, resources, conditions, summary}
+- "character_states" uses structured format: each character maps to {type, class, level, vitals, resources, conditions, summary}
+- "class": archetype, e.g. "Street Samurai" or "Decker"
+- "level": null (SR6E does not use levels)
 - "vitals": array of {label, current, max} — Physical CM, Stun CM
 - "resources": array of {label, current, max} — Edge
 - "conditions": array of strings — "Wounded", "Stun Overflow", etc.
@@ -444,6 +448,8 @@ SCHEMA A - Route to Narration (default):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy",
+      "class": "Street Samurai",
+      "level": null,
       "vitals": [
         {"label": "Physical", "current": 5, "max": 11},
         {"label": "Stun", "current": 7, "max": 10}
@@ -570,7 +576,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `vitals` (array of {label, current, max} -- e.g. Physical CM, Stun CM), `resources` (array of {label, current, max} -- e.g. Edge), `conditions` (array of strings -- e.g. "Wounded", "Stun Overflow"), and `summary` (free-text for equipment, active cyberware, gear). Full replacement each turn.
+- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (archetype, e.g. "Street Samurai" or "Decker"), `level` (null — SR6E does not use levels), `vitals` (array of {label, current, max} -- e.g. Physical CM, Stun CM), `resources` (array of {label, current, max} -- e.g. Edge), `conditions` (array of strings -- e.g. "Wounded", "Stun Overflow"), and `summary` (free-text for equipment, active cyberware, gear). Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: true only for pure OOC turns
 
@@ -702,11 +708,11 @@ STATE_REPORT_TOOL = {
                 "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
                 "additionalProperties": {
                     "type": "object",
-                    "required": ["type", "vitals"],
+                    "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
                         "class": {"type": "string", "description": "Archetype, e.g. 'Street Samurai' or 'Decker'."},
-                        "level": {"type": "integer", "description": "Character level or street cred tier, if applicable."},
+                        "level": {"type": ["integer", "null"], "description": "Character level or street cred tier, if applicable."},
                         "vitals": {
                             "type": "array",
                             "description": "HP as {label, current, max}. AC and other flat stats as {label, value}.",
