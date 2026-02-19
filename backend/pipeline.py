@@ -914,11 +914,21 @@ def run_pipeline(
         events_data.get("callback_ops"),
         current_turn
     )
-    pipeline_state["npc_memories"] = apply_npc_memory_ops(
-        pipeline_state["npc_memories"],
-        events_data.get("npc_memory_ops"),
-        current_turn
-    )
+    npc_mem_ops = events_data.get("npc_memory_ops")
+    if npc_mem_ops:
+        # Filter out memory ops for NPCs not in scene (use pre-update scene)
+        npcs_in_scene = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
+        if npcs_in_scene:
+            npc_mem_ops = [op for op in npc_mem_ops if op.get("npc") in npcs_in_scene]
+        else:
+            logger.info(f"Filtered all {len(npc_mem_ops)} pipeline npc_memory_ops — no NPCs in scene")
+            npc_mem_ops = []
+    if npc_mem_ops:
+        pipeline_state["npc_memories"] = apply_npc_memory_ops(
+            pipeline_state["npc_memories"],
+            npc_mem_ops,
+            current_turn
+        )
     if events_data.get("scene_state"):
         pipeline_state["scene_state"] = apply_scene_state(
             events_data["scene_state"],
@@ -1906,11 +1916,26 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             current_turn
         )
     if parsed.get("npc_memory_ops"):
-        pipeline_state["npc_memories"] = apply_npc_memory_ops(
-            pipeline_state["npc_memories"],
-            parsed["npc_memory_ops"],
-            current_turn
-        )
+        # Filter out memory ops for NPCs not currently in scene
+        npcs_present = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
+        if npcs_present:
+            filtered_mem_ops = [
+                op for op in parsed["npc_memory_ops"]
+                if op.get("npc") in npcs_present
+            ]
+            skipped = len(parsed["npc_memory_ops"]) - len(filtered_mem_ops)
+            if skipped:
+                logger.info(f"Filtered {skipped} npc_memory_ops for out-of-scene NPCs")
+        else:
+            filtered_mem_ops = []
+            if parsed["npc_memory_ops"]:
+                logger.info(f"Filtered all {len(parsed['npc_memory_ops'])} npc_memory_ops — no NPCs in scene")
+        if filtered_mem_ops:
+            pipeline_state["npc_memories"] = apply_npc_memory_ops(
+                pipeline_state["npc_memories"],
+                filtered_mem_ops,
+                current_turn
+            )
     if parsed.get("scene_state"):
         pipeline_state["scene_state"] = apply_scene_state(
             parsed["scene_state"],
