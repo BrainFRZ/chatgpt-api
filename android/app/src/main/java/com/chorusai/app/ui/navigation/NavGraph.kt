@@ -50,12 +50,8 @@ fun NavGraph(navController: NavHostController = rememberNavController()) {
                     defaultValue = null
                 }
             )
-        ) { backStackEntry ->
-            ChatScreen(
-                chatName = backStackEntry.arguments?.getString("chatName") ?: "",
-                project = backStackEntry.arguments?.getString("project"),
-                navController = navController
-            )
+        ) { _ ->
+            ChatScreen(navController = navController)
         }
 
         composable(
