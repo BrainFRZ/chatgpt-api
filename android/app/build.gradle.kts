@@ -17,7 +17,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        buildConfigField("String", "BASE_URL", "\"https://redvelveteer.com:8000\"")
+        buildConfigField("String", "BASE_URL", "\"https://redvelveteer.com\"")
 
         testInstrumentationRunner = "com.chorusai.app.HiltTestRunner"
     }
