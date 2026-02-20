@@ -79,7 +79,6 @@ import com.chorusai.app.ui.viewmodel.ChatViewModel
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
-import kotlinx.coroutines.delay
 
 @Composable
 fun ChatScreen(
@@ -203,26 +202,12 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll when new messages are added (send start)
+    // Auto-scroll to the user message (top of the new pair) when sending
     val messages = state.messages.filter { it.role != "system" }
     LaunchedEffect(messages.size, state.isSending) {
-        if (state.isSending && messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
-        }
-    }
-
-    // Auto-scroll during streaming: poll and scroll to bottom if user is near bottom
-    LaunchedEffect(state.isStreaming) {
-        if (!state.isStreaming) return@LaunchedEffect
-        while (true) {
-            delay(150)
-            val totalItems = listState.layoutInfo.totalItemsCount
-            if (totalItems == 0) continue
-            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            // Only auto-scroll if user is viewing the last couple items
-            if (lastVisibleIndex >= totalItems - 2) {
-                listState.scrollToItem(totalItems - 1)
-            }
+        if (state.isSending && messages.size >= 2) {
+            // Scroll to the user message, not the assistant placeholder
+            listState.animateScrollToItem(messages.lastIndex - 1)
         }
     }
 }
