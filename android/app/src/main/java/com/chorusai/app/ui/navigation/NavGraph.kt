@@ -59,11 +59,8 @@ fun NavGraph(navController: NavHostController = rememberNavController()) {
             arguments = listOf(
                 navArgument("projectName") { type = NavType.StringType }
             )
-        ) { backStackEntry ->
-            ProjectLandingScreen(
-                projectName = backStackEntry.arguments?.getString("projectName") ?: "",
-                navController = navController
-            )
+        ) { _ ->
+            ProjectLandingScreen(navController = navController)
         }
 
         composable(Screen.Settings.route) {

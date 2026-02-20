@@ -88,6 +88,13 @@ class ProjectRepository @Inject constructor(
     ): Response<ProjectInstructionsResponse> =
         api.getProjectInstructions(username, project, model)
 
+    suspend fun setProjectModel(
+        username: String,
+        project: String,
+        model: String
+    ): Response<Map<String, String>> =
+        api.setProjectModel(SetProjectModelRequest(username, project, model))
+
     suspend fun updateProjectInstructions(
         username: String,
         project: String,
