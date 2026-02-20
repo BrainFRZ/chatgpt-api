@@ -18,7 +18,151 @@ export interface CharacterPanelProps {
   setShowNpcMemories: (v: string | null) => void;
   mobileBottomSheetOpen: boolean;
   setMobileBottomSheetOpen: (v: boolean) => void;
-  characterSheetMd: string;
+  characterSheetFiles: {name: string, content: string}[];
+}
+
+// ─── VS Code Dark+ YAML Syntax Highlighting ───
+
+const yaml = {
+  key: '#9CDCFE',       // light blue — mapping keys
+  string: '#CE9178',    // orange-brown — quoted & unquoted string values
+  bool: '#569CD6',      // blue — true/false/null
+  number: '#B5CEA8',    // light green — numeric literals
+  comment: '#6A9955',   // green — comments
+  punct: '#D4D4D4',     // gray — colons, dashes, brackets
+  text: '#D4D4D4',      // gray — default text
+  anchor: '#DCDCAA',    // yellow — anchors & aliases
+};
+
+const yamlBoolRe = /^(true|false|yes|no|on|off|null|~)$/i;
+const yamlNumRe = /^[+-]?(\d[\d_]*(\.\d[\d_]*)?([eE][+-]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|\.inf|\.nan)$/;
+
+/** Find inline comment (# preceded by space, outside quotes). */
+function findInlineComment(s: string): number {
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inDouble) inSingle = !inSingle;
+    else if (c === '"' && !inSingle) inDouble = !inDouble;
+    else if (c === '#' && !inSingle && !inDouble && i > 0 && s[i - 1] === ' ') return i;
+  }
+  return -1;
+}
+
+/** Find key-separating colon (skips colons inside quotes). */
+function findKeyColon(s: string): number {
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inDouble) inSingle = !inSingle;
+    else if (c === '"' && !inSingle) inDouble = !inDouble;
+    else if (c === ':' && !inSingle && !inDouble && (i + 1 >= s.length || s[i + 1] === ' ')) return i;
+  }
+  return -1;
+}
+
+/** Render a YAML value span with appropriate coloring. */
+function renderYamlValue(val: string): React.ReactNode {
+  const cIdx = findInlineComment(val);
+  const main = cIdx >= 0 ? val.slice(0, cIdx) : val;
+  const comment = cIdx >= 0 ? val.slice(cIdx) : null;
+  const trimmed = main.trim();
+
+  let color = yaml.string; // default: unquoted string
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) color = yaml.string;
+  else if (trimmed.startsWith('&') || trimmed.startsWith('*')) color = yaml.anchor;
+  else if (yamlBoolRe.test(trimmed)) color = yaml.bool;
+  else if (yamlNumRe.test(trimmed)) color = yaml.number;
+  else if (trimmed.startsWith('|') || trimmed.startsWith('>')) color = yaml.punct;
+  else if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    // Flow collection — color brackets/commas as punctuation
+    return (
+      <>
+        {main.split(/([[\]{},:])/g).map((part, j) =>
+          /^[[\]{},:]$/.test(part)
+            ? <span key={j} style={{ color: yaml.punct }}>{part}</span>
+            : <span key={j} style={{ color: yaml.text }}>{part}</span>
+        )}
+        {comment && <span style={{ color: yaml.comment }}>{comment}</span>}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <span style={{ color }}>{main}</span>
+      {comment && <span style={{ color: yaml.comment }}>{comment}</span>}
+    </>
+  );
+}
+
+/** YAML content with VS Code Dark+ syntax highlighting. */
+function YamlHighlighted({ content }: { content: string }) {
+  return (
+    <div style={{
+      fontSize: '0.75rem', color: yaml.text, lineHeight: 1.6, marginTop: '8px',
+      fontFamily: "'Consolas', 'Monaco', 'Courier New', monospace",
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      background: '#16162a', borderRadius: '4px', padding: '8px',
+    }}>
+      {content.split('\n').map((line, i) => {
+        if (!line.trim()) return <div key={i}>{'\n'}</div>;
+
+        const trimmed = line.trimStart();
+        const indent = line.length - trimmed.length;
+        const indentSpan = indent > 0 ? <span>{line.slice(0, indent)}</span> : null;
+
+        // Full-line comment
+        if (trimmed.startsWith('#')) {
+          return <div key={i}>{indentSpan}<span style={{ color: yaml.comment }}>{trimmed}</span></div>;
+        }
+        // Document markers
+        if (trimmed === '---' || trimmed === '...') {
+          return <div key={i}>{indentSpan}<span style={{ color: yaml.punct }}>{trimmed}</span></div>;
+        }
+
+        // After indent, check for list dash
+        let pos = indent;
+        const parts: React.ReactNode[] = [];
+        if (indentSpan) parts.push(<span key="ind">{line.slice(0, indent)}</span>);
+
+        if (trimmed.startsWith('- ') || (trimmed === '-')) {
+          parts.push(<span key="dash" style={{ color: yaml.punct }}>-</span>);
+          pos += 1;
+          if (pos < line.length && line[pos] === ' ') {
+            parts.push(<span key="dashsp"> </span>);
+            pos += 1;
+          }
+          if (pos >= line.length) return <div key={i}>{parts}</div>;
+        }
+
+        // Key: value detection
+        const remaining = line.slice(pos);
+        const colonIdx = findKeyColon(remaining);
+        if (colonIdx >= 0) {
+          const key = remaining.slice(0, colonIdx);
+          const keyColor = (key.startsWith('&') || key.startsWith('*')) ? yaml.anchor : yaml.key;
+          parts.push(<span key="key" style={{ color: keyColor }}>{key}</span>);
+          parts.push(<span key="colon" style={{ color: yaml.punct }}>:</span>);
+          const afterColon = remaining.slice(colonIdx + 1);
+          if (afterColon) {
+            const valueStart = afterColon.search(/\S/);
+            if (valueStart < 0) {
+              parts.push(<span key="trail">{afterColon}</span>);
+            } else {
+              parts.push(<span key="sp">{afterColon.slice(0, valueStart)}</span>);
+              parts.push(<React.Fragment key="val">{renderYamlValue(afterColon.slice(valueStart))}</React.Fragment>);
+            }
+          }
+        } else {
+          // No key — treat as value (list item value, etc.)
+          parts.push(<React.Fragment key="val">{renderYamlValue(remaining)}</React.Fragment>);
+        }
+
+        return <div key={i}>{parts}</div>;
+      })}
+    </div>
+  );
 }
 
 export default function CharacterPanel({
@@ -37,7 +181,7 @@ export default function CharacterPanel({
   setShowNpcMemories,
   mobileBottomSheetOpen,
   setMobileBottomSheetOpen,
-  characterSheetMd,
+  characterSheetFiles,
 }: CharacterPanelProps) {
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
@@ -412,36 +556,41 @@ export default function CharacterPanel({
     const hudFunds = state.hud_state?.funds?.[selectedCharacter];
     const memories = (state.npc_memories || {})[selectedCharacter];
 
-    // Find character section in .md or .yaml sheet
-    const sheetSection = (() => {
-      if (!characterSheetMd) return '';
+    // Find character section in .md or .yaml sheet, tracking source file extension
+    const { sheetSection, sheetIsYaml } = (() => {
+      if (!characterSheetFiles.length) return { sheetSection: '', sheetIsYaml: false };
       const charLower = selectedCharacter.toLowerCase();
-      // Try markdown ## headers first
-      let sections = characterSheetMd.split(/(?=^## )/m);
-      if (sections.length > 1) {
-        const match = sections.find(s => {
-          const heading = s.split('\n')[0].replace(/^## /, '').trim();
-          return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
-        });
-        if (match) return match;
-      }
-      // Try YAML-style: split on banner blocks (# ===...title...# ===)
-      const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
-      const yamlSections: { name: string; start: number; }[] = [];
-      let m;
-      while ((m = yamlPattern.exec(characterSheetMd)) !== null) {
-        yamlSections.push({ name: m[1].trim(), start: m.index });
-      }
-      if (yamlSections.length > 0) {
-        for (let i = 0; i < yamlSections.length; i++) {
-          if (yamlSections[i].name.toLowerCase().includes(charLower)) {
-            const start = yamlSections[i].start;
-            const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : characterSheetMd.length;
-            return characterSheetMd.slice(start, end).trim();
+      for (const file of characterSheetFiles) {
+        const ext = file.name.split('.').pop()?.toLowerCase() || '';
+        const isYaml = ext === 'yaml' || ext === 'yml';
+        if (isYaml) {
+          // YAML: split on banner blocks (# ===...title...# ===)
+          const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
+          const yamlSections: { name: string; start: number; }[] = [];
+          let m;
+          while ((m = yamlPattern.exec(file.content)) !== null) {
+            yamlSections.push({ name: m[1].trim(), start: m.index });
+          }
+          for (let i = 0; i < yamlSections.length; i++) {
+            if (yamlSections[i].name.toLowerCase().includes(charLower)) {
+              const start = yamlSections[i].start;
+              const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : file.content.length;
+              return { sheetSection: file.content.slice(start, end).trim(), sheetIsYaml: true };
+            }
+          }
+        } else {
+          // Markdown: split on ## headers
+          const sections = file.content.split(/(?=^## )/m);
+          if (sections.length > 1) {
+            const match = sections.find(s => {
+              const heading = s.split('\n')[0].replace(/^## /, '').trim();
+              return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
+            });
+            if (match) return { sheetSection: match, sheetIsYaml: false };
           }
         }
       }
-      return '';
+      return { sheetSection: '', sheetIsYaml: false };
     })();
 
     // Game-specific state sections
@@ -800,43 +949,10 @@ export default function CharacterPanel({
                 if (body.startsWith('## ')) {
                   body = body.split('\n').slice(1).join('\n').trim();
                 } else if (body.startsWith('# ===')) {
-                  // Strip the 3-line banner (# ===, # Title, # ===)
                   body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
                 }
-                const isYaml = /^- \w+:|^\w+:/.test(body.trim());
-                if (isYaml) {
-                  return (
-                    <div style={{ fontSize: '0.75rem', color: '#ccc', lineHeight: 1.6, marginTop: '8px', fontFamily: "'Consolas', 'Monaco', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {body.split('\n').map((line, i) => {
-                        const commentStyle = { color: '#5a8a6a', fontStyle: 'italic' as const };
-                        // Render inline # comments in green
-                        const renderWithComment = (text: string, baseStyle: React.CSSProperties) => {
-                          const cIdx = text.indexOf('  #');
-                          if (cIdx >= 0) return <><span style={baseStyle}>{text.slice(0, cIdx)}</span><span style={commentStyle}>{text.slice(cIdx)}</span></>;
-                          return <span style={baseStyle}>{text}</span>;
-                        };
-                        // Full-line # comments
-                        if (/^\s*#/.test(line)) return <div key={i} style={commentStyle}>{line}</div>;
-                        // Style keys (- name:, class:, etc.) with inline comment support
-                        const keyMatch = line.match(/^(\s*-?\s*)(\w[\w\s]*?)(:)(.*)/);
-                        if (keyMatch) return (
-                          <div key={i}>
-                            <span>{keyMatch[1]}</span>
-                            <span style={{ color: '#60a5fa', fontWeight: 500 }}>{keyMatch[2]}</span>
-                            <span style={{ color: '#666' }}>{keyMatch[3]}</span>
-                            {renderWithComment(keyMatch[4], { color: '#e0e0e0' })}
-                          </div>
-                        );
-                        // List items with inline comment support
-                        if (/^\s+-\s/.test(line)) {
-                          const cIdx = line.indexOf('  #');
-                          if (cIdx >= 0) return <div key={i}><span style={{ color: '#ccc' }}>{line.slice(0, cIdx)}</span><span style={commentStyle}>{line.slice(cIdx)}</span></div>;
-                          return <div key={i} style={{ color: '#ccc' }}>{line}</div>;
-                        }
-                        return <div key={i}>{line}</div>;
-                      })}
-                    </div>
-                  );
+                if (sheetIsYaml) {
+                  return <YamlHighlighted content={body} />;
                 }
                 return (
                   <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>

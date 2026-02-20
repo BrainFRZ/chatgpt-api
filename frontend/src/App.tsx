@@ -256,7 +256,7 @@ function App() {
   const [showCharacterSheet, setShowCharacterSheet] = useState(false);
   const [showAllCharactersModal, setShowAllCharactersModal] = useState(false);
   const [showNpcMemories, setShowNpcMemories] = useState<string | null>(null);
-  const [characterSheetMd, setCharacterSheetMd] = useState<string>('');
+  const [characterSheetFiles, setCharacterSheetFiles] = useState<{name: string, content: string}[]>([]);
   const [mobileBottomSheetOpen, setMobileBottomSheetOpen] = useState(false);
 
   // Detect mobile screen size
@@ -823,9 +823,9 @@ function App() {
 
     // Fetch character sheet for right panel
     fetch(`/api/character-sheet/${user.username}/${projectName}`)
-      .then(r => r.ok ? r.json() : { content: '' })
-      .then(d => { if (currentProjectRef.current === projectName) setCharacterSheetMd(d.content || ''); })
-      .catch(() => setCharacterSheetMd(''));
+      .then(r => r.ok ? r.json() : { files: [] })
+      .then(d => { if (currentProjectRef.current === projectName) setCharacterSheetFiles(d.files || []); })
+      .catch(() => setCharacterSheetFiles([]));
 
     // Fetch chat list (uses refreshProjectChats which has built-in stale check)
     const chatList = await refreshProjectChats(projectName);
@@ -2676,7 +2676,7 @@ function App() {
           setShowNpcMemories={setShowNpcMemories}
           mobileBottomSheetOpen={mobileBottomSheetOpen}
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
-          characterSheetMd={characterSheetMd}
+          characterSheetFiles={characterSheetFiles}
         />
       </div>
 
