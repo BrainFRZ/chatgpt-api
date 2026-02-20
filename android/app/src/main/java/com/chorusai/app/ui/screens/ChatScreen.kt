@@ -24,7 +24,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material.icons.Icons
@@ -34,11 +36,15 @@ import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -65,6 +71,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
@@ -204,6 +211,9 @@ fun ChatScreen(
                                 editingMessageContent = state.editingMessageContent,
                                 isSending = state.isSending || state.isRemoteStreaming,
                                 scrollToBottomTrigger = state.scrollToBottomTrigger,
+                                bookmarkEditingMessageId = state.bookmarkEditingMessageId,
+                                bookmarkEditingText = state.bookmarkEditingText,
+                                bookmarkPopupMessageId = state.bookmarkPopupMessageId,
                                 onLoadMore = { viewModel.loadMore() },
                                 onGetSiblings = { viewModel.getSiblings(it) },
                                 onSwitchBranch = { viewModel.switchBranch(it) },
@@ -211,6 +221,11 @@ fun ChatScreen(
                                 onUpdateEditContent = { viewModel.updateEditContent(it) },
                                 onSaveEdit = { viewModel.saveEditMessage() },
                                 onCancelEdit = { viewModel.cancelEditMessage() },
+                                onToggleBookmarkPopup = { viewModel.toggleBookmarkPopup(it) },
+                                onStartBookmarkEdit = { viewModel.startBookmarkEdit(it) },
+                                onUpdateBookmarkText = { viewModel.updateBookmarkText(it) },
+                                onSaveBookmark = { viewModel.saveBookmark() },
+                                onDismissBookmark = { viewModel.dismissBookmark() },
                                 listState = listState,
                                 modifier = Modifier.weight(1f)
                             )
@@ -416,6 +431,9 @@ private fun MessageList(
     editingMessageContent: String,
     isSending: Boolean,
     scrollToBottomTrigger: Int,
+    bookmarkEditingMessageId: String?,
+    bookmarkEditingText: String,
+    bookmarkPopupMessageId: String?,
     onLoadMore: () -> Unit,
     onGetSiblings: (String) -> List<ChatMessage>,
     onSwitchBranch: (String) -> Unit,
@@ -423,6 +441,11 @@ private fun MessageList(
     onUpdateEditContent: (String) -> Unit,
     onSaveEdit: () -> Unit,
     onCancelEdit: () -> Unit,
+    onToggleBookmarkPopup: (String) -> Unit,
+    onStartBookmarkEdit: (String) -> Unit,
+    onUpdateBookmarkText: (String) -> Unit,
+    onSaveBookmark: () -> Unit,
+    onDismissBookmark: () -> Unit,
     listState: LazyListState,
     modifier: Modifier = Modifier
 ) {
@@ -524,11 +547,19 @@ private fun MessageList(
                 isEditing = isEditing,
                 editContent = if (isEditing) editingMessageContent else "",
                 isSending = isSending,
+                isBookmarkEditing = bookmarkEditingMessageId == message.id,
+                bookmarkEditingText = if (bookmarkEditingMessageId == message.id) bookmarkEditingText else "",
+                isBookmarkPopupShowing = bookmarkPopupMessageId == message.id,
                 onSwitchBranch = onSwitchBranch,
                 onStartEdit = { message.id?.let { onStartEdit(it) } },
                 onUpdateEditContent = onUpdateEditContent,
                 onSaveEdit = onSaveEdit,
-                onCancelEdit = onCancelEdit
+                onCancelEdit = onCancelEdit,
+                onToggleBookmarkPopup = { message.id?.let { onToggleBookmarkPopup(it) } },
+                onStartBookmarkEdit = { message.id?.let { onStartBookmarkEdit(it) } },
+                onUpdateBookmarkText = onUpdateBookmarkText,
+                onSaveBookmark = onSaveBookmark,
+                onDismissBookmark = onDismissBookmark
             )
         }
     }
@@ -614,11 +645,19 @@ private fun MessageBubble(
     isEditing: Boolean = false,
     editContent: String = "",
     isSending: Boolean = false,
+    isBookmarkEditing: Boolean = false,
+    bookmarkEditingText: String = "",
+    isBookmarkPopupShowing: Boolean = false,
     onSwitchBranch: (String) -> Unit = {},
     onStartEdit: () -> Unit = {},
     onUpdateEditContent: (String) -> Unit = {},
     onSaveEdit: () -> Unit = {},
-    onCancelEdit: () -> Unit = {}
+    onCancelEdit: () -> Unit = {},
+    onToggleBookmarkPopup: () -> Unit = {},
+    onStartBookmarkEdit: () -> Unit = {},
+    onUpdateBookmarkText: (String) -> Unit = {},
+    onSaveBookmark: () -> Unit = {},
+    onDismissBookmark: () -> Unit = {}
 ) {
     when (message.role) {
         "user" -> UserMessage(
@@ -628,11 +667,19 @@ private fun MessageBubble(
             isEditing = isEditing,
             editContent = editContent,
             isSending = isSending,
+            isBookmarkEditing = isBookmarkEditing,
+            bookmarkEditingText = bookmarkEditingText,
+            isBookmarkPopupShowing = isBookmarkPopupShowing,
             onSwitchBranch = onSwitchBranch,
             onStartEdit = onStartEdit,
             onUpdateEditContent = onUpdateEditContent,
             onSaveEdit = onSaveEdit,
-            onCancelEdit = onCancelEdit
+            onCancelEdit = onCancelEdit,
+            onToggleBookmarkPopup = onToggleBookmarkPopup,
+            onStartBookmarkEdit = onStartBookmarkEdit,
+            onUpdateBookmarkText = onUpdateBookmarkText,
+            onSaveBookmark = onSaveBookmark,
+            onDismissBookmark = onDismissBookmark
         )
         "assistant" -> AssistantMessage(message, isStreaming, isInContext)
     }
@@ -646,11 +693,19 @@ private fun UserMessage(
     isEditing: Boolean = false,
     editContent: String = "",
     isSending: Boolean = false,
+    isBookmarkEditing: Boolean = false,
+    bookmarkEditingText: String = "",
+    isBookmarkPopupShowing: Boolean = false,
     onSwitchBranch: (String) -> Unit = {},
     onStartEdit: () -> Unit = {},
     onUpdateEditContent: (String) -> Unit = {},
     onSaveEdit: () -> Unit = {},
-    onCancelEdit: () -> Unit = {}
+    onCancelEdit: () -> Unit = {},
+    onToggleBookmarkPopup: () -> Unit = {},
+    onStartBookmarkEdit: () -> Unit = {},
+    onUpdateBookmarkText: (String) -> Unit = {},
+    onSaveBookmark: () -> Unit = {},
+    onDismissBookmark: () -> Unit = {}
 ) {
     val bgColor = if (isInContext) SurfaceColor else SurfaceColor.copy(alpha = 0.5f)
     val contentAlpha = if (isInContext) 1f else 0.5f
@@ -742,6 +797,22 @@ private fun UserMessage(
                         )
                     }
                 }
+
+                // Bookmark icon (hidden while sending or editing)
+                if (!isSending && !isEditing) {
+                    val hasBookmark = !message.bookmark.isNullOrEmpty()
+                    IconButton(
+                        onClick = onToggleBookmarkPopup,
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (hasBookmark) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                            contentDescription = if (hasBookmark) "View bookmark" else "Add bookmark",
+                            tint = if (hasBookmark) Accent else TextMuted,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
             }
         }
 
@@ -797,7 +868,109 @@ private fun UserMessage(
         } else {
             ChatMarkdown(content = message.content)
         }
+
+        // Bookmark popup
+        if (isBookmarkPopupShowing) {
+            BookmarkPopup(
+                text = message.bookmark ?: "",
+                onTapText = onStartBookmarkEdit
+            )
+        }
+
+        // Bookmark editor
+        if (isBookmarkEditing) {
+            BookmarkEditor(
+                text = bookmarkEditingText,
+                onTextChange = onUpdateBookmarkText,
+                onSave = onSaveBookmark,
+                onDismiss = onDismissBookmark
+            )
+        }
     }
+}
+
+@Composable
+private fun BookmarkPopup(
+    text: String,
+    onTapText: () -> Unit
+) {
+    Spacer(modifier = Modifier.height(8.dp))
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Background),
+        border = BorderStroke(1.dp, Accent.copy(alpha = 0.3f)),
+        shape = RoundedCornerShape(6.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onTapText)
+                .padding(8.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Bookmark,
+                contentDescription = null,
+                tint = Accent,
+                modifier = Modifier.size(14.dp)
+            )
+            Text(
+                text = text,
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun BookmarkEditor(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Spacer(modifier = Modifier.height(8.dp))
+    val focusRequester = remember { FocusRequester() }
+    var hasFocus by remember { mutableStateOf(false) }
+    var committed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    OutlinedTextField(
+        value = text,
+        onValueChange = onTextChange,
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester)
+            .onFocusChanged { focusState ->
+                if (hasFocus && !focusState.isFocused && !committed) {
+                    committed = true
+                    // Focus lost → save if non-empty, dismiss if empty
+                    if (text.trim().isNotEmpty()) onSave() else onDismiss()
+                }
+                hasFocus = focusState.isFocused
+            },
+        placeholder = { Text("Bookmark this message…", color = TextMuted) },
+        maxLines = 3,
+        shape = RoundedCornerShape(6.dp),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = {
+            if (!committed) {
+                committed = true
+                onSave()
+            }
+        }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = TextPrimary,
+            unfocusedTextColor = TextPrimary,
+            focusedBorderColor = Accent,
+            unfocusedBorderColor = Border,
+            focusedContainerColor = Background,
+            unfocusedContainerColor = Background
+        )
+    )
 }
 
 @Composable

@@ -56,7 +56,10 @@ data class ChatUiState(
     val scrollToBottomTrigger: Int = 0,
     val pipelineState: PipelineState? = null,
     val gameSystem: String? = null,
-    val characterSheetFiles: List<CharacterSheetFile>? = null
+    val characterSheetFiles: List<CharacterSheetFile>? = null,
+    val bookmarkEditingMessageId: String? = null,
+    val bookmarkEditingText: String = "",
+    val bookmarkPopupMessageId: String? = null
 )
 
 sealed class ChatNavEvent {
@@ -151,7 +154,14 @@ class ChatViewModel @Inject constructor(
         } catch (e: Exception) {
             _uiState.update { it.copy(error = e.message ?: "Network error") }
         } finally {
-            _uiState.update { it.copy(isLoading = false, editingMessageId = null, editingMessageContent = "") }
+            _uiState.update { it.copy(
+                isLoading = false,
+                editingMessageId = null,
+                editingMessageContent = "",
+                bookmarkEditingMessageId = null,
+                bookmarkEditingText = "",
+                bookmarkPopupMessageId = null
+            ) }
         }
     }
 
@@ -215,12 +225,16 @@ class ChatViewModel @Inject constructor(
     }
 
     private var streamingJob: Job? = null
+    private var bookmarkJob: Job? = null
 
     fun sendMessage(content: String) {
         if (content.isBlank() || _uiState.value.isSending || _uiState.value.isRemoteStreaming) return
 
         streamingJob = viewModelScope.launch {
-            _uiState.update { it.copy(isSending = true, isStreaming = false, sendError = null) }
+            _uiState.update { it.copy(
+                isSending = true, isStreaming = false, sendError = null,
+                bookmarkEditingMessageId = null, bookmarkEditingText = "", bookmarkPopupMessageId = null
+            ) }
             val state = _uiState.value
 
             val tempUserId = "temp_user_${UUID.randomUUID()}"
@@ -459,6 +473,9 @@ class ChatViewModel @Inject constructor(
                                 isSwitchingBranch = false,
                                 editingMessageId = null,
                                 editingMessageContent = "",
+                                bookmarkEditingMessageId = null,
+                                bookmarkEditingText = "",
+                                bookmarkPopupMessageId = null,
                                 scrollToBottomTrigger = it.scrollToBottomTrigger + 1,
                                 pipelineState = body.pipelineState,
                                 gameSystem = body.gameSystem
@@ -483,7 +500,13 @@ class ChatViewModel @Inject constructor(
         val msg = messages.find { it.id == messageId } ?: return
         if (msg.role != "user") return
         _uiState.update {
-            it.copy(editingMessageId = messageId, editingMessageContent = msg.content)
+            it.copy(
+                editingMessageId = messageId,
+                editingMessageContent = msg.content,
+                bookmarkEditingMessageId = null,
+                bookmarkEditingText = "",
+                bookmarkPopupMessageId = null
+            )
         }
     }
 
@@ -506,8 +529,11 @@ class ChatViewModel @Inject constructor(
         if (editIndex < 0) return
         val originalMessage = visibleMessages[editIndex]
 
-        // Cancel editing state first
-        _uiState.update { it.copy(editingMessageId = null, editingMessageContent = "") }
+        // Cancel editing and bookmark state first
+        _uiState.update { it.copy(
+            editingMessageId = null, editingMessageContent = "",
+            bookmarkEditingMessageId = null, bookmarkEditingText = "", bookmarkPopupMessageId = null
+        ) }
 
         // The parent_id for the new branch = the original message's parent_id
         // This creates a sibling of the original message
@@ -646,6 +672,158 @@ class ChatViewModel @Inject constructor(
             if (_uiState.value.isSending) {
                 _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
             }
+        }
+    }
+
+    // --- Bookmarks ---
+
+    fun toggleBookmarkPopup(messageId: String) {
+        if (messageId.startsWith("temp_") || messageId.startsWith("remote_")) return
+        val state = _uiState.value
+        val message = state.messages.find { it.id == messageId } ?: return
+        val hasBookmark = !message.bookmark.isNullOrEmpty()
+
+        if (!hasBookmark) {
+            // No bookmark → open editor
+            _uiState.update {
+                it.copy(
+                    bookmarkEditingMessageId = messageId,
+                    bookmarkEditingText = "",
+                    bookmarkPopupMessageId = null
+                )
+            }
+        } else if (state.bookmarkPopupMessageId != messageId) {
+            // Has bookmark, popup hidden → show popup
+            _uiState.update {
+                it.copy(
+                    bookmarkPopupMessageId = messageId,
+                    bookmarkEditingMessageId = null,
+                    bookmarkEditingText = ""
+                )
+            }
+        } else {
+            // Has bookmark, popup showing → remove bookmark
+            _uiState.update {
+                it.copy(
+                    bookmarkPopupMessageId = null,
+                    messages = it.messages.map { msg ->
+                        if (msg.id == messageId) msg.copy(bookmark = null) else msg
+                    },
+                    allMessages = it.allMessages.map { msg ->
+                        if (msg.id == messageId) msg.copy(bookmark = null) else msg
+                    }
+                )
+            }
+            bookmarkJob?.cancel()
+            bookmarkJob = viewModelScope.launch {
+                try {
+                    chatRepo.setBookmark(
+                        username = state.username,
+                        chatName = state.chatName,
+                        messageId = messageId,
+                        bookmark = "",
+                        project = state.project
+                    )
+                } catch (_: Exception) { }
+            }
+        }
+    }
+
+    fun startBookmarkEdit(messageId: String) {
+        if (messageId.startsWith("temp_") || messageId.startsWith("remote_")) return
+        val message = _uiState.value.messages.find { it.id == messageId } ?: return
+        _uiState.update {
+            it.copy(
+                bookmarkEditingMessageId = messageId,
+                bookmarkEditingText = message.bookmark ?: "",
+                bookmarkPopupMessageId = null
+            )
+        }
+    }
+
+    fun updateBookmarkText(text: String) {
+        _uiState.update { it.copy(bookmarkEditingText = text) }
+    }
+
+    fun saveBookmark() {
+        val state = _uiState.value
+        val messageId = state.bookmarkEditingMessageId ?: return
+        val text = state.bookmarkEditingText.trim()
+        if (text.isEmpty()) {
+            // If there's an existing bookmark, remove it; otherwise just dismiss
+            val hasExisting = !state.messages.find { it.id == messageId }?.bookmark.isNullOrEmpty()
+            if (hasExisting) {
+                _uiState.update {
+                    it.copy(
+                        bookmarkEditingMessageId = null,
+                        bookmarkEditingText = "",
+                        bookmarkPopupMessageId = null,
+                        messages = it.messages.map { msg ->
+                            if (msg.id == messageId) msg.copy(bookmark = null) else msg
+                        },
+                        allMessages = it.allMessages.map { msg ->
+                            if (msg.id == messageId) msg.copy(bookmark = null) else msg
+                        }
+                    )
+                }
+                bookmarkJob?.cancel()
+                bookmarkJob = viewModelScope.launch {
+                    try {
+                        chatRepo.setBookmark(
+                            username = state.username,
+                            chatName = state.chatName,
+                            messageId = messageId,
+                            bookmark = "",
+                            project = state.project
+                        )
+                    } catch (_: Exception) { }
+                }
+            } else {
+                dismissBookmark()
+            }
+            return
+        }
+        // Skip if text unchanged
+        val existing = state.messages.find { it.id == messageId }?.bookmark ?: ""
+        if (text == existing) {
+            dismissBookmark()
+            return
+        }
+        // Optimistic update
+        _uiState.update {
+            it.copy(
+                bookmarkEditingMessageId = null,
+                bookmarkEditingText = "",
+                bookmarkPopupMessageId = null,
+                messages = it.messages.map { msg ->
+                    if (msg.id == messageId) msg.copy(bookmark = text) else msg
+                },
+                allMessages = it.allMessages.map { msg ->
+                    if (msg.id == messageId) msg.copy(bookmark = text) else msg
+                }
+            )
+        }
+        bookmarkJob?.cancel()
+        bookmarkJob = viewModelScope.launch {
+            try {
+                chatRepo.setBookmark(
+                    username = state.username,
+                    chatName = state.chatName,
+                    messageId = messageId,
+                    bookmark = text,
+                    project = state.project
+                )
+            } catch (_: Exception) { }
+        }
+    }
+
+    fun dismissBookmark() {
+        _uiState.update {
+            it.copy(
+                bookmarkEditingMessageId = null,
+                bookmarkEditingText = "",
+                bookmarkPopupMessageId = null
+            )
         }
     }
 
@@ -840,10 +1018,18 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is WsEvent.BookmarkUpdated -> {
+                // Don't overwrite optimistic updates for messages the user is actively editing
+                if (_uiState.value.bookmarkEditingMessageId == event.messageId) return
+                val normalizedBookmark = event.bookmark?.ifEmpty { null }
                 _uiState.update {
-                    it.copy(messages = it.messages.map { msg ->
-                        if (msg.id == event.messageId) msg.copy(bookmark = event.bookmark) else msg
-                    })
+                    it.copy(
+                        messages = it.messages.map { msg ->
+                            if (msg.id == event.messageId) msg.copy(bookmark = normalizedBookmark) else msg
+                        },
+                        allMessages = it.allMessages.map { msg ->
+                            if (msg.id == event.messageId) msg.copy(bookmark = normalizedBookmark) else msg
+                        }
+                    )
                 }
             }
             is WsEvent.StateUpdate -> {
