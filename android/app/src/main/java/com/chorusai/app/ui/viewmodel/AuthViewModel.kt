@@ -26,6 +26,7 @@ data class AuthUiState(
 
 sealed class NavigationEvent {
     data object NavigateToChatList : NavigationEvent()
+    data class NavigateToChat(val chatName: String, val project: String?) : NavigationEvent()
     data class NavigateToApiKeySetup(val username: String, val isNewUser: Boolean) : NavigationEvent()
     data object NavigateToLogin : NavigationEvent()
 }
@@ -49,7 +50,14 @@ class AuthViewModel @Inject constructor(
                 val isLoggedIn = prefs.isLoggedIn.first()
                 val username = prefs.username.first()
                 if (isLoggedIn && !username.isNullOrBlank()) {
-                    _navigationEvents.send(NavigationEvent.NavigateToChatList)
+                    val lastChat = prefs.getLastChat()
+                    if (lastChat != null) {
+                        _navigationEvents.send(
+                            NavigationEvent.NavigateToChat(lastChat.first, lastChat.second)
+                        )
+                    } else {
+                        _navigationEvents.send(NavigationEvent.NavigateToChatList)
+                    }
                 }
             } catch (_: Exception) {
                 // Auto-login failed, show login screen

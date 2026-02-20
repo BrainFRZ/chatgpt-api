@@ -97,6 +97,7 @@ class ChatViewModel @Inject constructor(
                 return@launch
             }
             _uiState.update { it.copy(username = username) }
+            prefs.saveLastChat(chatName, project)
             webSocketManager.connectChat(username, chatName, project)
 
             // Start collectors BEFORE loadChat so no WS events are missed
@@ -220,6 +221,7 @@ class ChatViewModel @Inject constructor(
 
     fun navigateBack() {
         viewModelScope.launch {
+            prefs.clearLastChat()
             _navEvents.send(ChatNavEvent.NavigateBack)
         }
     }

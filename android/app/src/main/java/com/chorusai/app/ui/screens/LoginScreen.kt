@@ -62,6 +62,15 @@ fun LoginScreen(
                         popUpTo(Screen.Login.route) { inclusive = true }
                     }
                 }
+                is NavigationEvent.NavigateToChat -> {
+                    // Navigate to ChatList first (back stack), then to the chat
+                    navController.navigate(Screen.ChatList.route) {
+                        popUpTo(Screen.Login.route) { inclusive = true }
+                    }
+                    navController.navigate(
+                        Screen.Chat.createRoute(event.chatName, event.project)
+                    )
+                }
                 is NavigationEvent.NavigateToApiKeySetup -> {
                     navController.navigate(
                         Screen.ApiKeySetup.createRoute(event.username, event.isNewUser)
