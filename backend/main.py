@@ -2505,17 +2505,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     SyncEvent(type=SyncEventType.DOCS_REFRESHED, data={})
                 )
 
-            # Broadcast user message to other clients viewing this chat
-            await sync_manager.broadcast_to_chat(
-                chat_key,
-                SyncEvent(
-                    type=SyncEventType.USER_MESSAGE_ADDED,
-                    data={
-                        "message": user_msg_data,
-                        "current_leaf_id": user_msg_id
-                    }
-                )
-            )
+            # user_message_added broadcast moved before StreamingResponse
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             use_pipeline = model_id == "gpt-5.2" and request.project
@@ -3310,6 +3300,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     data={"detail": error_msg}
                 )
             )
+
+    # Broadcast user message to WS clients BEFORE starting the SSE stream,
+    # so other clients see it immediately (not gated by generator execution)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.USER_MESSAGE_ADDED,
+            data={
+                "message": user_msg_data,
+                "current_leaf_id": user_msg_id
+            }
+        )
+    )
 
     return StreamingResponse(
         event_generator(),

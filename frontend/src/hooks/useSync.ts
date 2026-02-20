@@ -107,13 +107,42 @@ export function useSync(deps: UseSyncDeps) {
         });
         break;
 
-      case 'stream_done':
+      case 'stream_done': {
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
-        // If user_message_added never arrived, there's no placeholder to replace.
-        // Just reload the chat to get the correct branch state.
-        setNeedsSyncReload(true);
+        // Replace streaming placeholder with complete message
+        let hadPlaceholder = false;
+        deps.setMessages(prev => {
+          const newMessages = [...prev];
+          const lastIdx = newMessages.length - 1;
+          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant' && !newMessages[lastIdx].id) {
+            // Normal path: we have a placeholder from user_message_added
+            hadPlaceholder = true;
+            newMessages[lastIdx] = event.data.assistant_message;
+            return newMessages;
+          }
+          // No placeholder — earlier events were lost
+          return prev;
+        });
+        if (hadPlaceholder) {
+          // Update metadata for successful placeholder replacement
+          deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
+          deps.setTotalMessages(prev => prev + 1);
+          deps.setCurrentLeafId(event.data.current_leaf_id);
+          deps.setStats(event.data.stats);
+          deps.setContextStartIndex(event.data.context_start_index || 1);
+          deps.setPipelineStage(prev => {
+            if (!deps.currentChatRef.current) return prev;
+            const next = new Map(prev);
+            next.delete(deps.currentChatRef.current);
+            return next;
+          });
+        } else {
+          // No placeholder existed — reload to get correct branch state
+          setNeedsSyncReload(true);
+        }
         break;
+      }
 
       case 'stream_error':
         // Ignore if we're the one streaming - we handle this via SSE
