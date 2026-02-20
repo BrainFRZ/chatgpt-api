@@ -61,6 +61,7 @@ export function useSync(deps: UseSyncDeps) {
         deps.setMessages(prev => {
           const parentId = event.data.message.parent_id;
           const parentIndex = parentId ? prev.findIndex(m => m.id === parentId) : -1;
+          console.log('[WS user_message_added] parentId:', parentId, 'parentIndex:', parentIndex, 'prevLen:', prev.length, 'msgIds:', prev.map(m => m.id?.slice(-6)));
           const base = (parentIndex >= 0 && parentIndex < prev.length - 1)
             ? prev.slice(0, parentIndex + 1)
             : prev;
