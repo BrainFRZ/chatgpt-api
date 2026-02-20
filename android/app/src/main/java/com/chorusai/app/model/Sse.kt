@@ -36,7 +36,8 @@ sealed class SseEvent {
         val currentLeafId: String? = null,
         val totalMessages: Int? = null,
         val model: String? = null,
-        val pipelineState: Map<String, Any>? = null
+        val pipelineState: Map<String, Any>? = null,
+        val reasoning: String? = null
     ) : SseEvent()
 
     data class Error(

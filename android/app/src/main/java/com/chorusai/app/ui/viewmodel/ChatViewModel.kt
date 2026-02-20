@@ -254,6 +254,7 @@ class ChatViewModel @Inject constructor(
                                 cost = event.cost,
                                 model = event.model,
                                 reasoning = accumulatedReasoning.toString().ifEmpty { null }
+                                    ?: event.reasoning
                             )
                             _uiState.update {
                                 it.copy(
