@@ -56,19 +56,35 @@ export function useSync(deps: UseSyncDeps) {
         deps.setAllMessages(prev => [...prev, event.data.message]);
         deps.setTotalMessages(prev => prev + 1);
         deps.setCurrentLeafId(event.data.current_leaf_id);
-        // If the parent is in our path but not the last message, this is
-        // a branch (edit) — truncate to the parent before appending
+        // Detect branch edits and truncate to show the new branch:
+        // 1. Parent is in our path (not the last msg) → truncate after parent
+        // 2. Parent is the root/system msg (not in visible path) → find sibling
+        //    with same parent_id and truncate before it
+        // 3. Otherwise → append normally (new message at end of conversation)
         deps.setMessages(prev => {
           const parentId = event.data.message.parent_id;
           const parentIndex = parentId ? prev.findIndex(m => m.id === parentId) : -1;
-          console.log('[WS user_message_added] parentId:', parentId, 'parentIndex:', parentIndex, 'prevLen:', prev.length, 'msgIds:', prev.map(m => m.id?.slice(-6)));
-          const base = (parentIndex >= 0 && parentIndex < prev.length - 1)
-            ? prev.slice(0, parentIndex + 1)
-            : prev;
-          return [...base, event.data.message, {
-            role: 'assistant',
-            content: '',
-            timestamp: new Date().toISOString()
+          if (parentIndex >= 0 && parentIndex < prev.length - 1) {
+            // Parent found in path — truncate after parent
+            const base = prev.slice(0, parentIndex + 1);
+            return [...base, event.data.message, {
+              role: 'assistant', content: '', timestamp: new Date().toISOString()
+            }];
+          }
+          if (parentId && parentIndex === -1) {
+            // Parent not in visible path — check if a sibling exists
+            // (editing the first user msg, whose parent is the system/root msg)
+            const siblingIndex = prev.findIndex(m => m.parent_id === parentId);
+            if (siblingIndex >= 0) {
+              const base = prev.slice(0, siblingIndex);
+              return [...base, event.data.message, {
+                role: 'assistant', content: '', timestamp: new Date().toISOString()
+              }];
+            }
+          }
+          // Normal append — new message at end of conversation
+          return [...prev, event.data.message, {
+            role: 'assistant', content: '', timestamp: new Date().toISOString()
           }];
         });
         break;

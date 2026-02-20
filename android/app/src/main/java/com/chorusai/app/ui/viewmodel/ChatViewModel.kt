@@ -712,6 +712,14 @@ class ChatViewModel @Inject constructor(
                     val newMessages = if (parentIndex >= 0 && parentIndex < currentMessages.lastIndex) {
                         // Branch: truncate to parent, then append new message + placeholder
                         currentMessages.subList(0, parentIndex + 1) + event.message + placeholder
+                    } else if (parentId != null && parentIndex == -1) {
+                        // Parent not in visible path (e.g. system/root msg) — find sibling
+                        val siblingIndex = currentMessages.indexOfFirst { msg -> msg.parentId == parentId }
+                        if (siblingIndex >= 0) {
+                            currentMessages.subList(0, siblingIndex) + event.message + placeholder
+                        } else {
+                            currentMessages + event.message + placeholder
+                        }
                     } else {
                         // Normal append
                         currentMessages + event.message + placeholder
