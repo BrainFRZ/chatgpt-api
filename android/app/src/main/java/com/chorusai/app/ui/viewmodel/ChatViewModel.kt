@@ -59,7 +59,8 @@ data class ChatUiState(
     val characterSheetFiles: List<CharacterSheetFile>? = null,
     val bookmarkEditingMessageId: String? = null,
     val bookmarkEditingText: String = "",
-    val bookmarkPopupMessageId: String? = null
+    val bookmarkPopupMessageId: String? = null,
+    val anthropicSync: Boolean = true
 )
 
 sealed class ChatNavEvent {
@@ -143,6 +144,7 @@ class ChatViewModel @Inject constructor(
                         currentLeafId = body.currentLeafId,
                         contextStartIndex = 1,
                         model = body.model,
+                        anthropicSync = body.anthropicSync != false,
                         error = null,
                         pipelineState = body.pipelineState,
                         gameSystem = body.gameSystem
@@ -416,6 +418,28 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    fun setAnthropicSync(sync: Boolean) {
+        val previous = _uiState.value.anthropicSync
+        _uiState.update { it.copy(anthropicSync = sync) }
+
+        viewModelScope.launch {
+            val state = _uiState.value
+            try {
+                val response = chatRepo.setAnthropicSync(
+                    username = state.username,
+                    chatName = state.chatName,
+                    project = state.project,
+                    sync = sync
+                )
+                if (!response.isSuccessful) {
+                    _uiState.update { it.copy(anthropicSync = previous) }
+                }
+            } catch (_: Exception) {
+                _uiState.update { it.copy(anthropicSync = previous) }
+            }
+        }
+    }
+
     fun clearSendError() {
         _uiState.update { it.copy(sendError = null) }
     }
@@ -470,6 +494,7 @@ class ChatViewModel @Inject constructor(
                                 currentLeafId = body.currentLeafId,
                                 contextStartIndex = 1,
                                 model = body.model,
+                                anthropicSync = body.anthropicSync != false,
                                 isSwitchingBranch = false,
                                 editingMessageId = null,
                                 editingMessageContent = "",
@@ -703,6 +728,7 @@ class ChatViewModel @Inject constructor(
             }
         } else {
             // Has bookmark, popup showing → remove bookmark
+            val previousBookmark = message.bookmark
             _uiState.update {
                 it.copy(
                     bookmarkPopupMessageId = null,
@@ -716,15 +742,31 @@ class ChatViewModel @Inject constructor(
             }
             bookmarkJob?.cancel()
             bookmarkJob = viewModelScope.launch {
-                try {
+                val success = try {
                     chatRepo.setBookmark(
                         username = state.username,
                         chatName = state.chatName,
                         messageId = messageId,
                         bookmark = "",
                         project = state.project
-                    )
-                } catch (_: Exception) { }
+                    ).isSuccessful
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    false
+                }
+                if (!success) {
+                    _uiState.update {
+                        it.copy(
+                            messages = it.messages.map { msg ->
+                                if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                            },
+                            allMessages = it.allMessages.map { msg ->
+                                if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -753,6 +795,7 @@ class ChatViewModel @Inject constructor(
             // If there's an existing bookmark, remove it; otherwise just dismiss
             val hasExisting = !state.messages.find { it.id == messageId }?.bookmark.isNullOrEmpty()
             if (hasExisting) {
+                val previousBookmark = state.messages.find { it.id == messageId }?.bookmark
                 _uiState.update {
                     it.copy(
                         bookmarkEditingMessageId = null,
@@ -768,15 +811,31 @@ class ChatViewModel @Inject constructor(
                 }
                 bookmarkJob?.cancel()
                 bookmarkJob = viewModelScope.launch {
-                    try {
+                    val success = try {
                         chatRepo.setBookmark(
                             username = state.username,
                             chatName = state.chatName,
                             messageId = messageId,
                             bookmark = "",
                             project = state.project
-                        )
-                    } catch (_: Exception) { }
+                        ).isSuccessful
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (!success) {
+                        _uiState.update {
+                            it.copy(
+                                messages = it.messages.map { msg ->
+                                    if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                                },
+                                allMessages = it.allMessages.map { msg ->
+                                    if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                                }
+                            )
+                        }
+                    }
                 }
             } else {
                 dismissBookmark()
@@ -790,6 +849,7 @@ class ChatViewModel @Inject constructor(
             return
         }
         // Optimistic update
+        val previousBookmark = state.messages.find { it.id == messageId }?.bookmark
         _uiState.update {
             it.copy(
                 bookmarkEditingMessageId = null,
@@ -805,15 +865,31 @@ class ChatViewModel @Inject constructor(
         }
         bookmarkJob?.cancel()
         bookmarkJob = viewModelScope.launch {
-            try {
+            val success = try {
                 chatRepo.setBookmark(
                     username = state.username,
                     chatName = state.chatName,
                     messageId = messageId,
                     bookmark = text,
                     project = state.project
-                )
-            } catch (_: Exception) { }
+                ).isSuccessful
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (!success) {
+                _uiState.update {
+                    it.copy(
+                        messages = it.messages.map { msg ->
+                            if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                        },
+                        allMessages = it.allMessages.map { msg ->
+                            if (msg.id == messageId) msg.copy(bookmark = previousBookmark) else msg
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -1004,8 +1080,11 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is WsEvent.ChatSettingsChanged -> {
-                event.model?.let { model ->
-                    _uiState.update { it.copy(model = model) }
+                _uiState.update { state ->
+                    state.copy(
+                        model = event.model ?: state.model,
+                        anthropicSync = event.anthropicSync ?: state.anthropicSync
+                    )
                 }
             }
             is WsEvent.BranchSwitched -> {

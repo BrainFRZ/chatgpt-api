@@ -368,7 +368,8 @@ class WebSocketManager @Inject constructor(
                     targetMessageId = data.get("target_message_id")?.takeIf { !it.isJsonNull }?.asString
                 )
                 "chat_settings_changed" -> WsEvent.ChatSettingsChanged(
-                    model = data.get("model")?.takeIf { !it.isJsonNull }?.asString
+                    model = data.get("model")?.takeIf { !it.isJsonNull }?.asString,
+                    anthropicSync = data.get("anthropic_sync")?.takeIf { !it.isJsonNull }?.asBoolean
                 )
                 "bookmark_updated" -> WsEvent.BookmarkUpdated(
                     messageId = data.get("message_id").asString,

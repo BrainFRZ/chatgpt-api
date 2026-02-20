@@ -2,6 +2,7 @@ package com.chorusai.app.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -25,6 +26,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -72,6 +74,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
@@ -132,8 +135,10 @@ fun ChatScreen(
                 models = state.models,
                 isLoadingModels = state.isLoadingModels,
                 viewerCount = state.viewerCount,
+                anthropicSync = state.anthropicSync,
                 onBack = { viewModel.navigateBack() },
-                onModelSelected = { viewModel.setModel(it) }
+                onModelSelected = { viewModel.setModel(it) },
+                onToggleSync = { viewModel.setAnthropicSync(it) }
             )
         },
         containerColor = Background
@@ -307,8 +312,10 @@ private fun ChatTopBar(
     models: List<ModelInfo>,
     isLoadingModels: Boolean,
     viewerCount: Int,
+    anthropicSync: Boolean,
     onBack: () -> Unit,
-    onModelSelected: (String) -> Unit
+    onModelSelected: (String) -> Unit,
+    onToggleSync: (Boolean) -> Unit
 ) {
     var modelMenuExpanded by remember { mutableStateOf(false) }
 
@@ -363,6 +370,12 @@ private fun ChatTopBar(
             }
         },
         actions = {
+            if (currentModel?.startsWith("claude") == true) {
+                SyncToggle(
+                    isSync = anthropicSync,
+                    onToggle = { onToggleSync(!anthropicSync) }
+                )
+            }
             Box {
                 IconButton(onClick = { modelMenuExpanded = true }) {
                     if (isLoadingModels) {
@@ -416,6 +429,52 @@ private fun ChatTopBar(
             containerColor = SurfaceColor
         )
     )
+}
+
+@Composable
+private fun SyncToggle(
+    isSync: Boolean,
+    onToggle: () -> Unit
+) {
+    val thumbOffset by animateDpAsState(
+        targetValue = if (isSync) 20.dp else 2.dp,
+        label = "sync_thumb"
+    )
+    val trackColor = if (isSync) Color(0xFF4ADE80) else Color(0xFF4A4A6E)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(end = 4.dp)
+    ) {
+        Text(
+            text = "Async",
+            color = TextMuted,
+            fontSize = 11.sp
+        )
+        Box(
+            modifier = Modifier
+                .width(36.dp)
+                .height(18.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(trackColor)
+                .clickable(onClick = onToggle),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(start = thumbOffset)
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
+        }
+        Text(
+            text = "Sync",
+            color = TextMuted,
+            fontSize = 11.sp
+        )
+    }
 }
 
 @Composable

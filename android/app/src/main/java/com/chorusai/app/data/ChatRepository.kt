@@ -112,6 +112,14 @@ class ChatRepository @Inject constructor(
     ): Response<Map<String, Any>> =
         api.setBookmark(SetBookmarkRequest(username, chatName, messageId, bookmark, project))
 
+    suspend fun setAnthropicSync(
+        username: String,
+        chatName: String,
+        project: String? = null,
+        sync: Boolean
+    ): Response<Map<String, Any>> =
+        api.setAnthropicSync(SetAnthropicSyncRequest(username, chatName, project, sync))
+
     suspend fun getCharacterSheet(
         username: String,
         project: String

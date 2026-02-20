@@ -19,7 +19,7 @@ sealed class WsEvent {
     ) : WsEvent()
     data class StreamError(val detail: String) : WsEvent()
     data class BranchSwitched(val newLeafId: String, val targetMessageId: String?) : WsEvent()
-    data class ChatSettingsChanged(val model: String?) : WsEvent()
+    data class ChatSettingsChanged(val model: String?, val anthropicSync: Boolean? = null) : WsEvent()
     data class BookmarkUpdated(val messageId: String, val bookmark: String?) : WsEvent()
     data class StateUpdate(val pipelineState: PipelineState) : WsEvent()
 }
