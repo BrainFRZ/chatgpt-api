@@ -52,17 +52,24 @@ export function useSync(deps: UseSyncDeps) {
       case 'user_message_added':
         // Ignore if we're the one streaming - we already added our own message
         if (isCurrentlyStreaming) break;
-        // Another client sent a message - add it to our view
-        deps.setMessages(prev => [...prev, event.data.message]);
+        // Another client sent a message or edited one - add it to our view
         deps.setAllMessages(prev => [...prev, event.data.message]);
         deps.setTotalMessages(prev => prev + 1);
         deps.setCurrentLeafId(event.data.current_leaf_id);
-        // Add streaming placeholder for the upcoming assistant response
-        deps.setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString()
-        }]);
+        // If the parent is in our path but not the last message, this is
+        // a branch (edit) — truncate to the parent before appending
+        deps.setMessages(prev => {
+          const parentId = event.data.message.parent_id;
+          const parentIndex = parentId ? prev.findIndex(m => m.id === parentId) : -1;
+          const base = (parentIndex >= 0 && parentIndex < prev.length - 1)
+            ? prev.slice(0, parentIndex + 1)
+            : prev;
+          return [...base, event.data.message, {
+            role: 'assistant',
+            content: '',
+            timestamp: new Date().toISOString()
+          }];
+        });
         break;
 
       case 'stream_content':

@@ -700,8 +700,26 @@ class ChatViewModel @Inject constructor(
                 val placeholder = ChatMessage(id = tempId, role = "assistant", content = "")
                 clearRemoteStreamState()
                 _uiState.update {
+                    val currentMessages = it.messages
+                    val parentId = event.message.parentId
+
+                    // If the parent is in our path but not the last message, this is
+                    // a branch (edit). Truncate to the parent before appending.
+                    val parentIndex = if (parentId != null) {
+                        currentMessages.indexOfFirst { msg -> msg.id == parentId }
+                    } else -1
+
+                    val newMessages = if (parentIndex >= 0 && parentIndex < currentMessages.lastIndex) {
+                        // Branch: truncate to parent, then append new message + placeholder
+                        currentMessages.subList(0, parentIndex + 1) + event.message + placeholder
+                    } else {
+                        // Normal append
+                        currentMessages + event.message + placeholder
+                    }
+
                     it.copy(
-                        messages = it.messages + event.message + placeholder,
+                        messages = newMessages,
+                        allMessages = it.allMessages + event.message,
                         currentLeafId = event.currentLeafId ?: it.currentLeafId,
                         isRemoteStreaming = true,
                         streamingMessageId = tempId
@@ -756,6 +774,7 @@ class ChatViewModel @Inject constructor(
                         messages = it.messages.map { msg ->
                             if (msg.id == streamId) event.assistantMessage else msg
                         },
+                        allMessages = it.allMessages + event.assistantMessage,
                         currentLeafId = event.currentLeafId ?: it.currentLeafId,
                         totalMessages = event.totalMessages ?: it.totalMessages,
                         isRemoteStreaming = false,

@@ -207,10 +207,17 @@ function App() {
   const [isResizing, setIsResizing] = useState(false);
   const [resizeStartY, setResizeStartY] = useState(0);
   const [resizeStartHeight, setResizeStartHeight] = useState(0);
-  const [isLoading, setIsLoading] = useState<Set<string>>(new Set());
   const isLoadingRef = useRef<Set<string>>(new Set());
-  // Keep ref in sync with state for use in useCallback with [] deps
-  useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
+  const [isLoading, setIsLoadingState] = useState<Set<string>>(new Set());
+  // Wrap setIsLoading to update the ref synchronously, so the WS handler's
+  // isCurrentlyStreaming check sees the new value immediately (before render).
+  const setIsLoading: React.Dispatch<React.SetStateAction<Set<string>>> = useCallback((action) => {
+    setIsLoadingState(prev => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      isLoadingRef.current = next;
+      return next;
+    });
+  }, []);
   const [pipelineStage, setPipelineStage] = useState<Map<string, {stage: string, status: string}>>(new Map());
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [freeTokens, setFreeTokens] = useState<FreeTokens | null>(null);
