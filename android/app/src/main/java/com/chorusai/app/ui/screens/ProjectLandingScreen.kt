@@ -533,9 +533,10 @@ private fun parseIsoDateTime(iso: String): LocalDateTime? {
     try {
         return ZonedDateTime.parse(iso).withZoneSameInstant(deviceZone).toLocalDateTime()
     } catch (_: DateTimeParseException) {}
-    // Fallback: offset-naive with variable fractional seconds (assumed device-local)
+    // Fallback: offset-naive (legacy data) — assume UTC and convert to device zone
     try {
-        return LocalDateTime.parse(iso, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        val naive = LocalDateTime.parse(iso, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        return naive.atOffset(java.time.ZoneOffset.UTC).atZoneSameInstant(deviceZone).toLocalDateTime()
     } catch (_: DateTimeParseException) {}
     return null
 }

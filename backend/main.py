@@ -13,7 +13,7 @@ import asyncio
 import os
 import json
 import shutil
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
 import tiktoken
 import logging
@@ -686,7 +686,7 @@ def save_chat(username: str, chat_name: str, data: dict, project: str = None):
         atomic_write_json(path, data)
 
     # Update the chat index with last_accessed timestamp
-    last_accessed = data.get("stats", {}).get("last_accessed", datetime.now().isoformat())
+    last_accessed = data.get("stats", {}).get("last_accessed", datetime.now(timezone.utc).isoformat())
     update_chat_index(username, chat_name, last_accessed, project)
 
 
@@ -748,7 +748,7 @@ def rebuild_chat_index(username: str, project: str = None) -> dict:
             chat_name = f[5:-5]
             chat_data = load_chat(username, chat_name, project)
             if chat_data:
-                last_accessed = chat_data.get("stats", {}).get("last_accessed", "1970-01-01T00:00:00")
+                last_accessed = chat_data.get("stats", {}).get("last_accessed", "1970-01-01T00:00:00+00:00")
                 index[chat_name] = {"last_accessed": last_accessed}
 
     save_chat_index(username, index, project)
@@ -787,7 +787,7 @@ def create_empty_stats() -> dict:
         "total_cost": 0.0,
         "total_prompts": 0,
         "first_prompt_date": datetime.now(ZoneInfo('America/New_York')).date().isoformat(),
-        "last_accessed": datetime.now().isoformat()
+        "last_accessed": datetime.now(timezone.utc).isoformat()
     }
 
 def get_daily_usage_path(username: str) -> str:
@@ -929,7 +929,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
             f.write("You are a helpful assistant.")
         # Create initial metadata with default model
         save_project_metadata(username, project, {
-            "last_accessed": datetime.now().isoformat(),
+            "last_accessed": datetime.now(timezone.utc).isoformat(),
             "model": DEFAULT_MODEL
         })
     
@@ -1034,7 +1034,7 @@ def save_project_metadata(username: str, project: str, metadata: dict):
 def update_project_last_accessed(username: str, project: str):
     """Update project's last_accessed timestamp"""
     metadata = load_project_metadata(username, project)
-    metadata["last_accessed"] = datetime.now().isoformat()
+    metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
     save_project_metadata(username, project, metadata)
 
 # ============================================================
@@ -1674,7 +1674,7 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     # Update last_accessed timestamp
     if "stats" not in data:
         data["stats"] = create_empty_stats()
-    data["stats"]["last_accessed"] = datetime.now().isoformat()
+    data["stats"]["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
     all_messages = data["messages"]
     current_leaf = data.get("current_leaf_id")
@@ -2093,7 +2093,7 @@ def send_message(request: SendMessageRequest):
         stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
         stats["total_cost"] += actual_cost  # Use actual cost after free tokens
         stats["total_prompts"] += 1
-        stats["last_accessed"] = datetime.now().isoformat()
+        stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
         data["stats"] = stats
 
         # Add assistant message with branching fields and dual token counts
@@ -2726,7 +2726,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
                 stats["total_cost"] += actual_cost
                 stats["total_prompts"] += 1
-                stats["last_accessed"] = datetime.now().isoformat()
+                stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
                 data["stats"] = stats
 
                 # Add assistant message with pipeline stage data
@@ -3092,7 +3092,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
                         stats["total_cost"] += actual_cost
                         stats["total_prompts"] += 1
-                        stats["last_accessed"] = datetime.now().isoformat()
+                        stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
                         data["stats"] = stats
 
                         # Add assistant message
@@ -3565,7 +3565,7 @@ def rename_chat(request: RenameChatRequest):
 
     # Update chat index: remove old name, add new name with same timestamp
     index = load_chat_index(username, request.project)
-    old_entry = index.pop(request.old_name, {"last_accessed": datetime.now().isoformat()})
+    old_entry = index.pop(request.old_name, {"last_accessed": datetime.now(timezone.utc).isoformat()})
     index[request.new_name] = old_entry
     save_chat_index(username, index, request.project)
 
