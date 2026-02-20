@@ -560,9 +560,16 @@ private fun groupChatsByDate(chats: List<ChatSummary>): List<Pair<String, List<C
     return groups.map { (label, list) -> label to list.toList() }
 }
 
-private val timeFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val timeOnlyFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val dateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, h:mm a")
 
 private fun formatTime(iso: String): String {
     val dateTime = parseIsoDateTime(iso) ?: return ""
-    return dateTime.format(timeFormatter)
+    val today = LocalDate.now()
+    val date = dateTime.toLocalDate()
+    return if (date == today || date == today.minusDays(1)) {
+        dateTime.format(timeOnlyFormatter)
+    } else {
+        dateTime.format(dateTimeFormatter)
+    }
 }
