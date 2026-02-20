@@ -42,6 +42,7 @@ data class ProjectLandingUiState(
 sealed class ProjectLandingNavEvent {
     data class NavigateToChat(val chatName: String, val project: String) : ProjectLandingNavEvent()
     data object NavigateBack : ProjectLandingNavEvent()
+    data object NavigateToLogin : ProjectLandingNavEvent()
 }
 
 @HiltViewModel
@@ -66,6 +67,10 @@ class ProjectLandingViewModel @Inject constructor(
 
         viewModelScope.launch {
             val username = prefs.username.first() ?: ""
+            if (username.isBlank()) {
+                _navEvents.send(ProjectLandingNavEvent.NavigateToLogin)
+                return@launch
+            }
             _uiState.update { it.copy(username = username) }
             loadProjectData()
         }
@@ -114,7 +119,7 @@ class ProjectLandingViewModel @Inject constructor(
             if (state.chats.isEmpty()) {
                 _uiState.update { it.copy(isLoading = true, error = null) }
             } else {
-                _uiState.update { it.copy(isRefreshing = true) }
+                _uiState.update { it.copy(isRefreshing = true, error = null) }
             }
             loadProjectData()
         }
@@ -217,6 +222,10 @@ class ProjectLandingViewModel @Inject constructor(
         viewModelScope.launch {
             _navEvents.send(ProjectLandingNavEvent.NavigateBack)
         }
+    }
+
+    fun clearError() {
+        _uiState.update { it.copy(error = null) }
     }
 
     fun showCreateDialog() {

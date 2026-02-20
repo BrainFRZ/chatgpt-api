@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -43,6 +46,7 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -58,10 +62,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -93,7 +100,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
-import com.chorusai.app.model.PipelineState
 import com.chorusai.app.ui.theme.Accent
 import com.chorusai.app.ui.theme.Background
 import com.chorusai.app.ui.theme.Border
@@ -104,24 +110,52 @@ import com.chorusai.app.ui.theme.SurfaceTertiary
 import com.chorusai.app.ui.theme.TextMuted
 import com.chorusai.app.ui.theme.TextPrimary
 import com.chorusai.app.ui.theme.TextSecondary
+import com.chorusai.app.ui.navigation.Screen
 import com.chorusai.app.ui.viewmodel.ChatNavEvent
 import com.chorusai.app.ui.viewmodel.ChatViewModel
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     navController: NavController,
     viewModel: ChatViewModel = hiltViewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
         viewModel.navEvents.collect { event ->
             when (event) {
                 is ChatNavEvent.NavigateBack -> navController.popBackStack()
+                is ChatNavEvent.NavigateToLogin -> {
+                    navController.navigate(Screen.Login.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
             }
+        }
+    }
+
+    // Show send errors as snackbar
+    LaunchedEffect(state.sendError) {
+        state.sendError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearSendError()
+        }
+    }
+
+    // BackHandler: cancel edit → dismiss bookmark (only when needed)
+    val hasOverlayState = state.editingMessageId != null ||
+        state.bookmarkEditingMessageId != null ||
+        state.bookmarkPopupMessageId != null
+    BackHandler(enabled = hasOverlayState) {
+        when {
+            state.editingMessageId != null -> viewModel.cancelEditMessage()
+            state.bookmarkEditingMessageId != null -> viewModel.dismissBookmark()
+            state.bookmarkPopupMessageId != null -> viewModel.dismissBookmark()
         }
     }
 
@@ -141,6 +175,7 @@ fun ChatScreen(
                 onToggleSync = { viewModel.setAnthropicSync(it) }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = Background
     ) { padding ->
         val ps = state.pipelineState
@@ -191,64 +226,76 @@ fun ChatScreen(
                     else -> {
                         val visibleMessages = state.messages.filter { it.role != "system" }
                         if (visibleMessages.isEmpty() && !state.isSending) {
-                            Box(
+                            PullToRefreshBox(
+                                isRefreshing = state.isRefreshing,
+                                onRefresh = { viewModel.refresh() },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .weight(1f),
-                                contentAlignment = Alignment.Center
+                                    .weight(1f)
                             ) {
-                                Text(
-                                    text = "No messages yet",
-                                    color = TextMuted,
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .verticalScroll(rememberScrollState()),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.Chat,
+                                            contentDescription = null,
+                                            tint = TextMuted,
+                                            modifier = Modifier.size(64.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(16.dp))
+                                        Text(
+                                            text = "No messages yet",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = TextSecondary
+                                        )
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "Send a message to start",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = TextMuted
+                                        )
+                                    }
+                                }
                             }
                         } else {
-                            MessageList(
-                                messages = visibleMessages,
-                                totalMessages = state.totalMessages,
-                                contextStartIndex = state.contextStartIndex,
-                                hasMoreMessages = state.hasMoreMessages,
-                                isLoadingMore = state.isLoadingMore,
-                                isStreaming = state.isStreaming || state.isRemoteStreaming,
-                                streamingMessageId = state.streamingMessageId,
-                                editingMessageId = state.editingMessageId,
-                                editingMessageContent = state.editingMessageContent,
-                                isSending = state.isSending || state.isRemoteStreaming,
-                                scrollToBottomTrigger = state.scrollToBottomTrigger,
-                                bookmarkEditingMessageId = state.bookmarkEditingMessageId,
-                                bookmarkEditingText = state.bookmarkEditingText,
-                                bookmarkPopupMessageId = state.bookmarkPopupMessageId,
-                                onLoadMore = { viewModel.loadMore() },
-                                onGetSiblings = { viewModel.getSiblings(it) },
-                                onSwitchBranch = { viewModel.switchBranch(it) },
-                                onStartEdit = { viewModel.startEditMessage(it) },
-                                onUpdateEditContent = { viewModel.updateEditContent(it) },
-                                onSaveEdit = { viewModel.saveEditMessage() },
-                                onCancelEdit = { viewModel.cancelEditMessage() },
-                                onToggleBookmarkPopup = { viewModel.toggleBookmarkPopup(it) },
-                                onStartBookmarkEdit = { viewModel.startBookmarkEdit(it) },
-                                onUpdateBookmarkText = { viewModel.updateBookmarkText(it) },
-                                onSaveBookmark = { viewModel.saveBookmark() },
-                                onDismissBookmark = { viewModel.dismissBookmark() },
-                                listState = listState,
+                            PullToRefreshBox(
+                                isRefreshing = state.isRefreshing,
+                                onRefresh = { viewModel.refresh() },
                                 modifier = Modifier.weight(1f)
-                            )
-                        }
-
-                        // Send error banner
-                        if (state.sendError != null) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.errorContainer,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.clearSendError() }
                             ) {
-                                Text(
-                                    text = state.sendError!!,
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                MessageList(
+                                    messages = visibleMessages,
+                                    totalMessages = state.totalMessages,
+                                    contextStartIndex = state.contextStartIndex,
+                                    hasMoreMessages = state.hasMoreMessages,
+                                    isLoadingMore = state.isLoadingMore,
+                                    isStreaming = state.isStreaming || state.isRemoteStreaming,
+                                    streamingMessageId = state.streamingMessageId,
+                                    editingMessageId = state.editingMessageId,
+                                    editingMessageContent = state.editingMessageContent,
+                                    isSending = state.isSending || state.isRemoteStreaming,
+                                    scrollToBottomTrigger = state.scrollToBottomTrigger,
+                                    bookmarkEditingMessageId = state.bookmarkEditingMessageId,
+                                    bookmarkEditingText = state.bookmarkEditingText,
+                                    bookmarkPopupMessageId = state.bookmarkPopupMessageId,
+                                    onLoadMore = { viewModel.loadMore() },
+                                    onGetSiblings = { viewModel.getSiblings(it) },
+                                    onSwitchBranch = { viewModel.switchBranch(it) },
+                                    onStartEdit = { viewModel.startEditMessage(it) },
+                                    onUpdateEditContent = { viewModel.updateEditContent(it) },
+                                    onSaveEdit = { viewModel.saveEditMessage() },
+                                    onCancelEdit = { viewModel.cancelEditMessage() },
+                                    onToggleBookmarkPopup = { viewModel.toggleBookmarkPopup(it) },
+                                    onStartBookmarkEdit = { viewModel.startBookmarkEdit(it) },
+                                    onUpdateBookmarkText = { viewModel.updateBookmarkText(it) },
+                                    onSaveBookmark = { viewModel.saveBookmark() },
+                                    onDismissBookmark = { viewModel.dismissBookmark() },
+                                    listState = listState,
+                                    modifier = Modifier.fillMaxSize()
                                 )
                             }
                         }

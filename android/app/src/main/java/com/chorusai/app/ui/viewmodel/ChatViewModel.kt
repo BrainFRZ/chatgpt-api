@@ -60,11 +60,13 @@ data class ChatUiState(
     val bookmarkEditingMessageId: String? = null,
     val bookmarkEditingText: String = "",
     val bookmarkPopupMessageId: String? = null,
-    val anthropicSync: Boolean = true
+    val anthropicSync: Boolean = true,
+    val isRefreshing: Boolean = false
 )
 
 sealed class ChatNavEvent {
     data object NavigateBack : ChatNavEvent()
+    data object NavigateToLogin : ChatNavEvent()
 }
 
 @HiltViewModel
@@ -90,32 +92,36 @@ class ChatViewModel @Inject constructor(
 
         viewModelScope.launch {
             val username = prefs.username.first() ?: ""
+            if (username.isBlank()) {
+                _navEvents.send(ChatNavEvent.NavigateToLogin)
+                return@launch
+            }
             _uiState.update { it.copy(username = username) }
             webSocketManager.connectChat(username, chatName, project)
-            loadChat()
-        }
 
-        viewModelScope.launch {
-            loadModels()
-        }
+            // Start collectors BEFORE loadChat so no WS events are missed
+            launch { loadModels() }
 
-        viewModelScope.launch {
-            webSocketManager.chatEvents.collect { event ->
-                handleChatWsEvent(event)
+            launch {
+                webSocketManager.chatEvents.collect { event ->
+                    handleChatWsEvent(event)
+                }
             }
-        }
 
-        viewModelScope.launch {
-            webSocketManager.userEvents.collect { event ->
-                if (event is WsEvent.ChatDeleted) {
-                    val state = _uiState.value
-                    if (event.chatName == state.chatName &&
-                        (event.project ?: "") == (state.project ?: "")
-                    ) {
-                        _uiState.update { it.copy(chatDeleted = true) }
+            launch {
+                webSocketManager.userEvents.collect { event ->
+                    if (event is WsEvent.ChatDeleted) {
+                        val state = _uiState.value
+                        if (event.chatName == state.chatName &&
+                            (event.project ?: "") == (state.project ?: "")
+                        ) {
+                            _uiState.update { it.copy(chatDeleted = true) }
+                        }
                     }
                 }
             }
+
+            loadChat()
         }
     }
 
@@ -158,6 +164,7 @@ class ChatViewModel @Inject constructor(
         } finally {
             _uiState.update { it.copy(
                 isLoading = false,
+                isRefreshing = false,
                 editingMessageId = null,
                 editingMessageContent = "",
                 bookmarkEditingMessageId = null,
@@ -201,7 +208,12 @@ class ChatViewModel @Inject constructor(
 
     fun refresh() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
+            val state = _uiState.value
+            if (state.messages.isEmpty()) {
+                _uiState.update { it.copy(isLoading = true, error = null) }
+            } else {
+                _uiState.update { it.copy(isRefreshing = true, error = null) }
+            }
             loadChat()
         }
     }

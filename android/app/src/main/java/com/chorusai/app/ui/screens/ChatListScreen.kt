@@ -39,6 +39,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -55,6 +57,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.chorusai.app.BuildConfig
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.chorusai.app.ui.navigation.Screen
@@ -100,6 +104,17 @@ fun ChatListScreen(
         }
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Show transient errors as snackbar when data already loaded
+    LaunchedEffect(uiState.error) {
+        val err = uiState.error
+        if (err != null && (uiState.chats.isNotEmpty() || uiState.projects.isNotEmpty())) {
+            snackbarHostState.showSnackbar(err)
+            viewModel.clearError()
+        }
+    }
+
     Scaffold(
         topBar = {
             ChatListTopBar(
@@ -119,6 +134,7 @@ fun ChatListScreen(
                 )
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         when {
@@ -350,6 +366,21 @@ private fun ChatListContent(
                             strokeWidth = 2.dp
                         )
                     }
+                }
+            }
+
+            item(key = "version_footer") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp, bottom = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "v${BuildConfig.VERSION_NAME}",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }

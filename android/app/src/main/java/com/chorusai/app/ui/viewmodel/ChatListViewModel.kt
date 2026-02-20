@@ -137,7 +137,7 @@ class ChatListViewModel @Inject constructor(
             if (state.chats.isEmpty() && state.projects.isEmpty()) {
                 _uiState.update { it.copy(isLoading = true, error = null) }
             } else {
-                _uiState.update { it.copy(isRefreshing = true) }
+                _uiState.update { it.copy(isRefreshing = true, error = null) }
             }
             loadChats()
         }
@@ -265,6 +265,10 @@ class ChatListViewModel @Inject constructor(
             authRepo.logout()
             _navEvents.send(ChatListNavEvent.NavigateToLogin)
         }
+    }
+
+    fun clearError() {
+        _uiState.update { it.copy(error = null) }
     }
 
     fun showCreateDialog() {

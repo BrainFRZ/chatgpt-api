@@ -7,6 +7,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.navigation.navDeepLink
 import com.chorusai.app.ui.screens.*
 
 @Composable
@@ -49,6 +50,10 @@ fun NavGraph(navController: NavHostController = rememberNavController()) {
                     nullable = true
                     defaultValue = null
                 }
+            ),
+            deepLinks = listOf(
+                navDeepLink { uriPattern = "chorusai://chat/{chatName}" },
+                navDeepLink { uriPattern = "chorusai://chat/{chatName}?project={project}" }
             )
         ) { _ ->
             ChatScreen(navController = navController)
@@ -58,6 +63,9 @@ fun NavGraph(navController: NavHostController = rememberNavController()) {
             route = Screen.ProjectLanding.route,
             arguments = listOf(
                 navArgument("projectName") { type = NavType.StringType }
+            ),
+            deepLinks = listOf(
+                navDeepLink { uriPattern = "chorusai://project/{projectName}" }
             )
         ) { _ ->
             ProjectLandingScreen(navController = navController)
