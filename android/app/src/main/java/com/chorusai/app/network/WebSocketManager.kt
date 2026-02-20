@@ -18,6 +18,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okhttp3.logging.HttpLoggingInterceptor
 import java.net.URLEncoder
 import javax.inject.Inject
 import javax.inject.Named
@@ -25,7 +26,7 @@ import javax.inject.Singleton
 
 @Singleton
 class WebSocketManager @Inject constructor(
-    private val okHttpClient: OkHttpClient,
+    okHttpClient: OkHttpClient,
     private val gson: Gson,
     @Named("baseUrl") baseUrl: String
 ) {
@@ -34,6 +35,19 @@ class WebSocketManager @Inject constructor(
         private const val PING_INTERVAL_MS = 30_000L
         private const val MAX_RECONNECT_ATTEMPTS = 5
     }
+
+    // Downgrade BODY-level logging to HEADERS — BODY interferes with WebSocket frames
+    private val wsHttpClient = okHttpClient.newBuilder()
+        .apply {
+            val bodyLoggers = interceptors().filterIsInstance<HttpLoggingInterceptor>()
+            bodyLoggers.forEach { interceptors().remove(it) }
+            if (bodyLoggers.isNotEmpty()) {
+                addInterceptor(HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.HEADERS
+                })
+            }
+        }
+        .build()
 
     private val wsBaseUrl: String = baseUrl.trimEnd('/').let { url ->
         when {
@@ -102,7 +116,7 @@ class WebSocketManager @Inject constructor(
         Log.d(TAG, "Connecting user WS: $url")
 
         val request = Request.Builder().url(url).build()
-        userWs = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+        userWs = wsHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = synchronized(lock) {
                 Log.d(TAG, "User WS opened")
                 userReconnectAttempts = 0
@@ -190,7 +204,7 @@ class WebSocketManager @Inject constructor(
         Log.d(TAG, "Connecting chat WS: $url")
 
         val request = Request.Builder().url(url).build()
-        chatWs = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+        chatWs = wsHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = synchronized(lock) {
                 Log.d(TAG, "Chat WS opened")
                 chatReconnectAttempts = 0
@@ -281,7 +295,7 @@ class WebSocketManager @Inject constructor(
 
     // --- Helpers ---
 
-    private fun encode(s: String): String = URLEncoder.encode(s, "UTF-8")
+    private fun encode(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
     // --- Parsing ---
 
