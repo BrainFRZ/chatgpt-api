@@ -33,15 +33,16 @@ class UserPreferences @Inject constructor(
 
     suspend fun getLastChat(): Pair<String, String?>? {
         val prefs = context.dataStore.data.first()
-        val chatName = prefs[lastChatNameKey] ?: return null
-        val project = prefs[lastChatProjectKey]
+        val chatName = prefs[lastChatNameKey]
+        if (chatName.isNullOrBlank()) return null
+        val project = prefs[lastChatProjectKey]?.ifBlank { null }
         return chatName to project
     }
 
     suspend fun saveLastChat(chatName: String, project: String?) {
         context.dataStore.edit { prefs ->
             prefs[lastChatNameKey] = chatName
-            if (project != null) {
+            if (!project.isNullOrBlank()) {
                 prefs[lastChatProjectKey] = project
             } else {
                 prefs.remove(lastChatProjectKey)

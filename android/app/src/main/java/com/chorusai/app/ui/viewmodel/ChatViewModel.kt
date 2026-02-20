@@ -97,7 +97,9 @@ class ChatViewModel @Inject constructor(
                 return@launch
             }
             _uiState.update { it.copy(username = username) }
-            prefs.saveLastChat(chatName, project)
+            if (chatName.isNotBlank()) {
+                prefs.saveLastChat(chatName, project)
+            }
             webSocketManager.connectChat(username, chatName, project)
 
             // Start collectors BEFORE loadChat so no WS events are missed
@@ -117,6 +119,7 @@ class ChatViewModel @Inject constructor(
                             (event.project ?: "") == (state.project ?: "")
                         ) {
                             _uiState.update { it.copy(chatDeleted = true) }
+                            prefs.clearLastChat()
                         }
                     }
                 }
@@ -219,7 +222,11 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private var hasNavigatedBack = false
+
     fun navigateBack() {
+        if (hasNavigatedBack) return
+        hasNavigatedBack = true
         viewModelScope.launch {
             prefs.clearLastChat()
             _navEvents.send(ChatNavEvent.NavigateBack)

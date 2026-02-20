@@ -147,15 +147,13 @@ fun ChatScreen(
         }
     }
 
-    // BackHandler: cancel edit → dismiss bookmark (only when needed)
-    val hasOverlayState = state.editingMessageId != null ||
-        state.bookmarkEditingMessageId != null ||
-        state.bookmarkPopupMessageId != null
-    BackHandler(enabled = hasOverlayState) {
+    // BackHandler: cancel edit → dismiss bookmark → navigate back (clearing lastChat)
+    BackHandler(enabled = true) {
         when {
             state.editingMessageId != null -> viewModel.cancelEditMessage()
             state.bookmarkEditingMessageId != null -> viewModel.dismissBookmark()
             state.bookmarkPopupMessageId != null -> viewModel.dismissBookmark()
+            else -> viewModel.navigateBack()
         }
     }
 
