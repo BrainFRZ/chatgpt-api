@@ -50,9 +50,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -851,7 +856,7 @@ private fun CharacterSheetModal(
                         files.forEachIndexed { index, file ->
                             val ext = file.name.substringAfterLast('.', "").lowercase()
                             if (ext == "yaml" || ext == "yml") {
-                                SheetMarkdown("```yaml\n${file.content}\n```")
+                                YamlHighlighted(file.content)
                             } else {
                                 SheetMarkdown(file.content)
                             }
@@ -1600,6 +1605,202 @@ private fun SheetMarkdown(content: String) {
         ),
         modifier = Modifier.fillMaxWidth()
     )
+}
+
+// ─── YAML Syntax Highlighting (VS Code Dark+ palette) ───
+
+private val YamlKey = Color(0xFF9CDCFE)       // light blue — mapping keys
+private val YamlString = Color(0xFFCE9178)     // orange-brown — quoted strings
+private val YamlBool = Color(0xFF569CD6)       // blue — true/false/null
+private val YamlNumber = Color(0xFFB5CEA8)     // light green — numeric literals
+private val YamlComment = Color(0xFF6A9955)    // green — comments
+private val YamlPunct = Color(0xFFD4D4D4)      // gray — colons, dashes, brackets
+private val YamlText = Color(0xFFD4D4D4)       // gray — default/unquoted values
+private val YamlAnchor = Color(0xFFDCDCAA)     // yellow — anchors & aliases
+
+private val yamlBoolPattern = Regex("^(true|false|yes|no|on|off|null|~)$", RegexOption.IGNORE_CASE)
+private val yamlNumberPattern = Regex("^[+-]?(\\d[\\d_]*(\\.[\\d_]+)?([eE][+-]?\\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|\\.inf|\\.nan)$")
+
+/** Renders YAML content with VS Code Dark+ syntax highlighting. */
+@Composable
+private fun YamlHighlighted(content: String) {
+    val annotated = remember(content) { highlightYaml(content) }
+    Text(
+        text = annotated,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(CharPanelBg, RoundedCornerShape(4.dp))
+            .padding(8.dp)
+    )
+}
+
+private fun highlightYaml(content: String) = buildAnnotatedString {
+    val defaultStyle = SpanStyle(color = YamlText)
+    content.lines().forEachIndexed { lineIdx, line ->
+        if (lineIdx > 0) append('\n')
+        if (line.isBlank()) {
+            append(line)
+            return@forEachIndexed
+        }
+        // Comment line (possibly indented)
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith('#')) {
+            val indent = line.length - trimmed.length
+            withStyle(defaultStyle) { append(line.substring(0, indent)) }
+            withStyle(SpanStyle(color = YamlComment)) { append(trimmed) }
+            return@forEachIndexed
+        }
+        // Document markers
+        if (trimmed == "---" || trimmed == "...") {
+            withStyle(SpanStyle(color = YamlPunct)) { append(line) }
+            return@forEachIndexed
+        }
+        // Process key: value lines and list items
+        highlightYamlLine(line, defaultStyle)
+    }
+}
+
+private fun AnnotatedString.Builder.highlightYamlLine(line: String, defaultStyle: SpanStyle) {
+    var pos = 0
+    val len = line.length
+
+    // Leading whitespace
+    while (pos < len && line[pos] == ' ') pos++
+    if (pos > 0) withStyle(defaultStyle) { append(line.substring(0, pos)) }
+
+    if (pos >= len) return
+
+    // List item dash
+    if (line[pos] == '-' && (pos + 1 >= len || line[pos + 1] == ' ')) {
+        withStyle(SpanStyle(color = YamlPunct)) { append("-") }
+        pos++
+        if (pos < len && line[pos] == ' ') {
+            withStyle(defaultStyle) { append(" ") }
+            pos++
+        }
+        if (pos >= len) return
+    }
+
+    // Check for key: value pattern
+    val remaining = line.substring(pos)
+    val colonMatch = findKeyColon(remaining)
+    if (colonMatch != null) {
+        val key = remaining.substring(0, colonMatch)
+        // Anchor/alias before key
+        if (key.startsWith("&") || key.startsWith("*")) {
+            withStyle(SpanStyle(color = YamlAnchor)) { append(key) }
+        } else {
+            withStyle(SpanStyle(color = YamlKey)) { append(key) }
+        }
+        withStyle(SpanStyle(color = YamlPunct)) { append(":") }
+        val afterColon = pos + colonMatch + 1
+        if (afterColon < len) {
+            val rest = line.substring(afterColon)
+            // Space after colon
+            val valueStart = rest.indexOfFirst { it != ' ' }
+            if (valueStart < 0) {
+                withStyle(defaultStyle) { append(rest) }
+            } else {
+                withStyle(defaultStyle) { append(rest.substring(0, valueStart)) }
+                highlightYamlValue(rest.substring(valueStart))
+            }
+        }
+    } else {
+        // No key — treat as a value (e.g. list item value)
+        highlightYamlValue(remaining)
+    }
+}
+
+/** Find the colon that separates key from value. Skips colons inside quotes. */
+private fun findKeyColon(s: String): Int? {
+    var i = 0
+    var inSingle = false
+    var inDouble = false
+    while (i < s.length) {
+        val c = s[i]
+        when {
+            c == '\'' && !inDouble -> inSingle = !inSingle
+            c == '"' && !inSingle -> inDouble = !inDouble
+            c == ':' && !inSingle && !inDouble && (i + 1 >= s.length || s[i + 1] == ' ') -> return i
+        }
+        i++
+    }
+    return null
+}
+
+private fun AnnotatedString.Builder.highlightYamlValue(value: String) {
+    val v = value.trim()
+    // Inline comment
+    val commentIdx = findInlineComment(value)
+    val main = if (commentIdx != null) value.substring(0, commentIdx) else value
+    val comment = if (commentIdx != null) value.substring(commentIdx) else null
+
+    val mainTrimmed = main.trim()
+    when {
+        // Quoted strings
+        mainTrimmed.startsWith('"') || mainTrimmed.startsWith('\'') -> {
+            withStyle(SpanStyle(color = YamlString)) { append(main) }
+        }
+        // Anchors / aliases
+        mainTrimmed.startsWith('&') || mainTrimmed.startsWith('*') -> {
+            withStyle(SpanStyle(color = YamlAnchor)) { append(main) }
+        }
+        // Booleans / null
+        yamlBoolPattern.matches(mainTrimmed) -> {
+            withStyle(SpanStyle(color = YamlBool)) { append(main) }
+        }
+        // Numbers
+        yamlNumberPattern.matches(mainTrimmed) -> {
+            withStyle(SpanStyle(color = YamlNumber)) { append(main) }
+        }
+        // Flow collections
+        mainTrimmed.startsWith('[') || mainTrimmed.startsWith('{') -> {
+            highlightFlowCollection(main)
+        }
+        // Pipe/angle (block scalar indicators)
+        mainTrimmed.startsWith('|') || mainTrimmed.startsWith('>') -> {
+            withStyle(SpanStyle(color = YamlPunct)) { append(main) }
+        }
+        // Unquoted string value
+        else -> {
+            withStyle(SpanStyle(color = YamlString)) { append(main) }
+        }
+    }
+    if (comment != null) {
+        withStyle(SpanStyle(color = YamlComment)) { append(comment) }
+    }
+}
+
+/** Find start of inline comment (# preceded by space, outside quotes). */
+private fun findInlineComment(s: String): Int? {
+    var i = 0
+    var inSingle = false
+    var inDouble = false
+    while (i < s.length) {
+        val c = s[i]
+        when {
+            c == '\'' && !inDouble -> inSingle = !inSingle
+            c == '"' && !inSingle -> inDouble = !inDouble
+            c == '#' && !inSingle && !inDouble && i > 0 && s[i - 1] == ' ' -> return i
+        }
+        i++
+    }
+    return null
+}
+
+/** Highlight flow collections [a, b] / {a: b} with basic token coloring. */
+private fun AnnotatedString.Builder.highlightFlowCollection(s: String) {
+    for (c in s) {
+        when (c) {
+            '[', ']', '{', '}', ',', ':' ->
+                withStyle(SpanStyle(color = YamlPunct)) { append(c.toString()) }
+            else ->
+                withStyle(SpanStyle(color = YamlText)) { append(c.toString()) }
+        }
+    }
 }
 
 // ─── Draw Left Border Modifier ───
