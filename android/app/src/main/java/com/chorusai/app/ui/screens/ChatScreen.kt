@@ -1,7 +1,9 @@
 package com.chorusai.app.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -55,7 +57,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -363,7 +370,9 @@ private fun MessageList(
 
     LazyColumn(
         state = listState,
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier
+            .fillMaxWidth()
+            .fadingScrollbar(listState)
     ) {
         // Load more header — always present when more messages exist (stable item count)
         if (hasMoreMessages) {
@@ -628,6 +637,65 @@ private fun StreamingIndicator() {
             fontStyle = FontStyle.Italic
         )
     }
+}
+
+@Composable
+private fun Modifier.fadingScrollbar(
+    listState: LazyListState,
+    width: Dp = 4.dp,
+    minThumbHeight: Dp = 32.dp
+): Modifier {
+    val alpha = remember { Animatable(0f) }
+
+    // Fade in when scrolling, fade out after idle
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling) {
+                    alpha.snapTo(1f)
+                } else {
+                    alpha.animateTo(0f, animationSpec = tween(durationMillis = 800, delayMillis = 600))
+                }
+            }
+    }
+
+    val currentAlpha = alpha.value
+    return this.then(
+        if (currentAlpha > 0f) {
+            Modifier.drawWithContent {
+                drawContent()
+
+                val totalItems = listState.layoutInfo.totalItemsCount
+                val visibleItems = listState.layoutInfo.visibleItemsInfo
+                if (totalItems == 0 || visibleItems.isEmpty()) return@drawWithContent
+
+                val viewportHeight = listState.layoutInfo.viewportSize.height.toFloat()
+                val totalHeight = listState.layoutInfo.visibleItemsInfo.let { items ->
+                    val avgItemHeight = items.sumOf { it.size } / items.size.toFloat()
+                    avgItemHeight * totalItems
+                }
+                if (totalHeight <= viewportHeight) return@drawWithContent
+
+                val thumbHeight = (viewportHeight / totalHeight * viewportHeight)
+                    .coerceAtLeast(minThumbHeight.toPx())
+
+                val firstVisibleItem = visibleItems.first()
+                val scrollOffset = firstVisibleItem.index * (totalHeight / totalItems) - firstVisibleItem.offset
+                val scrollFraction = scrollOffset / (totalHeight - viewportHeight)
+                val thumbOffset = scrollFraction * (viewportHeight - thumbHeight)
+
+                drawRoundRect(
+                    color = TextMuted,
+                    topLeft = Offset(size.width - width.toPx() - 2.dp.toPx(), thumbOffset.coerceAtLeast(0f)),
+                    size = Size(width.toPx(), thumbHeight),
+                    cornerRadius = CornerRadius(width.toPx() / 2f),
+                    alpha = currentAlpha * 0.5f
+                )
+            }
+        } else {
+            Modifier
+        }
+    )
 }
 
 @Composable
