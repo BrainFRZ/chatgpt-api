@@ -110,14 +110,22 @@ export function useSync(deps: UseSyncDeps) {
       case 'stream_done':
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
-        // Replace streaming placeholder with complete message
+        // Check if we have a streaming placeholder (set by user_message_added).
+        // If not, the earlier events were lost — trigger a full reload instead
+        // of trying to patch the message list.
         deps.setMessages(prev => {
-          const newMessages = [...prev];
-          const lastIdx = newMessages.length - 1;
-          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+          const lastIdx = prev.length - 1;
+          const hasPlaceholder = lastIdx >= 0 &&
+            prev[lastIdx].role === 'assistant' && !prev[lastIdx].id;
+          if (hasPlaceholder) {
+            // Normal path: replace placeholder with final message
+            const newMessages = [...prev];
             newMessages[lastIdx] = event.data.assistant_message;
+            return newMessages;
           }
-          return newMessages;
+          // No placeholder — earlier events were lost, trigger reload
+          setNeedsSyncReload(true);
+          return prev;
         });
         deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
         deps.setTotalMessages(prev => prev + 1);
@@ -301,14 +309,14 @@ export function useSync(deps: UseSyncDeps) {
         }, 30000); // Ping every 30 seconds
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = (msgEvent) => {
         try {
-          const data = JSON.parse(event.data);
+          const data = JSON.parse(msgEvent.data);
           // Skip user-level events here - they're handled by the user-level WebSocket
           if (data.type === 'chat_created' || data.type === 'chat_deleted') return;
           handleSyncEvent(data);
         } catch (e) {
-          // Ignore parse errors
+          console.error('[WS parse error]', e);
         }
       };
 
