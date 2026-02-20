@@ -110,34 +110,9 @@ export function useSync(deps: UseSyncDeps) {
       case 'stream_done':
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
-        // Check if we have a streaming placeholder (set by user_message_added).
-        // If not, the earlier events were lost — trigger a full reload instead
-        // of trying to patch the message list.
-        deps.setMessages(prev => {
-          const lastIdx = prev.length - 1;
-          const hasPlaceholder = lastIdx >= 0 &&
-            prev[lastIdx].role === 'assistant' && !prev[lastIdx].id;
-          if (hasPlaceholder) {
-            // Normal path: replace placeholder with final message
-            const newMessages = [...prev];
-            newMessages[lastIdx] = event.data.assistant_message;
-            return newMessages;
-          }
-          // No placeholder — earlier events were lost, trigger reload
-          setNeedsSyncReload(true);
-          return prev;
-        });
-        deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
-        deps.setTotalMessages(prev => prev + 1);
-        deps.setCurrentLeafId(event.data.current_leaf_id);
-        deps.setStats(event.data.stats);
-        deps.setContextStartIndex(event.data.context_start_index || 1);
-        deps.setPipelineStage(prev => {
-          if (!deps.currentChatRef.current) return prev;
-          const next = new Map(prev);
-          next.delete(deps.currentChatRef.current);
-          return next;
-        });
+        // If user_message_added never arrived, there's no placeholder to replace.
+        // Just reload the chat to get the correct branch state.
+        setNeedsSyncReload(true);
         break;
 
       case 'stream_error':
