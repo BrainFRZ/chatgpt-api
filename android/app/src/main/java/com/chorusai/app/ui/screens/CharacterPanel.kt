@@ -1601,13 +1601,17 @@ private fun SheetMarkdown(content: String) {
     )
 }
 
-/** Heuristic: content looks like raw YAML if it has key: value patterns and no markdown headings. */
+/** Heuristic: content looks like raw YAML vs markdown. */
 private fun looksLikeYaml(content: String): Boolean {
-    val lines = content.lines().take(10)
-    val hasYamlPairs = lines.count { it.matches(Regex("^\\s*[\\w-]+:.*")) } >= 2
-    val hasMarkdownHeadings = lines.any { it.startsWith("#") }
-    val hasFencedCode = content.contains("```")
-    return hasYamlPairs && !hasMarkdownHeadings && !hasFencedCode
+    if (content.contains("```")) return false // has fenced code blocks → already markdown
+    val lines = content.lines()
+    // Skip leading comment/blank lines to find the first real content line
+    val firstContent = lines.firstOrNull { it.isNotBlank() && !it.trimStart().startsWith("#") }
+    // YAML: first content line is a key-value pair or list item
+    return firstContent != null && (
+        firstContent.matches(Regex("^-?\\s*[\\w-]+:.*")) ||
+        firstContent.matches(Regex("^\\s*- .*"))
+    )
 }
 
 // ─── Draw Left Border Modifier ───
