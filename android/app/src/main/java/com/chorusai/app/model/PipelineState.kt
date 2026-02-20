@@ -8,25 +8,29 @@ internal fun Any?.toCleanString(): String = when (this) {
     else -> toString()
 }
 
+/** Display a Double cleanly: 14.0 → "14", 0.75 → "0.75" */
+private fun Double.cleanNum(): String =
+    if (this == toLong().toDouble()) toLong().toString() else toString()
+
 data class VitalBar(
     val label: String = "",
-    val current: Int? = null,
-    val max: Int? = null,
+    val current: Double? = null,
+    val max: Double? = null,
     val value: Any? = null
 ) {
     val isFlat: Boolean get() = current == null && max == null && value != null
     val displayValue: String get() = when {
         isFlat -> value.toCleanString()
-        current != null && max != null -> "$current/$max"
-        current != null -> "$current"
+        current != null && max != null -> "${current.cleanNum()}/${max.cleanNum()}"
+        current != null -> current.cleanNum()
         else -> ""
     }
 }
 
 data class ResourceEntry(
     val label: String = "",
-    val current: Int = 0,
-    val max: Int = 0
+    val current: Double = 0.0,
+    val max: Double = 0.0
 )
 
 data class CharacterData(

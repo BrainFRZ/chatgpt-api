@@ -62,11 +62,11 @@ import com.chorusai.app.ui.theme.*
 
 // ─── Color Helpers ───
 
-private fun vitalColor(current: Int?, max: Int?, label: String?): Color {
+private fun vitalColor(current: Double?, max: Double?, label: String?): Color {
     val cur = current ?: return VitalGreen
     val mx = max ?: return VitalGreen
-    if (mx <= 0) return VitalGreen
-    val pct = cur.toFloat() / mx
+    if (mx <= 0.0) return VitalGreen
+    val pct = (cur / mx).toFloat()
     val l = (label ?: "").lowercase()
     return when {
         l.contains("san") -> when {
@@ -583,10 +583,10 @@ private fun TypeBadge(type: String) {
 
 @Composable
 private fun VitalBarRow(vital: VitalBar) {
-    val cur = vital.current ?: 0
-    val mx = vital.max ?: 1
+    val cur = vital.current ?: 0.0
+    val mx = vital.max ?: 1.0
     val color = vitalColor(cur, mx, vital.label)
-    val progress = if (mx > 0) (cur.toFloat() / mx).coerceIn(0f, 1f) else 0f
+    val progress = if (mx > 0.0) (cur / mx).toFloat().coerceIn(0f, 1f) else 0f
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -619,9 +619,11 @@ private fun VitalBarRow(vital: VitalBar) {
 @Composable
 private fun ResourceDotsRow(resource: ResourceEntry) {
     val color = resourceDotColor(resource.label)
+    val cur = resource.current.toInt().coerceIn(0, 20)
+    val mx = resource.max.toInt().coerceIn(0, 20)
     val dots = buildString {
-        repeat(resource.current.coerceIn(0, 20)) { append("\u25CF") }
-        repeat((resource.max - resource.current).coerceIn(0, 20)) { append("\u25CB") }
+        repeat(cur) { append("\u25CF") }
+        repeat((mx - cur).coerceAtLeast(0)) { append("\u25CB") }
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(text = resource.label, color = TextMuted, fontSize = 10.sp)
@@ -850,7 +852,7 @@ private fun SectionLabel(text: String) {
 @Composable
 private fun ResourceBarRow(resource: ResourceEntry) {
     val color = resourceDotColor(resource.label)
-    val progress = if (resource.max > 0) (resource.current.toFloat() / resource.max).coerceIn(0f, 1f) else 0f
+    val progress = if (resource.max > 0.0) (resource.current / resource.max).toFloat().coerceIn(0f, 1f) else 0f
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -873,7 +875,7 @@ private fun ResourceBarRow(resource: ResourceEntry) {
         )
         Spacer(modifier = Modifier.width(4.dp))
         Text(
-            text = "${resource.current}/${resource.max}",
+            text = "${resource.current.toCleanString()}/${resource.max.toCleanString()}",
             color = TextSecondary,
             fontSize = 10.sp
         )
@@ -1002,14 +1004,14 @@ private fun DnD5eState(
             val shields = ship["shields"] as? Map<String, Number>
             SectionLabel("SHIP SYSTEMS")
             hull?.let {
-                val cur = it["current"]?.toInt() ?: 0
-                val mx = it["max"]?.toInt() ?: 1
+                val cur = it["current"]?.toDouble() ?: 0.0
+                val mx = it["max"]?.toDouble() ?: 1.0
                 VitalBarRow(VitalBar("Hull", cur, mx))
                 Spacer(modifier = Modifier.height(4.dp))
             }
             shields?.let {
-                val cur = it["current"]?.toInt() ?: 0
-                val mx = it["max"]?.toInt() ?: 1
+                val cur = it["current"]?.toDouble() ?: 0.0
+                val mx = it["max"]?.toDouble() ?: 1.0
                 VitalBarRow(VitalBar("Shield", cur, mx))
                 Spacer(modifier = Modifier.height(4.dp))
             }
@@ -1029,8 +1031,8 @@ private fun CoC7eState(characterName: String, gameState: Map<String, Any>) {
     // SAN bar
     val san = inv["san"] as? Map<String, Number>
     san?.let {
-        val cur = it["current"]?.toInt() ?: 0
-        val mx = it["max"]?.toInt() ?: 99
+        val cur = it["current"]?.toDouble() ?: 0.0
+        val mx = it["max"]?.toDouble() ?: 99.0
         VitalBarRow(VitalBar("SAN", cur, mx))
         Spacer(modifier = Modifier.height(4.dp))
     }
@@ -1095,8 +1097,8 @@ private fun Sr6eState(characterName: String, gameState: Map<String, Any>) {
     // Edge
     val edge = runner["edge"] as? Map<String, Number>
     edge?.let {
-        val cur = it["current"]?.toInt() ?: 0
-        val mx = it["max"]?.toInt() ?: 0
+        val cur = it["current"]?.toDouble() ?: 0.0
+        val mx = it["max"]?.toDouble() ?: 0.0
         ResourceDotsRow(ResourceEntry("Edge", cur, mx))
         Spacer(modifier = Modifier.height(4.dp))
     }
@@ -1128,8 +1130,8 @@ private fun CpRedState(characterName: String, gameState: Map<String, Any>) {
     // Humanity
     val humanity = er["humanity"] as? Map<String, Number>
     humanity?.let {
-        val cur = it["current"]?.toInt() ?: 0
-        val mx = it["max"]?.toInt() ?: 0
+        val cur = it["current"]?.toDouble() ?: 0.0
+        val mx = it["max"]?.toDouble() ?: 0.0
         VitalBarRow(VitalBar("Humanity", cur, mx))
         Spacer(modifier = Modifier.height(4.dp))
     }
@@ -1137,8 +1139,8 @@ private fun CpRedState(characterName: String, gameState: Map<String, Any>) {
     // Luck
     val luck = er["luck"] as? Map<String, Number>
     luck?.let {
-        val cur = it["current"]?.toInt() ?: 0
-        val mx = it["max"]?.toInt() ?: 0
+        val cur = it["current"]?.toDouble() ?: 0.0
+        val mx = it["max"]?.toDouble() ?: 0.0
         ResourceDotsRow(ResourceEntry("Luck", cur, mx))
         Spacer(modifier = Modifier.height(4.dp))
     }
