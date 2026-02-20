@@ -120,7 +120,8 @@ class SseClient(
                         totalMessages = (map["total_messages"] as? Double)?.toInt(),
                         model = map["model"] as? String,
                         pipelineState = map["pipeline_state"] as? Map<String, Any>,
-                        reasoning = map["reasoning"] as? String
+                        reasoning = map["reasoning"] as? String,
+                        contextStartIndex = (map["context_start_index"] as? Double)?.toInt()
                     )
                 }
                 "error" -> {

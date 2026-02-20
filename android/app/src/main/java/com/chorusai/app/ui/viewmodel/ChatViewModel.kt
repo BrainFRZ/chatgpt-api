@@ -32,9 +32,11 @@ data class ChatUiState(
     val project: String? = null,
     val username: String = "",
     val messages: List<ChatMessage> = emptyList(),
+    val allMessages: List<ChatMessage> = emptyList(),
     val totalMessages: Int = 0,
     val hasMoreMessages: Boolean = false,
     val currentLeafId: String? = null,
+    val contextStartIndex: Int = 1,
     val model: String? = null,
     val isLoadingMore: Boolean = false,
     val isSending: Boolean = false,
@@ -45,7 +47,11 @@ data class ChatUiState(
     val isLoadingModels: Boolean = false,
     val viewerCount: Int = 1,
     val isRemoteStreaming: Boolean = false,
-    val chatDeleted: Boolean = false
+    val chatDeleted: Boolean = false,
+    val editingMessageId: String? = null,
+    val editingMessageContent: String = "",
+    val isSwitchingBranch: Boolean = false,
+    val scrollToBottomTrigger: Int = 0
 )
 
 sealed class ChatNavEvent {
@@ -123,9 +129,11 @@ class ChatViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         messages = body.messages,
+                        allMessages = body.allMessages ?: body.messages,
                         totalMessages = body.totalMessages,
                         hasMoreMessages = body.hasMoreMessages,
                         currentLeafId = body.currentLeafId,
+                        contextStartIndex = 1,
                         model = body.model,
                         error = null
                     )
@@ -136,7 +144,7 @@ class ChatViewModel @Inject constructor(
         } catch (e: Exception) {
             _uiState.update { it.copy(error = e.message ?: "Network error") }
         } finally {
-            _uiState.update { it.copy(isLoading = false) }
+            _uiState.update { it.copy(isLoading = false, editingMessageId = null, editingMessageContent = "") }
         }
     }
 
@@ -290,17 +298,22 @@ class ChatViewModel @Inject constructor(
                                     },
                                     currentLeafId = event.currentLeafId ?: it.currentLeafId,
                                     totalMessages = event.totalMessages ?: it.totalMessages,
+                                    contextStartIndex = event.contextStartIndex ?: it.contextStartIndex,
                                     isStreaming = false,
                                     streamingMessageId = null,
                                     isSending = false
                                 )
                             }
+                            // Reload allMessages to include the new messages
+                            reloadAllMessages()
                         }
                         is SseEvent.Error -> {
                             _uiState.update {
                                 it.copy(
                                     messages = if (accumulatedContent.isEmpty()) {
-                                        it.messages.filter { msg -> msg.id != tempAssistantId }
+                                        it.messages.filter { msg ->
+                                            msg.id != tempAssistantId && msg.id != tempUserId
+                                        }
                                     } else {
                                         it.messages
                                     },
@@ -320,7 +333,9 @@ class ChatViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         messages = if (accumulatedContent.isEmpty()) {
-                            it.messages.filter { msg -> msg.id != tempAssistantId }
+                            it.messages.filter { msg ->
+                                msg.id != tempAssistantId && msg.id != tempUserId
+                            }
                         } else {
                             it.messages
                         },
@@ -350,6 +365,8 @@ class ChatViewModel @Inject constructor(
                 streamingMessageId = null
             )
         }
+        // Reload to recover correct state (especially after edit truncation)
+        viewModelScope.launch { loadChat() }
     }
 
     fun setModel(modelId: String) {
@@ -376,6 +393,266 @@ class ChatViewModel @Inject constructor(
 
     fun clearSendError() {
         _uiState.update { it.copy(sendError = null) }
+    }
+
+    // --- Tree utilities ---
+
+    /**
+     * Find all siblings of a message (messages sharing the same parent_id).
+     * Returns them sorted by timestamp (oldest first), mirroring the web app.
+     */
+    fun getSiblings(messageId: String): List<ChatMessage> {
+        val all = _uiState.value.allMessages
+        val target = all.find { it.id == messageId } ?: return emptyList()
+        val parentId = target.parentId
+        return all.filter { it.parentId == parentId && it.role != "system" }
+            .sortedBy { it.timestamp ?: "" }
+    }
+
+    // --- Branch switching ---
+
+    fun switchBranch(targetMessageId: String) {
+        if (_uiState.value.isSwitchingBranch) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSwitchingBranch = true) }
+            val state = _uiState.value
+            try {
+                val response = chatRepo.switchBranch(
+                    username = state.username,
+                    chatName = state.chatName,
+                    targetMessageId = targetMessageId,
+                    project = state.project
+                )
+                if (response.isSuccessful) {
+                    val newLeafId = response.body()?.get("new_leaf_id")
+                    // Reload the chat at the new leaf
+                    val chatResponse = chatRepo.getChat(
+                        username = state.username,
+                        chatName = state.chatName,
+                        project = state.project,
+                        leafId = newLeafId,
+                        limit = pageSize,
+                        offset = 0
+                    )
+                    if (chatResponse.isSuccessful) {
+                        val body = chatResponse.body()!!
+                        _uiState.update {
+                            it.copy(
+                                messages = body.messages,
+                                allMessages = body.allMessages ?: body.messages,
+                                totalMessages = body.totalMessages,
+                                hasMoreMessages = body.hasMoreMessages,
+                                currentLeafId = body.currentLeafId,
+                                contextStartIndex = 1,
+                                model = body.model,
+                                isSwitchingBranch = false,
+                                editingMessageId = null,
+                                editingMessageContent = "",
+                                scrollToBottomTrigger = it.scrollToBottomTrigger + 1
+                            )
+                        }
+                    } else {
+                        _uiState.update { it.copy(isSwitchingBranch = false) }
+                    }
+                } else {
+                    _uiState.update { it.copy(isSwitchingBranch = false) }
+                }
+            } catch (_: Exception) {
+                _uiState.update { it.copy(isSwitchingBranch = false) }
+            }
+        }
+    }
+
+    // --- Message editing ---
+
+    fun startEditMessage(messageId: String) {
+        val messages = _uiState.value.messages.filter { it.role != "system" }
+        val msg = messages.find { it.id == messageId } ?: return
+        if (msg.role != "user") return
+        _uiState.update {
+            it.copy(editingMessageId = messageId, editingMessageContent = msg.content)
+        }
+    }
+
+    fun updateEditContent(content: String) {
+        _uiState.update { it.copy(editingMessageContent = content) }
+    }
+
+    fun cancelEditMessage() {
+        _uiState.update { it.copy(editingMessageId = null, editingMessageContent = "") }
+    }
+
+    fun saveEditMessage() {
+        val state = _uiState.value
+        val editId = state.editingMessageId ?: return
+        val editContent = state.editingMessageContent.trim()
+        if (editContent.isBlank() || state.isSending || state.isRemoteStreaming) return
+
+        val visibleMessages = state.messages.filter { it.role != "system" }
+        val editIndex = visibleMessages.indexOfFirst { it.id == editId }
+        if (editIndex < 0) return
+        val originalMessage = visibleMessages[editIndex]
+
+        // Cancel editing state first
+        _uiState.update { it.copy(editingMessageId = null, editingMessageContent = "") }
+
+        // The parent_id for the new branch = the original message's parent_id
+        // This creates a sibling of the original message
+        val parentId = originalMessage.parentId
+
+        streamingJob = viewModelScope.launch {
+            _uiState.update { it.copy(isSending = true, isStreaming = false, sendError = null) }
+
+            val tempUserId = "temp_user_${UUID.randomUUID()}"
+            val tempAssistantId = "temp_assistant_${UUID.randomUUID()}"
+
+            val userMessage = ChatMessage(
+                id = tempUserId,
+                role = "user",
+                content = editContent,
+                parentId = parentId
+            )
+            val streamingMessage = ChatMessage(
+                id = tempAssistantId,
+                role = "assistant",
+                content = ""
+            )
+
+            // Replace everything from editIndex onward with the new user message + placeholder
+            // Preserve any system messages from the original list
+            val systemMessages = state.messages.filter { it.role == "system" }
+            val prefix = visibleMessages.subList(0, editIndex)
+            _uiState.update {
+                it.copy(
+                    messages = systemMessages + prefix + userMessage + streamingMessage,
+                    isStreaming = true,
+                    streamingMessageId = tempAssistantId
+                )
+            }
+
+            val accumulatedContent = StringBuilder()
+            val accumulatedReasoning = StringBuilder()
+
+            try {
+                chatRepo.streamMessage(
+                    username = state.username,
+                    chatName = state.chatName,
+                    message = editContent,
+                    project = state.project,
+                    parentId = parentId,
+                    model = state.model
+                ).collect { event ->
+                    when (event) {
+                        is SseEvent.Init -> {
+                            val newUserId = event.userMessageId
+                            if (newUserId != null) {
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == tempUserId) msg.copy(id = newUserId) else msg
+                                    })
+                                }
+                            }
+                        }
+                        is SseEvent.Content -> {
+                            accumulatedContent.append(event.delta)
+                            val newContent = accumulatedContent.toString()
+                            _uiState.update {
+                                it.copy(messages = it.messages.map { msg ->
+                                    if (msg.id == tempAssistantId) msg.copy(content = newContent) else msg
+                                })
+                            }
+                        }
+                        is SseEvent.Thinking -> {
+                            accumulatedReasoning.append(event.delta)
+                            val newReasoning = accumulatedReasoning.toString()
+                            _uiState.update {
+                                it.copy(messages = it.messages.map { msg ->
+                                    if (msg.id == tempAssistantId) msg.copy(reasoning = newReasoning) else msg
+                                })
+                            }
+                        }
+                        is SseEvent.Done -> {
+                            val finalMessage = ChatMessage(
+                                id = event.assistantMessageId ?: tempAssistantId,
+                                role = "assistant",
+                                content = accumulatedContent.toString(),
+                                tokens = event.tokens,
+                                cost = event.cost,
+                                model = event.model,
+                                reasoning = accumulatedReasoning.toString().ifEmpty { null }
+                                    ?: event.reasoning
+                            )
+                            _uiState.update {
+                                it.copy(
+                                    messages = it.messages.map { msg ->
+                                        if (msg.id == tempAssistantId) finalMessage else msg
+                                    },
+                                    currentLeafId = event.currentLeafId ?: it.currentLeafId,
+                                    totalMessages = event.totalMessages ?: it.totalMessages,
+                                    contextStartIndex = event.contextStartIndex ?: it.contextStartIndex,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
+                            // Reload allMessages to include the new branch
+                            reloadAllMessages()
+                        }
+                        is SseEvent.Error -> {
+                            _uiState.update {
+                                it.copy(
+                                    sendError = event.detail,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
+                            // Reload to restore correct state
+                            loadChat()
+                        }
+                        else -> {}
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        sendError = e.message ?: "Streaming error",
+                        isStreaming = false,
+                        streamingMessageId = null,
+                        isSending = false
+                    )
+                }
+                loadChat()
+            }
+            if (_uiState.value.isSending) {
+                _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
+            }
+        }
+    }
+
+    /** Re-fetch allMessages without replacing the visible branch path */
+    private suspend fun reloadAllMessages() {
+        val state = _uiState.value
+        try {
+            val response = chatRepo.getChat(
+                username = state.username,
+                chatName = state.chatName,
+                project = state.project,
+                leafId = state.currentLeafId,
+                limit = pageSize,
+                offset = 0
+            )
+            if (response.isSuccessful) {
+                val body = response.body()!!
+                _uiState.update {
+                    it.copy(allMessages = body.allMessages ?: body.messages)
+                }
+            }
+        } catch (_: Exception) {
+            // Silent fail — allMessages is non-critical for display
+        }
     }
 
     override fun onCleared() {
@@ -509,9 +786,12 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is WsEvent.BranchSwitched -> {
+                // Skip if we triggered this switch locally (avoid redundant reload + flash)
+                if (_uiState.value.isSwitchingBranch) return
                 viewModelScope.launch {
                     _uiState.update { it.copy(isLoading = true) }
                     loadChat()
+                    _uiState.update { it.copy(scrollToBottomTrigger = it.scrollToBottomTrigger + 1) }
                 }
             }
             is WsEvent.BookmarkUpdated -> {

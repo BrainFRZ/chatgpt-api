@@ -32,6 +32,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,6 +63,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
@@ -79,6 +86,8 @@ import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.ui.theme.Accent
 import com.chorusai.app.ui.theme.Background
 import com.chorusai.app.ui.theme.Border
+import com.chorusai.app.ui.theme.Error
+import com.chorusai.app.ui.theme.Success
 import com.chorusai.app.ui.theme.Surface as SurfaceColor
 import com.chorusai.app.ui.theme.SurfaceTertiary
 import com.chorusai.app.ui.theme.TextMuted
@@ -177,11 +186,23 @@ fun ChatScreen(
                     } else {
                         MessageList(
                             messages = visibleMessages,
+                            totalMessages = state.totalMessages,
+                            contextStartIndex = state.contextStartIndex,
                             hasMoreMessages = state.hasMoreMessages,
                             isLoadingMore = state.isLoadingMore,
                             isStreaming = state.isStreaming || state.isRemoteStreaming,
                             streamingMessageId = state.streamingMessageId,
+                            editingMessageId = state.editingMessageId,
+                            editingMessageContent = state.editingMessageContent,
+                            isSending = state.isSending || state.isRemoteStreaming,
+                            scrollToBottomTrigger = state.scrollToBottomTrigger,
                             onLoadMore = { viewModel.loadMore() },
+                            onGetSiblings = { viewModel.getSiblings(it) },
+                            onSwitchBranch = { viewModel.switchBranch(it) },
+                            onStartEdit = { viewModel.startEditMessage(it) },
+                            onUpdateEditContent = { viewModel.updateEditContent(it) },
+                            onSaveEdit = { viewModel.saveEditMessage() },
+                            onCancelEdit = { viewModel.cancelEditMessage() },
                             listState = listState,
                             modifier = Modifier.weight(1f)
                         )
@@ -364,11 +385,23 @@ private fun ChatTopBar(
 @Composable
 private fun MessageList(
     messages: List<ChatMessage>,
+    totalMessages: Int,
+    contextStartIndex: Int,
     hasMoreMessages: Boolean,
     isLoadingMore: Boolean,
     isStreaming: Boolean,
     streamingMessageId: String?,
+    editingMessageId: String?,
+    editingMessageContent: String,
+    isSending: Boolean,
+    scrollToBottomTrigger: Int,
     onLoadMore: () -> Unit,
+    onGetSiblings: (String) -> List<ChatMessage>,
+    onSwitchBranch: (String) -> Unit,
+    onStartEdit: (String) -> Unit,
+    onUpdateEditContent: (String) -> Unit,
+    onSaveEdit: () -> Unit,
+    onCancelEdit: () -> Unit,
     listState: LazyListState,
     modifier: Modifier = Modifier
 ) {
@@ -377,10 +410,19 @@ private fun MessageList(
     var previousFirstMessageId by remember { mutableStateOf<String?>(null) }
     var hadLoadMoreItem by remember { mutableStateOf(false) }
 
+    // Re-scroll to bottom after branch switch (full list replacement)
+    LaunchedEffect(scrollToBottomTrigger) {
+        if (scrollToBottomTrigger > 0 && messages.isNotEmpty()) {
+            val loadMoreOffset = if (hasMoreMessages) 1 else 0
+            listState.scrollToItem(messages.lastIndex + loadMoreOffset)
+        }
+    }
+
     // Auto-scroll to bottom on initial load; adjust scroll after prepending older messages
     LaunchedEffect(messages.size) {
         if (!hasScrolledToBottom && messages.isNotEmpty()) {
-            listState.scrollToItem(messages.lastIndex)
+            val loadMoreOffset = if (hasMoreMessages) 1 else 0
+            listState.scrollToItem(messages.lastIndex + loadMoreOffset)
             hasScrolledToBottom = true
         } else if (hasScrolledToBottom && messages.isNotEmpty()) {
             val sizeChange = messages.size - previousMessageCount
@@ -438,10 +480,34 @@ private fun MessageList(
         itemsIndexed(
             messages,
             key = { index, msg -> msg.id ?: "msg_${index}_${msg.role}" }
-        ) { _, message ->
+        ) { index, message ->
+            // Context graying: calculate backend index and compare to contextStartIndex
+            val firstDisplayedBackendIndex = totalMessages - messages.size
+            val actualBackendIndex = firstDisplayedBackendIndex + index
+            val isInContext = actualBackendIndex >= contextStartIndex
+
+            // Branch info for user messages
+            val siblings = if (message.role == "user" && message.id != null) {
+                onGetSiblings(message.id!!)
+            } else {
+                emptyList()
+            }
+
+            val isEditing = editingMessageId != null && editingMessageId == message.id
+
             MessageBubble(
                 message = message,
-                isStreaming = isStreaming && message.id == streamingMessageId
+                isStreaming = isStreaming && message.id == streamingMessageId,
+                isInContext = isInContext,
+                siblings = siblings,
+                isEditing = isEditing,
+                editContent = if (isEditing) editingMessageContent else "",
+                isSending = isSending,
+                onSwitchBranch = onSwitchBranch,
+                onStartEdit = { message.id?.let { onStartEdit(it) } },
+                onUpdateEditContent = onUpdateEditContent,
+                onSaveEdit = onSaveEdit,
+                onCancelEdit = onCancelEdit
             )
         }
     }
@@ -518,47 +584,220 @@ private fun MessageInputBar(
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
+private fun MessageBubble(
+    message: ChatMessage,
+    isStreaming: Boolean = false,
+    isInContext: Boolean = true,
+    siblings: List<ChatMessage> = emptyList(),
+    isEditing: Boolean = false,
+    editContent: String = "",
+    isSending: Boolean = false,
+    onSwitchBranch: (String) -> Unit = {},
+    onStartEdit: () -> Unit = {},
+    onUpdateEditContent: (String) -> Unit = {},
+    onSaveEdit: () -> Unit = {},
+    onCancelEdit: () -> Unit = {}
+) {
     when (message.role) {
-        "user" -> UserMessage(message)
-        "assistant" -> AssistantMessage(message, isStreaming)
+        "user" -> UserMessage(
+            message = message,
+            isInContext = isInContext,
+            siblings = siblings,
+            isEditing = isEditing,
+            editContent = editContent,
+            isSending = isSending,
+            onSwitchBranch = onSwitchBranch,
+            onStartEdit = onStartEdit,
+            onUpdateEditContent = onUpdateEditContent,
+            onSaveEdit = onSaveEdit,
+            onCancelEdit = onCancelEdit
+        )
+        "assistant" -> AssistantMessage(message, isStreaming, isInContext)
     }
 }
 
 @Composable
-private fun UserMessage(message: ChatMessage) {
+private fun UserMessage(
+    message: ChatMessage,
+    isInContext: Boolean = true,
+    siblings: List<ChatMessage> = emptyList(),
+    isEditing: Boolean = false,
+    editContent: String = "",
+    isSending: Boolean = false,
+    onSwitchBranch: (String) -> Unit = {},
+    onStartEdit: () -> Unit = {},
+    onUpdateEditContent: (String) -> Unit = {},
+    onSaveEdit: () -> Unit = {},
+    onCancelEdit: () -> Unit = {}
+) {
+    val bgColor = if (isInContext) SurfaceColor else SurfaceColor.copy(alpha = 0.5f)
+    val contentAlpha = if (isInContext) 1f else 0.5f
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(SurfaceColor)
+            .background(bgColor)
             .padding(12.dp)
     ) {
-        Text(
-            text = "You",
-            color = TextSecondary,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold
-        )
+        // Header row: "You" label + branch nav + edit button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "You",
+                color = TextSecondary.copy(alpha = contentAlpha),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold
+            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // Branch navigation: ◀ N/M ▶
+                if (siblings.size > 1 && message.id != null) {
+                    val currentIndex = siblings.indexOfFirst { it.id == message.id }
+                    if (currentIndex >= 0) {
+                        val hasPrev = currentIndex > 0
+                        val hasNext = currentIndex < siblings.size - 1
+
+                        IconButton(
+                            onClick = {
+                                val prevId = siblings.getOrNull(currentIndex - 1)?.id
+                                if (hasPrev && prevId != null) onSwitchBranch(prevId)
+                            },
+                            enabled = hasPrev,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                contentDescription = "Previous branch",
+                                tint = if (hasPrev) TextMuted else TextMuted.copy(alpha = 0.3f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Text(
+                            text = "${currentIndex + 1}/${siblings.size}",
+                            color = TextMuted,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 2.dp)
+                        )
+
+                        IconButton(
+                            onClick = {
+                                val nextId = siblings.getOrNull(currentIndex + 1)?.id
+                                if (hasNext && nextId != null) onSwitchBranch(nextId)
+                            },
+                            enabled = hasNext,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Next branch",
+                                tint = if (hasNext) TextMuted else TextMuted.copy(alpha = 0.3f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Edit button (hidden while sending or editing another message)
+                if (!isEditing && !isSending) {
+                    IconButton(
+                        onClick = onStartEdit,
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Edit,
+                            contentDescription = "Edit message",
+                            tint = TextMuted,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(4.dp))
-        ChatMarkdown(content = message.content)
+
+        if (isEditing) {
+            // Inline edit mode
+            val focusRequester = remember { FocusRequester() }
+            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+            OutlinedTextField(
+                value = editContent,
+                onValueChange = onUpdateEditContent,
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                maxLines = 8,
+                shape = RoundedCornerShape(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Accent,
+                    unfocusedBorderColor = Border,
+                    focusedContainerColor = Background,
+                    unfocusedContainerColor = Background
+                )
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(
+                    onClick = onSaveEdit,
+                    enabled = editContent.isNotBlank(),
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "Save edit",
+                        tint = if (editContent.isNotBlank()) Success else TextMuted,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onCancelEdit,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Cancel edit",
+                        tint = Error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        } else {
+            ChatMarkdown(content = message.content)
+        }
     }
 }
 
 @Composable
-private fun AssistantMessage(message: ChatMessage, isStreaming: Boolean = false) {
+private fun AssistantMessage(
+    message: ChatMessage,
+    isStreaming: Boolean = false,
+    isInContext: Boolean = true
+) {
+    val bgColor = if (isInContext) SurfaceTertiary else SurfaceTertiary.copy(alpha = 0.5f)
+    val contentAlpha = if (isInContext) 1f else 0.5f
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(SurfaceTertiary)
+            .background(bgColor)
             .padding(12.dp)
     ) {
         Text(
             text = "Assistant",
-            color = Accent,
+            color = Accent.copy(alpha = contentAlpha),
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold
         )
