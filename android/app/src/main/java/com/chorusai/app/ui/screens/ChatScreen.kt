@@ -206,8 +206,9 @@ fun ChatScreen(
     val messages = state.messages.filter { it.role != "system" }
     LaunchedEffect(messages.size, state.isSending) {
         if (state.isSending && messages.size >= 2) {
-            // Scroll to the user message, not the assistant placeholder
-            listState.animateScrollToItem(messages.lastIndex - 1)
+            // Account for load_more header item in LazyColumn indices
+            val loadMoreOffset = if (state.hasMoreMessages) 1 else 0
+            listState.animateScrollToItem(messages.lastIndex - 1 + loadMoreOffset)
         }
     }
 }

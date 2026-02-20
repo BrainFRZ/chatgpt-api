@@ -9,6 +9,7 @@ import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.model.SseEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -285,6 +286,8 @@ class ChatViewModel @Inject constructor(
                         else -> { /* Ignore pipeline_stage, state_update, etc. for now */ }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -300,8 +303,10 @@ class ChatViewModel @Inject constructor(
                     )
                 }
             }
-            // Ensure flags are reset if flow completes without done/error
-            _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
+            // Ensure flags are reset if flow completed without done/error (e.g. stream closed early)
+            if (_uiState.value.isSending) {
+                _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
+            }
         }
     }
 
