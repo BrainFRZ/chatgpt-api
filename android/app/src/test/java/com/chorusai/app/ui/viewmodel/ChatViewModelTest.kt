@@ -7,12 +7,18 @@ import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ChatResponse
 import com.chorusai.app.model.ContextLimits
-import com.chorusai.app.model.MessageResponse
 import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.model.ModelPricing
+import com.chorusai.app.model.SseEvent
+import com.chorusai.app.model.WsEvent
+import com.chorusai.app.network.WebSocketManager
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.flowOf
@@ -38,6 +44,8 @@ class ChatViewModelTest {
     private val testDispatcher = StandardTestDispatcher()
     private lateinit var chatRepo: ChatRepository
     private lateinit var prefs: UserPreferences
+    private lateinit var webSocketManager: WebSocketManager
+    private lateinit var gson: Gson
 
     private val testMessages = listOf(
         ChatMessage(id = "1", role = "system", content = "You are a helpful assistant"),
@@ -53,6 +61,10 @@ class ChatViewModelTest {
         Dispatchers.setMain(testDispatcher)
         chatRepo = mockk(relaxed = true)
         prefs = mockk(relaxed = true)
+        webSocketManager = mockk(relaxed = true)
+        every { webSocketManager.chatEvents } returns MutableSharedFlow<WsEvent>()
+        every { webSocketManager.userEvents } returns MutableSharedFlow<WsEvent>()
+        gson = GsonBuilder().create()
         coEvery { prefs.username } returns flowOf("testuser")
     }
 
@@ -71,7 +83,7 @@ class ChatViewModelTest {
                 if (project != null) put("project", project)
             }
         )
-        return ChatViewModel(chatRepo, prefs, savedStateHandle)
+        return ChatViewModel(chatRepo, prefs, webSocketManager, gson, savedStateHandle)
     }
 
     // ---- Init / loadChat ----
@@ -310,15 +322,15 @@ class ChatViewModelTest {
         val vm = createViewModel()
         advanceUntilIdle()
 
+        // Mock streamMessage to emit SSE events
         coEvery {
-            chatRepo.sendMessage("testuser", "test-chat", "Hello world", null, "3", null, "gpt-4")
-        } returns Response.success(
-            MessageResponse(
-                assistantMessage = "Hi! How can I help?",
+            chatRepo.streamMessage("testuser", "test-chat", "Hello world", null, "3", null, "gpt-4")
+        } returns flowOf(
+            SseEvent.Init(userMessageId = "4"),
+            SseEvent.Content(delta = "Hi! How can I help?"),
+            SseEvent.Done(
                 tokens = "100",
                 cost = "0.002",
-                contextStartIndex = 0,
-                userMessageId = "4",
                 assistantMessageId = "5",
                 currentLeafId = "5",
                 totalMessages = 5,
@@ -334,12 +346,12 @@ class ChatViewModelTest {
         assertNull(state.sendError)
         // Original 3 + user + assistant = 5
         assertEquals(5, state.messages.size)
-        // The user message should have the real ID
+        // The user message should have the real ID from Init event
         val userMsg = state.messages[3]
         assertEquals("4", userMsg.id)
         assertEquals("user", userMsg.role)
         assertEquals("Hello world", userMsg.content)
-        // The assistant message should have the real ID and content
+        // The assistant message should have the real ID and content from Done event
         val assistantMsg = state.messages[4]
         assertEquals("5", assistantMsg.id)
         assertEquals("assistant", assistantMsg.role)
@@ -352,7 +364,7 @@ class ChatViewModelTest {
     }
 
     @Test
-    fun `sendMessage error removes thinking placeholder`() = runTest {
+    fun `sendMessage error removes placeholders`() = runTest {
         coEvery { chatRepo.getChat("testuser", "test-chat", null, null, 30, 0) } returns
                 Response.success(
                     ChatResponse(
@@ -367,8 +379,9 @@ class ChatViewModelTest {
         val vm = createViewModel()
         advanceUntilIdle()
 
+        // streamMessage throws before emitting any events (no accumulated content)
         coEvery {
-            chatRepo.sendMessage("testuser", "test-chat", "Hello", null, "3", null, "gpt-4")
+            chatRepo.streamMessage("testuser", "test-chat", "Hello", null, "3", null, "gpt-4")
         } throws java.io.IOException("Network error")
 
         vm.sendMessage("Hello")
@@ -377,10 +390,8 @@ class ChatViewModelTest {
         val state = vm.uiState.value
         assertFalse(state.isSending)
         assertEquals("Network error", state.sendError)
-        // Original 3 + user message kept, thinking removed = 4
-        assertEquals(4, state.messages.size)
-        assertEquals("user", state.messages[3].role)
-        assertEquals("Hello", state.messages[3].content)
+        // Both temp user and assistant messages removed since no content accumulated
+        assertEquals(3, state.messages.size)
     }
 
     @Test
@@ -401,7 +412,7 @@ class ChatViewModelTest {
         advanceUntilIdle()
 
         assertEquals(3, vm.uiState.value.messages.size)
-        coVerify(exactly = 0) { chatRepo.sendMessage(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { chatRepo.streamMessage(any(), any(), any(), any(), any(), any(), any()) }
     }
 
     // ---- setModel ----

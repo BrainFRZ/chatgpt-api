@@ -1,8 +1,10 @@
 package com.chorusai.app.network
 
+import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonElement
 import com.google.gson.reflect.TypeToken
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -48,8 +50,8 @@ class SseEventParsingTest {
                     )
                 }
                 "state_update" -> {
-                    val map: Map<String, Any> = gson.fromJson(data, mapType)
-                    SseEvent.StateUpdate(data = map)
+                    val ps = gson.fromJson(data, PipelineState::class.java)
+                    SseEvent.StateUpdate(data = ps)
                 }
                 "state_notifications" -> {
                     val map: Map<String, Any> = gson.fromJson(data, mapType)
@@ -58,16 +60,24 @@ class SseEventParsingTest {
                 }
                 "docs_refreshed" -> SseEvent.DocsRefreshed
                 "done" -> {
-                    val map: Map<String, Any> = gson.fromJson(data, mapType)
+                    val jsonEl = gson.fromJson(data, JsonElement::class.java)
+                    val obj = jsonEl.asJsonObject
+                    val pipelineState = obj.get("pipeline_state")?.takeIf { !it.isJsonNull }?.let {
+                        gson.fromJson(it, PipelineState::class.java)
+                    }
                     SseEvent.Done(
-                        tokens = map["tokens"] as? String,
-                        cost = map["cost"] as? String,
-                        stats = map["stats"] as? Map<String, Any>,
-                        assistantMessageId = map["assistant_message_id"] as? String,
-                        currentLeafId = map["current_leaf_id"] as? String,
-                        totalMessages = (map["total_messages"] as? Double)?.toInt(),
-                        model = map["model"] as? String,
-                        pipelineState = map["pipeline_state"] as? Map<String, Any>
+                        tokens = obj.get("tokens")?.takeIf { !it.isJsonNull }?.asString,
+                        cost = obj.get("cost")?.takeIf { !it.isJsonNull }?.asString,
+                        stats = obj.get("stats")?.takeIf { !it.isJsonNull }?.let {
+                            gson.fromJson<Map<String, Any>>(it, mapType)
+                        },
+                        assistantMessageId = obj.get("assistant_message_id")?.takeIf { !it.isJsonNull }?.asString,
+                        currentLeafId = obj.get("current_leaf_id")?.takeIf { !it.isJsonNull }?.asString,
+                        totalMessages = obj.get("total_messages")?.takeIf { !it.isJsonNull }?.asInt,
+                        model = obj.get("model")?.takeIf { !it.isJsonNull }?.asString,
+                        pipelineState = pipelineState,
+                        reasoning = obj.get("reasoning")?.takeIf { !it.isJsonNull }?.asString,
+                        contextStartIndex = obj.get("context_start_index")?.takeIf { !it.isJsonNull }?.asInt
                     )
                 }
                 "error" -> {
@@ -117,7 +127,7 @@ class SseEventParsingTest {
     fun `parse content event with special characters`() {
         val event = parseEvent("content", """{"delta":"Hello\nWorld \"quote\""}""")
         assertTrue(event is SseEvent.Content)
-        assertTrue((event as SseEvent.Content).delta.contains("Hello"))
+        assertEquals("Hello\nWorld \"quote\"", (event as SseEvent.Content).delta)
     }
 
     // ---- thinking event ----
@@ -154,8 +164,8 @@ class SseEventParsingTest {
     fun `parse state_update event`() {
         val event = parseEvent("state_update", """{"turn_counter":5,"pacing":{"episode":1}}""")
         assertTrue(event is SseEvent.StateUpdate)
-        val data = (event as SseEvent.StateUpdate).data
-        assertEquals(5.0, data["turn_counter"])
+        val ps = (event as SseEvent.StateUpdate).data
+        assertEquals(5, ps.turnCounter)
     }
 
     // ---- state_notifications event ----
@@ -197,7 +207,7 @@ class SseEventParsingTest {
             "cost": "0.01",
             "assistant_message_id": "a-1",
             "current_leaf_id": "leaf-1",
-            "total_messages": 10.0,
+            "total_messages": 10,
             "model": "gpt-4"
         }""")
         assertTrue(event is SseEvent.Done)

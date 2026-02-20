@@ -2,6 +2,7 @@ package com.chorusai.app.network
 
 import android.util.Log
 import com.chorusai.app.model.ChatMessage
+import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.WsEvent
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -129,6 +130,7 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = synchronized(lock) {
+                if (webSocket != userWs) return
                 Log.w(TAG, "User WS failure: ${t.message}")
                 userPingJob?.cancel()
                 userWs = null
@@ -140,6 +142,7 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = synchronized(lock) {
+                if (webSocket != userWs) return
                 Log.d(TAG, "User WS closed: $code $reason")
                 userPingJob?.cancel()
                 userWs = null
@@ -217,6 +220,7 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = synchronized(lock) {
+                if (webSocket != chatWs) return
                 Log.w(TAG, "Chat WS failure: ${t.message}")
                 chatPingJob?.cancel()
                 chatWs = null
@@ -228,6 +232,7 @@ class WebSocketManager @Inject constructor(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = synchronized(lock) {
+                if (webSocket != chatWs) return
                 Log.d(TAG, "Chat WS closed: $code $reason")
                 chatPingJob?.cancel()
                 chatWs = null
@@ -303,7 +308,7 @@ class WebSocketManager @Inject constructor(
         return try {
             val json = gson.fromJson(text, JsonObject::class.java)
             val type = json.get("type")?.asString ?: return null
-            val data = json.getAsJsonObject("data")
+            val data = json.getAsJsonObject("data") ?: JsonObject()
             when (type) {
                 "chat_created" -> WsEvent.ChatCreated(
                     chatName = data.get("chat_name").asString,
@@ -345,10 +350,14 @@ class WebSocketManager @Inject constructor(
                 )
                 "stream_done" -> {
                     val assistantMsg = gson.fromJson(data.get("assistant_message"), ChatMessage::class.java)
+                    val ps = data.get("pipeline_state")?.takeIf { !it.isJsonNull }?.let {
+                        gson.fromJson(it, PipelineState::class.java)
+                    }
                     WsEvent.StreamDone(
                         assistantMessage = assistantMsg,
                         currentLeafId = data.get("current_leaf_id")?.takeIf { !it.isJsonNull }?.asString,
-                        totalMessages = data.get("total_messages")?.takeIf { !it.isJsonNull }?.asInt
+                        totalMessages = data.get("total_messages")?.takeIf { !it.isJsonNull }?.asInt,
+                        pipelineState = ps
                     )
                 }
                 "stream_error" -> WsEvent.StreamError(
@@ -365,6 +374,10 @@ class WebSocketManager @Inject constructor(
                     messageId = data.get("message_id").asString,
                     bookmark = data.get("bookmark")?.takeIf { !it.isJsonNull }?.asString
                 )
+                "state_update" -> {
+                    val ps = gson.fromJson(data.get("pipeline_state"), PipelineState::class.java)
+                    if (ps != null) WsEvent.StateUpdate(pipelineState = ps) else null
+                }
                 "pong" -> null
                 else -> null
             }

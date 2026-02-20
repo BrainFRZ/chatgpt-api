@@ -1,7 +1,9 @@
 package com.chorusai.app.network
 
+import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
 import com.google.gson.Gson
+import com.google.gson.JsonElement
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -100,8 +102,8 @@ class SseClient(
                     )
                 }
                 "state_update" -> {
-                    val map: Map<String, Any> = gson.fromJson(data, mapType)
-                    SseEvent.StateUpdate(data = map)
+                    val ps = gson.fromJson(data, PipelineState::class.java)
+                    if (ps != null) SseEvent.StateUpdate(data = ps) else null
                 }
                 "state_notifications" -> {
                     val map: Map<String, Any> = gson.fromJson(data, mapType)
@@ -110,18 +112,24 @@ class SseClient(
                 }
                 "docs_refreshed" -> SseEvent.DocsRefreshed
                 "done" -> {
-                    val map: Map<String, Any> = gson.fromJson(data, mapType)
+                    val jsonEl = gson.fromJson(data, JsonElement::class.java)
+                    val obj = jsonEl.asJsonObject
+                    val pipelineState = obj.get("pipeline_state")?.takeIf { !it.isJsonNull }?.let {
+                        gson.fromJson(it, PipelineState::class.java)
+                    }
                     SseEvent.Done(
-                        tokens = map["tokens"] as? String,
-                        cost = map["cost"] as? String,
-                        stats = map["stats"] as? Map<String, Any>,
-                        assistantMessageId = map["assistant_message_id"] as? String,
-                        currentLeafId = map["current_leaf_id"] as? String,
-                        totalMessages = (map["total_messages"] as? Double)?.toInt(),
-                        model = map["model"] as? String,
-                        pipelineState = map["pipeline_state"] as? Map<String, Any>,
-                        reasoning = map["reasoning"] as? String,
-                        contextStartIndex = (map["context_start_index"] as? Double)?.toInt()
+                        tokens = obj.get("tokens")?.takeIf { !it.isJsonNull }?.asString,
+                        cost = obj.get("cost")?.takeIf { !it.isJsonNull }?.asString,
+                        stats = obj.get("stats")?.takeIf { !it.isJsonNull }?.let {
+                            gson.fromJson<Map<String, Any>>(it, mapType)
+                        },
+                        assistantMessageId = obj.get("assistant_message_id")?.takeIf { !it.isJsonNull }?.asString,
+                        currentLeafId = obj.get("current_leaf_id")?.takeIf { !it.isJsonNull }?.asString,
+                        totalMessages = obj.get("total_messages")?.takeIf { !it.isJsonNull }?.asInt,
+                        model = obj.get("model")?.takeIf { !it.isJsonNull }?.asString,
+                        pipelineState = pipelineState,
+                        reasoning = obj.get("reasoning")?.takeIf { !it.isJsonNull }?.asString,
+                        contextStartIndex = obj.get("context_start_index")?.takeIf { !it.isJsonNull }?.asInt
                     )
                 }
                 "error" -> {

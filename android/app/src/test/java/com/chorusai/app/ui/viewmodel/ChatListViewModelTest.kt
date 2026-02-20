@@ -5,9 +5,13 @@ import com.chorusai.app.data.AuthRepository
 import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.ChatListResponse
+import com.chorusai.app.model.WsEvent
+import com.chorusai.app.network.WebSocketManager
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.flowOf
@@ -34,6 +38,7 @@ class ChatListViewModelTest {
     private lateinit var chatRepo: ChatRepository
     private lateinit var authRepo: AuthRepository
     private lateinit var prefs: UserPreferences
+    private lateinit var webSocketManager: WebSocketManager
 
     @Before
     fun setup() {
@@ -41,6 +46,8 @@ class ChatListViewModelTest {
         chatRepo = mockk(relaxed = true)
         authRepo = mockk(relaxed = true)
         prefs = mockk(relaxed = true)
+        webSocketManager = mockk(relaxed = true)
+        every { webSocketManager.userEvents } returns MutableSharedFlow<WsEvent>()
         coEvery { prefs.username } returns flowOf("testuser")
     }
 
@@ -50,7 +57,7 @@ class ChatListViewModelTest {
     }
 
     private fun createViewModel(): ChatListViewModel {
-        return ChatListViewModel(chatRepo, authRepo, prefs)
+        return ChatListViewModel(chatRepo, authRepo, prefs, webSocketManager)
     }
 
     // ---- Init / loadChats ----

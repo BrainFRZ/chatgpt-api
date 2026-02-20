@@ -7,9 +7,11 @@ import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
+import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
 import com.chorusai.app.model.WsEvent
 import com.chorusai.app.network.WebSocketManager
+import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -51,7 +53,10 @@ data class ChatUiState(
     val editingMessageId: String? = null,
     val editingMessageContent: String = "",
     val isSwitchingBranch: Boolean = false,
-    val scrollToBottomTrigger: Int = 0
+    val scrollToBottomTrigger: Int = 0,
+    val pipelineState: PipelineState? = null,
+    val gameSystem: String? = null,
+    val characterSheetMd: String? = null
 )
 
 sealed class ChatNavEvent {
@@ -63,6 +68,7 @@ class ChatViewModel @Inject constructor(
     private val chatRepo: ChatRepository,
     private val prefs: UserPreferences,
     private val webSocketManager: WebSocketManager,
+    private val gson: Gson,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -126,6 +132,12 @@ class ChatViewModel @Inject constructor(
             )
             if (response.isSuccessful) {
                 val body = response.body()!!
+                val ps = body.pipelineState?.let { rawMap ->
+                    try {
+                        val json = gson.toJson(rawMap)
+                        gson.fromJson(json, PipelineState::class.java)
+                    } catch (_: Exception) { null }
+                }
                 _uiState.update {
                     it.copy(
                         messages = body.messages,
@@ -135,7 +147,9 @@ class ChatViewModel @Inject constructor(
                         currentLeafId = body.currentLeafId,
                         contextStartIndex = 1,
                         model = body.model,
-                        error = null
+                        error = null,
+                        pipelineState = ps,
+                        gameSystem = body.gameSystem
                     )
                 }
             } else {
@@ -280,6 +294,9 @@ class ChatViewModel @Inject constructor(
                                 })
                             }
                         }
+                        is SseEvent.StateUpdate -> {
+                            _uiState.update { it.copy(pipelineState = event.data) }
+                        }
                         is SseEvent.Done -> {
                             val finalMessage = ChatMessage(
                                 id = event.assistantMessageId ?: tempAssistantId,
@@ -301,7 +318,8 @@ class ChatViewModel @Inject constructor(
                                     contextStartIndex = event.contextStartIndex ?: it.contextStartIndex,
                                     isStreaming = false,
                                     streamingMessageId = null,
-                                    isSending = false
+                                    isSending = false,
+                                    pipelineState = event.pipelineState ?: it.pipelineState
                                 )
                             }
                             // Reload allMessages to include the new messages
@@ -324,7 +342,7 @@ class ChatViewModel @Inject constructor(
                                 )
                             }
                         }
-                        else -> { /* Ignore pipeline_stage, state_update, etc. for now */ }
+                        else -> { /* Ignore pipeline_stage, etc. */ }
                     }
                 }
             } catch (e: CancellationException) {
@@ -436,6 +454,12 @@ class ChatViewModel @Inject constructor(
                     )
                     if (chatResponse.isSuccessful) {
                         val body = chatResponse.body()!!
+                        val ps = body.pipelineState?.let { rawMap ->
+                            try {
+                                val json = gson.toJson(rawMap)
+                                gson.fromJson(json, PipelineState::class.java)
+                            } catch (_: Exception) { null }
+                        }
                         _uiState.update {
                             it.copy(
                                 messages = body.messages,
@@ -448,7 +472,9 @@ class ChatViewModel @Inject constructor(
                                 isSwitchingBranch = false,
                                 editingMessageId = null,
                                 editingMessageContent = "",
-                                scrollToBottomTrigger = it.scrollToBottomTrigger + 1
+                                scrollToBottomTrigger = it.scrollToBottomTrigger + 1,
+                                pipelineState = ps,
+                                gameSystem = body.gameSystem
                             )
                         }
                     } else {
@@ -571,6 +597,9 @@ class ChatViewModel @Inject constructor(
                                 })
                             }
                         }
+                        is SseEvent.StateUpdate -> {
+                            _uiState.update { it.copy(pipelineState = event.data) }
+                        }
                         is SseEvent.Done -> {
                             val finalMessage = ChatMessage(
                                 id = event.assistantMessageId ?: tempAssistantId,
@@ -592,7 +621,8 @@ class ChatViewModel @Inject constructor(
                                     contextStartIndex = event.contextStartIndex ?: it.contextStartIndex,
                                     isStreaming = false,
                                     streamingMessageId = null,
-                                    isSending = false
+                                    isSending = false,
+                                    pipelineState = event.pipelineState ?: it.pipelineState
                                 )
                             }
                             // Reload allMessages to include the new branch
@@ -785,6 +815,7 @@ class ChatViewModel @Inject constructor(
                         allMessages = it.allMessages + event.assistantMessage,
                         currentLeafId = event.currentLeafId ?: it.currentLeafId,
                         totalMessages = event.totalMessages ?: it.totalMessages,
+                        pipelineState = event.pipelineState ?: it.pipelineState,
                         isRemoteStreaming = false,
                         streamingMessageId = null
                     )
@@ -828,7 +859,26 @@ class ChatViewModel @Inject constructor(
                     })
                 }
             }
+            is WsEvent.StateUpdate -> {
+                _uiState.update { it.copy(pipelineState = event.pipelineState) }
+            }
             else -> { /* Ignore user-level events in chat context */ }
+        }
+    }
+
+    fun fetchCharacterSheet() {
+        val state = _uiState.value
+        if (state.characterSheetMd != null || state.project == null) return
+        viewModelScope.launch {
+            try {
+                val response = chatRepo.getCharacterSheet(state.username, state.project)
+                if (response.isSuccessful) {
+                    val md = response.body()?.get("content") ?: response.body()?.get("sheet") ?: ""
+                    _uiState.update { it.copy(characterSheetMd = md) }
+                }
+            } catch (_: Exception) {
+                // Silent fail — character sheet is non-critical
+            }
         }
     }
 }

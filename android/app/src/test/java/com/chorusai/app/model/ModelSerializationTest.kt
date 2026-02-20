@@ -350,7 +350,8 @@ class ModelSerializationTest {
         assertEquals(1, state.callbackLedger.nextId)
         assertTrue(state.callbackLedger.open.isEmpty())
         assertTrue(state.npcMemories.isEmpty())
-        assertTrue(state.sceneState.isEmpty())
+        assertTrue(state.sceneState.pcsPresent.isEmpty())
+        assertTrue(state.sceneState.npcsPresent.isEmpty())
         assertTrue(state.characterStates.isEmpty())
         assertEquals(0, state.turnCounter)
     }
@@ -361,14 +362,17 @@ class ModelSerializationTest {
             "pacing": {"episode": 3, "beat": 2, "responses": 15},
             "callback_ledger": {"next_id": 5, "open": [], "recently_resolved": []},
             "npc_memories": {},
-            "scene_state": {},
+            "scene_state": {"pcs_present": [], "npcs_present": []},
             "character_states": {},
             "game_state": {},
             "turn_counter": 10
         }"""
         val state = gson.fromJson(json, PipelineState::class.java)
-        assertEquals(3, state.pacing.episode)
-        assertEquals(2, state.pacing.beat)
+        // Gson deserializes ints as Double in Any? fields — toCleanString() handles display
+        assertEquals(3.0, state.pacing.episode)
+        assertEquals(2.0, state.pacing.beat)
+        assertEquals("3", state.pacing.episode.toCleanString())
+        assertEquals("2", state.pacing.beat.toCleanString())
         assertEquals(15, state.pacing.responses)
         assertEquals(5, state.callbackLedger.nextId)
         assertEquals(10, state.turnCounter)

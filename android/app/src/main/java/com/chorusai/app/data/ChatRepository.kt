@@ -112,6 +112,12 @@ class ChatRepository @Inject constructor(
     ): Response<Map<String, Any>> =
         api.setBookmark(SetBookmarkRequest(username, chatName, messageId, bookmark, project))
 
+    suspend fun getCharacterSheet(
+        username: String,
+        project: String
+    ): Response<Map<String, String>> =
+        api.getCharacterSheet(username, project)
+
     suspend fun getModels(): Response<List<ModelInfo>> =
         api.getModels()
 

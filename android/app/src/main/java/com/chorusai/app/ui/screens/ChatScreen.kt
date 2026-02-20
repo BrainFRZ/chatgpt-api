@@ -83,6 +83,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
+import com.chorusai.app.model.PipelineState
 import com.chorusai.app.ui.theme.Accent
 import com.chorusai.app.ui.theme.Background
 import com.chorusai.app.ui.theme.Border
@@ -130,106 +131,126 @@ fun ChatScreen(
         },
         containerColor = Background
     ) { padding ->
-        Column(
+        val ps = state.pipelineState
+        val hasCharacterPanel = ps != null &&
+            (ps.sceneState.pcsPresent.isNotEmpty() ||
+             ps.sceneState.npcsPresent.isNotEmpty() ||
+             ps.characterStates.isNotEmpty())
+
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .consumeWindowInsets(padding)
                 .imePadding()
         ) {
-            when {
-                state.isLoading -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(color = Accent)
-                    }
-                }
-                state.error != null -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = state.error!!,
-                                color = TextMuted,
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Button(onClick = { viewModel.refresh() }) {
-                                Text("Retry")
-                            }
-                        }
-                    }
-                }
-                else -> {
-                    val visibleMessages = state.messages.filter { it.role != "system" }
-                    if (visibleMessages.isEmpty() && !state.isSending) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                when {
+                    state.isLoading -> {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "No messages yet",
-                                color = TextMuted,
-                                style = MaterialTheme.typography.bodyLarge
-                            )
+                            CircularProgressIndicator(color = Accent)
                         }
-                    } else {
-                        MessageList(
-                            messages = visibleMessages,
-                            totalMessages = state.totalMessages,
-                            contextStartIndex = state.contextStartIndex,
-                            hasMoreMessages = state.hasMoreMessages,
-                            isLoadingMore = state.isLoadingMore,
-                            isStreaming = state.isStreaming || state.isRemoteStreaming,
-                            streamingMessageId = state.streamingMessageId,
-                            editingMessageId = state.editingMessageId,
-                            editingMessageContent = state.editingMessageContent,
-                            isSending = state.isSending || state.isRemoteStreaming,
-                            scrollToBottomTrigger = state.scrollToBottomTrigger,
-                            onLoadMore = { viewModel.loadMore() },
-                            onGetSiblings = { viewModel.getSiblings(it) },
-                            onSwitchBranch = { viewModel.switchBranch(it) },
-                            onStartEdit = { viewModel.startEditMessage(it) },
-                            onUpdateEditContent = { viewModel.updateEditContent(it) },
-                            onSaveEdit = { viewModel.saveEditMessage() },
-                            onCancelEdit = { viewModel.cancelEditMessage() },
-                            listState = listState,
-                            modifier = Modifier.weight(1f)
-                        )
                     }
-
-                    // Send error banner
-                    if (state.sendError != null) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
+                    state.error != null -> {
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { viewModel.clearSendError() }
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = state.sendError!!,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = state.error!!,
+                                    color = TextMuted,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Button(onClick = { viewModel.refresh() }) {
+                                    Text("Retry")
+                                }
+                            }
                         }
                     }
+                    else -> {
+                        val visibleMessages = state.messages.filter { it.role != "system" }
+                        if (visibleMessages.isEmpty() && !state.isSending) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No messages yet",
+                                    color = TextMuted,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                            }
+                        } else {
+                            MessageList(
+                                messages = visibleMessages,
+                                totalMessages = state.totalMessages,
+                                contextStartIndex = state.contextStartIndex,
+                                hasMoreMessages = state.hasMoreMessages,
+                                isLoadingMore = state.isLoadingMore,
+                                isStreaming = state.isStreaming || state.isRemoteStreaming,
+                                streamingMessageId = state.streamingMessageId,
+                                editingMessageId = state.editingMessageId,
+                                editingMessageContent = state.editingMessageContent,
+                                isSending = state.isSending || state.isRemoteStreaming,
+                                scrollToBottomTrigger = state.scrollToBottomTrigger,
+                                onLoadMore = { viewModel.loadMore() },
+                                onGetSiblings = { viewModel.getSiblings(it) },
+                                onSwitchBranch = { viewModel.switchBranch(it) },
+                                onStartEdit = { viewModel.startEditMessage(it) },
+                                onUpdateEditContent = { viewModel.updateEditContent(it) },
+                                onSaveEdit = { viewModel.saveEditMessage() },
+                                onCancelEdit = { viewModel.cancelEditMessage() },
+                                listState = listState,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
-                    MessageInputBar(
-                        isSending = state.isSending || state.isRemoteStreaming,
-                        onSend = { viewModel.sendMessage(it) }
-                    )
+                        // Send error banner
+                        if (state.sendError != null) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.clearSendError() }
+                            ) {
+                                Text(
+                                    text = state.sendError!!,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+
+                        MessageInputBar(
+                            isSending = state.isSending || state.isRemoteStreaming,
+                            onSend = { viewModel.sendMessage(it) },
+                            bottomPadding = if (hasCharacterPanel) 34.dp else 0.dp
+                        )
+                    }
                 }
+            }
+
+            // Character panel overlay
+            if (ps != null && hasCharacterPanel) {
+                CharacterPanel(
+                    pipelineState = ps,
+                    gameSystem = state.gameSystem,
+                    characterSheetMd = state.characterSheetMd,
+                    onFetchCharacterSheet = { viewModel.fetchCharacterSheet() },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
             }
         }
     }
@@ -516,7 +537,8 @@ private fun MessageList(
 @Composable
 private fun MessageInputBar(
     isSending: Boolean,
-    onSend: (String) -> Unit
+    onSend: (String) -> Unit,
+    bottomPadding: Dp = 0.dp
 ) {
     var text by remember { mutableStateOf("") }
 
@@ -525,7 +547,7 @@ private fun MessageInputBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp + bottomPadding),
             verticalAlignment = Alignment.Bottom
         ) {
             OutlinedTextField(

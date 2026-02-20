@@ -19,7 +19,7 @@ sealed class SseEvent {
     ) : SseEvent()
 
     data class StateUpdate(
-        val data: Map<String, Any>
+        val data: PipelineState
     ) : SseEvent()
 
     data class StateNotifications(
@@ -36,7 +36,7 @@ sealed class SseEvent {
         val currentLeafId: String? = null,
         val totalMessages: Int? = null,
         val model: String? = null,
-        val pipelineState: Map<String, Any>? = null,
+        val pipelineState: PipelineState? = null,
         val reasoning: String? = null,
         val contextStartIndex: Int? = null
     ) : SseEvent()
