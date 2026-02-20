@@ -111,4 +111,15 @@ class ChatRepository @Inject constructor(
         project: String? = null
     ): Response<Map<String, Any>> =
         api.setBookmark(SetBookmarkRequest(username, chatName, messageId, bookmark, project))
+
+    suspend fun getModels(): Response<List<ModelInfo>> =
+        api.getModels()
+
+    suspend fun setChatModel(
+        username: String,
+        chatName: String,
+        project: String? = null,
+        model: String
+    ): Response<Map<String, String>> =
+        api.setChatModel(SetChatModelRequest(username, chatName, project, model))
 }
