@@ -183,7 +183,7 @@ private fun memoryBorderColor(impact: Int): Color = when {
 fun CharacterPanel(
     pipelineState: PipelineState,
     gameSystem: String?,
-    characterSheetMd: String?,
+    characterSheetFiles: List<CharacterSheetFile>?,
     onFetchCharacterSheet: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -348,7 +348,7 @@ fun CharacterPanel(
             characterData = data,
             pipelineState = pipelineState,
             gameSystem = gameSystem,
-            characterSheetMd = characterSheetMd,
+            characterSheetFiles = characterSheetFiles,
             onDismiss = { selectedCharName = null },
             onViewMemories = { showMemories = name; selectedCharName = null },
             onFetchCharacterSheet = onFetchCharacterSheet
@@ -647,7 +647,7 @@ private fun CharacterSheetModal(
     characterData: CharacterData,
     pipelineState: PipelineState,
     gameSystem: String?,
-    characterSheetMd: String?,
+    characterSheetFiles: List<CharacterSheetFile>?,
     onDismiss: () -> Unit,
     onViewMemories: () -> Unit,
     onFetchCharacterSheet: () -> Unit
@@ -811,7 +811,7 @@ private fun CharacterSheetModal(
                     .background(CharPanelCardBg)
                     .clickable {
                         sheetExpanded = !sheetExpanded
-                        if (sheetExpanded && characterSheetMd == null) onFetchCharacterSheet()
+                        if (sheetExpanded && characterSheetFiles == null) onFetchCharacterSheet()
                     }
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -828,8 +828,8 @@ private fun CharacterSheetModal(
 
             if (sheetExpanded) {
                 Spacer(modifier = Modifier.height(4.dp))
-                val rawContent = characterSheetMd
-                if (rawContent == null) {
+                val files = characterSheetFiles
+                if (files == null) {
                     Text(
                         text = "Loading...",
                         color = TextMuted,
@@ -841,14 +841,24 @@ private fun CharacterSheetModal(
                             .padding(8.dp)
                     )
                 } else {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(4.dp))
                             .background(CharPanelCardBg)
                             .padding(8.dp)
                     ) {
-                        SheetMarkdown(rawContent)
+                        files.forEachIndexed { index, file ->
+                            val ext = file.name.substringAfterLast('.', "").lowercase()
+                            if (ext == "yaml" || ext == "yml") {
+                                SheetMarkdown("```yaml\n${file.content}\n```")
+                            } else {
+                                SheetMarkdown(file.content)
+                            }
+                            if (index < files.lastIndex) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -1556,15 +1566,6 @@ private fun CallbackCard(callback: CallbackEntry, borderColor: Color, turnCounte
 /** Renders character sheet content as formatted markdown with syntax-highlighted code blocks. */
 @Composable
 private fun SheetMarkdown(content: String) {
-    // Detect raw YAML content (not already in a code fence) and wrap it
-    val processed = remember(content) {
-        if (looksLikeYaml(content)) {
-            "```yaml\n$content\n```"
-        } else {
-            content
-        }
-    }
-
     val colors = markdownColor(
         text = TextSecondary,
         codeText = TextSecondary,
@@ -1590,7 +1591,7 @@ private fun SheetMarkdown(content: String) {
     )
 
     Markdown(
-        content = processed,
+        content = content,
         colors = colors,
         typography = typography,
         components = markdownComponents(
@@ -1598,19 +1599,6 @@ private fun SheetMarkdown(content: String) {
             codeFence = highlightedCodeFence,
         ),
         modifier = Modifier.fillMaxWidth()
-    )
-}
-
-/** Heuristic: content looks like raw YAML vs markdown. */
-private fun looksLikeYaml(content: String): Boolean {
-    if (content.contains("```")) return false // has fenced code blocks → already markdown
-    val lines = content.lines()
-    // Skip leading comment/blank lines to find the first real content line
-    val firstContent = lines.firstOrNull { it.isNotBlank() && !it.trimStart().startsWith("#") }
-    // YAML: first content line is a key-value pair or list item
-    return firstContent != null && (
-        firstContent.matches(Regex("^-?\\s*[\\w-]+:.*")) ||
-        firstContent.matches(Regex("^\\s*- .*"))
     )
 }
 

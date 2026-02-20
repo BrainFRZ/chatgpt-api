@@ -7,6 +7,15 @@ data class AttachedFile(
     val content: String
 )
 
+data class CharacterSheetFile(
+    val name: String,
+    val content: String
+)
+
+data class CharacterSheetResponse(
+    val files: List<CharacterSheetFile> = emptyList()
+)
+
 data class ChatMessage(
     val id: String? = null,
     @SerializedName("parent_id") val parentId: String? = null,

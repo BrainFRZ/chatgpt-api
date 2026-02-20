@@ -247,7 +247,7 @@ fun ChatScreen(
                 CharacterPanel(
                     pipelineState = ps,
                     gameSystem = state.gameSystem,
-                    characterSheetMd = state.characterSheetMd,
+                    characterSheetFiles = state.characterSheetFiles,
                     onFetchCharacterSheet = { viewModel.fetchCharacterSheet() },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )

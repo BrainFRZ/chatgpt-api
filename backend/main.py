@@ -4739,20 +4739,20 @@ def set_project_game_system(request: SetProjectGameSystemRequest):
 
 @app.get("/api/character-sheet/{username}/{project}")
 def get_character_sheet(username: str, project: str):
-    """Return raw .md content of character sheet file(s) from project uploads."""
+    """Return character sheet file(s) from project uploads with filename metadata."""
     username = username.strip().lower()
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
     if not os.path.exists(uploads_dir):
-        return {"content": ""}
+        return {"files": []}
 
     # Find files matching *character*sheet* (case-insensitive)
     import fnmatch
     matches = [f for f in os.listdir(uploads_dir)
                if fnmatch.fnmatch(f.lower(), "*character*sheet*") or fnmatch.fnmatch(f.lower(), "*character*")]
     if not matches:
-        return {"content": ""}
+        return {"files": []}
 
-    combined = ""
+    files = []
     real_uploads = os.path.realpath(uploads_dir)
     for filename in sorted(matches):
         filepath = os.path.join(uploads_dir, filename)
@@ -4761,8 +4761,8 @@ def get_character_sheet(username: str, project: str):
             continue
         if os.path.isfile(filepath):
             with open(filepath, 'r', encoding='utf-8') as f:
-                combined += f.read() + "\n\n"
-    return {"content": combined.strip()}
+                files.append({"name": filename, "content": f.read()})
+    return {"files": files}
 
 
 @app.get("/health")

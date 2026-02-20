@@ -232,7 +232,7 @@ interface ChorusApi {
     suspend fun getCharacterSheet(
         @Path("username") username: String,
         @Path("project") project: String
-    ): Response<Map<String, String>>
+    ): Response<CharacterSheetResponse>
 
     // --- Health ---
 

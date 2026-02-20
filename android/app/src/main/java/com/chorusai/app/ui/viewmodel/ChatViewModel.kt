@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
+import com.chorusai.app.model.CharacterSheetFile
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.model.PipelineState
@@ -55,7 +56,7 @@ data class ChatUiState(
     val scrollToBottomTrigger: Int = 0,
     val pipelineState: PipelineState? = null,
     val gameSystem: String? = null,
-    val characterSheetMd: String? = null
+    val characterSheetFiles: List<CharacterSheetFile>? = null
 )
 
 sealed class ChatNavEvent {
@@ -854,13 +855,13 @@ class ChatViewModel @Inject constructor(
 
     fun fetchCharacterSheet() {
         val state = _uiState.value
-        if (state.characterSheetMd != null || state.project == null) return
+        if (state.characterSheetFiles != null || state.project == null) return
         viewModelScope.launch {
             try {
                 val response = chatRepo.getCharacterSheet(state.username, state.project)
                 if (response.isSuccessful) {
-                    val md = response.body()?.get("content") ?: response.body()?.get("sheet") ?: ""
-                    _uiState.update { it.copy(characterSheetMd = md) }
+                    val files = response.body()?.files ?: emptyList()
+                    _uiState.update { it.copy(characterSheetFiles = files) }
                 }
             } catch (_: Exception) {
                 // Silent fail — character sheet is non-critical

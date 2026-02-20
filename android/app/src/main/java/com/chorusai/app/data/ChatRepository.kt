@@ -115,7 +115,7 @@ class ChatRepository @Inject constructor(
     suspend fun getCharacterSheet(
         username: String,
         project: String
-    ): Response<Map<String, String>> =
+    ): Response<CharacterSheetResponse> =
         api.getCharacterSheet(username, project)
 
     suspend fun getModels(): Response<List<ModelInfo>> =
