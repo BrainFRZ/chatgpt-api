@@ -11,7 +11,6 @@ import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
 import com.chorusai.app.model.WsEvent
 import com.chorusai.app.network.WebSocketManager
-import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -68,7 +67,6 @@ class ChatViewModel @Inject constructor(
     private val chatRepo: ChatRepository,
     private val prefs: UserPreferences,
     private val webSocketManager: WebSocketManager,
-    private val gson: Gson,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -132,12 +130,6 @@ class ChatViewModel @Inject constructor(
             )
             if (response.isSuccessful) {
                 val body = response.body()!!
-                val ps = body.pipelineState?.let { rawMap ->
-                    try {
-                        val json = gson.toJson(rawMap)
-                        gson.fromJson(json, PipelineState::class.java)
-                    } catch (_: Exception) { null }
-                }
                 _uiState.update {
                     it.copy(
                         messages = body.messages,
@@ -148,7 +140,7 @@ class ChatViewModel @Inject constructor(
                         contextStartIndex = 1,
                         model = body.model,
                         error = null,
-                        pipelineState = ps,
+                        pipelineState = body.pipelineState,
                         gameSystem = body.gameSystem
                     )
                 }
@@ -454,12 +446,6 @@ class ChatViewModel @Inject constructor(
                     )
                     if (chatResponse.isSuccessful) {
                         val body = chatResponse.body()!!
-                        val ps = body.pipelineState?.let { rawMap ->
-                            try {
-                                val json = gson.toJson(rawMap)
-                                gson.fromJson(json, PipelineState::class.java)
-                            } catch (_: Exception) { null }
-                        }
                         _uiState.update {
                             it.copy(
                                 messages = body.messages,
@@ -473,7 +459,7 @@ class ChatViewModel @Inject constructor(
                                 editingMessageId = null,
                                 editingMessageContent = "",
                                 scrollToBottomTrigger = it.scrollToBottomTrigger + 1,
-                                pipelineState = ps,
+                                pipelineState = body.pipelineState,
                                 gameSystem = body.gameSystem
                             )
                         }

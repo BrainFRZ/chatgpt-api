@@ -50,7 +50,7 @@ data class ChatResponse(
     @SerializedName("current_leaf_id") val currentLeafId: String? = null,
     val model: String? = null,
     @SerializedName("anthropic_sync") val anthropicSync: Boolean? = null,
-    @SerializedName("pipeline_state") val pipelineState: Map<String, Any>? = null,
+    @SerializedName("pipeline_state") val pipelineState: PipelineState? = null,
     @SerializedName("game_system") val gameSystem: String? = null
 )
 

@@ -12,8 +12,6 @@ import com.chorusai.app.model.ModelPricing
 import com.chorusai.app.model.SseEvent
 import com.chorusai.app.model.WsEvent
 import com.chorusai.app.network.WebSocketManager
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -45,7 +43,6 @@ class ChatViewModelTest {
     private lateinit var chatRepo: ChatRepository
     private lateinit var prefs: UserPreferences
     private lateinit var webSocketManager: WebSocketManager
-    private lateinit var gson: Gson
 
     private val testMessages = listOf(
         ChatMessage(id = "1", role = "system", content = "You are a helpful assistant"),
@@ -64,7 +61,6 @@ class ChatViewModelTest {
         webSocketManager = mockk(relaxed = true)
         every { webSocketManager.chatEvents } returns MutableSharedFlow<WsEvent>()
         every { webSocketManager.userEvents } returns MutableSharedFlow<WsEvent>()
-        gson = GsonBuilder().create()
         coEvery { prefs.username } returns flowOf("testuser")
     }
 
@@ -83,7 +79,7 @@ class ChatViewModelTest {
                 if (project != null) put("project", project)
             }
         )
-        return ChatViewModel(chatRepo, prefs, webSocketManager, gson, savedStateHandle)
+        return ChatViewModel(chatRepo, prefs, webSocketManager, savedStateHandle)
     }
 
     // ---- Init / loadChat ----

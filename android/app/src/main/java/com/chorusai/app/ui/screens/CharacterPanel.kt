@@ -182,12 +182,14 @@ fun CharacterPanel(
     modifier: Modifier = Modifier
 ) {
     val scene = pipelineState.sceneState
-    val allInScene = scene.pcsPresent + scene.npcsPresent
+    val sceneNames = scene.pcsPresent + scene.npcsPresent
     val characterStates = pipelineState.characterStates
     val combat = pipelineState.combat
+    // Use scene lists if populated, otherwise fall back to characterStates keys
+    val allInScene = sceneNames.ifEmpty { characterStates.keys.toList() }
     val charCount = allInScene.size
 
-    if (charCount == 0 && characterStates.isEmpty()) return
+    if (charCount == 0) return
 
     var expanded by remember { mutableStateOf(false) }
     var selectedCharName by remember { mutableStateOf<String?>(null) }
@@ -272,7 +274,7 @@ fun CharacterPanel(
                 val orderedNames = if (combat != null) {
                     combat.initiativeOrder.ifEmpty { allInScene }
                 } else {
-                    scene.pcsPresent + scene.npcsPresent
+                    allInScene
                 }
 
                 LazyColumn(
