@@ -8,9 +8,12 @@ import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.model.SseEvent
+import com.chorusai.app.model.WsEvent
+import com.chorusai.app.network.WebSocketManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,7 +42,9 @@ data class ChatUiState(
     val streamingMessageId: String? = null,
     val sendError: String? = null,
     val models: List<ModelInfo> = emptyList(),
-    val isLoadingModels: Boolean = false
+    val isLoadingModels: Boolean = false,
+    val viewerCount: Int = 1,
+    val isRemoteStreaming: Boolean = false
 )
 
 sealed class ChatNavEvent {
@@ -50,6 +55,7 @@ sealed class ChatNavEvent {
 class ChatViewModel @Inject constructor(
     private val chatRepo: ChatRepository,
     private val prefs: UserPreferences,
+    private val webSocketManager: WebSocketManager,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -69,11 +75,18 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             val username = prefs.username.first() ?: ""
             _uiState.update { it.copy(username = username) }
+            webSocketManager.connectChat(username, chatName, project)
             loadChat()
         }
 
         viewModelScope.launch {
             loadModels()
+        }
+
+        viewModelScope.launch {
+            webSocketManager.chatEvents.collect { event ->
+                handleChatWsEvent(event)
+            }
         }
     }
 
@@ -175,7 +188,7 @@ class ChatViewModel @Inject constructor(
     private var streamingJob: Job? = null
 
     fun sendMessage(content: String) {
-        if (content.isBlank() || _uiState.value.isSending) return
+        if (content.isBlank() || _uiState.value.isSending || _uiState.value.isRemoteStreaming) return
 
         streamingJob = viewModelScope.launch {
             _uiState.update { it.copy(isSending = true, isStreaming = false, sendError = null) }
@@ -314,7 +327,15 @@ class ChatViewModel @Inject constructor(
     fun cancelStreaming() {
         streamingJob?.cancel()
         streamingJob = null
-        _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
+        clearRemoteStreamState()
+        _uiState.update {
+            it.copy(
+                isSending = false,
+                isStreaming = false,
+                isRemoteStreaming = false,
+                streamingMessageId = null
+            )
+        }
     }
 
     fun setModel(modelId: String) {
@@ -341,5 +362,152 @@ class ChatViewModel @Inject constructor(
 
     fun clearSendError() {
         _uiState.update { it.copy(sendError = null) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        webSocketManager.disconnectChat()
+    }
+
+    // Accumulated content/reasoning for remote streaming
+    private val remoteContent = StringBuilder()
+    private val remoteReasoning = StringBuilder()
+    private var remoteStreamTimeoutJob: Job? = null
+
+    private fun clearRemoteStreamState() {
+        remoteStreamTimeoutJob?.cancel()
+        remoteContent.clear()
+        remoteReasoning.clear()
+    }
+
+    private fun handleChatWsEvent(event: WsEvent) {
+        when (event) {
+            is WsEvent.ClientJoined -> {
+                // If we were mid-remote-stream, the WS reconnected — clean up and reload
+                if (_uiState.value.isRemoteStreaming) {
+                    val orphanedId = _uiState.value.streamingMessageId
+                    clearRemoteStreamState()
+                    _uiState.update {
+                        it.copy(
+                            messages = it.messages.filter { msg -> msg.id != orphanedId },
+                            isRemoteStreaming = false,
+                            streamingMessageId = null,
+                            viewerCount = event.connectionCount
+                        )
+                    }
+                    viewModelScope.launch { loadChat() }
+                } else {
+                    _uiState.update { it.copy(viewerCount = event.connectionCount) }
+                }
+            }
+            is WsEvent.ClientLeft -> {
+                _uiState.update { it.copy(viewerCount = event.connectionCount) }
+            }
+            is WsEvent.UserMessageAdded -> {
+                if (_uiState.value.isSending) return // Skip if we're the sender
+                val tempId = "remote_assistant_${UUID.randomUUID()}"
+                val placeholder = ChatMessage(id = tempId, role = "assistant", content = "")
+                clearRemoteStreamState()
+                _uiState.update {
+                    it.copy(
+                        messages = it.messages + event.message + placeholder,
+                        currentLeafId = event.currentLeafId ?: it.currentLeafId,
+                        isRemoteStreaming = true,
+                        streamingMessageId = tempId
+                    )
+                }
+                // Safety timeout — if no StreamDone/StreamError arrives, clean up and reload
+                remoteStreamTimeoutJob = viewModelScope.launch {
+                    delay(120_000L)
+                    if (_uiState.value.isRemoteStreaming) {
+                        val orphanedId = _uiState.value.streamingMessageId
+                        remoteContent.clear()
+                        remoteReasoning.clear()
+                        _uiState.update {
+                            it.copy(
+                                messages = it.messages.filter { msg -> msg.id != orphanedId },
+                                isRemoteStreaming = false,
+                                streamingMessageId = null
+                            )
+                        }
+                        loadChat()
+                    }
+                }
+            }
+            is WsEvent.StreamContent -> {
+                if (_uiState.value.isSending) return
+                val streamId = _uiState.value.streamingMessageId ?: return
+                remoteContent.append(event.delta)
+                val newContent = remoteContent.toString()
+                _uiState.update {
+                    it.copy(messages = it.messages.map { msg ->
+                        if (msg.id == streamId) msg.copy(content = newContent) else msg
+                    })
+                }
+            }
+            is WsEvent.StreamThinking -> {
+                if (_uiState.value.isSending) return
+                val streamId = _uiState.value.streamingMessageId ?: return
+                remoteReasoning.append(event.delta)
+                val newReasoning = remoteReasoning.toString()
+                _uiState.update {
+                    it.copy(messages = it.messages.map { msg ->
+                        if (msg.id == streamId) msg.copy(reasoning = newReasoning) else msg
+                    })
+                }
+            }
+            is WsEvent.StreamDone -> {
+                if (_uiState.value.isSending) return
+                val streamId = _uiState.value.streamingMessageId ?: return
+                clearRemoteStreamState()
+                _uiState.update {
+                    it.copy(
+                        messages = it.messages.map { msg ->
+                            if (msg.id == streamId) event.assistantMessage else msg
+                        },
+                        currentLeafId = event.currentLeafId ?: it.currentLeafId,
+                        totalMessages = event.totalMessages ?: it.totalMessages,
+                        isRemoteStreaming = false,
+                        streamingMessageId = null
+                    )
+                }
+            }
+            is WsEvent.StreamError -> {
+                if (_uiState.value.isSending) return
+                val streamId = _uiState.value.streamingMessageId ?: return
+                val hadContent = remoteContent.isNotEmpty()
+                clearRemoteStreamState()
+                _uiState.update {
+                    it.copy(
+                        messages = if (!hadContent) {
+                            it.messages.filter { msg -> msg.id != streamId }
+                        } else {
+                            it.messages
+                        },
+                        isRemoteStreaming = false,
+                        streamingMessageId = null
+                    )
+                }
+            }
+            is WsEvent.ChatSettingsChanged -> {
+                event.model?.let { model ->
+                    _uiState.update { it.copy(model = model) }
+                }
+            }
+            is WsEvent.BranchSwitched -> {
+                viewModelScope.launch {
+                    _uiState.update { it.copy(isLoading = true) }
+                    loadChat()
+                }
+            }
+            is WsEvent.BookmarkUpdated -> {
+                _uiState.update {
+                    it.copy(messages = it.messages.map { msg ->
+                        if (msg.id == event.messageId) msg.copy(bookmark = event.bookmark) else msg
+                    })
+                }
+            }
+            else -> { /* Ignore user-level events in chat context */ }
+        }
     }
 }

@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -112,6 +113,7 @@ fun ChatScreen(
                 currentModel = state.model,
                 models = state.models,
                 isLoadingModels = state.isLoadingModels,
+                viewerCount = state.viewerCount,
                 onBack = { viewModel.navigateBack() },
                 onModelSelected = { viewModel.setModel(it) }
             )
@@ -176,7 +178,7 @@ fun ChatScreen(
                             messages = visibleMessages,
                             hasMoreMessages = state.hasMoreMessages,
                             isLoadingMore = state.isLoadingMore,
-                            isStreaming = state.isStreaming,
+                            isStreaming = state.isStreaming || state.isRemoteStreaming,
                             streamingMessageId = state.streamingMessageId,
                             onLoadMore = { viewModel.loadMore() },
                             listState = listState,
@@ -202,7 +204,7 @@ fun ChatScreen(
                     }
 
                     MessageInputBar(
-                        isSending = state.isSending,
+                        isSending = state.isSending || state.isRemoteStreaming,
                         onSend = { viewModel.sendMessage(it) }
                     )
                 }
@@ -210,7 +212,7 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll to the user message (top of the new pair) when sending
+    // Auto-scroll to the user message (top of the new pair) when sending locally
     val messages = state.messages.filter { it.role != "system" }
     LaunchedEffect(messages.size, state.isSending) {
         if (state.isSending && messages.size >= 2) {
@@ -228,6 +230,7 @@ private fun ChatTopBar(
     currentModel: String?,
     models: List<ModelInfo>,
     isLoadingModels: Boolean,
+    viewerCount: Int,
     onBack: () -> Unit,
     onModelSelected: (String) -> Unit
 ) {
@@ -243,15 +246,34 @@ private fun ChatTopBar(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (currentModel != null) {
-                    val displayName = models.find { it.id == currentModel }?.name ?: currentModel
-                    Text(
-                        text = displayName,
-                        color = TextMuted,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (currentModel != null) {
+                        val displayName = models.find { it.id == currentModel }?.name ?: currentModel
+                        Text(
+                            text = displayName,
+                            color = TextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                    if (viewerCount > 1) {
+                        Icon(
+                            imageVector = Icons.Filled.People,
+                            contentDescription = "Viewers",
+                            tint = TextMuted,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = viewerCount.toString(),
+                            color = TextMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             }
         },

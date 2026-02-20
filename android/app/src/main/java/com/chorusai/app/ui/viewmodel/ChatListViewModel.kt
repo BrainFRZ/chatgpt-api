@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.chorusai.app.data.AuthRepository
 import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
+import com.chorusai.app.model.WsEvent
+import com.chorusai.app.network.WebSocketManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +46,8 @@ sealed class ChatListNavEvent {
 class ChatListViewModel @Inject constructor(
     private val chatRepo: ChatRepository,
     private val authRepo: AuthRepository,
-    private val prefs: UserPreferences
+    private val prefs: UserPreferences,
+    private val webSocketManager: WebSocketManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatListUiState())
@@ -59,7 +62,43 @@ class ChatListViewModel @Inject constructor(
         viewModelScope.launch {
             val username = prefs.username.first() ?: ""
             _uiState.update { it.copy(username = username) }
+            if (username.isNotBlank()) {
+                webSocketManager.connectUser(username)
+            }
             loadChats()
+        }
+
+        viewModelScope.launch {
+            webSocketManager.userEvents.collect { event ->
+                when (event) {
+                    is WsEvent.ChatCreated -> {
+                        // Only handle non-project chats in the main chat list
+                        if (event.project == null) {
+                            _uiState.update {
+                                if (event.chatName !in it.chats) {
+                                    it.copy(
+                                        chats = listOf(event.chatName) + it.chats,
+                                        total = it.total + 1
+                                    )
+                                } else it
+                            }
+                        }
+                    }
+                    is WsEvent.ChatDeleted -> {
+                        if (event.project == null) {
+                            _uiState.update {
+                                if (event.chatName in it.chats) {
+                                    it.copy(
+                                        chats = it.chats - event.chatName,
+                                        total = it.total - 1
+                                    )
+                                } else it
+                            }
+                        }
+                    }
+                    else -> { /* Ignore chat-level events here */ }
+                }
+            }
         }
     }
 
@@ -160,13 +199,21 @@ class ChatListViewModel @Inject constructor(
                 val response = chatRepo.deleteChat(_uiState.value.username, chatName)
                 if (response.isSuccessful) {
                     _uiState.update {
-                        it.copy(
-                            chats = it.chats - chatName,
-                            total = it.total - 1,
-                            showDeleteDialog = null,
-                            isDialogLoading = false,
-                            dialogError = null
-                        )
+                        if (chatName in it.chats) {
+                            it.copy(
+                                chats = it.chats - chatName,
+                                total = it.total - 1,
+                                showDeleteDialog = null,
+                                isDialogLoading = false,
+                                dialogError = null
+                            )
+                        } else {
+                            it.copy(
+                                showDeleteDialog = null,
+                                isDialogLoading = false,
+                                dialogError = null
+                            )
+                        }
                     }
                 } else {
                     val errorBody = response.errorBody()?.string() ?: "Failed to delete chat"
@@ -213,6 +260,8 @@ class ChatListViewModel @Inject constructor(
 
     fun logout() {
         viewModelScope.launch {
+            webSocketManager.disconnectChat()
+            webSocketManager.disconnectUser()
             authRepo.logout()
             _navEvents.send(ChatListNavEvent.NavigateToLogin)
         }
