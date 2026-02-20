@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -220,6 +221,24 @@ fun ChatScreen(
             val loadMoreOffset = if (state.hasMoreMessages) 1 else 0
             listState.animateScrollToItem(messages.lastIndex - 1 + loadMoreOffset)
         }
+    }
+
+    if (state.chatDeleted) {
+        AlertDialog(
+            onDismissRequest = { viewModel.navigateBack() },
+            title = { Text("Chat deleted") },
+            text = {
+                Text(
+                    "\"${state.chatName}\" was deleted from another session.",
+                    color = TextPrimary
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.navigateBack() }) {
+                    Text("OK")
+                }
+            }
+        )
     }
 }
 

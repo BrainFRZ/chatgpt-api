@@ -44,7 +44,8 @@ data class ChatUiState(
     val models: List<ModelInfo> = emptyList(),
     val isLoadingModels: Boolean = false,
     val viewerCount: Int = 1,
-    val isRemoteStreaming: Boolean = false
+    val isRemoteStreaming: Boolean = false,
+    val chatDeleted: Boolean = false
 )
 
 sealed class ChatNavEvent {
@@ -86,6 +87,19 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             webSocketManager.chatEvents.collect { event ->
                 handleChatWsEvent(event)
+            }
+        }
+
+        viewModelScope.launch {
+            webSocketManager.userEvents.collect { event ->
+                if (event is WsEvent.ChatDeleted) {
+                    val state = _uiState.value
+                    if (event.chatName == state.chatName &&
+                        (event.project ?: "") == (state.project ?: "")
+                    ) {
+                        _uiState.update { it.copy(chatDeleted = true) }
+                    }
+                }
             }
         }
     }
