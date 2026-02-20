@@ -11,6 +11,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
@@ -23,6 +24,17 @@ class SseClient(
 ) {
     private val sseHttpClient = okHttpClient.newBuilder()
         .readTimeout(10, TimeUnit.MINUTES)
+        .apply {
+            // Downgrade BODY-level logging to HEADERS for SSE — BODY buffers the
+            // entire response before passing it through, breaking token-by-token streaming
+            val interceptorsToReplace = interceptors().filterIsInstance<HttpLoggingInterceptor>()
+            interceptorsToReplace.forEach { interceptors().remove(it) }
+            if (interceptorsToReplace.isNotEmpty()) {
+                addInterceptor(HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.HEADERS
+                })
+            }
+        }
         .build()
 
     fun streamMessage(requestBody: Map<String, Any?>): Flow<SseEvent> = callbackFlow {
