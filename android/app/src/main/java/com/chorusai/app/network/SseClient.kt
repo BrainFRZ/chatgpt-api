@@ -57,6 +57,7 @@ class SseClient(
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 val message = t?.message ?: response?.message ?: "SSE connection failed"
+                response?.close()
                 trySend(SseEvent.Error(detail = message))
                 close()
             }
