@@ -1,5 +1,7 @@
 package com.chorusai.app.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -52,7 +54,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,6 +79,7 @@ import com.chorusai.app.ui.viewmodel.ChatViewModel
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import kotlinx.coroutines.delay
 
 @Composable
 fun ChatScreen(
@@ -164,6 +169,8 @@ fun ChatScreen(
                             messages = visibleMessages,
                             hasMoreMessages = state.hasMoreMessages,
                             isLoadingMore = state.isLoadingMore,
+                            isStreaming = state.isStreaming,
+                            streamingMessageId = state.streamingMessageId,
                             onLoadMore = { viewModel.loadMore() },
                             listState = listState,
                             modifier = Modifier.weight(1f)
@@ -196,11 +203,26 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll when sending
+    // Auto-scroll when new messages are added (send start)
     val messages = state.messages.filter { it.role != "system" }
     LaunchedEffect(messages.size, state.isSending) {
         if (state.isSending && messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
+        }
+    }
+
+    // Auto-scroll during streaming: poll and scroll to bottom if user is near bottom
+    LaunchedEffect(state.isStreaming) {
+        if (!state.isStreaming) return@LaunchedEffect
+        while (true) {
+            delay(150)
+            val totalItems = listState.layoutInfo.totalItemsCount
+            if (totalItems == 0) continue
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            // Only auto-scroll if user is viewing the last couple items
+            if (lastVisibleIndex >= totalItems - 2) {
+                listState.scrollToItem(totalItems - 1)
+            }
         }
     }
 }
@@ -309,6 +331,8 @@ private fun MessageList(
     messages: List<ChatMessage>,
     hasMoreMessages: Boolean,
     isLoadingMore: Boolean,
+    isStreaming: Boolean,
+    streamingMessageId: String?,
     onLoadMore: () -> Unit,
     listState: LazyListState,
     modifier: Modifier = Modifier
@@ -378,7 +402,10 @@ private fun MessageList(
             messages,
             key = { index, msg -> msg.id ?: "msg_${index}_${msg.role}" }
         ) { _, message ->
-            MessageBubble(message = message)
+            MessageBubble(
+                message = message,
+                isStreaming = isStreaming && message.id == streamingMessageId
+            )
         }
     }
 }
@@ -451,10 +478,10 @@ private fun MessageInputBar(
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
     when (message.role) {
         "user" -> UserMessage(message)
-        "assistant" -> AssistantMessage(message)
+        "assistant" -> AssistantMessage(message, isStreaming)
     }
 }
 
@@ -480,7 +507,7 @@ private fun UserMessage(message: ChatMessage) {
 }
 
 @Composable
-private fun AssistantMessage(message: ChatMessage) {
+private fun AssistantMessage(message: ChatMessage, isStreaming: Boolean = false) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -496,26 +523,120 @@ private fun AssistantMessage(message: ChatMessage) {
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(4.dp))
-        ChatMarkdown(content = message.content)
 
-        // Metadata footer
-        val metaParts = buildList {
-            message.model?.let { add(it) }
-            message.tokens?.let { add("$it tokens") }
-            message.cost?.let { add("$$it") }
-        }
-        if (metaParts.isNotEmpty()) {
+        // Collapsible reasoning section
+        if (!message.reasoning.isNullOrEmpty()) {
+            ReasoningSection(
+                reasoning = message.reasoning,
+                isStreaming = isStreaming && message.content.isEmpty()
+            )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = metaParts.joinToString(" \u00B7 "),
+        }
+
+        // Streaming indicator when waiting for first content token
+        if (isStreaming && message.content.isEmpty() && message.reasoning.isNullOrEmpty()) {
+            StreamingIndicator()
+        } else if (message.content.isNotEmpty()) {
+            ChatMarkdown(content = message.content)
+        }
+
+        // Metadata footer (only shown after streaming completes)
+        if (!isStreaming) {
+            val metaParts = buildList {
+                message.model?.let { add(it) }
+                message.tokens?.let { add(it) }
+                message.cost?.let { add(it) }
+            }
+            if (metaParts.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = metaParts.joinToString(" \u00B7 "),
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningSection(reasoning: String, isStreaming: Boolean = false) {
+    var expanded by remember { mutableStateOf(false) }
+    val rotationAngle by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        label = "reasoning_arrow"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(SurfaceColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "\u25B6",
+                color = TextMuted,
+                fontSize = 10.sp,
+                modifier = Modifier.rotate(rotationAngle)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (isStreaming) "Reasoning..." else "Reasoning",
+                color = TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium
+            )
+            if (isStreaming) {
+                Spacer(modifier = Modifier.width(8.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
                     color = TextMuted,
-                    fontSize = 11.sp
+                    strokeWidth = 1.5.dp
                 )
             }
         }
+
+        AnimatedVisibility(visible = expanded) {
+            Text(
+                text = reasoning,
+                color = TextMuted,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontStyle = FontStyle.Italic
+                ),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun StreamingIndicator() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(16.dp),
+            color = Accent,
+            strokeWidth = 2.dp
+        )
+        Text(
+            text = "Thinking...",
+            color = TextMuted,
+            style = MaterialTheme.typography.bodyMedium,
+            fontStyle = FontStyle.Italic
+        )
     }
 }
 

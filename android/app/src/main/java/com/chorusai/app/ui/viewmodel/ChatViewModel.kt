@@ -7,7 +7,9 @@ import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.ChatMessage
 import com.chorusai.app.model.ModelInfo
+import com.chorusai.app.model.SseEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +34,8 @@ data class ChatUiState(
     val model: String? = null,
     val isLoadingMore: Boolean = false,
     val isSending: Boolean = false,
+    val isStreaming: Boolean = false,
+    val streamingMessageId: String? = null,
     val sendError: String? = null,
     val models: List<ModelInfo> = emptyList(),
     val isLoadingModels: Boolean = false
@@ -167,11 +171,13 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private var streamingJob: Job? = null
+
     fun sendMessage(content: String) {
         if (content.isBlank() || _uiState.value.isSending) return
 
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSending = true, sendError = null) }
+        streamingJob = viewModelScope.launch {
+            _uiState.update { it.copy(isSending = true, isStreaming = false, sendError = null) }
             val state = _uiState.value
 
             val tempUserId = "temp_user_${UUID.randomUUID()}"
@@ -183,72 +189,126 @@ class ChatViewModel @Inject constructor(
                 content = content,
                 parentId = state.currentLeafId
             )
-            val thinkingMessage = ChatMessage(
+            val streamingMessage = ChatMessage(
                 id = tempAssistantId,
                 role = "assistant",
-                content = "Thinking..."
+                content = ""
             )
 
             _uiState.update {
-                it.copy(messages = it.messages + userMessage + thinkingMessage)
+                it.copy(
+                    messages = it.messages + userMessage + streamingMessage,
+                    isStreaming = true,
+                    streamingMessageId = tempAssistantId
+                )
             }
 
+            val accumulatedContent = StringBuilder()
+            val accumulatedReasoning = StringBuilder()
+
             try {
-                val response = chatRepo.sendMessage(
+                chatRepo.streamMessage(
                     username = state.username,
                     chatName = state.chatName,
                     message = content,
                     project = state.project,
                     parentId = state.currentLeafId,
                     model = state.model
-                )
-
-                if (response.isSuccessful) {
-                    val body = response.body()!!
-                    val realUserMessage = userMessage.copy(id = body.userMessageId ?: tempUserId)
-                    val realAssistantMessage = ChatMessage(
-                        id = body.assistantMessageId ?: tempAssistantId,
-                        role = "assistant",
-                        content = body.assistantMessage,
-                        tokens = body.tokens,
-                        cost = body.cost,
-                        model = body.model,
-                        reasoning = body.reasoning
-                    )
-
-                    _uiState.update {
-                        it.copy(
-                            messages = it.messages.map { msg ->
-                                when (msg.id) {
-                                    tempUserId -> realUserMessage
-                                    tempAssistantId -> realAssistantMessage
-                                    else -> msg
+                ).collect { event ->
+                    when (event) {
+                        is SseEvent.Init -> {
+                            val newUserId = event.userMessageId
+                            if (newUserId != null) {
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == tempUserId) msg.copy(id = newUserId) else msg
+                                    })
                                 }
-                            },
-                            currentLeafId = body.currentLeafId ?: it.currentLeafId,
-                            totalMessages = body.totalMessages ?: it.totalMessages
-                        )
-                    }
-                } else {
-                    // Remove thinking placeholder, keep user message
-                    _uiState.update {
-                        it.copy(
-                            messages = it.messages.filter { msg -> msg.id != tempAssistantId },
-                            sendError = "Failed to send message"
-                        )
+                            }
+                        }
+                        is SseEvent.Content -> {
+                            accumulatedContent.append(event.delta)
+                            val newContent = accumulatedContent.toString()
+                            _uiState.update {
+                                it.copy(messages = it.messages.map { msg ->
+                                    if (msg.id == tempAssistantId) msg.copy(content = newContent) else msg
+                                })
+                            }
+                        }
+                        is SseEvent.Thinking -> {
+                            accumulatedReasoning.append(event.delta)
+                            val newReasoning = accumulatedReasoning.toString()
+                            _uiState.update {
+                                it.copy(messages = it.messages.map { msg ->
+                                    if (msg.id == tempAssistantId) msg.copy(reasoning = newReasoning) else msg
+                                })
+                            }
+                        }
+                        is SseEvent.Done -> {
+                            val finalMessage = ChatMessage(
+                                id = event.assistantMessageId ?: tempAssistantId,
+                                role = "assistant",
+                                content = accumulatedContent.toString(),
+                                tokens = event.tokens,
+                                cost = event.cost,
+                                model = event.model,
+                                reasoning = accumulatedReasoning.toString().ifEmpty { null }
+                            )
+                            _uiState.update {
+                                it.copy(
+                                    messages = it.messages.map { msg ->
+                                        if (msg.id == tempAssistantId) finalMessage else msg
+                                    },
+                                    currentLeafId = event.currentLeafId ?: it.currentLeafId,
+                                    totalMessages = event.totalMessages ?: it.totalMessages,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
+                        }
+                        is SseEvent.Error -> {
+                            _uiState.update {
+                                it.copy(
+                                    messages = if (accumulatedContent.isEmpty()) {
+                                        it.messages.filter { msg -> msg.id != tempAssistantId }
+                                    } else {
+                                        it.messages
+                                    },
+                                    sendError = event.detail,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
+                        }
+                        else -> { /* Ignore pipeline_stage, state_update, etc. for now */ }
                     }
                 }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
-                        messages = it.messages.filter { msg -> msg.id != tempAssistantId },
-                        sendError = e.message ?: "Network error"
+                        messages = if (accumulatedContent.isEmpty()) {
+                            it.messages.filter { msg -> msg.id != tempAssistantId }
+                        } else {
+                            it.messages
+                        },
+                        sendError = e.message ?: "Streaming error",
+                        isStreaming = false,
+                        streamingMessageId = null,
+                        isSending = false
                     )
                 }
-            } finally {
-                _uiState.update { it.copy(isSending = false) }
             }
+            // Ensure flags are reset if flow completes without done/error
+            _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
         }
+    }
+
+    fun cancelStreaming() {
+        streamingJob?.cancel()
+        streamingJob = null
+        _uiState.update { it.copy(isSending = false, isStreaming = false, streamingMessageId = null) }
     }
 
     fun setModel(modelId: String) {
