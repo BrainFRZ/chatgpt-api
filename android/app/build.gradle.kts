@@ -90,6 +90,7 @@ dependencies {
 
     // Markdown rendering
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
+    implementation("com.mikepenz:multiplatform-markdown-renderer-code:0.27.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

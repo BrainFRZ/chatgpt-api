@@ -59,6 +59,12 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.chorusai.app.model.*
 import com.chorusai.app.ui.theme.*
+import com.mikepenz.markdown.compose.components.markdownComponents
+import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
+import com.mikepenz.markdown.compose.elements.highlightedCodeFence
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 
 // ─── Color Helpers ───
 
@@ -822,16 +828,29 @@ private fun CharacterSheetModal(
 
             if (sheetExpanded) {
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = characterSheetMd ?: "Loading...",
-                    color = TextSecondary,
-                    fontSize = 11.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(CharPanelCardBg)
-                        .padding(8.dp)
-                )
+                val rawContent = characterSheetMd
+                if (rawContent == null) {
+                    Text(
+                        text = "Loading...",
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(CharPanelCardBg)
+                            .padding(8.dp)
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(CharPanelCardBg)
+                            .padding(8.dp)
+                    ) {
+                        SheetMarkdown(rawContent)
+                    }
+                }
             }
         }
     }
@@ -1530,6 +1549,65 @@ private fun CallbackCard(callback: CallbackEntry, borderColor: Color, turnCounte
             }
         }
     }
+}
+
+// ─── Sheet Markdown ───
+
+/** Renders character sheet content as formatted markdown with syntax-highlighted code blocks. */
+@Composable
+private fun SheetMarkdown(content: String) {
+    // Detect raw YAML content (not already in a code fence) and wrap it
+    val processed = remember(content) {
+        if (looksLikeYaml(content)) {
+            "```yaml\n$content\n```"
+        } else {
+            content
+        }
+    }
+
+    val colors = markdownColor(
+        text = TextSecondary,
+        codeText = TextSecondary,
+        inlineCodeText = TextSecondary,
+        linkText = Accent,
+        codeBackground = CharPanelBg,
+        inlineCodeBackground = CharPanelBg,
+        dividerColor = CharPanelCardBorder
+    )
+    val typography = markdownTypography(
+        h1 = MaterialTheme.typography.titleMedium.copy(color = TextPrimary),
+        h2 = MaterialTheme.typography.titleSmall.copy(color = TextPrimary),
+        h3 = MaterialTheme.typography.bodyLarge.copy(color = TextPrimary, fontWeight = FontWeight.Bold),
+        h4 = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, fontWeight = FontWeight.Bold),
+        h5 = MaterialTheme.typography.bodySmall.copy(color = TextPrimary, fontWeight = FontWeight.Bold),
+        h6 = MaterialTheme.typography.bodySmall.copy(color = TextSecondary, fontWeight = FontWeight.Bold),
+        text = MaterialTheme.typography.bodySmall.copy(color = TextSecondary),
+        code = MaterialTheme.typography.bodySmall.copy(
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            color = TextSecondary
+        ),
+        paragraph = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+    )
+
+    Markdown(
+        content = processed,
+        colors = colors,
+        typography = typography,
+        components = markdownComponents(
+            codeBlock = highlightedCodeBlock,
+            codeFence = highlightedCodeFence,
+        ),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+/** Heuristic: content looks like raw YAML if it has key: value patterns and no markdown headings. */
+private fun looksLikeYaml(content: String): Boolean {
+    val lines = content.lines().take(10)
+    val hasYamlPairs = lines.count { it.matches(Regex("^\\s*[\\w-]+:.*")) } >= 2
+    val hasMarkdownHeadings = lines.any { it.startsWith("#") }
+    val hasFencedCode = content.contains("```")
+    return hasYamlPairs && !hasMarkdownHeadings && !hasFencedCode
 }
 
 // ─── Draw Left Border Modifier ───
