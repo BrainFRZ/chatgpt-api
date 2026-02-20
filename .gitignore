@@ -56,3 +56,4 @@
 !PIPELINE_PLAN.md
 !android/
 !android/**
+android/*.keystore
