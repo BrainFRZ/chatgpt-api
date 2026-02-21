@@ -883,15 +883,16 @@ export default function CharacterPanel({
           {/* Game-specific state */}
           {renderGameState()}
 
-          {/* Funds: Ship shows all, PC shows own (or all if no ship in game), NPC hidden */}
+          {/* Funds/Credits: Ship shows all, others show own */}
           {(() => {
             const allFunds = state.hud_state?.funds || {};
-            const hasShipInScene = Object.values(cs).some((e: any) => (e?.data || e)?.type === 'ship');
+            const gs = chatGameSystem || (gameState.ship ? 'dnd5e_cyber' : 'dnd5e');
+            const fundsLabel = ({ dnd5e_cyber: 'Credits', sr6e: 'Nuyen', cpred: 'Eurobucks' } as Record<string, string>)[gs] || 'Funds';
             if (type === 'ship') {
               const entries = Object.entries(allFunds);
               if (entries.length > 0) return (
                 <div style={{ marginTop: '12px' }}>
-                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>{fundsLabel}</div>
                   {entries.map(([k, v]: [string, any]) => (
                     <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
                       <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
@@ -899,28 +900,13 @@ export default function CharacterPanel({
                   ))}
                 </div>
               );
-            } else if (type === 'pc') {
-              if (!hasShipInScene) {
-                // No ship — PC shows all funds
-                const entries = Object.entries(allFunds);
-                if (entries.length > 0) return (
-                  <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-                    {entries.map(([k, v]: [string, any]) => (
-                      <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
-                        <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
-                      </div>
-                    ))}
-                  </div>
-                );
-              } else if (hudFunds) {
-                return (
-                  <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-                    <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : hudFunds}</div>
-                  </div>
-                );
-              }
+            } else if (hudFunds) {
+              return (
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>{fundsLabel}</div>
+                  <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : hudFunds}</div>
+                </div>
+              );
             }
             return null;
           })()}

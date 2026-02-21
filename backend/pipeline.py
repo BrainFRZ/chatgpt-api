@@ -2030,6 +2030,14 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist HUD state from tool report
     if "hud_state" in parsed:
         pipeline_state["hud_state"] = parsed["hud_state"]
+    # Derive hud_state.funds from ship.credits (single source of truth), then scene-scope
+    pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("game_state"))
+    pipeline_state["hud_state"] = scope_hud_funds(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("scene_state", {}),
+        pipeline_state.get("character_states", {}))
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         pipeline_state["combat"] = parsed["combat"]

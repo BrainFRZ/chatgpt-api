@@ -788,8 +788,8 @@ private fun CharacterSheetModal(
                 gameSystem = gameSystem
             )
 
-            // Funds
-            FundsSection(characterName, characterData, pipelineState)
+            // Funds / Credits
+            FundsSection(characterName, characterData, pipelineState, gameSystem)
 
             // NPC Memories button
             if (memories.isNotEmpty()) {
@@ -1206,21 +1206,28 @@ private fun CpRedState(characterName: String, gameState: Map<String, Any>) {
 private fun FundsSection(
     characterName: String,
     characterData: CharacterData,
-    pipelineState: PipelineState
+    pipelineState: PipelineState,
+    gameSystem: String?
 ) {
     val funds = pipelineState.hudState?.funds ?: return
     val type = characterData.type?.lowercase()
+    val gs = gameSystem?.lowercase() ?: if (pipelineState.gameState.containsKey("ship")) "dnd5e_cyber" else "dnd5e"
+    val label = when (gs) {
+        "dnd5e_cyber" -> "CREDITS"
+        "sr6e" -> "NUYEN"
+        "cpred" -> "EUROBUCKS"
+        else -> "FUNDS"
+    }
 
-    // Ships show all funds, PCs show own, NPCs show none
+    // Ships show all funds, others show own
     val displayFunds: Map<String, Any> = when (type) {
         "ship" -> funds
-        "pc" -> funds.filterKeys { it.equals(characterName, ignoreCase = true) }
-        else -> return
+        else -> funds.filterKeys { it.equals(characterName, ignoreCase = true) }
     }
 
     if (displayFunds.isEmpty()) return
 
-    SectionLabel("FUNDS")
+    SectionLabel(label)
     displayFunds.forEach { (name, value) ->
         Text(text = "$name: $value", color = VitalYellow, fontSize = 12.sp)
     }
