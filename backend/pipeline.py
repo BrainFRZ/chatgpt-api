@@ -9,6 +9,7 @@ Only activates for GPT-5.2 project chats; Anthropic models use the existing sing
 import copy
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional, Iterator
 
@@ -1989,6 +1990,61 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     if "combat" in parsed:
         pipeline_state["combat"] = parsed["combat"]
     return pipeline_state
+
+
+def build_player_agency_reminder(user_message: str, character_states: dict) -> str:
+    """Build a dynamic player-agency reminder for multi-PC campaigns.
+
+    Detects which PC is prompting from the [tag] at the start of the message,
+    then lists all other PCs as off-limits. Returns empty string for:
+    - Single-player campaigns (0 or 1 PC)
+    - Messages without a recognized player tag
+    - OOC messages
+    """
+    # Collect all PCs from character_states
+    pcs = []
+    for name, cs in character_states.items():
+        data = cs.get("data", cs)  # handle both {data: {type:...}} and flat {type:...}
+        if data.get("type") == "pc":
+            pcs.append(name)
+    if len(pcs) <= 1:
+        return ""
+
+    # Parse [tag] from start of message
+    match = re.match(r'\s*\[([^\]]+)\]', user_message)
+    if not match:
+        return ""
+    tag = match.group(1).strip()
+
+    # Skip OOC tags
+    if tag.upper() in ("OOC",) or tag.upper().startswith("OOC:") or tag.upper().startswith("OOC "):
+        return ""
+
+    # Match tag to a PC name (fuzzy: [A] matches "Aedina", [Aedina] matches "Aedina Lumenvale")
+    prompting_pc = None
+    for pc_name in pcs:
+        first_name = pc_name.split()[0]
+        if first_name.lower().startswith(tag.lower()) or tag.lower().startswith(first_name.lower()):
+            prompting_pc = pc_name
+            break
+
+    if not prompting_pc:
+        return ""
+
+    # Build reminder listing off-limits PCs
+    off_limits = [name for name in pcs if name != prompting_pc]
+    if not off_limits:
+        return ""
+
+    off_limits_names = ", ".join(off_limits)
+    prompting_first = prompting_pc.split()[0]
+
+    return (
+        f"⚠️ PLAYER AGENCY: [{prompting_first}] is prompting. "
+        f"Do NOT author {off_limits_names} — no actions, speech, thoughts, feelings, "
+        f"body language, or physical reactions. Describe only the world and NPC reactions, "
+        f"then prompt the next player."
+    )
 
 
 def build_single_agent_injections(pipeline_state: dict, game_system: dict = None) -> str:

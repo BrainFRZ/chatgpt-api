@@ -33,7 +33,8 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 from pipeline import (
     run_pipeline, PipelineResult, generate_debug_transcript,
     apply_single_agent_state_updates,
-    build_single_agent_injections, migrate_pipeline_state,
+    build_single_agent_injections, build_player_agency_reminder,
+    migrate_pipeline_state,
     get_context_pairs, extract_state_notifications,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
@@ -2458,10 +2459,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
         system_msg = {"role": branch_path[0]["role"], "content": system_content}
 
-        # User message with injections prepended
+        # User message with injections prepended + player agency reminder for multi-PC
         user_content = build_message_content(branch_path[-1])
+        agency_reminder = build_player_agency_reminder(
+            user_content, stateful_pipeline_state.get("character_states", {}))
+        parts = []
         if injections_str:
-            user_content = injections_str + "\n\n" + user_content
+            parts.append(injections_str)
+        if agency_reminder:
+            parts.append(agency_reminder)
+        parts.append(user_content)
+        user_content = "\n\n".join(parts)
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
