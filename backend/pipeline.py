@@ -455,6 +455,52 @@ def _memory_sort_key(m: dict) -> tuple:
     return (m.get("impact", 0), m.get("turn_created", 0))
 
 
+def filter_ops_by_scene_scope(parsed: dict, npcs_present: set) -> None:
+    """Filter npc_memory_ops and relationship_ops to only include NPCs in the current scene.
+
+    Mutates parsed dict in-place (so downstream notification extraction sees filtered ops).
+    Faction ops (fr) and bootstrap ops (set/npc_set) are always allowed through.
+    If npcs_present is empty/uninitialized, skips filtering (allows all ops — needed for
+    first-turn bootstrap when scene_state hasn't been populated yet).
+    """
+    if not npcs_present:
+        # No scene_state yet (first turn / bootstrap) — allow all ops through
+        return
+
+    skipped = 0
+
+    # Filter npc_memory_ops
+    mem_ops = parsed.get("npc_memory_ops")
+    if mem_ops:
+        filtered = [op for op in mem_ops if op.get("npc") in npcs_present]
+        skipped += len(mem_ops) - len(filtered)
+        parsed["npc_memory_ops"] = filtered
+
+    # Filter relationship_ops — only rs/roms/npc_rs/npc_roms for NPCs not present
+    # Allow: fr (factions aren't scene-scoped), set/npc_set (bootstrap)
+    rel_ops = parsed.get("relationship_ops")
+    if rel_ops:
+        filtered_rel = []
+        for op in rel_ops:
+            op_type = op.get("op")
+            if op_type in ("set", "npc_set", "fr"):
+                # Always allow bootstrap and faction ops
+                filtered_rel.append(op)
+            elif op_type in ("rs", "roms", "npc_rs", "npc_roms"):
+                target = op.get("target", "")
+                if target in npcs_present:
+                    filtered_rel.append(op)
+                else:
+                    skipped += 1
+                    logger.info(f"Filtered {op_type} op for '{target}' — not in scene")
+            else:
+                filtered_rel.append(op)
+        parsed["relationship_ops"] = filtered_rel
+
+    if skipped:
+        logger.info(f"Scene-scope filter: dropped {skipped} ops for out-of-scene NPCs")
+
+
 def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
     """Apply npc_memory_ops (add/drop) to the NPC memories dict."""
     if not ops:
@@ -914,19 +960,14 @@ def run_pipeline(
         events_data.get("callback_ops"),
         current_turn
     )
-    npc_mem_ops = events_data.get("npc_memory_ops")
-    if npc_mem_ops:
-        # Filter out memory ops for NPCs not in scene (use pre-update scene)
-        npcs_in_scene = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
-        if npcs_in_scene:
-            npc_mem_ops = [op for op in npc_mem_ops if op.get("npc") in npcs_in_scene]
-        else:
-            logger.info(f"Filtered all {len(npc_mem_ops)} pipeline npc_memory_ops — no NPCs in scene")
-            npc_mem_ops = []
-    if npc_mem_ops:
+    # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
+    npcs_in_scene = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
+    if events_data.get("npc_memory_ops") or events_data.get("relationship_ops"):
+        filter_ops_by_scene_scope(events_data, npcs_in_scene)
+    if events_data.get("npc_memory_ops"):
         pipeline_state["npc_memories"] = apply_npc_memory_ops(
             pipeline_state["npc_memories"],
-            npc_mem_ops,
+            events_data["npc_memory_ops"],
             current_turn
         )
     if events_data.get("scene_state"):
@@ -935,7 +976,7 @@ def run_pipeline(
             existing_scene=pipeline_state.get("scene_state")
         )
 
-    # Apply game-specific state ops (e.g. investigator_ops for CoC 7E)
+    # Apply game-specific state ops (relationship_ops already filtered by scene scope)
     if gs.get("apply_game_state"):
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = gs["init_game_state"]()
@@ -1915,27 +1956,17 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             parsed["callback_ops"],
             current_turn
         )
+    # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
+    # Mutates parsed in-place so downstream notification extraction also sees filtered ops
+    npcs_present = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
+    if parsed.get("npc_memory_ops") or parsed.get("relationship_ops"):
+        filter_ops_by_scene_scope(parsed, npcs_present)
     if parsed.get("npc_memory_ops"):
-        # Filter out memory ops for NPCs not currently in scene
-        npcs_present = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
-        if npcs_present:
-            filtered_mem_ops = [
-                op for op in parsed["npc_memory_ops"]
-                if op.get("npc") in npcs_present
-            ]
-            skipped = len(parsed["npc_memory_ops"]) - len(filtered_mem_ops)
-            if skipped:
-                logger.info(f"Filtered {skipped} npc_memory_ops for out-of-scene NPCs")
-        else:
-            filtered_mem_ops = []
-            if parsed["npc_memory_ops"]:
-                logger.info(f"Filtered all {len(parsed['npc_memory_ops'])} npc_memory_ops — no NPCs in scene")
-        if filtered_mem_ops:
-            pipeline_state["npc_memories"] = apply_npc_memory_ops(
-                pipeline_state["npc_memories"],
-                filtered_mem_ops,
-                current_turn
-            )
+        pipeline_state["npc_memories"] = apply_npc_memory_ops(
+            pipeline_state["npc_memories"],
+            parsed["npc_memory_ops"],
+            current_turn
+        )
     if parsed.get("scene_state"):
         pipeline_state["scene_state"] = apply_scene_state(
             parsed["scene_state"],
@@ -1946,7 +1977,7 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         parsed.get("character_states") or {},
         current_turn
     )
-    # Apply game-specific state ops (e.g. investigator_ops for CoC 7E)
+    # Apply game-specific state ops (relationship_ops already filtered by scene scope)
     if game_system and game_system.get("apply_game_state"):
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = game_system["init_game_state"]()
@@ -2011,11 +2042,12 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     return "\n\n".join(injections) if injections else ""
 
 
-def extract_state_notifications(ops_source: dict) -> list:
+def extract_state_notifications(ops_source: dict, npcs_present: set = None) -> list:
     """Extract user-visible notifications from relationship_ops and npc_memory_ops.
 
     Returns a list of notification dicts for the frontend to display.
     Skips bootstrap ops (set/npc_set) and drop actions — only meaningful changes.
+    If npcs_present is provided, filters out ops targeting NPCs not in the scene.
     """
     notifications = []
 
@@ -2023,6 +2055,11 @@ def extract_state_notifications(ops_source: dict) -> list:
         op_type = op.get("op")
         if op_type in ("set", "npc_set"):
             continue
+        # Scene-scope filter for notifications (when called from pipeline path
+        # where ops_source is re-parsed from raw JSON, not the filtered copy)
+        if npcs_present is not None and op_type in ("rs", "roms", "npc_rs", "npc_roms"):
+            if op.get("target") not in npcs_present:
+                continue
         if op_type in ("rs", "roms", "fr"):
             notifications.append({
                 "type": f"{op_type}_change",
@@ -2043,6 +2080,9 @@ def extract_state_notifications(ops_source: dict) -> list:
 
     for op in ops_source.get("npc_memory_ops", []):
         if op.get("action") != "add":
+            continue
+        # Scene-scope filter for memory notifications
+        if npcs_present is not None and op.get("npc") not in npcs_present:
             continue
         notifications.append({
             "type": "npc_memory",

@@ -890,16 +890,35 @@ def get_instructions(username: str, project: str = None) -> str:
     else:
         instructions = "You are a helpful assistant."
 
-    # Append user-level base instructions if they exist (shared DM rules across all projects)
-    if project:
-        base_path = os.path.join(get_user_dir(username), "base_instructions.di")
-        if os.path.exists(base_path):
-            with open(base_path, 'r', encoding='utf-8') as f:
-                base = f.read().strip()
-            if base:
-                instructions = instructions.rstrip() + "\n\n" + base
-
     return instructions
+
+def get_base_instructions(username: str) -> str:
+    """Load user-level base instructions (shared DM rules across all projects).
+    Returned separately so callers can place them at the END of the system prompt
+    (after project files) for maximum salience."""
+    base_path = os.path.join(get_user_dir(username), "base_instructions.di")
+    if os.path.exists(base_path):
+        with open(base_path, 'r', encoding='utf-8') as f:
+            base = f.read().strip()
+        if base:
+            return base
+    return ""
+
+def build_system_content(username: str, project: str) -> str:
+    """Build the full system prompt: instructions + project files + base instructions.
+    Base instructions go LAST (after project files) for maximum end-of-prompt salience."""
+    instructions = get_instructions(username, project)
+    if project:
+        project_files = load_project_files(username, project)
+        base = get_base_instructions(username)
+        parts = [instructions]
+        if project_files:
+            parts.append(project_files)
+        if base:
+            parts.append(base)
+        return "\n\n".join(parts)
+    else:
+        return instructions
 
 def get_instructions_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load per-agent instructions file, falling back to shared instructions.di."""
@@ -1608,17 +1627,8 @@ async def create_chat(request: CreateChatRequest):
     if os.path.exists(path):
         raise HTTPException(status_code=400, detail="Chat already exists")
 
-    # Build system message (instructions first, then project files)
-    if request.project:
-        instructions = get_instructions(username, request.project)
-        project_files = load_project_files(username, request.project)
-        if project_files:
-            system_content = instructions + "\n\n" + project_files
-        else:
-            system_content = instructions
-    else:
-        # Free chats also check for instructions
-        system_content = get_instructions(username, None)
+    # Build system message: instructions + project files + base instructions (at end for salience)
+    system_content = build_system_content(username, request.project)
 
     data = {
         "messages": [{"role": "system", "content": system_content}],
@@ -2423,12 +2433,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         if did_trim:
             docs_refreshed = True
-            fresh_instructions = get_instructions(username, request.project)
-            fresh_files = load_project_files(username, request.project)
-            if fresh_files:
-                fresh_system = fresh_instructions + "\n\n" + fresh_files
-            else:
-                fresh_system = fresh_instructions
+            fresh_system = build_system_content(username, request.project)
             branch_path[0]["content"] = fresh_system
             branch_path[0].pop("total_tokens", None)
             branch_path[0].pop("total_gpt_tokens", None)
@@ -2657,7 +2662,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if pipeline_result.events_json:
                     try:
                         events_parsed = json.loads(pipeline_result.events_json)
-                        notifs = extract_state_notifications(events_parsed)
+                        # Pass npcs_present for scene-scope filtering (events_parsed is re-parsed
+                        # from raw JSON, so it has unfiltered ops unlike the applied state)
+                        ps_scene = (pipeline_result.pipeline_state or {}).get("scene_state", {})
+                        notif_npcs = set(ps_scene.get("npcs_present", []))
+                        notifs = extract_state_notifications(events_parsed, npcs_present=notif_npcs)
                         if notifs:
                             yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
                             await sync_manager.broadcast_to_chat(chat_key,
@@ -3612,16 +3621,8 @@ def reload_chat(request: ReloadChatRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Rebuild system message (instructions first, then project files)
-    if request.project:
-        instructions = get_instructions(username, request.project)
-        project_files = load_project_files(username, request.project)
-        if project_files:
-            system_content = instructions + "\n\n" + project_files
-        else:
-            system_content = instructions
-    else:
-        system_content = get_instructions(username, None)
+    # Rebuild system message: instructions + project files + base instructions (at end for salience)
+    system_content = build_system_content(username, request.project)
 
     # Update the system message content while preserving other fields (id, parent_id, tokens)
     # This maintains the tree structure and cached token counts
