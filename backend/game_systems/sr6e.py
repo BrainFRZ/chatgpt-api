@@ -274,6 +274,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "combat": "<null OR combat object>",
   "callback_ops": [...],
   "npc_memory_ops": [...],
+  "plot_ops": [],
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -359,8 +360,16 @@ ARC LABEL:
 - Set to a short label when starting a new run or subplot
 - null on all other turns
 
-PLOT DIVERGENCE:
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+PLOT OPS (save-state notifications):
+- Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
+- "branch": a defined fork in the plot docs — report which path was taken.
+- "flag": a named variable or flag changed — report the new value.
+- "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
+- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
+
+IRRECONCILABLE PLOT BREAK:
+- If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
 
 CALLBACK LEDGER:
 - Same semantics as standard pipeline (add/resolve/update via callback_ops)
@@ -583,6 +592,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 Optional arrays:
 - **callback_ops**: Add/resolve Johnson deals, intel, debts, favors. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Record significant NPC moments
+- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
@@ -654,7 +664,8 @@ When triggered, guide the player through SR6E character creation **one step at a
 ### Rules:
 - Call `report_state` every turn
 - Do NOT reference the state system in your narrative
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
+- If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
+- If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
 - Noir cyberpunk tone: rain-slicked neon, corporate oppression, morally gray shadows
 - Magic is primal and dangerous — drain is real, spirits are not pets
 - Violence is consequential
@@ -816,6 +827,37 @@ STATE_REPORT_TOOL = {
                     "location": {"type": "string"},
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
+                }
+            },
+            "plot_ops": {
+                "type": "array",
+                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
+                "items": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {
+                        "key": {
+                            "type": ["string", "null"],
+                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
+                        },
+                        "value": {
+                            "type": ["string", "null"],
+                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "What the player chose, stated concisely."
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["branch", "flag", "divergence"],
+                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
+                        },
+                        "episode": {
+                            "type": "string",
+                            "description": "Current episode/session from pacing context."
+                        }
+                    }
                 }
             }
         }

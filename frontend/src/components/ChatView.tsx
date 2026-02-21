@@ -503,6 +503,27 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'plot_decision') {
+                const isDivergence = n.severity === 'divergence';
+                return (
+                  <div key={i} style={{
+                    ...styles.plotNotification,
+                    ...(isDivergence ? styles.plotNotificationDivergence : {}),
+                  }}>
+                    <span style={{
+                      ...styles.plotSeverityBadge,
+                      ...(isDivergence ? styles.plotSeverityBadgeDivergence : {}),
+                    }}>
+                      {n.severity || 'plot'}
+                    </span>
+                    {n.key && <span style={styles.notificationLabel}>{n.key}{n.value ? ` = ${n.value}` : ''}</span>}
+                    {n.key ? ' — ' : ''}{n.decision}
+                    {n.episode && (
+                      <span style={{ color: '#666', fontSize: '11px' }}> [{n.episode}]</span>
+                    )}
+                  </div>
+                );
+              }
               // RS/RomS/FR/npc_rs/npc_roms change
               const isNeg = (n.change ?? 0) < 0;
               const label = n.type.replace('_change', '').toUpperCase();

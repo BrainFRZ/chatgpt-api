@@ -1245,6 +1245,33 @@ export const styles: { [key: string]: React.CSSProperties } = {
     color: '#ccc',
     borderLeft: '3px solid #9c27b0',
   },
+  plotNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(255,255,255,0.03)',
+    color: '#ccc',
+    borderLeft: '3px solid #ff9800',
+  },
+  plotNotificationDivergence: {
+    borderLeft: '3px solid #ff5722',
+  },
+  plotSeverityBadge: {
+    display: 'inline-block',
+    fontSize: '10px',
+    fontWeight: 700,
+    textTransform: 'uppercase' as const,
+    padding: '1px 4px',
+    borderRadius: '2px',
+    marginRight: '6px',
+    background: 'rgba(255, 152, 0, 0.15)',
+    color: '#ff9800',
+  },
+  plotSeverityBadgeDivergence: {
+    background: 'rgba(255, 87, 34, 0.15)',
+    color: '#ff5722',
+  },
   notificationLabel: {
     fontWeight: 600,
     marginRight: '4px',

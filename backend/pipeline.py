@@ -1898,6 +1898,46 @@ def _parse_characters_section(lines: list) -> dict:
     return result
 
 
+def _parse_plot_section(lines: list) -> list:
+    """Parse PLOT section lines into plot_ops list.
+
+    Supports pipe-delimited format:
+        decision text | key=value | severity | episode
+    Also supports simpler formats with fewer fields.
+    """
+    ops = []
+    for line in lines:
+        line = line.strip().lstrip("- ")
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        op = {"decision": parts[0]}
+        for part in parts[1:]:
+            if "=" in part:
+                k, _, v = part.partition("=")
+                k = k.strip().lower()
+                v = v.strip()
+                if k == "key":
+                    op["key"] = v if v.lower() != "null" else None
+                elif k == "value":
+                    op["value"] = v if v.lower() != "null" else None
+                elif k == "severity":
+                    op["severity"] = v
+                elif k == "episode":
+                    op["episode"] = v
+                else:
+                    op["key"] = k
+                    op["value"] = v
+            else:
+                part_lower = part.lower()
+                if part_lower in ("branch", "flag", "divergence"):
+                    op["severity"] = part_lower
+                else:
+                    op["episode"] = part
+        ops.append(op)
+    return ops
+
+
 def parse_state_updates_block(text: str, current_turn: int) -> dict:
     """
     Parse the [STATE UPDATES] block text into ops compatible with existing apply_* functions.
@@ -1909,6 +1949,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         "pacing": None,
         "callback_ops": None,
         "npc_memory_ops": None,
+        "plot_ops": None,
         "scene_state": None,
         "character_states": None,
     }
@@ -1923,6 +1964,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         "SCENE": "SCENE", "CHARACTERS": "CHARACTERS",
         "SCENE STATE": "SCENE", "CHARACTER STATES": "CHARACTERS",
         "NPC MEMORIES": "MEMORIES",
+        "PLOT": "PLOT", "PLOT OPS": "PLOT",
     }
 
     for line in text.split("\n"):
@@ -1943,6 +1985,8 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         result["scene_state"] = _parse_scene_section(section_lines["SCENE"])
     if "CHARACTERS" in section_lines:
         result["character_states"] = _parse_characters_section(section_lines["CHARACTERS"])
+    if "PLOT" in section_lines:
+        result["plot_ops"] = _parse_plot_section(section_lines["PLOT"])
 
     return result
 
@@ -2146,6 +2190,16 @@ def extract_state_notifications(ops_source: dict, npcs_present: set = None) -> l
             "text": op.get("text"),
             "quote": op.get("quote"),
             "impact": op.get("impact"),
+        })
+
+    for op in ops_source.get("plot_ops", []):
+        notifications.append({
+            "type": "plot_decision",
+            "key": op.get("key"),
+            "value": op.get("value"),
+            "decision": op.get("decision"),
+            "severity": op.get("severity"),
+            "episode": op.get("episode"),
         })
 
     return notifications
