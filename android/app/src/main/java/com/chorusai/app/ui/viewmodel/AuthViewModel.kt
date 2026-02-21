@@ -88,13 +88,14 @@ class AuthViewModel @Inject constructor(
                         _uiState.update { it.copy(error = "Invalid server response") }
                         return@launch
                     }
-                    authRepo.saveLogin(username)
+                    val serverUsername = body.username
+                    authRepo.saveLogin(serverUsername)
                     if (body.hasApiKey) {
                         _navigationEvents.send(NavigationEvent.NavigateToChatList)
                     } else {
                         _navigationEvents.send(
                             NavigationEvent.NavigateToApiKeySetup(
-                                username = username,
+                                username = serverUsername,
                                 isNewUser = body.isNewUser
                             )
                         )
