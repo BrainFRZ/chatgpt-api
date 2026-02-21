@@ -254,7 +254,7 @@ export default function ChatView({
                     ✏️
                   </button>
                 )}
-                {msg.id && bookmarkingMessageIndex !== i && (
+                {msg.role === 'user' && msg.id && bookmarkingMessageIndex !== i && (
                   <button
                     onClick={() => msg.bookmark ? deleteBookmark(i) : startBookmark(i)}
                     style={styles.bookmarkButton}
@@ -282,7 +282,7 @@ export default function ChatView({
                 )}
               </div>
 
-              {bookmarkingMessageIndex === i && (
+              {msg.role === 'user' && bookmarkingMessageIndex === i && (
                 <div style={styles.bookmarkInputContainer}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="#4a4ae8" style={{flexShrink: 0}}>
                     <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
