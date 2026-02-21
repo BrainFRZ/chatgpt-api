@@ -1123,7 +1123,6 @@ private fun AssistantMessage(
             val metaParts = buildList {
                 message.model?.let { add(it) }
                 message.tokens?.let { add(it) }
-                message.cost?.let { add(it) }
             }
             if (metaParts.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
