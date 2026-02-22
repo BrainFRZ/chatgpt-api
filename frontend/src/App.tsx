@@ -2248,6 +2248,7 @@ function App() {
     setSelectedModel, setAnthropicSync, setDocsRefreshed,
     setChats, setProjectChatsCache, setRootChatsCache,
     resetChatState,
+    fetchUserStats,
   });
 
   // Close attach menu when clicking outside

@@ -24,6 +24,7 @@ interface UseSyncDeps {
   setProjectChatsCache: React.Dispatch<React.SetStateAction<{[key: string]: string[]}>>;
   setRootChatsCache: React.Dispatch<React.SetStateAction<string[] | null>>;
   resetChatState: () => void;
+  fetchUserStats: () => void;
 }
 
 export function useSync(deps: UseSyncDeps) {
@@ -147,6 +148,7 @@ export function useSync(deps: UseSyncDeps) {
           deps.setCurrentLeafId(event.data.current_leaf_id);
           deps.setStats(event.data.stats);
           deps.setContextStartIndex(event.data.context_start_index || 1);
+          deps.fetchUserStats();
           deps.setPipelineStage(prev => {
             if (!deps.currentChatRef.current) return prev;
             const next = new Map(prev);
