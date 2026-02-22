@@ -263,14 +263,13 @@ export default function CharacterPanel({
     return entry.data || entry || {};
   };
 
-  // Alert level labels and colors for hack mode HUD (matches backend ALERT_LEVEL_NAMES)
+  // Alert level labels and colors for hack mode HUD (matches rulebook thresholds)
   const alertLevelInfo = (level: number): [string, string] => {
     if (level <= 0) return ['Dormant', '#4ade80'];
-    if (level === 1) return ['Passive Scan', '#86efac'];
-    if (level === 2) return ['Suspicious', '#fbbf24'];
-    if (level === 3) return ['Active Alert', '#fb923c'];
-    if (level === 4) return ['Active Search', '#ef4444'];
-    return ['Lockdown', '#dc2626'];
+    if (level <= 2) return ['Elevated', '#fbbf24'];
+    if (level <= 4) return ['Active Search', '#fb923c'];
+    if (level <= 6) return ['Lockdown', '#ef4444'];
+    return ['Convergence', '#dc2626'];
   };
 
   // Hack mode HUD section
@@ -286,10 +285,10 @@ export default function CharacterPanel({
         <div style={{ marginBottom: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
             <span>Alert Level</span>
-            <span style={{ color: alertColor, fontWeight: 600 }}>{hackState.alert_level}/5 — {alertLabel}</span>
+            <span style={{ color: alertColor, fontWeight: 600 }}>{hackState.alert_level} — {alertLabel}</span>
           </div>
           <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${Math.min(100, ((hackState.alert_level || 0) / 5) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
+            <div style={{ height: '100%', width: `${Math.min(100, ((hackState.alert_level || 0) / 7) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
           </div>
         </div>
 

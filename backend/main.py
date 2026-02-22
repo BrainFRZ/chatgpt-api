@@ -956,8 +956,11 @@ def ensure_project_exists(username: str, project: str) -> bool:
     
     return is_new
 
+HACK_ONLY_FILES = {"Hacking Rulebook.md"}
+
 def load_project_files(username: str, project: str) -> str:
-    """Load all staged project files from project's uploads folder"""
+    """Load all staged project files from project's uploads folder.
+    Hack-only files (e.g. Hacking Rulebook.md) are excluded — they are injected separately during hack mode."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
 
     if not os.path.exists(uploads_dir):
@@ -972,6 +975,9 @@ def load_project_files(username: str, project: str) -> str:
 
     combined = ""
     for filename in sorted(project_files):
+        # Skip hack-only files (injected separately during hack mode)
+        if filename in HACK_ONLY_FILES:
+            continue
         # Skip files that are not staged (default to True for backward compat)
         if not tokens_cache.get(filename, {}).get("staged", True):
             continue
@@ -1000,6 +1006,9 @@ def load_project_files_for_agent(username: str, project: str, agent_name: str) -
 
     combined = ""
     for filename in sorted(project_files):
+        # Skip hack-only files (injected separately during hack mode)
+        if filename in HACK_ONLY_FILES:
+            continue
         file_cache = tokens_cache.get(filename, {})
         # Skip files that are not staged
         if not file_cache.get("staged", True):
@@ -2481,6 +2490,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         hack_system_content = hack_contract
         if hacker_profile:
             hack_system_content += "\n\n" + hacker_profile
+
+        # Inject Hacking Rulebook if present in this project's uploads
+        if request.project:
+            rulebook_path = os.path.join(get_project_dir(username, request.project), "uploads", "Hacking Rulebook.md")
+            if os.path.exists(rulebook_path):
+                with open(rulebook_path, 'r', encoding='utf-8') as f:
+                    hack_system_content += f"\n\n{'='*60}\nFILE: Hacking Rulebook.md\n{'='*60}\n\n" + f.read()
 
         system_msg = {"role": "system", "content": hack_system_content}
 

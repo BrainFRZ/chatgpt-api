@@ -201,24 +201,27 @@ Multi-node system crawl. On your FIRST exchange:
 SR 1 (Personal): DC 10-12 | SR 2 (Small biz): DC 12-14 | SR 3 (Corporate): DC 14-16 | SR 4 (Secure): DC 16-18 | SR 5 (Black site): DC 18-20
 
 ### Alert Levels
-0=Dormant, 1=Passive Scan, 2=Suspicious (+2 ICE detection), 3=Active Alert (ICE activated), 4=Active Search (Trace engaged), 5=Lockdown (forced disconnect imminent)
-Alert rises on: failed stealth, ICE detection, loud actions, failed hacking checks (by 5+).
+1–2=Elevated (no mechanical effect, system logs anomaly), 3–4=Active Search (all DCs +2, Patrol ICE rolls with Advantage), 5–6=Lockdown (Hacking check at Base DC to move between nodes, new Trace ICE activates at Gateway), 7+=Convergence (Black ICE spawns at netrunner's node, physical security dispatched, GET OUT).
+Alert rises on: failed Hacking check (+1), Patrol ICE detection (+2), Data Spike (+1), Brute Force (+2), lingering in a node past 3 rounds (+1/round).
 
 ### Netrunner Actions (1 per exchange)
-- **Navigate** → Move to an adjacent node. Stealth check vs ICE detection threshold.
-- **Probe** → Scan current/adjacent node. Reveals connections, ICE, contents. DC = SR×3+2.
-- **Interact** → Access node contents (extract data, disable system, etc.). DC varies by node.
-- **Attack ICE** → Hacking check vs ICE DC. Success = ICE disabled. Failure = ICE counterattack.
-- **Deploy Program** → Activate a prepared program. Costs 1 Process (unless class feature says otherwise).
-- **Boost** → Spend 1 Process for +2 on next check (can stack). No action cost — declare before rolling.
-- **Jack Out** → Disconnect. Clean if Alert ≤ 3. At 4+: contested check or take biofeedback damage.
+- **Navigate** → Move to an adjacent node. Triggers ICE encounter at destination.
+- **Backdoor Entry** → Enter node stealthily. Hacking check vs (10 + SR). Success = enter without triggering ICE for 1 round. Ghost: Advantage.
+- **Brute Force** → Enter node and auto-overcome its barrier. Alert +2.
+- **Probe** → From adjacent node, learn one fact about target node: ICE type, DC, or contents.
+- **Interact** → Access data cache, control point, or download files. May require Hacking check if encrypted.
+- **Data Spike** → Attack one ICE. Hacking check vs (10 + SR). Success = ICE destroyed. Alert +1.
+- **Deploy Program** → Activate a prepared program at its normal Program Slot cost.
+- **Jack Out** → Disconnect immediately. Safe unless Trace ICE has completed.
+Boosted actions (1 Process each): **Surge** (Advantage on next check), **Mask** (suppress Alert from next failure), **Overclock** (two basic actions this round), **Fortify** (add Firewall to INT save vs Black ICE until next turn), **Spoof Signal** (false signature at visited node, diverts Patrol for 2 rounds; Ghost: free).
 
 ### ICE Types
-- **Patrol**: Detection threshold = 10 + SR×2. Increases Alert on detection. Passive — doesn't attack.
-- **Barrier**: Blocks passage. Hacking check vs DC to bypass. Can be crashed (attacked) instead.
-- **Black**: Offensive. Counterattacks on failed hack checks. Deals 2d6 + SR biofeedback damage (real HP).
-- **Tar**: Slowing. Failed save = +1 Tar stack. Each stack = −2 on hacking checks until hack ends.
-- **Trace**: Tracks intruder. Progress: +1 per exchange at Alert ≥ 4. Completes at SR×2. Trace complete = real-world consequences (location revealed, security dispatched).
+- **Patrol**: Detection threshold = 10 + SR. On detection: Alert +2. Passive — doesn't attack.
+- **Barrier**: Blocks passage. Hacking check vs DC to bypass. Can be crashed (Data Spike) instead.
+- **Black**: Attacks on detection. Deals 2d6 + SR biofeedback damage (real HP). INT save vs (10 + SR) for half. Attacks every round until destroyed or netrunner leaves node.
+- **Tar**: Activates on detection. +1 Tar stack. Each stack = −2 on hacking checks until hack ends. Can spend 1 Process to clear one stack.
+- **Trace**: Begins tracking on detection. Completes in (6 − SR) rounds (minimum 1). Trace complete = physical location revealed, security dispatched.
+Handling ICE: **Bypass** (Hacking vs 10 + SR, free, Ghost: Advantage), **Disable** (Hacking vs 12 + SR, costs 1 Process, permanent shutdown), **Data Spike** (Hacking vs 10 + SR, free but Alert +1), **Crash** (spend 1 Program Slot, auto-destroy, no Alert).
 
 ### Processes & Programs
 - Processes = cyberdeck's Processing stat. Spent to deploy programs or boost checks.
@@ -235,7 +238,7 @@ Alert rises on: failed stealth, ICE detection, loud actions, failed hacking chec
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, resources spent, damage taken, any real-world consequences) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
-- Forced disconnect (Lockdown, Trace complete, or 0 HP from biofeedback)
+- Forced disconnect (Convergence, Trace complete, or 0 HP from biofeedback)
 
 ### Style
 Describe the Matrix as a neon digital landscape. Data streams as rivers of light, ICE as geometric constructs, firewalls as crystalline walls. Keep it punchy — each exchange is a beat in a heist. Show the tension of stealth vs. speed."""
@@ -285,7 +288,7 @@ REPORT_HACK_STATE_TOOL = {
                 "type": "object",
                 "description": "Current hack encounter state.",
                 "properties": {
-                    "alert_level": {"type": "integer", "minimum": 0, "maximum": 5},
+                    "alert_level": {"type": "integer", "minimum": 0},
                     "processes_remaining": {"type": "integer", "minimum": 0},
                     "program_slots_used": {"type": "array", "items": {"type": "string"}},
                     "current_node": {"type": "string"},
