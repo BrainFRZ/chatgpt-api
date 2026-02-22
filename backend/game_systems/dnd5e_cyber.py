@@ -6,6 +6,7 @@ and adds ship state tracking (hull, shields, ammo, credits) via ship_ops.
 """
 
 import copy
+import json
 import logging
 
 from .dnd5e import (
@@ -147,6 +148,352 @@ def build_game_injection(game_state):
 
 
 # ============================================================
+# Hack Mode — Matrix Encounters
+# ============================================================
+
+# Ghost subclass features by minimum level
+GHOST_FEATURES = {
+    3: [
+        "Zero Footprint: Advantage on Backdoor Entry. After any node action, may spend 1 round to reduce Alert by 1. Spoof Signal costs 0 Processes.",
+        "Clean Exit: Reaction: Jack Out with no consequences. Alert resets. 1/SR.",
+    ],
+    6: [
+        "Spoof Identity: Enter systems as a scanned user. Bypass barriers at/below clearance. Lasts until Alert reaches Active Search. 1/SR.",
+    ],
+    9: [
+        "Ghost Protocol: Invisible in the Matrix for 1 minute. End early for automatic critical on next hack action. 1/LR.",
+    ],
+    13: [
+        "Digital Phantom: While Ghost Protocol is active, immune to Trace ICE. Can pass through Barrier nodes without checks.",
+    ],
+}
+
+ALERT_LEVEL_NAMES = {
+    0: "Dormant",
+    1: "Passive Scan",
+    2: "Suspicious",
+    3: "Active Alert",
+    4: "Active Search",
+    5: "Lockdown",
+}
+
+HACK_CONTRACT = """## Hack Mode — Matrix Encounter
+
+You are running a live hacking encounter. A netrunner has jacked into a target system.
+
+### Your Role
+- Describe the Matrix environment from the netrunner's perspective (neon data streams, geometric ICE constructs, digital architecture)
+- Adjudicate all hack actions: resolve dice rolls, apply consequences, track state
+- Call `report_hack_state` after EVERY exchange
+- Set `hack_complete: true` when the hack ends (objective achieved, jack out, or dumped)
+
+### Quick Hack (2-4 exchanges)
+Direct strike on a single-objective system. No node map. The netrunner faces 1-2 ICE encounters between them and the target. Resolve quickly.
+
+### Full Sequence (5-8 exchanges)
+Multi-node system crawl. On your FIRST exchange:
+1. Generate the complete system architecture based on the SR and target type
+2. Include it in hack_state.system_map as structured JSON: `{"sr": N, "nodes": {"NodeName": {"type": "gateway|data_cache|control_point|barrier|target", "ice": "patrol|black|tar|trace|barrier|null", "dc": N, "connections": [...], "contents": "..."}}}`
+3. Describe the Gateway node to the player
+4. The player does NOT see the map — reveal only through navigation and Probe actions
+
+### System Rating (SR) — Determines base DCs
+SR 1 (Personal): DC 10-12 | SR 2 (Small biz): DC 12-14 | SR 3 (Corporate): DC 14-16 | SR 4 (Secure): DC 16-18 | SR 5 (Black site): DC 18-20
+
+### Alert Levels
+0=Dormant, 1=Passive Scan, 2=Suspicious (+2 ICE detection), 3=Active Alert (ICE activated), 4=Active Search (Trace engaged), 5=Lockdown (forced disconnect imminent)
+Alert rises on: failed stealth, ICE detection, loud actions, failed hacking checks (by 5+).
+
+### Netrunner Actions (1 per exchange)
+- **Navigate** → Move to an adjacent node. Stealth check vs ICE detection threshold.
+- **Probe** → Scan current/adjacent node. Reveals connections, ICE, contents. DC = SR×3+2.
+- **Interact** → Access node contents (extract data, disable system, etc.). DC varies by node.
+- **Attack ICE** → Hacking check vs ICE DC. Success = ICE disabled. Failure = ICE counterattack.
+- **Deploy Program** → Activate a prepared program. Costs 1 Process (unless class feature says otherwise).
+- **Boost** → Spend 1 Process for +2 on next check (can stack). No action cost — declare before rolling.
+- **Jack Out** → Disconnect. Clean if Alert ≤ 3. At 4+: contested check or take biofeedback damage.
+
+### ICE Types
+- **Patrol**: Detection threshold = 10 + SR×2. Increases Alert on detection. Passive — doesn't attack.
+- **Barrier**: Blocks passage. Hacking check vs DC to bypass. Can be crashed (attacked) instead.
+- **Black**: Offensive. Counterattacks on failed hack checks. Deals 2d6 + SR biofeedback damage (real HP).
+- **Tar**: Slowing. Failed save = +1 Tar stack. Each stack = −2 on hacking checks until hack ends.
+- **Trace**: Tracks intruder. Progress: +1 per exchange at Alert ≥ 4. Completes at SR×2. Trace complete = real-world consequences (location revealed, security dispatched).
+
+### Processes & Programs
+- Processes = cyberdeck's Processing stat. Spent to deploy programs or boost checks.
+- Programs are pre-loaded (require Program Slots). Active until dismissed or hack ends.
+- The [HACKER PROFILE] lists available processes and prepared programs.
+
+### Dice Mechanics
+- Hacking check: 1d20 + Hacking Bonus vs DC
+- Show full breakdown: 🎲 [Description]: [**roll**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
+- Apply advantage/disadvantage when applicable (Ghost features, Control Points, etc.)
+- Nat 20: exceptional success (extra benefit). Nat 1: catastrophic failure (ICE counterattack, Alert spike).
+
+### Completing the Hack
+Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, resources spent, damage taken, any real-world consequences) when:
+- Target objective achieved
+- Netrunner voluntarily jacks out (partial success possible)
+- Forced disconnect (Lockdown, Trace complete, or 0 HP from biofeedback)
+
+### Style
+Describe the Matrix as a neon digital landscape. Data streams as rivers of light, ICE as geometric constructs, firewalls as crystalline walls. Keep it punchy — each exchange is a beat in a heist. Show the tension of stealth vs. speed."""
+
+REPORT_HACK_STATE_TOOL = {
+    "name": "report_hack_state",
+    "description": "Report hack encounter state after each exchange. Call every exchange during hack mode.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "available_actions", "hack_state"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Matrix description — what the netrunner experiences this exchange."
+            },
+            "available_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Available actions the netrunner can take next."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "Dice rolls made this exchange.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "dc": {"type": "integer"},
+                        "roll": {"type": "integer"},
+                        "modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "total": {"type": "integer"},
+                        "advantage": {"type": "boolean"},
+                        "result": {"type": "string", "enum": ["success", "failure"]}
+                    }
+                }
+            },
+            "hack_state": {
+                "type": "object",
+                "description": "Current hack encounter state.",
+                "properties": {
+                    "alert_level": {"type": "integer", "minimum": 0, "maximum": 5},
+                    "processes_remaining": {"type": "integer", "minimum": 0},
+                    "program_slots_used": {"type": "array", "items": {"type": "string"}},
+                    "current_node": {"type": "string"},
+                    "nodes_visited": {"type": "array", "items": {"type": "string"}},
+                    "ice_status": {
+                        "type": "object",
+                        "description": "Map of node name to ICE status string (e.g. 'Patrol ICE — active', 'Black ICE — disabled').",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "trace_progress": {
+                        "type": ["integer", "null"],
+                        "description": "Trace ICE progress counter. null if no Trace active."
+                    },
+                    "tar_stacks": {"type": "integer", "minimum": 0},
+                    "hp_change": {
+                        "type": "integer",
+                        "description": "Cumulative HP change during this hack (negative = damage taken from biofeedback)."
+                    },
+                    "system_map": {
+                        "type": ["object", "null"],
+                        "description": "Full Sequence only. Set on first exchange with complete system architecture. null for Quick Hacks."
+                    }
+                }
+            },
+            "hack_complete": {
+                "type": "boolean",
+                "description": "True when the hack encounter is over (objective achieved, jacked out, or dumped)."
+            },
+            "narrative_summary": {
+                "type": ["string", "null"],
+                "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, resources spent, damage taken."
+            }
+        }
+    }
+}
+
+
+def init_hack_state(tier="full_sequence", target_system="Unknown", sr=3, processes_max=4):
+    """Return initial hack_state structure."""
+    return {
+        "active": True,
+        "tier": tier,
+        "target_system": target_system,
+        "sr": sr,
+        "start_message_id": None,
+        "system_map": None,
+        "alert_level": 0,
+        "processes_remaining": processes_max,
+        "processes_max": processes_max,
+        "program_slots_used": [],
+        "current_node": "Gateway",
+        "nodes_visited": ["Gateway"],
+        "ice_status": {},
+        "trace_progress": None,
+        "tar_stacks": 0,
+        "hp_change": 0,
+        "narrative_summary": None,
+        "available_actions": [],
+    }
+
+
+def apply_hack_state(hack_state, tool_input):
+    """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
+    hs = tool_input.get("hack_state", {})
+
+    # Update tracked fields from model's state report
+    for field in ["alert_level", "processes_remaining", "program_slots_used",
+                  "current_node", "nodes_visited", "ice_status",
+                  "trace_progress", "tar_stacks", "hp_change"]:
+        if field in hs:
+            hack_state[field] = hs[field]
+
+    # System map (Full Sequence, first exchange only)
+    if hs.get("system_map") and not hack_state.get("system_map"):
+        hack_state["system_map"] = hs["system_map"]
+
+    # Available actions for HUD
+    if tool_input.get("available_actions"):
+        hack_state["available_actions"] = tool_input["available_actions"]
+
+    # Hack completion
+    if tool_input.get("hack_complete"):
+        hack_state["active"] = False
+        hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
+
+    return hack_state
+
+
+def build_hack_injection(hack_state):
+    """Build state injection string for hack exchange user messages."""
+    parts = []
+
+    # Core hack state
+    alert_name = ALERT_LEVEL_NAMES.get(hack_state.get("alert_level", 0), "Unknown")
+    processes_max = hack_state.get("processes_max", 4)
+    lines = [
+        "[HACK STATE]",
+        f"Target: {hack_state.get('target_system', 'Unknown')} (SR {hack_state.get('sr', 3)})",
+        f"Tier: {hack_state.get('tier', 'full_sequence').replace('_', ' ').title()}",
+        f"Alert Level: {hack_state.get('alert_level', 0)} ({alert_name})",
+        f"Processes: {hack_state.get('processes_remaining', 0)}/{processes_max}",
+    ]
+
+    programs = hack_state.get("program_slots_used", [])
+    lines.append(f"Active Programs: {', '.join(programs) if programs else 'None'}")
+    lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
+    lines.append(f"Nodes Visited: {', '.join(hack_state.get('nodes_visited', ['Gateway']))}")
+
+    ice = hack_state.get("ice_status", {})
+    if ice:
+        lines.append("ICE Status:")
+        for node, status in ice.items():
+            lines.append(f"  {node}: {status}")
+
+    trace = hack_state.get("trace_progress")
+    if trace is not None:
+        sr = hack_state.get("sr", 3)
+        lines.append(f"Trace Progress: {trace}/{sr * 2}")
+
+    tar = hack_state.get("tar_stacks", 0)
+    if tar:
+        lines.append(f"Tar Stacks: {tar} (−{tar * 2} to hacking checks)")
+
+    hp = hack_state.get("hp_change", 0)
+    if hp:
+        lines.append(f"HP Change This Hack: {hp}")
+
+    lines.append("[/HACK STATE]")
+    parts.append("\n".join(lines))
+
+    # System map (Full Sequence — model reference, NOT shown to player)
+    system_map = hack_state.get("system_map")
+    if system_map:
+        parts.append(f"[SYSTEM MAP]\n{json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+
+    return "\n\n".join(parts)
+
+
+def build_hacker_profile(character_states):
+    """Build compact hacker profile from character_states for hack mode context.
+    Extracts PC stats relevant to hacking (HP, AC, class features, cyberdeck, programs)."""
+    # Find the PC
+    pc_name = None
+    pc_data = None
+    for name, entry in character_states.items():
+        data = entry.get("data", entry)  # handle both wrapped and unwrapped formats
+        if data.get("type") == "pc":
+            pc_name = name
+            pc_data = data
+            break
+
+    if not pc_data:
+        return ""
+
+    lines = ["[HACKER PROFILE]"]
+    lines.append(f"Name: {pc_name}")
+
+    # Class and level
+    cls = pc_data.get("class", "Unknown")
+    level = pc_data.get("level")
+    if level:
+        lines.append(f"Class: {cls} | Level: {level}")
+    else:
+        lines.append(f"Class: {cls}")
+
+    # Vitals (HP, AC, etc.)
+    vitals_parts = []
+    for v in pc_data.get("vitals", []):
+        label = v.get("label", "")
+        if "current" in v and "max" in v:
+            vitals_parts.append(f"{label}: {v['current']}/{v['max']}")
+        elif "value" in v:
+            vitals_parts.append(f"{label}: {v['value']}")
+    if vitals_parts:
+        lines.append(" | ".join(vitals_parts))
+
+    # Hacking-relevant resources (Processes, Program Slots, etc.)
+    for r in pc_data.get("resources", []):
+        label = r.get("label", "")
+        if any(kw in label.lower() for kw in ["process", "program", "hack", "cyberdeck"]):
+            lines.append(f"{label}: {r.get('current', 0)}/{r.get('max', 0)}")
+
+    # Conditions
+    conditions = pc_data.get("conditions", [])
+    if conditions:
+        lines.append(f"Conditions: {', '.join(conditions)}")
+
+    # Summary (may contain cyberdeck info, hacking bonus, prepared programs, etc.)
+    summary = pc_data.get("summary", "")
+    if summary:
+        lines.append(f"Notes: {summary}")
+
+    # Ghost subclass features (filtered by level)
+    if level and "ghost" in cls.lower():
+        feature_lines = []
+        for min_level, features in sorted(GHOST_FEATURES.items()):
+            if level >= min_level:
+                feature_lines.extend(features)
+        if feature_lines:
+            lines.append(f"\nGhost Features (active at Lvl {level}):")
+            for feat in feature_lines:
+                lines.append(f"- {feat}")
+
+    lines.append("[/HACKER PROFILE]")
+    return "\n".join(lines)
+
+
+# ============================================================
 # Pipeline Contracts
 # ============================================================
 
@@ -230,6 +577,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     {"action": "drop", "npc": "<NPC name>", "index": <0-based index in that NPC's memory list>}
   ],
   "plot_ops": [],
+  "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -274,6 +622,14 @@ PLOT OPS (save-state notifications):
 
 IRRECONCILABLE PLOT BREAK:
 - If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
+
+HACK TRIGGER:
+- When a cyberdeck-equipped PC initiates a Quick Hack or Full Sequence, set "hack_trigger" in your output:
+  {"tier": "quick_hack" or "full_sequence", "target_system": "<name of target system>", "sr": <1-5>}
+- Simple Checks (single Hacking skill check) resolve normally via Mechanics — no hack_trigger needed.
+- Only trigger for Quick Hacks (2-4 exchanges) or Full Sequences (5-8 exchanges) where the netrunner jacks into a system.
+- Set to null on all other turns (the vast majority).
+- Describe the moment of jacking in narratively in the current turn. The app will switch to hack mode for subsequent exchanges.
 
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
@@ -664,7 +1020,17 @@ When triggered, guide the player through D&D 5E character creation (reflavored f
 - Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
 - Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
 - When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+### Hack Mode Trigger
+When a cyberdeck-equipped PC initiates a hack against a system (Quick Hack or Full Sequence), set `hack_trigger` in your `report_state` call:
+- `tier`: "quick_hack" (2-4 exchanges, single objective) or "full_sequence" (5-8 exchanges, node crawl)
+- `target_system`: Name/description of the target system (e.g. "Meridian Corp personnel database")
+- `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
+
+Simple Checks (single Hacking skill check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Sequences where the cyberdeck-equipped netrunner is jacking into a system.
+
+Describe the moment of jacking in narratively (the character connecting, the Matrix materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -863,6 +1229,15 @@ STATE_REPORT_TOOL = {
                         }
                     }
                 }
+            },
+            "hack_trigger": {
+                "type": ["object", "null"],
+                "description": "Set when a cyberdeck-equipped PC initiates a Quick Hack or Full Sequence. null on normal turns. Simple Checks resolve in the narrative — no trigger needed.",
+                "properties": {
+                    "tier": {"type": "string", "enum": ["quick_hack", "full_sequence"]},
+                    "target_system": {"type": "string", "description": "Name/description of the target system"},
+                    "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"}
+                }
             }
         }
     }
@@ -883,4 +1258,11 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Hack mode (Matrix encounters)
+    "hack_contract": HACK_CONTRACT,
+    "hack_tool": REPORT_HACK_STATE_TOOL,
+    "init_hack_state": init_hack_state,
+    "apply_hack_state": apply_hack_state,
+    "build_hack_injection": build_hack_injection,
+    "build_hacker_profile": build_hacker_profile,
 }

@@ -19,6 +19,7 @@ export interface CharacterPanelProps {
   mobileBottomSheetOpen: boolean;
   setMobileBottomSheetOpen: (v: boolean) => void;
   characterSheetFiles: {name: string, content: string}[];
+  hackState: any;
 }
 
 // ─── VS Code Dark+ YAML Syntax Highlighting ───
@@ -182,6 +183,7 @@ export default function CharacterPanel({
   mobileBottomSheetOpen,
   setMobileBottomSheetOpen,
   characterSheetFiles,
+  hackState,
 }: CharacterPanelProps) {
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
@@ -259,6 +261,118 @@ export default function CharacterPanel({
     const entry = cs[name];
     if (!entry) return { type: 'npc' };
     return entry.data || entry || {};
+  };
+
+  // Alert level labels and colors for hack mode HUD (matches backend ALERT_LEVEL_NAMES)
+  const alertLevelInfo = (level: number): [string, string] => {
+    if (level <= 0) return ['Dormant', '#4ade80'];
+    if (level === 1) return ['Passive Scan', '#86efac'];
+    if (level === 2) return ['Suspicious', '#fbbf24'];
+    if (level === 3) return ['Active Alert', '#fb923c'];
+    if (level === 4) return ['Active Search', '#ef4444'];
+    return ['Lockdown', '#dc2626'];
+  };
+
+  // Hack mode HUD section
+  const renderHackHud = (condensed?: boolean) => {
+    if (!hackState?.active) return null;
+    const [alertLabel, alertColor] = alertLevelInfo(hackState.alert_level || 0);
+    const procPct = hackState.processes_max > 0 ? Math.max(0, Math.min(100, (hackState.processes_remaining / hackState.processes_max) * 100)) : 0;
+    const iceEntries = Object.entries(hackState.ice_status || {});
+
+    return (
+      <div style={{ padding: condensed ? '6px 8px' : '8px', borderBottom: '1px solid #0a3a0a', backgroundColor: '#0a1a0a' }}>
+        {/* Alert Level */}
+        <div style={{ marginBottom: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+            <span>Alert Level</span>
+            <span style={{ color: alertColor, fontWeight: 600 }}>{hackState.alert_level}/5 — {alertLabel}</span>
+          </div>
+          <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${Math.min(100, ((hackState.alert_level || 0) / 5) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
+          </div>
+        </div>
+
+        {/* Processes */}
+        <div style={{ marginBottom: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+            <span>Processes</span>
+            <span>{hackState.processes_remaining}/{hackState.processes_max}</span>
+          </div>
+          <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${procPct}%`, backgroundColor: '#00ff41', borderRadius: '2px', transition: 'width 0.3s' }} />
+          </div>
+        </div>
+
+        {/* Current Node */}
+        {hackState.current_node && (
+          <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
+            <span>Node: </span>
+            <span style={{ color: '#00ff41', fontWeight: 600 }}>{hackState.current_node}</span>
+            {hackState.nodes_visited?.length > 0 && (
+              <span style={{ color: '#555', marginLeft: '6px' }}>
+                ({(() => { const prior = hackState.nodes_visited.filter((n: string) => n !== hackState.current_node); return prior.length > 0 ? prior.join(' \u2192 ') + ' \u2192 ' + hackState.current_node : hackState.current_node; })()})
+              </span>
+            )}
+          </div>
+        )}
+
+        {!condensed && (
+          <>
+            {/* Active Programs */}
+            {hackState.program_slots_used?.length > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
+                <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+                  {hackState.program_slots_used.map((p: string, i: number) => (
+                    <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: '#00ff4118', color: '#00ff41', fontWeight: 500 }}>{p}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ICE Status */}
+            {iceEntries.length > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>ICE</div>
+                {iceEntries.map(([node, status]: [string, any]) => {
+                  const statusStr = String(status).toLowerCase();
+                  const iceColor = statusStr.includes('destroyed') || statusStr.includes('defeated') ? '#666' : statusStr.includes('active') ? '#ef4444' : '#fb923c';
+                  return (
+                    <div key={node} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', padding: '1px 0' }}>
+                      <span style={{ color: '#999' }}>{node}</span>
+                      <span style={{ color: iceColor }}>{String(status)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Trace Progress */}
+            {hackState.trace_progress != null && hackState.trace_progress > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                {(() => { const traceMax = (hackState.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hackState.trace_progress / traceMax) * 100) : 0; return (<>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+                  <span style={{ color: '#fbbf24' }}>{'\u26A0'} Trace</span>
+                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{hackState.trace_progress}/{traceMax}</span>
+                </div>
+                <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${tracePct}%`, backgroundColor: tracePct >= 75 ? '#ef4444' : '#fbbf24', borderRadius: '2px', transition: 'width 0.3s' }} />
+                </div>
+                </>); })()}
+              </div>
+            )}
+
+            {/* Tar Stacks */}
+            {hackState.tar_stacks > 0 && (
+              <div style={{ fontSize: '0.68rem', color: '#fb923c' }}>
+                Tar Stacks: {hackState.tar_stacks}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
   };
 
   // Render a single card
@@ -373,7 +487,10 @@ export default function CharacterPanel({
             style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer', padding: '4px 8px' }}
             title="Open character panel (Ctrl+])"
           >{'\u00AB'}</button>
-          {charCount > 0 && (
+          {hackState?.active && (
+            <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#00ff41', marginTop: '8px', backgroundColor: '#00ff4118', borderRadius: '8px', padding: '1px 5px' }}>H</span>
+          )}
+          {charCount > 0 && !hackState?.active && (
             <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
           )}
         </div>
@@ -401,15 +518,18 @@ export default function CharacterPanel({
         )}
         {/* Panel header */}
         <div style={{
-          padding: '12px 12px 8px', borderBottom: '1px solid #333', display: 'flex',
+          padding: '12px 12px 8px', borderBottom: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
           justifyContent: 'space-between', alignItems: 'center',
-          backgroundColor: combat ? '#2a1a1a' : 'transparent',
+          backgroundColor: hackState?.active ? '#0a1f0a' : combat ? '#2a1a1a' : 'transparent',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: '#ccc' }}>
-              {combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : '#ccc' }}>
+              {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
-            {combat && (
+            {hackState?.active && (
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
+            )}
+            {!hackState?.active && combat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
             )}
           </div>
@@ -419,6 +539,9 @@ export default function CharacterPanel({
             title="Close character panel (Ctrl+])"
           >{'\u00BB'}</button>
         </div>
+
+        {/* Hack HUD */}
+        {renderHackHud()}
 
         {/* Panel body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px', scrollbarWidth: 'thin' as any }}>
@@ -477,7 +600,7 @@ export default function CharacterPanel({
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
-    if (allPresent.length === 0) return null;
+    if (allPresent.length === 0 && !hackState?.active) return null;
 
     return (
       <>
@@ -494,21 +617,23 @@ export default function CharacterPanel({
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
-        backgroundColor: '#16162a', borderTop: '1px solid #333',
+        backgroundColor: hackState?.active ? '#0a1a0a' : '#16162a', borderTop: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`,
         zIndex: 1500, transition: 'height 0.25s ease',
         display: 'flex', flexDirection: 'column' as const,
       }}>
         {/* Tab handle */}
         <div
           onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? '1px solid #333' : 'none' }}
+          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: hackState?.active ? '#00ff41' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}` : 'none' }}
         >
-          <div style={{ width: '32px', height: '3px', backgroundColor: '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {allPresent.length} characters in scene
+          <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
+          {hackState?.active && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
           <>
+            {renderHackHud(true)}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
               {allPresent.map((name: string) => renderCard(name))}
             </div>

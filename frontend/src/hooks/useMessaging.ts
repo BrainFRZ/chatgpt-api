@@ -27,6 +27,7 @@ interface UseMessagingDeps {
   setPipelineStage: React.Dispatch<React.SetStateAction<Map<string, {stage: string, status: string}>>>;
   setPipelineState: (v: any) => void;
   setStateNotifications: (v: any[]) => void;
+  setHackState: (v: any) => void;
   setDocsRefreshed: (v: boolean) => void;
   setError: (v: string) => void;
   editingMessageIndex: number | null;
@@ -216,6 +217,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
+            deps.setHackState(event.data);
+          } else if (event.type === 'hack_complete') {
+            deps.setHackState(null);
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -433,6 +438,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
+            deps.setHackState(event.data);
+          } else if (event.type === 'hack_complete') {
+            deps.setHackState(null);
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -453,8 +462,12 @@ export function useMessaging(deps: UseMessagingDeps) {
               cost: data.cost,
               reasoning: data.reasoning,
               model: data.model,
-              service_tier: data.service_tier
+              service_tier: data.service_tier,
+              ...(data.hack_mode ? { hack_mode: true } : {})
             };
+            if (data.hack_mode) {
+              userMsgWithId.hack_mode = true;
+            }
 
             // Replace optimistic messages with complete ones
             deps.setMessages(prev => [...prev.slice(0, -2), userMsgWithId, assistantMessage]);

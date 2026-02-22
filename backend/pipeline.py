@@ -250,6 +250,62 @@ def build_message_content(msg: dict) -> str:
     return content
 
 
+def collapse_hack_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse hack_mode messages into synthetic summary pairs for normal context building.
+
+    Scans the branch_path for consecutive runs of hack_mode=true messages and replaces
+    each run with a single user/assistant pair containing the hack result summary.
+    System message (first) and current user message (last) are preserved unchanged.
+    Non-hack messages are passed through unmodified.
+
+    This ensures that post-hack normal turns don't include hack exchange details
+    in the API context, keeping the narrative context clean and focused.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    # Check if there are any hack messages (fast path)
+    history = branch_path[1:-1]
+    if not any(msg.get("hack_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]  # Keep system message
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("hack_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found start of hack run — scan to end
+        hack_summary = None
+        j = i
+        while j < len(history) and history[j].get("hack_mode"):
+            # Check for narrative_summary in hack_tool_input on assistant messages
+            tool_input = history[j].get("hack_tool_input", {})
+            if tool_input and tool_input.get("narrative_summary"):
+                hack_summary = tool_input["narrative_summary"]
+            j += 1
+
+        # Replace entire hack run with a synthetic summary pair
+        if hack_summary:
+            result.append({
+                "role": "user",
+                "content": "[The netrunner initiated a hack sequence.]"
+            })
+            result.append({
+                "role": "assistant",
+                "content": f"[HACK RESULT]\n{hack_summary}\n[/HACK RESULT]"
+            })
+        # else: incomplete hack with no summary — drop silently
+
+        i = j  # Skip past all hack messages
+
+    result.append(branch_path[-1])  # Keep current user message
+    return result
+
+
 def get_context_pairs(
     branch_path: list[dict],
     threshold_pairs: int,
@@ -932,8 +988,10 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "events", "status": "thinking"})
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
+    # Collapse hack messages into summary pairs before context trimming
+    branch_path_for_events = collapse_hack_messages(branch_path)
     recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
-        branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
+        branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
     events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs)

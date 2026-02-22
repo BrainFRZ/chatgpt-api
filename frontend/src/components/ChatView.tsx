@@ -223,11 +223,15 @@ export default function ChatView({
           const actualBackendIndex = firstDisplayedBackendIndex + i;
           const isInContext = actualBackendIndex >= contextStartIndex;
 
-          // Choose background color based on context and role
+          // Choose background color based on context, role, and hack mode
           let backgroundColor;
+          const isHackMode = !!(msg as any).hack_mode;
           if (!isInContext) {
             // Out of context: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
+          } else if (isHackMode) {
+            // Hack mode: matrix-themed green/dark tint
+            backgroundColor = msg.role === 'user' ? '#1a2e1a' : '#0f1f0f';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -242,7 +246,8 @@ export default function ChatView({
                 backgroundColor
               }}
             >
-              <div style={styles.messageRole}>
+              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : {})}}>
+                {isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button

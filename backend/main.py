@@ -36,6 +36,7 @@ from pipeline import (
     build_single_agent_injections, build_player_agency_reminder,
     migrate_pipeline_state,
     get_context_pairs, extract_state_notifications,
+    collapse_hack_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -2413,21 +2414,127 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         gs = get_game_system(DEFAULT_GAME_SYSTEM)
 
+    # Check if hack mode (matrix encounter) is active or just completed
+    use_hack_mode = False
+    hack_state = data.get("hack_state")
+    hack_result_injection = None
+
+    if hack_state:
+        if hack_state.get("active") and gs and gs.get("hack_contract"):
+            use_hack_mode = True
+        elif not hack_state.get("active") and hack_state.get("narrative_summary"):
+            # Hack just completed on the previous turn — inject result into this turn
+            hack_result_injection = (
+                f"[HACK RESULT]\n{hack_state['narrative_summary']}\n[/HACK RESULT]"
+            )
+            # Apply cumulative HP change back to persistent character_states
+            hp_change = hack_state.get("hp_change", 0)
+            if hp_change:
+                ps = data.get("pipeline_state", {})
+                for name, entry in ps.get("character_states", {}).items():
+                    d = entry.get("data", entry)
+                    if d.get("type") == "pc":
+                        for v in d.get("vitals", []):
+                            if v.get("label") == "HP" and "current" in v:
+                                v["current"] = max(0, v["current"] + hp_change)
+                                break
+                        break
+            # Apply process changes back to character_states
+            processes_remaining = hack_state.get("processes_remaining")
+            if processes_remaining is not None:
+                ps = data.get("pipeline_state", {})
+                for name, entry in ps.get("character_states", {}).items():
+                    d = entry.get("data", entry)
+                    if d.get("type") == "pc":
+                        for r in d.get("resources", []):
+                            if "process" in r.get("label", "").lower():
+                                r["current"] = processes_remaining
+                                break
+                        break
+            data["hack_state"] = None
+            logger.info(f"Hack: cleared completed hack_state, injecting result for {username}")
+
+    if use_hack_mode:
+        # Flag the user message as a hack exchange
+        user_msg_data["hack_mode"] = True
+
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
 
-    if use_stateful:
+    # GPT-5.2 hack request params (non-streaming JSON call, built separately)
+    hack_gpt_request_params = None
+
+    if use_hack_mode:
+        # ============================================================
+        # Hack mode: stripped context with hack contract + hacker profile
+        # ============================================================
+        hack_ps = data.get("pipeline_state", {})
+
+        # Build system prompt: hack contract + hacker profile
+        hack_contract = gs["hack_contract"]
+        hacker_profile = gs["build_hacker_profile"](hack_ps.get("character_states", {}))
+        hack_injection = gs["build_hack_injection"](hack_state)
+
+        hack_system_content = hack_contract
+        if hacker_profile:
+            hack_system_content += "\n\n" + hacker_profile
+
+        system_msg = {"role": "system", "content": hack_system_content}
+
+        # Only include hack-flagged messages (from start_message_id onward)
+        hack_start_id = hack_state.get("start_message_id")
+        hack_history = []
+        found_start = not hack_start_id  # if no start_id, include all hack messages
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == hack_start_id:
+                found_start = True
+            if found_start and msg.get("hack_mode"):
+                hack_history.append({"role": msg["role"], "content": msg["content"]})
+
+        # User message with hack state injection prepended
+        user_content = build_message_content(branch_path[-1])
+        user_content = hack_injection + "\n\n" + user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + hack_history + [new_user_msg]
+
+        # Context start index: only hack messages are in context
+        context_start_index = max(1, len(branch_path) - len(hack_history) - 1)
+
+        logger.info(f"Hack mode: {hack_state.get('tier')} for {username}, "
+                     f"SR {hack_state.get('sr')}, {len(hack_history)} prior hack exchanges")
+
+        if model_id == "gpt-5.2":
+            # GPT-5.2: build non-streaming JSON request via pipeline request builder
+            gpt_hack_messages = [
+                {"role": "system", "content": hack_system_content
+                 + "\n\nYou MUST output valid JSON matching the report_hack_state schema:\n"
+                 + json.dumps(gs["hack_tool"]["input_schema"], indent=2)},
+            ] + hack_history + [new_user_msg]
+            hack_gpt_request_params = provider.build_pipeline_request(
+                messages=gpt_hack_messages,
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="hack",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
+    elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
         import copy as _copy
         stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
 
         trim_anchor_id = data.get("_trim_anchor_id")
+        # Collapse hack messages into summary pairs before context trimming
+        branch_path_for_context = collapse_hack_messages(branch_path)
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
-            branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
+            branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
         )
         data["_trim_anchor_id"] = new_anchor_id
         data.pop("_stateful_trimming", None)  # clean up legacy flag
@@ -2455,6 +2562,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Build injections for user message
         injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
 
+        # Inject hack result from a just-completed hack if applicable
+        if hack_result_injection:
+            injections_str = (injections_str + "\n\n" + hack_result_injection) if injections_str else hack_result_injection
+
         # System prompt: contract + original
         system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
         system_msg = {"role": branch_path[0]["role"], "content": system_content}
@@ -2475,28 +2586,50 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
-        history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
+        # Collapse hack messages in non-stateful path too
+        bp_filtered = collapse_hack_messages(branch_path)
+        history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
+
+        # Inject hack result into non-stateful path too
+        if hack_result_injection:
+            user_content = hack_result_injection + "\n\n" + user_content
+
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
         messages_for_api = [system_msg] + history_msgs + [new_user_msg]
 
     is_free_chat = not request.project
     use_cache = data.get("anthropic_sync", True)
-    request_params = provider.build_request(
-        messages=messages_for_api,
-        username=username,
-        project=request.project,
-        chat_name=request.chat_name,
-        is_free_chat=is_free_chat,
-        use_cache=use_cache
-    )
-
-    if use_stateful:
-        request_params["tools"] = [gs["state_report_tool"]]
-        # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
-        # Auto + strong contract instructions achieves the same result.
+    if use_hack_mode and model_id.startswith("claude"):
+        # Claude hack mode: use standard build_request with hack tool
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
+        request_params["tools"] = [gs["hack_tool"]]
         request_params["tool_choice"] = {"type": "auto"}
+    elif use_hack_mode:
+        # GPT-5.2 hack mode: request_params not used (hack_gpt_request_params used instead)
+        request_params = {}
+    else:
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=is_free_chat,
+            use_cache=use_cache
+        )
+        if use_stateful:
+            request_params["tools"] = [gs["state_report_tool"]]
+            # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
+            # Auto + strong contract instructions achieves the same result.
+            request_params["tool_choice"] = {"type": "auto"}
 
     # Store for use inside event_generator (assignments there make it local)
     _outer_context_start_index = context_start_index
@@ -2521,10 +2654,179 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # user_message_added broadcast moved before StreamingResponse
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
-            use_pipeline = model_id == "gpt-5.2" and request.project
-            # use_stateful is computed in the outer scope (before event_generator)
+            # Hack mode bypasses the pipeline — uses single-agent call instead
+            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode
+            # use_stateful and use_hack_mode are computed in the outer scope (before event_generator)
 
-            if use_pipeline:
+            if use_hack_mode and model_id == "gpt-5.2":
+                # ============================================================
+                # GPT-5.2 Hack mode: non-streaming JSON call
+                # ============================================================
+                logger.info(f"Hack mode (GPT-5.2): starting for {username}")
+
+                # Emit hack_mode_active event
+                yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
+
+                # Non-streaming call with JSON mode
+                hack_response = await asyncio.to_thread(
+                    provider.send_request_non_streaming,
+                    client, hack_gpt_request_params, 60.0
+                )
+
+                hack_content = hack_response.get('content', '')
+                hack_reasoning = hack_response.get('reasoning')
+
+                # Parse JSON response
+                try:
+                    hack_json = json.loads(hack_content)
+                except json.JSONDecodeError:
+                    logger.error(f"Hack mode: failed to parse JSON response: {hack_content[:200]}")
+                    hack_json = {}
+
+                # Extract narrative and yield as content
+                narrative = hack_json.get("narrative", hack_content)
+                accumulated_content = narrative
+                if narrative:
+                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
+                    )
+
+                if hack_reasoning:
+                    accumulated_thinking = hack_reasoning
+
+                # Apply hack state updates
+                gs["apply_hack_state"](hack_state, hack_json)
+                data["hack_state"] = hack_state
+
+                # Emit updated hack state
+                yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
+
+                if hack_json.get("hack_complete"):
+                    yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
+                    logger.info(f"Hack mode: completed for {username}: {hack_state.get('narrative_summary', '')[:100]}")
+
+                # Build usage dict from hack response
+                usage = {
+                    'input_tokens': hack_response.get('input_tokens', 0),
+                    'cache_read_tokens': hack_response.get('cache_read_tokens', 0),
+                    'cache_creation_tokens': hack_response.get('cache_creation_tokens', 0),
+                    'output_tokens': hack_response.get('output_tokens', 0),
+                    'reasoning_tokens': hack_response.get('reasoning_tokens', 0),
+                    'content': narrative,
+                    'reasoning': hack_reasoning,
+                    'service_tier': hack_response.get('service_tier'),
+                }
+
+                # === Done event handling (shared with standard path below) ===
+                assistant_message = narrative
+                reasoning_summary = hack_reasoning
+                service_tier = hack_response.get('service_tier')
+
+                from providers import ParsedResponse
+                parsed = ParsedResponse(
+                    content=assistant_message,
+                    reasoning=reasoning_summary,
+                    input_tokens=usage['input_tokens'],
+                    cache_read_tokens=usage['cache_read_tokens'],
+                    cache_creation_tokens=usage['cache_creation_tokens'],
+                    output_tokens=usage['output_tokens'],
+                    reasoning_tokens=usage['reasoning_tokens']
+                )
+
+                new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                if service_tier:
+                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                else:
+                    total_cost = provider.calculate_cost(parsed)
+                tokens_str = provider.format_token_string(parsed)
+
+                actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+                # Update stats
+                stats = data.get("stats", create_empty_stats())
+                stats["total_input_tokens"] += new_input_tokens
+                stats["total_cached_tokens"] += parsed.cache_read_tokens
+                stats["total_output_tokens"] += parsed.output_tokens
+                stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                stats["total_cost"] += actual_cost
+                stats["total_prompts"] += 1
+                stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
+                data["stats"] = stats
+
+                # Create assistant message (flagged as hack_mode)
+                assistant_msg_id = generate_message_id()
+                assistant_msg_data = {
+                    "id": assistant_msg_id,
+                    "parent_id": user_msg_id,
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                    "tokens": tokens_str,
+                    "cost": cost_str,
+                    "total_tokens": usage['output_tokens'],
+                    "total_gpt_tokens": usage['output_tokens'],
+                    "model": model_id,
+                    "hack_mode": True,
+                    "hack_tool_input": hack_json,
+                }
+                if reasoning_summary:
+                    assistant_msg_data["reasoning"] = reasoning_summary
+                if service_tier:
+                    assistant_msg_data["service_tier"] = service_tier
+
+                data["messages"].append(assistant_msg_data)
+                data["current_leaf_id"] = assistant_msg_id
+                save_chat(username, request.chat_name, data, request.project)
+
+                if pending_usage is not None:
+                    save_daily_usage(username, pending_usage)
+
+                update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens,
+                                        parsed.output_tokens, parsed.reasoning_tokens, actual_cost,
+                                        model=model_id, context_tokens=0)
+
+                branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                done_data = {
+                    'assistant_message': assistant_message,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': reasoning_summary,
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': len(branch_path_final),
+                    'model': model_id,
+                    'hack_mode': True,
+                }
+                if service_tier:
+                    done_data['service_tier'] = service_tier
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": len(branch_path_final),
+                            "stats": stats,
+                            "context_start_index": context_start_index
+                        }
+                    )
+                )
+
+                logger.info(f"Hack mode (GPT-5.2): completed for {username}")
+
+            elif use_pipeline:
                 # ============================================================
                 # Multi-agent pipeline path (Events → Mechanics → Narration)
                 # ============================================================
@@ -2777,6 +3079,35 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
 
+                # Check for hack_trigger from pipeline events
+                if pipeline_result.events_json and gs and gs.get("init_hack_state"):
+                    try:
+                        _evts = json.loads(pipeline_result.events_json) if isinstance(pipeline_result.events_json, str) else pipeline_result.events_json
+                        if _evts.get("hack_trigger"):
+                            ht = _evts["hack_trigger"]
+                            processes_max = 4
+                            _ps = data.get("pipeline_state", {})
+                            for _n, _e in _ps.get("character_states", {}).items():
+                                _d = _e.get("data", _e)
+                                if _d.get("type") == "pc":
+                                    for _r in _d.get("resources", []):
+                                        if "process" in _r.get("label", "").lower():
+                                            processes_max = _r.get("max", 4)
+                                            break
+                                    break
+                            data["hack_state"] = gs["init_hack_state"](
+                                tier=ht.get("tier", "full_sequence"),
+                                target_system=ht.get("target_system", "Unknown"),
+                                sr=ht.get("sr", 3),
+                                processes_max=processes_max,
+                            )
+                            data["hack_state"]["start_message_id"] = assistant_msg_id
+                            yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
+                            logger.info(f"Pipeline hack trigger: {ht.get('tier')} on "
+                                        f"{ht.get('target_system')} SR{ht.get('sr')} for {username}")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 # Update system message tokens
                 system_msg_ref = branch_path[0]
                 system_content_val = system_msg_ref.get("content", "")
@@ -2925,6 +3256,45 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         logger.info(f"Stream done event received for user {username}")
                         usage = stream_event.usage
 
+                        # Handle hack mode tool output (Claude hack mode)
+                        hack_tool_input = None
+                        if use_hack_mode and model_id.startswith("claude"):
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input:
+                                gs["apply_hack_state"](hack_state, tool_input)
+                                data["hack_state"] = hack_state
+                                hack_tool_input = tool_input
+                                logger.info(f"Hack mode: applied hack state for {username}, "
+                                            f"alert={hack_state.get('alert_level')}, "
+                                            f"node={hack_state.get('current_node')}, "
+                                            f"complete={tool_input.get('hack_complete', False)}")
+                            else:
+                                logger.warning(f"Hack mode: no tool_use_input, attempting retry for {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        request_params.get("system", []),
+                                        request_params["messages"],
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        gs["hack_tool"]
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        gs["apply_hack_state"](hack_state, retry_result)
+                                        data["hack_state"] = hack_state
+                                        hack_tool_input = retry_result
+                                        logger.info(f"Hack mode: retry succeeded for {username}")
+                                    else:
+                                        logger.warning(f"Hack mode: retry also failed for {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Hack mode: retry error for {username}: {retry_err}")
+
                         # Extract tool_use input for stateful state updates
                         stateful_tool_input = None
                         stateful_tool_retried = False
@@ -2993,6 +3363,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 chat_key,
                                 SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                             )
+
+                        # Emit hack state update SSE events (Claude hack mode)
+                        if use_hack_mode and hack_tool_input:
+                            yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STATE_UPDATE, data={"hack_state": hack_state})
+                            )
+                            if hack_tool_input.get("hack_complete"):
+                                yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
+                                logger.info(f"Hack mode: completed for {username}: "
+                                            f"{hack_state.get('narrative_summary', '')[:100]}")
 
                         # Emit state change notifications (single-agent path)
                         if stateful_tool_input:
@@ -3141,8 +3523,43 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 
+                        # Flag hack mode messages
+                        if use_hack_mode:
+                            assistant_msg_data["hack_mode"] = True
+                            if hack_tool_input:
+                                assistant_msg_data["hack_tool_input"] = hack_tool_input
+
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id
+
+                        # Check for hack_trigger in normal stateful tool output
+                        if (stateful_tool_input
+                            and stateful_tool_input.get("hack_trigger")
+                            and gs and gs.get("init_hack_state")):
+                            ht = stateful_tool_input["hack_trigger"]
+                            # Extract processes_max from character_states
+                            processes_max = 4
+                            cs = (stateful_pipeline_state.get("character_states", {})
+                                  if stateful_pipeline_state else
+                                  data.get("pipeline_state", {}).get("character_states", {}))
+                            for _name, _entry in cs.items():
+                                _d = _entry.get("data", _entry)
+                                if _d.get("type") == "pc":
+                                    for _r in _d.get("resources", []):
+                                        if "process" in _r.get("label", "").lower():
+                                            processes_max = _r.get("max", 4)
+                                            break
+                                    break
+                            data["hack_state"] = gs["init_hack_state"](
+                                tier=ht.get("tier", "full_sequence"),
+                                target_system=ht.get("target_system", "Unknown"),
+                                sr=ht.get("sr", 3),
+                                processes_max=processes_max,
+                            )
+                            data["hack_state"]["start_message_id"] = assistant_msg_id
+                            yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
+                            logger.info(f"Hack trigger: {ht.get('tier')} on {ht.get('target_system')} "
+                                        f"SR{ht.get('sr')} for {username}")
 
                         save_chat(username, request.chat_name, data, request.project)
                         logger.info(f"Stream: saved chat for user {username}")
@@ -3222,6 +3639,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         }
                         if service_tier:
                             done_data['service_tier'] = service_tier
+                        if use_hack_mode:
+                            done_data['hack_mode'] = True
                         if not client_disconnected:
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 

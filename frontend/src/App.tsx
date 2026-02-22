@@ -252,6 +252,7 @@ function App() {
   const [pipelineState, setPipelineState] = useState<any>(null);
   const [stateNotifications, setStateNotifications] = useState<any[]>([]);
   const [chatGameSystem, setChatGameSystem] = useState<string | null>(null);
+  const [hackState, setHackState] = useState<any>(null);
   const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null);
   const [showCharacterSheet, setShowCharacterSheet] = useState(false);
   const [showAllCharactersModal, setShowAllCharactersModal] = useState(false);
@@ -356,6 +357,7 @@ function App() {
     setPipelineState(null);
     setStateNotifications([]);
     setChatGameSystem(null);
+    setHackState(null);
     setSelectedCharacter(null);
     setShowCharacterSheet(false);
     setShowAllCharactersModal(false);
@@ -1672,9 +1674,10 @@ function App() {
       setSelectedModel(data.model || projectModel || 'gpt-5.2');
       setAnthropicSync(data.anthropic_sync !== false);
 
-      // Load pipeline state and game system for right panel
+      // Load pipeline state, game system, and hack state for right panel
       setPipelineState(data.pipeline_state || null);
       setChatGameSystem(data.game_system || null);
+      setHackState(data.hack_state || null);
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -2229,7 +2232,7 @@ function App() {
     selectedModel, contextStartIndex, setContextStartIndex,
     stats, setStats,
     isLoading, setIsLoading,
-    setPipelineStage, setPipelineState, setStateNotifications, setDocsRefreshed, setError,
+    setPipelineStage, setPipelineState, setStateNotifications, setHackState, setDocsRefreshed, setError,
     editingMessageIndex, editingMessageContent,
     setEditingMessageIndex, setEditingMessageContent,
     fetchUserStats, fetchFreeTokens,
@@ -2677,6 +2680,7 @@ function App() {
           mobileBottomSheetOpen={mobileBottomSheetOpen}
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
           characterSheetFiles={characterSheetFiles}
+          hackState={hackState}
         />
       </div>
 
