@@ -2426,16 +2426,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     # Check if hack mode (matrix encounter) is active or just completed
     use_hack_mode = False
     hack_state = data.get("hack_state")
-    hack_result_injection = None
 
     if hack_state:
         if hack_state.get("active") and gs and gs.get("hack_contract"):
             use_hack_mode = True
         elif not hack_state.get("active") and hack_state.get("narrative_summary"):
-            # Hack just completed on the previous turn — inject result into this turn
-            hack_result_injection = (
-                f"[HACK RESULT]\n{hack_state['narrative_summary']}\n[/HACK RESULT]"
-            )
             # Apply cumulative HP change back to persistent character_states
             hp_change = hack_state.get("hp_change", 0)
             if hp_change:
@@ -2461,7 +2456,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 break
                         break
             data["hack_state"] = None
-            logger.info(f"Hack: cleared completed hack_state, injecting result for {username}")
+            logger.info(f"Hack: cleared completed hack_state for {username}")
 
     if use_hack_mode:
         # Flag the user message as a hack exchange
@@ -2578,10 +2573,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Build injections for user message
         injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
 
-        # Inject hack result from a just-completed hack if applicable
-        if hack_result_injection:
-            injections_str = (injections_str + "\n\n" + hack_result_injection) if injections_str else hack_result_injection
-
         # System prompt: contract + original
         system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
         system_msg = {"role": branch_path[0]["role"], "content": system_content}
@@ -2606,10 +2597,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         bp_filtered = collapse_hack_messages(branch_path)
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
-
-        # Inject hack result into non-stateful path too
-        if hack_result_injection:
-            user_content = hack_result_injection + "\n\n" + user_content
 
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
