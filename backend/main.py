@@ -3207,20 +3207,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 # Broadcast stream done to other clients
+                pipeline_stream_done_data = {
+                    "assistant_message": assistant_msg_data,
+                    "user_message_id": user_msg_id,
+                    "assistant_message_id": assistant_msg_id,
+                    "current_leaf_id": assistant_msg_id,
+                    "total_messages": branch_total_messages,
+                    "stats": response_stats,
+                    "context_start_index": context_start_index
+                }
+                if data.get("pipeline_state"):
+                    pipeline_stream_done_data["pipeline_state"] = data["pipeline_state"]
                 await sync_manager.broadcast_to_chat(
                     chat_key,
-                    SyncEvent(
-                        type=SyncEventType.STREAM_DONE,
-                        data={
-                            "assistant_message": assistant_msg_data,
-                            "user_message_id": user_msg_id,
-                            "assistant_message_id": assistant_msg_id,
-                            "current_leaf_id": assistant_msg_id,
-                            "total_messages": branch_total_messages,
-                            "stats": response_stats,
-                            "context_start_index": context_start_index
-                        }
-                    )
+                    SyncEvent(type=SyncEventType.STREAM_DONE, data=pipeline_stream_done_data)
                 )
 
                 logger.info(f"Pipeline: completed for user {username}, stages: {pipeline_result.stages_run}")
@@ -3661,20 +3661,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                         # Broadcast stream done to other clients
+                        stream_done_data = {
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": branch_total_messages,
+                            "stats": response_stats,
+                            "context_start_index": context_start_index
+                        }
+                        if data.get("pipeline_state"):
+                            stream_done_data["pipeline_state"] = data["pipeline_state"]
                         await sync_manager.broadcast_to_chat(
                             chat_key,
-                            SyncEvent(
-                                type=SyncEventType.STREAM_DONE,
-                                data={
-                                    "assistant_message": assistant_msg_data,
-                                    "user_message_id": user_msg_id,
-                                    "assistant_message_id": assistant_msg_id,
-                                    "current_leaf_id": assistant_msg_id,
-                                    "total_messages": branch_total_messages,
-                                    "stats": response_stats,
-                                    "context_start_index": context_start_index
-                                }
-                            )
+                            SyncEvent(type=SyncEventType.STREAM_DONE, data=stream_done_data)
                         )
 
                 logger.info(f"Stream loop completed for user {username}")

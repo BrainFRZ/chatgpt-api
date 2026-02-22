@@ -148,6 +148,9 @@ export function useSync(deps: UseSyncDeps) {
           deps.setCurrentLeafId(event.data.current_leaf_id);
           deps.setStats(event.data.stats);
           deps.setContextStartIndex(event.data.context_start_index || 1);
+          if (event.data.pipeline_state) {
+            deps.setPipelineState(event.data.pipeline_state);
+          }
           deps.fetchUserStats();
           deps.setPipelineStage(prev => {
             if (!deps.currentChatRef.current) return prev;
