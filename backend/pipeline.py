@@ -177,8 +177,10 @@ def build_events_messages(
     scene_injection = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene_injection)
 
-    # 5. Character states
-    cs_injection = build_character_states_injection(pipeline_state.get("character_states", {}))
+    # 5. Character states (scene-scoped)
+    cs_injection = build_character_states_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}))
     injections.append(cs_injection)
 
     # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
@@ -860,14 +862,22 @@ def _format_character_data(data) -> str:
     return " | ".join(parts) if parts else json.dumps(data)
 
 
-def build_character_states_injection(character_states: dict) -> str:
+def build_character_states_injection(character_states: dict, scene_state: dict = None) -> str:
     """Build human-readable character states injection for Events.
 
     Entries are stored as {"name": {"data": {...}, "last_updated": N}}.
     Falls back gracefully for old formats.
+    When scene_state is provided, only includes characters in pcs_present + npcs_present.
     """
     if not character_states:
         return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt, or begin interactive character creation if no sheets are available)\n[/CHARACTER STATES]"
+    # Scene-scope filter: only inject characters present in the scene
+    if scene_state:
+        present = set(scene_state.get("pcs_present", []) + scene_state.get("npcs_present", []))
+        if present:
+            character_states = {k: v for k, v in character_states.items() if k in present}
+    if not character_states:
+        return "[CHARACTER STATES]\n(no characters in scene)\n[/CHARACTER STATES]"
     lines = ["[CHARACTER STATES]"]
     for name, entry in character_states.items():
         if isinstance(entry, dict):
@@ -2186,8 +2196,10 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     scene = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene)
 
-    # 5. Character states
-    cs = build_character_states_injection(pipeline_state.get("character_states", {}))
+    # 5. Character states (scene-scoped)
+    cs = build_character_states_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}))
     injections.append(cs)
 
     # 6. HUD state (with scene-scoped funds, backfilled from game_state)
