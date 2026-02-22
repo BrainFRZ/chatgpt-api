@@ -299,7 +299,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
 }
 
 RUNNER OPS (structured state tracking):
-You receive a [RUNNER STATE] block with each runner's tracked mechanical state: Edge (current/max), Physical CM (filled/max + wound mod), Stun CM (filled/max), Overflow, Essence, Nuyen, Sustained Spells, and Active Effects. This is your authoritative source — it persists across context trims.
+You receive a [RUNNER STATE] block with each runner's tracked mechanical state: Edge (current/max), Physical CM (filled/max + wound mod), Stun CM (filled/max), Overflow, Essence, Nuyen, Sustained Spells, and Active Effects. This is your authoritative source — it persists across context trims. If the injected state conflicts with project files, the injected state takes precedence — only update it based on events in the conversation.
 
 Use "runner_ops" to update this state. Operations:
 - {"runner": "<name>", "op": "edge", "change": <signed int>, "reason": "<why>"}

@@ -296,7 +296,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
 }
 
 EDGERUNNER OPS (structured state tracking):
-You receive an [EDGERUNNER STATE] block with each edgerunner's tracked mechanical state: HP (current/max + seriously wounded flag), Humanity (current/max), Luck (current/max), Armor (head SP/body SP), Eurobucks, Critical Injuries (with Death Save DV mods), and Cyberware. This is your authoritative source — it persists across context trims.
+You receive an [EDGERUNNER STATE] block with each edgerunner's tracked mechanical state: HP (current/max + seriously wounded flag), Humanity (current/max), Luck (current/max), Armor (head SP/body SP), Eurobucks, Critical Injuries (with Death Save DV mods), and Cyberware. This is your authoritative source — it persists across context trims. If the injected state conflicts with project files, the injected state takes precedence — only update it based on events in the conversation.
 
 Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "hp", "change": <signed int>, "reason": "<why>"}

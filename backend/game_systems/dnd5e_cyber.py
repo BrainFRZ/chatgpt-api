@@ -723,6 +723,7 @@ CHARACTER STATES:
 - Use this as the baseline for your "character_states" output — update it with any changes visible in the current context (damage taken, spells cast, items used, conditions gained/lost)
 - If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
 - This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
+- If the injected state conflicts with project files (e.g. character sheets show max HP but state shows current HP after damage), the injected state takes precedence — only update it based on events in the conversation
 - Use the structured format: each character is an object with type, vitals, resources, conditions, and summary
 - Ships should be included as entries with type "ship" — vitals include Hull/Shields, resources include ammo
 

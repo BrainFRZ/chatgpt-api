@@ -275,7 +275,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
 }
 
 INVESTIGATOR OPS (structured state tracking):
-You receive an [INVESTIGATOR STATE] block with each investigator's tracked mechanical state: SAN (current/max), Luck, Mythos%, Bonds, Phobias, Manias, and Skill marks. This is your authoritative source — it persists across context trims.
+You receive an [INVESTIGATOR STATE] block with each investigator's tracked mechanical state: SAN (current/max), Luck, Mythos%, Bonds, Phobias, Manias, and Skill marks. This is your authoritative source — it persists across context trims. If the injected state conflicts with project files, the injected state takes precedence — only update it based on events in the conversation.
 
 Use "investigator_ops" to update this state. Operations:
 - {"investigator": "<name>", "op": "san", "change": <signed int>, "reason": "<why>"}
