@@ -60,6 +60,15 @@ val MemoryLow = Color(0xFF4A4A6E)
 val CallbackOpen = Color(0xFFF59E0B)
 val CallbackResolved = Color(0xFF22C55E)
 
+// Matrix / Hack Mode
+val MatrixBg = Color(0xFF0A1A0A)
+val MatrixGreen = Color(0xFF00FF41)
+val MatrixBorder = Color(0xFF0A3A0A)
+val MatrixMuted = Color(0xFF4A7A4A)
+val MatrixCardBg = Color(0xFF0D200D)
+val MatrixTrace = Color(0xFFFBBF24)
+val MatrixTar = Color(0xFFFB923C)
+
 // Relationship colors
 val RelationshipPurple = Color(0xFFA78BFA)
 val RelationshipGreen = Color(0xFF4ADE80)

@@ -1,5 +1,6 @@
 package com.chorusai.app.network
 
+import com.chorusai.app.model.HackState
 import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
 import com.google.gson.Gson
@@ -109,6 +110,10 @@ class SseClient(
                     val map: Map<String, Any> = gson.fromJson(data, mapType)
                     val notifications = (map["notifications"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
                     SseEvent.StateNotifications(notifications = notifications)
+                }
+                "hack_state_update", "hack_mode_start" -> {
+                    val hs = gson.fromJson(data, HackState::class.java)
+                    if (hs != null) SseEvent.HackStateUpdate(hackState = hs) else null
                 }
                 "docs_refreshed" -> SseEvent.DocsRefreshed
                 "done" -> {

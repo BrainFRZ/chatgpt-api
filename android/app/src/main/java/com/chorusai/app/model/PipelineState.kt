@@ -98,6 +98,24 @@ data class HudState(
     val funds: Map<String, Any>? = null
 )
 
+data class HackState(
+    val active: Boolean = false,
+    val tier: String = "full_sequence",
+    @SerializedName("target_system") val targetSystem: String = "Unknown",
+    val sr: Int = 3,
+    @SerializedName("alert_level") val alertLevel: Int = 0,
+    @SerializedName("processes_remaining") val processesRemaining: Int = 4,
+    @SerializedName("processes_max") val processesMax: Int = 4,
+    @SerializedName("program_slots_used") val programSlotsUsed: List<String> = emptyList(),
+    @SerializedName("current_node") val currentNode: String? = null,
+    @SerializedName("nodes_visited") val nodesVisited: List<String> = emptyList(),
+    @SerializedName("ice_status") val iceStatus: Map<String, String> = emptyMap(),
+    @SerializedName("trace_progress") val traceProgress: Int? = null,
+    @SerializedName("tar_stacks") val tarStacks: Int = 0,
+    @SerializedName("hp_change") val hpChange: Int = 0,
+    @SerializedName("narrative_summary") val narrativeSummary: String? = null
+)
+
 data class PipelineState(
     val pacing: PacingInfo = PacingInfo(),
     @SerializedName("callback_ledger") val callbackLedger: CallbackLedger = CallbackLedger(),

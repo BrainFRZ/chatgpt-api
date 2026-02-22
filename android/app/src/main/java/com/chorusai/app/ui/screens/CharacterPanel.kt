@@ -182,12 +182,23 @@ private fun memoryBorderColor(impact: Int): Color = when {
     else -> MemoryLow
 }
 
+// ─── Hack Mode Helpers ───
+
+private fun alertLevelInfo(level: Int): Pair<String, Color> = when {
+    level <= 0 -> "Dormant" to Color(0xFF4ADE80)
+    level <= 2 -> "Elevated" to Color(0xFFFBBF24)
+    level <= 4 -> "Active Search" to Color(0xFFFB923C)
+    level <= 6 -> "Lockdown" to Color(0xFFEF4444)
+    else -> "Convergence" to Color(0xFFDC2626)
+}
+
 // ─── Main CharacterPanel ───
 
 @Composable
 fun CharacterPanel(
     pipelineState: PipelineState,
     gameSystem: String?,
+    hackState: HackState? = null,
     characterSheetFiles: List<CharacterSheetFile>?,
     onFetchCharacterSheet: () -> Unit,
     modifier: Modifier = Modifier
@@ -200,7 +211,7 @@ fun CharacterPanel(
     val allInScene = sceneNames.ifEmpty { characterStates.keys.toList() }
     val charCount = allInScene.size
 
-    if (charCount == 0) return
+    if (charCount == 0 && hackState?.active != true) return
 
     var expanded by remember { mutableStateOf(false) }
     var selectedCharName by remember { mutableStateOf<String?>(null) }
@@ -233,6 +244,9 @@ fun CharacterPanel(
             )
         }
 
+        val hackActive = hackState?.active == true
+        val sheetBg = if (hackActive) MatrixBg else CharPanelBg
+
         // Bottom sheet — consumes clicks so they don't pass through to backdrop
         Column(
             modifier = Modifier
@@ -240,7 +254,7 @@ fun CharacterPanel(
                 .height(sheetHeight)
                 .align(Alignment.BottomCenter)
                 .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                .background(CharPanelBg)
+                .background(sheetBg)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
@@ -251,6 +265,7 @@ fun CharacterPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(collapsedHeight)
+                    .background(sheetBg)
                     .clickable { expanded = !expanded }
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -263,82 +278,178 @@ fun CharacterPanel(
                             .width(32.dp)
                             .height(3.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(TextMuted.copy(alpha = 0.5f))
+                            .background(if (hackActive) MatrixGreen else TextMuted.copy(alpha = 0.5f))
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Icon(
                         imageVector = if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
                         contentDescription = if (expanded) "Collapse" else "Expand",
-                        tint = TextMuted,
+                        tint = if (hackActive) MatrixGreen else TextMuted,
                         modifier = Modifier.size(18.dp)
                     )
                 }
-                Text(
-                    text = if (combat != null) "Combat Round ${combat.round}" else "$charCount characters in scene",
-                    color = TextMuted,
-                    fontSize = 12.sp
-                )
+                if (hackActive) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Matrix \u2014 ${hackState!!.targetSystem}",
+                            color = MatrixGreen,
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "HACK",
+                            color = MatrixGreen,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(MatrixGreen.copy(alpha = 0.15f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                } else {
+                    Text(
+                        text = if (combat != null) "Combat Round ${combat.round}" else "$charCount characters in scene",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
+                }
             }
 
             if (expanded) {
-                // Character list
-                val orderedNames = if (combat != null) {
-                    combat.initiativeOrder.ifEmpty { allInScene }
-                } else {
-                    allInScene
-                }
+                if (hackActive) {
+                    // ── Hack Mode Layout ──
+                    val pcNames = scene.pcsPresent.ifEmpty {
+                        characterStates.filter { it.value.data.type?.lowercase() == "pc" }.keys.toList()
+                    }
 
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp)
-                ) {
-                    if (combat != null && orderedNames.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = "INITIATIVE ORDER \u2022 Round ${combat.round}",
-                                color = TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
-                            )
-                        }
-                    } else {
-                        if (scene.pcsPresent.isNotEmpty()) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp)
+                    ) {
+                        // PC cards
+                        if (pcNames.isNotEmpty()) {
                             item {
                                 Text(
-                                    text = "PCS",
+                                    text = "NETRUNNER",
+                                    color = MatrixMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(pcNames.distinct(), key = { it }) { name ->
+                                val cs = characterStates[name]
+                                val data = cs?.data ?: CharacterData()
+                                CharacterCard(
+                                    name = name,
+                                    data = data,
+                                    isActiveTurn = false,
+                                    onClick = { selectedCharName = name }
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                        }
+
+                        // ICE Status
+                        if (hackState.iceStatus.isNotEmpty()) {
+                            item {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "ICE STATUS",
+                                    color = MatrixMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
+                                )
+                            }
+                            items(hackState.iceStatus.entries.toList(), key = { it.key }) { (node, status) ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 4.dp, bottom = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(text = node, color = MatrixGreen, fontSize = 11.sp)
+                                    Text(text = status, color = MatrixMuted, fontSize = 11.sp)
+                                }
+                            }
+                        }
+
+                        // HUD section
+                        item {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            HackHud(hackState)
+                        }
+                    }
+
+                    SheetFooter(
+                        openCallbackCount = pipelineState.callbackLedger.open.size,
+                        totalCharCount = characterStates.size,
+                        onCallbacksClick = { showCallbacks = true },
+                        onViewAllClick = { showAllChars = true }
+                    )
+                } else {
+                    // ── Normal Layout ──
+                    val orderedNames = if (combat != null) {
+                        combat.initiativeOrder.ifEmpty { allInScene }
+                    } else {
+                        allInScene
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp)
+                    ) {
+                        if (combat != null && orderedNames.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "INITIATIVE ORDER \u2022 Round ${combat.round}",
                                     color = TextMuted,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
                                 )
                             }
+                        } else {
+                            if (scene.pcsPresent.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        text = "PCS",
+                                        color = TextMuted,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        items(orderedNames.distinct(), key = { it }) { name ->
+                            val cs = characterStates[name]
+                            val data = cs?.data ?: CharacterData()
+                            val isActive = combat?.currentTurn == name
+                            CharacterCard(
+                                name = name,
+                                data = data,
+                                isActiveTurn = isActive,
+                                onClick = { selectedCharName = name }
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
                     }
 
-                    items(orderedNames.distinct(), key = { it }) { name ->
-                        val cs = characterStates[name]
-                        val data = cs?.data ?: CharacterData()
-                        val isActive = combat?.currentTurn == name
-                        CharacterCard(
-                            name = name,
-                            data = data,
-                            isActiveTurn = isActive,
-                            onClick = { selectedCharName = name }
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                    }
+                    SheetFooter(
+                        openCallbackCount = pipelineState.callbackLedger.open.size,
+                        totalCharCount = characterStates.size,
+                        onCallbacksClick = { showCallbacks = true },
+                        onViewAllClick = { showAllChars = true }
+                    )
                 }
-
-                // Footer buttons
-                SheetFooter(
-                    openCallbackCount = pipelineState.callbackLedger.open.size,
-                    totalCharCount = characterStates.size,
-                    onCallbacksClick = { showCallbacks = true },
-                    onViewAllClick = { showAllChars = true }
-                )
             }
         }
     }
@@ -383,6 +494,130 @@ fun CharacterPanel(
             memories = memories,
             onDismiss = { showMemories = null }
         )
+    }
+}
+
+// ─── Hack HUD ───
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun HackHud(hackState: HackState) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MatrixCardBg)
+            .padding(8.dp)
+    ) {
+        // Alert level
+        val (alertLabel, alertColor) = alertLevelInfo(hackState.alertLevel)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "ALERT", color = MatrixMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text(text = "$alertLabel (${hackState.alertLevel})", color = alertColor, fontSize = 10.sp)
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        LinearProgressIndicator(
+            progress = { (hackState.alertLevel / 7f).coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+            color = alertColor,
+            trackColor = MatrixBorder
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Processes
+        val procMax = hackState.processesMax.coerceAtLeast(1)
+        val procFrac = (hackState.processesRemaining / procMax.toFloat()).coerceIn(0f, 1f)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "PROCESSES", color = MatrixMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text(text = "${hackState.processesRemaining}/${hackState.processesMax}", color = MatrixGreen, fontSize = 10.sp)
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        LinearProgressIndicator(
+            progress = { procFrac },
+            modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+            color = MatrixGreen,
+            trackColor = MatrixBorder
+        )
+
+        // Current node
+        hackState.currentNode?.let { node ->
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = "Node: ", color = MatrixMuted, fontSize = 10.sp)
+                Text(text = node, color = MatrixGreen, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            if (hackState.nodesVisited.isNotEmpty()) {
+                Text(
+                    text = hackState.nodesVisited.joinToString(" \u2192 "),
+                    color = MatrixMuted,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        // Active programs
+        if (hackState.programSlotsUsed.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(text = "PROGRAMS", color = MatrixMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(2.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                hackState.programSlotsUsed.forEach { prog ->
+                    Text(
+                        text = prog,
+                        color = MatrixGreen,
+                        fontSize = 9.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(MatrixGreen.copy(alpha = 0.15f))
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+            }
+        }
+
+        // Trace
+        val trace = hackState.traceProgress
+        if (trace != null && trace > 0) {
+            val traceMax = (hackState.sr * 2).coerceAtLeast(1)
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "TRACE", color = MatrixTrace, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text(text = "$trace / $traceMax", color = MatrixTrace, fontSize = 10.sp)
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            LinearProgressIndicator(
+                progress = { (trace / traceMax.toFloat()).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                color = if (trace >= traceMax - 1) VitalRed else MatrixTrace,
+                trackColor = MatrixBorder
+            )
+        }
+
+        // Tar stacks
+        if (hackState.tarStacks > 0) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "TAR \u00D7${hackState.tarStacks}",
+                color = MatrixTar,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 

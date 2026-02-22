@@ -60,7 +60,8 @@ data class ChatResponse(
     val model: String? = null,
     @SerializedName("anthropic_sync") val anthropicSync: Boolean? = null,
     @SerializedName("pipeline_state") val pipelineState: PipelineState? = null,
-    @SerializedName("game_system") val gameSystem: String? = null
+    @SerializedName("game_system") val gameSystem: String? = null,
+    @SerializedName("hack_state") val hackState: HackState? = null
 )
 
 data class SendMessageRequest(

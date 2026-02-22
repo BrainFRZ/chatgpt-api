@@ -7,6 +7,7 @@ import com.chorusai.app.data.ChatRepository
 import com.chorusai.app.data.UserPreferences
 import com.chorusai.app.model.CharacterSheetFile
 import com.chorusai.app.model.ChatMessage
+import com.chorusai.app.model.HackState
 import com.chorusai.app.model.ModelInfo
 import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.SseEvent
@@ -55,6 +56,7 @@ data class ChatUiState(
     val isSwitchingBranch: Boolean = false,
     val scrollToBottomTrigger: Int = 0,
     val pipelineState: PipelineState? = null,
+    val hackState: HackState? = null,
     val gameSystem: String? = null,
     val characterSheetFiles: List<CharacterSheetFile>? = null,
     val bookmarkEditingMessageId: String? = null,
@@ -157,6 +159,7 @@ class ChatViewModel @Inject constructor(
                         anthropicSync = body.anthropicSync != false,
                         error = null,
                         pipelineState = body.pipelineState,
+                        hackState = body.hackState ?: it.hackState,
                         gameSystem = body.gameSystem
                     )
                 }
@@ -326,6 +329,9 @@ class ChatViewModel @Inject constructor(
                         }
                         is SseEvent.StateUpdate -> {
                             _uiState.update { it.copy(pipelineState = event.data) }
+                        }
+                        is SseEvent.HackStateUpdate -> {
+                            _uiState.update { it.copy(hackState = event.hackState) }
                         }
                         is SseEvent.Done -> {
                             val finalMessage = ChatMessage(
@@ -658,6 +664,9 @@ class ChatViewModel @Inject constructor(
                         }
                         is SseEvent.StateUpdate -> {
                             _uiState.update { it.copy(pipelineState = event.data) }
+                        }
+                        is SseEvent.HackStateUpdate -> {
+                            _uiState.update { it.copy(hackState = event.hackState) }
                         }
                         is SseEvent.Done -> {
                             val finalMessage = ChatMessage(
@@ -1133,7 +1142,15 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is WsEvent.StateUpdate -> {
-                _uiState.update { it.copy(pipelineState = event.pipelineState) }
+                _uiState.update {
+                    it.copy(
+                        pipelineState = event.pipelineState,
+                        hackState = event.hackState ?: it.hackState
+                    )
+                }
+            }
+            is WsEvent.HackStateUpdate -> {
+                _uiState.update { it.copy(hackState = event.hackState) }
             }
             else -> { /* Ignore user-level events in chat context */ }
         }

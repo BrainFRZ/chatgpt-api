@@ -2,6 +2,7 @@ package com.chorusai.app.network
 
 import android.util.Log
 import com.chorusai.app.model.ChatMessage
+import com.chorusai.app.model.HackState
 import com.chorusai.app.model.PipelineState
 import com.chorusai.app.model.WsEvent
 import com.google.gson.Gson
@@ -377,7 +378,14 @@ class WebSocketManager @Inject constructor(
                 )
                 "state_update" -> {
                     val ps = gson.fromJson(data.get("pipeline_state"), PipelineState::class.java)
-                    if (ps != null) WsEvent.StateUpdate(pipelineState = ps) else null
+                    val hs = data.get("hack_state")?.takeIf { !it.isJsonNull }?.let {
+                        gson.fromJson(it, HackState::class.java)
+                    }
+                    when {
+                        ps != null -> WsEvent.StateUpdate(pipelineState = ps, hackState = hs)
+                        hs != null -> WsEvent.HackStateUpdate(hackState = hs)
+                        else -> null
+                    }
                 }
                 "pong" -> null
                 else -> null

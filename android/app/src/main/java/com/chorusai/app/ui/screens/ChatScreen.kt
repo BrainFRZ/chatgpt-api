@@ -177,10 +177,11 @@ fun ChatScreen(
         containerColor = Background
     ) { padding ->
         val ps = state.pipelineState
-        val hasCharacterPanel = ps != null &&
-            (ps.sceneState.pcsPresent.isNotEmpty() ||
+        val hackState = state.hackState
+        val hasCharacterPanel = hackState?.active == true ||
+            (ps != null && (ps.sceneState.pcsPresent.isNotEmpty() ||
              ps.sceneState.npcsPresent.isNotEmpty() ||
-             ps.characterStates.isNotEmpty())
+             ps.characterStates.isNotEmpty()))
 
         Box(
             modifier = Modifier
@@ -303,15 +304,17 @@ fun ChatScreen(
                             onSend = { viewModel.sendMessage(it) },
                             bottomPadding = if (hasCharacterPanel) 34.dp else 0.dp
                         )
+
                     }
                 }
             }
 
             // Character panel overlay
-            if (ps != null && hasCharacterPanel) {
+            if (hasCharacterPanel) {
                 CharacterPanel(
-                    pipelineState = ps,
+                    pipelineState = ps ?: com.chorusai.app.model.PipelineState(),
                     gameSystem = state.gameSystem,
+                    hackState = hackState,
                     characterSheetFiles = state.characterSheetFiles,
                     onFetchCharacterSheet = { viewModel.fetchCharacterSheet() },
                     modifier = Modifier.align(Alignment.BottomCenter)

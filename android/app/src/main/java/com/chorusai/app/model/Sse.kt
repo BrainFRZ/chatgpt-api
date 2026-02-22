@@ -26,6 +26,8 @@ sealed class SseEvent {
         val notifications: List<String>
     ) : SseEvent()
 
+    data class HackStateUpdate(val hackState: HackState) : SseEvent()
+
     data object DocsRefreshed : SseEvent()
 
     data class Done(
