@@ -13,6 +13,10 @@ from .dnd5e import (
     init_game_state as _dnd5e_init,
     apply_game_state as _dnd5e_apply,
     build_game_injection as _dnd5e_build_injection,
+    COMBAT_CONTRACT,
+    REPORT_COMBAT_STATE_TOOL,
+    build_combat_profile,
+    build_combat_injection,
 )
 
 logger = logging.getLogger(__name__)
@@ -1269,4 +1273,9 @@ GAME_SYSTEM = {
     "apply_hack_state": apply_hack_state,
     "build_hack_injection": build_hack_injection,
     "build_hacker_profile": build_hacker_profile,
+    # Combat context mode (inherits from dnd5e)
+    "combat_contract": COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

@@ -962,6 +962,211 @@ STATE_REPORT_TOOL = {
 }
 
 # ============================================================
+# Combat Context Mode
+# ============================================================
+
+COMBAT_CONTRACT = """You are the COMBAT MASTER for a D&D 5E session. A battle is underway.
+
+YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with tactical precision. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
+
+Call report_combat_state every exchange, then write your narrative response.
+
+COMBAT RULES (D&D 5E):
+- Action Economy: Each combatant gets an Action, Bonus Action, Reaction, and Movement (30 ft default) per round. Track expenditure.
+- Attack Rolls: 1d20 + attack bonus vs target AC. Hit → roll damage dice + modifier.
+- Saving Throws: 1d20 + save bonus vs DC. Fail → apply effect.
+- Conditions: Prone (attackers within 5 ft have adv, ranged disadv; costs half move to stand), Restrained (disadv attacks, adv against), Poisoned (disadv attacks/ability checks), Paralyzed (auto-crit within 5 ft), Unconscious (incapacitated, drop everything, auto-crit within 5 ft), Frightened (disadv attacks/checks while source visible; can't move closer), Charmed (can't attack charmer), Blinded (disadv attacks, adv against), Stunned (incapacitated, no move, auto-fail Str/Dex saves), Incapacitated (no actions or reactions).
+- Death Saves: DC 10 Wis save each turn at 0 HP. 3 failures = death; 3 successes = stable. Crit hit on unconscious target = 2 failures. Any damage = 1 failure.
+- Concentration: Damage → Con save (DC 10 or half damage, whichever higher). Fail = lose concentration.
+- Opportunity Attacks: Triggered when a hostile creature leaves melee range without Disengage.
+
+DICE ROLLING:
+- Roll ALL dice yourself. Show your work inline.
+- Example: "Goblin attacks Aedina: 1d20+4 = [11]+4 = 15 vs AC 15 → HIT → 1d6+2 = [4]+2 = 6 damage"
+- Never ask the player to roll. Be mathematically precise.
+
+ENEMY TACTICS:
+- Enemies act intelligently: focus wounded targets, use terrain, retreat when outmatched.
+- Vary tactics — flanking, conditions, area denial, Disengage from dangerous melee.
+
+COMBAT FLOW:
+- Each exchange covers the current combatant's turn plus any immediate reactions.
+- Advance current_turn to the next combatant in initiative order after each turn.
+- When the last combatant in the order acts, increment the round counter and return to the top.
+- End combat when all enemies are at 0 HP or flee. Set combat_complete=true on the final exchange.
+
+NARRATIVE STYLE:
+- Present tense, immediate, visceral. 2–5 sentences.
+- Name combatants. Describe what dice results mean in fiction, not just numbers.
+- End each exchange by setting up what the next active combatant faces.
+
+REPORT REQUIREMENTS (report_combat_state):
+- narrative_summary: ONLY when combat_complete=true — a 1–3 sentence summary of the ENTIRE fight written with the full combat history in mind. This becomes the lasting narrative record once combat is collapsed from context."""
+
+
+REPORT_COMBAT_STATE_TOOL = {
+    "name": "report_combat_state",
+    "description": "Report combat state after each exchange. Call every combat turn, before your narrative.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "rolls", "character_updates", "combat", "combat_complete"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Full narrative of this combat exchange — what happened, who did what, what the dice mean in fiction."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "All dice rolls this exchange (attacks, damage, saves, checks).",
+                "items": {
+                    "type": "object",
+                    "required": ["description", "result"],
+                    "properties": {
+                        "description": {"type": "string"},
+                        "result": {"type": "string", "description": "e.g. '1d20+4 = [11]+4 = 15 vs AC 15 → HIT'"}
+                    }
+                }
+            },
+            "character_updates": {
+                "type": "array",
+                "description": "HP and condition changes for every affected combatant.",
+                "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "hp_delta": {"type": "integer", "description": "Signed HP change. Negative = damage, positive = healing."},
+                        "vital_label": {"type": "string", "description": "Vital to apply hp_delta to (e.g. 'HP', 'Physical', 'Stun', 'SAN', 'Luck', 'Armor'). Defaults to 'HP' if omitted."},
+                        "conditions_add": {"type": "array", "items": {"type": "string"}, "description": "Conditions gained this exchange."},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}, "description": "Conditions cleared this exchange."}
+                    }
+                }
+            },
+            "combat": {
+                "description": "Updated initiative state. Set to null when combat ends.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["round", "initiative_order", "current_turn"],
+                        "properties": {
+                            "round": {"type": "integer"},
+                            "initiative_order": {"type": "array", "items": {"type": "string"}},
+                            "current_turn": {"type": "string"}
+                        }
+                    },
+                    {"type": "null"}
+                ]
+            },
+            "combat_complete": {
+                "type": "boolean",
+                "description": "True when this exchange ends the combat encounter."
+            },
+            "narrative_summary": {
+                "type": "string",
+                "description": "ONLY include when combat_complete=true. 1–3 sentence summary of the ENTIRE fight for the narrative record."
+            }
+        }
+    }
+}
+
+
+def build_combat_profile(character_states, combat):
+    """Build compact combatant roster from character_states for combat mode context."""
+    if not character_states:
+        return ""
+
+    initiative_order = combat.get("initiative_order", []) if combat else []
+
+    lines = ["[COMBATANT ROSTER]"]
+
+    # Order by initiative if available, then remaining characters alphabetically
+    if initiative_order:
+        ordered = [(name, character_states[name]) for name in initiative_order if name in character_states]
+        in_order = set(initiative_order)
+        ordered += [(n, d) for n, d in character_states.items() if n not in in_order]
+    else:
+        ordered = list(character_states.items())
+
+    for name, entry in ordered:
+        d = entry.get("data", entry)
+        parts = []
+
+        char_class = d.get("class", "")
+        char_level = d.get("level")
+        char_type = d.get("type", "pc")
+        if char_class and char_level:
+            parts.append(f"{char_class} {char_level}")
+        elif char_class:
+            parts.append(char_class)
+        else:
+            parts.append(char_type.upper())
+
+        for v in d.get("vitals", []):
+            if v.get("label") == "HP":
+                if "current" in v and "max" in v:
+                    parts.append(f"HP {v['current']}/{v['max']}")
+                elif "value" in v:
+                    parts.append(f"HP {v['value']}")
+            elif v.get("label") == "AC" and "value" in v:
+                parts.append(f"AC {v['value']}")
+
+        conditions = d.get("conditions", [])
+        if conditions:
+            parts.append(f"[{', '.join(conditions)}]")
+
+        key_resources = []
+        for r in d.get("resources", []):
+            cur = r.get("current", 0)
+            mx = r.get("max", 0)
+            if mx > 0:
+                key_resources.append(f"{r.get('label', '?')} {cur}/{mx}")
+        if key_resources:
+            parts.append("| " + ", ".join(key_resources))
+
+        line = f"  {name}: {' | '.join(parts)}"
+        summary = d.get("summary", "")
+        if summary:
+            line += f"\n    {summary}"
+        lines.append(line)
+
+    lines.append("[/COMBATANT ROSTER]")
+    return "\n".join(lines)
+
+
+def build_combat_injection(combat, pipeline_state):
+    """Build [COMBAT STATE] injection prepended to each user message during combat."""
+    if not combat:
+        return ""
+
+    lines = ["[COMBAT STATE]"]
+    lines.append(f"Round: {combat.get('round', 1)}")
+
+    current_turn = combat.get("current_turn", "")
+    initiative_order = combat.get("initiative_order", [])
+    cs = pipeline_state.get("character_states", {})
+
+    lines.append("Initiative Order:")
+    for name in initiative_order:
+        marker = " \u2190 ACTING" if name == current_turn else ""
+        entry = cs.get(name, {})
+        d = entry.get("data", entry)
+        status_parts = []
+        for v in d.get("vitals", []):
+            if v.get("label") == "HP":
+                if "current" in v and "max" in v:
+                    status_parts.append(f"HP {v['current']}/{v['max']}")
+                break
+        conditions = d.get("conditions", [])
+        if conditions:
+            status_parts.append(f"[{', '.join(conditions)}]")
+        status = f" ({', '.join(status_parts)})" if status_parts else ""
+        lines.append(f"  {name}{status}{marker}")
+
+    lines.append("[/COMBAT STATE]")
+    return "\n".join(lines)
+
+
+# ============================================================
 # Game System Definition
 # ============================================================
 
@@ -976,4 +1181,9 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Combat context mode
+    "combat_contract": COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

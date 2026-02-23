@@ -9,6 +9,12 @@ Luck (session-spendable), Armor (head/body with ablation), eurobucks, critical i
 import copy
 import logging
 
+from .dnd5e import (
+    REPORT_COMBAT_STATE_TOOL,
+    build_combat_profile,
+    build_combat_injection,
+)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -881,6 +887,57 @@ STATE_REPORT_TOOL = {
 }
 
 # ============================================================
+# Combat Context Mode
+# ============================================================
+
+CPRED_COMBAT_CONTRACT = """You are the COMBAT MASTER for a Cyberpunk RED session. A battle is underway.
+
+YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with visceral intensity. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
+
+Call report_combat_state every exchange, then write your narrative response.
+
+COMBAT RULES (Cyberpunk RED):
+- Dice: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29). Exploding 10s: roll again and add (keep exploding). Fumble 1s: roll again and subtract.
+- Initiative: REF + 1d10; ties broken by REF stat.
+- Action Economy: Move Action + Action per turn.
+- Seriously Wounded: When HP ≤ half max → −2 to ALL actions. Add "Seriously Wounded" condition automatically when threshold is crossed.
+- Armor Ablation: Each penetrating hit (damage after armor > 0) reduces armor SP by 1. Track via character_updates using vital_label: "Armor" and hp_delta: −1 if Armor is tracked as a vital — otherwise note in narrative.
+- Critical Injuries: Triggered when a single hit deals 13+ damage after armor. Roll on critical injury table and add as a condition.
+- Death Saves: At 0 HP — BODY + WILL + d10 vs DV 10 (DV increases by 1 each subsequent round; +1 per critical injury). Fail = dead.
+- Luck: Spend Luck points to add to any roll (1 point = +1). Report spending via character_updates (vital_label: "Luck", hp_delta: −N).
+
+VITAL LABELS for character_updates:
+- HP damage/healing → vital_label: "HP" (default, can omit)
+- Armor ablation → vital_label: "Armor", hp_delta: −1 (only if Armor tracked as a vital)
+- Luck spent → vital_label: "Luck", hp_delta: −N
+
+DICE ROLLING:
+- Roll ALL dice yourself. Show results inline.
+- Attack example: "V attacks: d10[7] + REF 8 + Handgun 6 = 21 vs DV 15 → HIT → 3d6[4,3,5] = 12 damage → Body armor SP 11 → 12−11 = 1 net → SP ablates to 10, 1 HP damage"
+- Exploding 10s example: "d10[10] + d10[6] = 16 + STAT + Skill = total"
+- Fumble 1 example: "d10[1] − d10[4] = −3 + STAT + Skill = total"
+
+ENEMY TACTICS:
+- Enemies focus wounded edgerunners, use cover, call reinforcements when outnumbered.
+- Netrunners stay back and attempt network control; solos engage directly; heavies suppress with autofire.
+
+COMBAT FLOW:
+- Each exchange covers the current combatant's turn plus any immediate reactions.
+- Advance current_turn to the next combatant in initiative order after each turn.
+- When the last combatant acts, increment round and return to top.
+- End combat when all enemies are at 0 HP or fled. Set combat_complete=true.
+
+NARRATIVE STYLE:
+- Present tense, visceral, Night City grit. 2–5 sentences.
+- Name combatants. Chrome reflects neon. Armor breaks. Bullets are real and so is death.
+- End each exchange setting up what the next active combatant faces.
+
+REPORT REQUIREMENTS (report_combat_state):
+- narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.
+- Use vital_label: "HP" for health (default). vital_label: "Armor" for SP ablation. vital_label: "Luck" for Luck spent."""
+
+
+# ============================================================
 # Game System Definition
 # ============================================================
 
@@ -895,4 +952,9 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Combat context mode
+    "combat_contract": CPRED_COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

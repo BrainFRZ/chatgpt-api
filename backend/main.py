@@ -37,6 +37,7 @@ from pipeline import (
     migrate_pipeline_state,
     get_context_pairs, extract_state_notifications,
     collapse_hack_messages,
+    collapse_combat_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -957,10 +958,12 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 HACK_ONLY_FILES = {"Hacking Rulebook.md"}
+COMBAT_ONLY_FILES = {"Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"}
 
 def load_project_files(username: str, project: str) -> str:
     """Load all staged project files from project's uploads folder.
-    Hack-only files (e.g. Hacking Rulebook.md) are excluded — they are injected separately during hack mode."""
+    Hack-only files (e.g. Hacking Rulebook.md) and combat-only files are excluded
+    — they are injected separately during their respective modes."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
 
     if not os.path.exists(uploads_dir):
@@ -975,8 +978,8 @@ def load_project_files(username: str, project: str) -> str:
 
     combined = ""
     for filename in sorted(project_files):
-        # Skip hack-only files (injected separately during hack mode)
-        if filename in HACK_ONLY_FILES:
+        # Skip mode-specific files (injected separately during hack/combat mode)
+        if filename in HACK_ONLY_FILES or filename in COMBAT_ONLY_FILES:
             continue
         # Skip files that are not staged (default to True for backward compat)
         if not tokens_cache.get(filename, {}).get("staged", True):
@@ -1006,8 +1009,8 @@ def load_project_files_for_agent(username: str, project: str, agent_name: str) -
 
     combined = ""
     for filename in sorted(project_files):
-        # Skip hack-only files (injected separately during hack mode)
-        if filename in HACK_ONLY_FILES:
+        # Skip mode-specific files (injected separately during hack/combat mode)
+        if filename in HACK_ONLY_FILES or filename in COMBAT_ONLY_FILES:
             continue
         file_cache = tokens_cache.get(filename, {})
         # Skip files that are not staged
@@ -2462,14 +2465,28 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Flag the user message as a hack exchange
         user_msg_data["hack_mode"] = True
 
+    # Check if combat context mode is active
+    use_combat_mode = False
+    _ps_for_combat = data.get("pipeline_state", {})
+    _combat = _ps_for_combat.get("combat")
+    if (not use_hack_mode) and _combat and request.project and gs and gs.get("combat_contract"):
+        use_combat_mode = True
+
+    if use_combat_mode:
+        # Flag the user message as a combat exchange
+        user_msg_data["combat_mode"] = True
+
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
 
     # GPT-5.2 hack request params (non-streaming JSON call, built separately)
     hack_gpt_request_params = None
+
+    # GPT-5.2 combat request params (non-streaming JSON call, built separately)
+    combat_gpt_request_params = None
 
     if use_hack_mode:
         # ============================================================
@@ -2535,6 +2552,75 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 json_mode=True,
             )
 
+    elif use_combat_mode:
+        # ============================================================
+        # Combat mode: stripped context with combat contract + roster
+        # ============================================================
+        combat_ps = data.get("pipeline_state", {})
+        combat = combat_ps.get("combat", {})
+
+        combat_contract = gs["combat_contract"]
+        combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat)
+        combat_injection = gs["build_combat_injection"](combat, combat_ps)
+
+        combat_system_content = combat_contract
+        if combat_profile:
+            combat_system_content += "\n\n" + combat_profile
+
+        # Inject combat-specific project files if present
+        if request.project:
+            uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            for fname in ["Core Conversion.md"]:
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+            for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                    break
+
+        system_msg = {"role": "system", "content": combat_system_content}
+
+        # Only include combat-flagged messages from combat start
+        combat_start_id = combat.get("start_message_id")
+        combat_history = []
+        found_start = not combat_start_id
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == combat_start_id:
+                found_start = True
+            if found_start and msg.get("combat_mode"):
+                combat_history.append({"role": msg["role"], "content": msg["content"]})
+
+        user_content = build_message_content(branch_path[-1])
+        user_content = combat_injection + "\n\n" + user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + combat_history + [new_user_msg]
+        context_start_index = max(1, len(branch_path) - len(combat_history) - 1)
+
+        logger.info(f"Combat mode: round {combat.get('round', 1)} for {username}, "
+                    f"{len(combat_history)} prior combat exchanges")
+
+        if model_id == "gpt-5.2":
+            # GPT-5.2: build non-streaming JSON request via pipeline request builder
+            gpt_combat_messages = [
+                {"role": "system", "content": combat_system_content
+                 + "\n\nYou MUST output valid JSON matching the report_combat_state schema:\n"
+                 + json.dumps(gs["combat_tool"]["input_schema"], indent=2)},
+            ] + combat_history + [new_user_msg]
+            combat_gpt_request_params = provider.build_pipeline_request(
+                messages=gpt_combat_messages,
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="combat",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
     elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
         import copy as _copy
@@ -2542,8 +2628,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
 
         trim_anchor_id = data.get("_trim_anchor_id")
-        # Collapse hack messages into summary pairs before context trimming
-        branch_path_for_context = collapse_hack_messages(branch_path)
+        # Collapse hack and combat messages into summary pairs before context trimming
+        branch_path_for_context = collapse_combat_messages(collapse_hack_messages(branch_path))
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
             branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
         )
@@ -2593,8 +2679,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
-        # Collapse hack messages in non-stateful path too
-        bp_filtered = collapse_hack_messages(branch_path)
+        # Collapse hack and combat messages in non-stateful path too
+        bp_filtered = collapse_combat_messages(collapse_hack_messages(branch_path))
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
 
@@ -2618,6 +2704,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         request_params["tool_choice"] = {"type": "auto"}
     elif use_hack_mode:
         # GPT-5.2 hack mode: request_params not used (hack_gpt_request_params used instead)
+        request_params = {}
+    elif use_combat_mode and model_id.startswith("claude"):
+        # Claude combat mode: use standard build_request with combat tool
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
+        request_params["tools"] = [gs["combat_tool"]]
+        request_params["tool_choice"] = {"type": "auto"}
+    elif use_combat_mode:
+        # GPT-5.2 combat mode: request_params not used (combat_gpt_request_params used instead)
         request_params = {}
     else:
         request_params = provider.build_request(
@@ -2657,9 +2758,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # user_message_added broadcast moved before StreamingResponse
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
-            # Hack mode bypasses the pipeline — uses single-agent call instead
-            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode
-            # use_stateful and use_hack_mode are computed in the outer scope (before event_generator)
+            # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
+            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode
+            # use_stateful, use_hack_mode, use_combat_mode are computed in the outer scope (before event_generator)
 
             if use_hack_mode and model_id == "gpt-5.2":
                 # ============================================================
@@ -2828,6 +2929,218 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 )
 
                 logger.info(f"Hack mode (GPT-5.2): completed for {username}")
+
+            elif use_combat_mode and model_id == "gpt-5.2":
+                # ============================================================
+                # GPT-5.2 Combat mode: non-streaming JSON call
+                # ============================================================
+                logger.info(f"Combat mode (GPT-5.2): starting for {username}")
+
+                # Emit state_update so character panel refreshes with current combat state
+                if data.get("pipeline_state"):
+                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+
+                # Non-streaming call with JSON mode
+                combat_response = await asyncio.to_thread(
+                    provider.send_request_non_streaming,
+                    client, combat_gpt_request_params, 60.0
+                )
+
+                combat_content = combat_response.get('content', '')
+                combat_reasoning = combat_response.get('reasoning')
+
+                # Parse JSON response
+                try:
+                    combat_json = json.loads(combat_content)
+                except json.JSONDecodeError:
+                    logger.error(f"Combat mode: failed to parse JSON response: {combat_content[:200]}")
+                    combat_json = {}
+
+                # Extract narrative and yield as content
+                narrative = combat_json.get("narrative", combat_content)
+                accumulated_content = narrative
+                if narrative:
+                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
+                    )
+
+                if combat_reasoning:
+                    accumulated_thinking = combat_reasoning
+
+                # Apply character_updates to pipeline_state.character_states
+                combat_ps = data.get("pipeline_state", {})
+                for upd in combat_json.get("character_updates", []):
+                    name = upd.get("name")
+                    if not name:
+                        continue
+                    cs = combat_ps.get("character_states", {})
+                    entry = cs.get(name)
+                    if entry is None:
+                        continue
+                    d = entry.get("data", entry)
+                    # Apply HP delta
+                    hp_delta = upd.get("hp_delta")
+                    if hp_delta is not None:
+                        _vl = upd.get("vital_label", "HP")
+                        for v in d.get("vitals", []):
+                            if v.get("label") == _vl and "current" in v:
+                                v["current"] = max(0, v["current"] + hp_delta)
+                                break
+                    # Apply conditions
+                    conditions = d.setdefault("conditions", [])
+                    for cond in upd.get("conditions_add", []):
+                        if cond not in conditions:
+                            conditions.append(cond)
+                    for cond in upd.get("conditions_remove", []):
+                        if cond in conditions:
+                            conditions.remove(cond)
+
+                # Update pipeline_state.combat from tool output
+                new_combat = combat_json.get("combat")
+                if combat_json.get("combat_complete") or new_combat is None:
+                    combat_ps["combat"] = None
+                elif isinstance(new_combat, dict):
+                    # Preserve start_message_id across updates
+                    old_start = combat_ps.get("combat", {}).get("start_message_id")
+                    combat_ps["combat"] = new_combat
+                    if old_start and "start_message_id" not in new_combat:
+                        combat_ps["combat"]["start_message_id"] = old_start
+
+                data["pipeline_state"] = combat_ps
+
+                # Emit state_update SSE event with updated pipeline_state
+                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                )
+
+                # Build usage dict from combat response
+                usage = {
+                    'input_tokens': combat_response.get('input_tokens', 0),
+                    'cache_read_tokens': combat_response.get('cache_read_tokens', 0),
+                    'cache_creation_tokens': combat_response.get('cache_creation_tokens', 0),
+                    'output_tokens': combat_response.get('output_tokens', 0),
+                    'reasoning_tokens': combat_response.get('reasoning_tokens', 0),
+                    'content': narrative,
+                    'reasoning': combat_reasoning,
+                    'service_tier': combat_response.get('service_tier'),
+                }
+
+                assistant_message = narrative
+                reasoning_summary = combat_reasoning
+                service_tier = combat_response.get('service_tier')
+
+                from providers import ParsedResponse
+                parsed = ParsedResponse(
+                    content=assistant_message,
+                    reasoning=reasoning_summary,
+                    input_tokens=usage['input_tokens'],
+                    cache_read_tokens=usage['cache_read_tokens'],
+                    cache_creation_tokens=usage['cache_creation_tokens'],
+                    output_tokens=usage['output_tokens'],
+                    reasoning_tokens=usage['reasoning_tokens']
+                )
+
+                new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                if service_tier:
+                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                else:
+                    total_cost = provider.calculate_cost(parsed)
+                tokens_str = provider.format_token_string(parsed)
+
+                actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+                # Update stats
+                stats = data.get("stats", create_empty_stats())
+                stats["total_input_tokens"] += new_input_tokens
+                stats["total_cached_tokens"] += parsed.cache_read_tokens
+                stats["total_output_tokens"] += parsed.output_tokens
+                stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                stats["total_cost"] += actual_cost
+                stats["total_prompts"] += 1
+                stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
+                data["stats"] = stats
+
+                # Create assistant message (flagged as combat_mode)
+                assistant_msg_id = generate_message_id()
+                assistant_msg_data = {
+                    "id": assistant_msg_id,
+                    "parent_id": user_msg_id,
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                    "tokens": tokens_str,
+                    "cost": cost_str,
+                    "total_tokens": usage['output_tokens'],
+                    "total_gpt_tokens": usage['output_tokens'],
+                    "model": model_id,
+                    "combat_mode": True,
+                    "combat_tool_input": combat_json,
+                }
+                if reasoning_summary:
+                    assistant_msg_data["reasoning"] = reasoning_summary
+                if service_tier:
+                    assistant_msg_data["service_tier"] = service_tier
+
+                # Track combat start_message_id (fires when combat first becomes active)
+                active_combat = data.get("pipeline_state", {}).get("combat")
+                if active_combat and "start_message_id" not in active_combat:
+                    active_combat["start_message_id"] = assistant_msg_id
+
+                data["messages"].append(assistant_msg_data)
+                data["current_leaf_id"] = assistant_msg_id
+                save_chat(username, request.chat_name, data, request.project)
+
+                if pending_usage is not None:
+                    save_daily_usage(username, pending_usage)
+
+                update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens,
+                                        parsed.output_tokens, parsed.reasoning_tokens, actual_cost,
+                                        model=model_id, context_tokens=0)
+
+                branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                done_data = {
+                    'assistant_message': assistant_message,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': reasoning_summary,
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': len(branch_path_final),
+                    'model': model_id,
+                    'combat_mode': True,
+                }
+                if service_tier:
+                    done_data['service_tier'] = service_tier
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": len(branch_path_final),
+                            "stats": stats,
+                            "context_start_index": context_start_index,
+                            "pipeline_state": data.get("pipeline_state")
+                        }
+                    )
+                )
+
+                logger.info(f"Combat mode (GPT-5.2): completed for {username}, "
+                            f"combat_complete={combat_json.get('combat_complete', False)}")
 
             elif use_pipeline:
                 # ============================================================
@@ -3082,6 +3395,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
 
+                # Track combat start_message_id when combat begins via pipeline
+                _pipeline_combat = data.get("pipeline_state", {}).get("combat")
+                if _pipeline_combat and "start_message_id" not in _pipeline_combat:
+                    _pipeline_combat["start_message_id"] = assistant_msg_id
+
                 # Check for hack_trigger from pipeline events
                 if pipeline_result.events_json and gs and gs.get("init_hack_state"):
                     try:
@@ -3298,6 +3616,106 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 except Exception as retry_err:
                                     logger.error(f"Hack mode: retry error for {username}: {retry_err}")
 
+                        # Handle combat mode tool output (Claude combat mode)
+                        combat_tool_input = None
+                        if use_combat_mode and model_id.startswith("claude"):
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input:
+                                combat_tool_input = tool_input
+                                # Apply character_updates to pipeline_state.character_states
+                                _combat_ps = data.get("pipeline_state", {})
+                                for upd in tool_input.get("character_updates", []):
+                                    _name = upd.get("name")
+                                    if not _name:
+                                        continue
+                                    _entry = _combat_ps.get("character_states", {}).get(_name)
+                                    if _entry is None:
+                                        continue
+                                    _d = _entry.get("data", _entry)
+                                    _hp_delta = upd.get("hp_delta")
+                                    if _hp_delta is not None:
+                                        _vl = upd.get("vital_label", "HP")
+                                        for _v in _d.get("vitals", []):
+                                            if _v.get("label") == _vl and "current" in _v:
+                                                _v["current"] = max(0, _v["current"] + _hp_delta)
+                                                break
+                                    _conds = _d.setdefault("conditions", [])
+                                    for _c in upd.get("conditions_add", []):
+                                        if _c not in _conds:
+                                            _conds.append(_c)
+                                    for _c in upd.get("conditions_remove", []):
+                                        if _c in _conds:
+                                            _conds.remove(_c)
+                                # Update pipeline_state.combat
+                                _new_combat = tool_input.get("combat")
+                                if tool_input.get("combat_complete") or _new_combat is None:
+                                    _combat_ps["combat"] = None
+                                elif isinstance(_new_combat, dict):
+                                    _old_start = _combat_ps.get("combat", {}).get("start_message_id")
+                                    _combat_ps["combat"] = _new_combat
+                                    if _old_start and "start_message_id" not in _new_combat:
+                                        _combat_ps["combat"]["start_message_id"] = _old_start
+                                data["pipeline_state"] = _combat_ps
+                                logger.info(f"Combat mode: applied state for {username}, "
+                                            f"complete={tool_input.get('combat_complete', False)}")
+                            else:
+                                logger.warning(f"Combat mode: no tool_use_input for {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        request_params.get("system", []),
+                                        request_params["messages"],
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        gs["combat_tool"]
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        combat_tool_input = retry_result
+                                        # Apply state from retry result (mirrors initial tool path)
+                                        _combat_ps = data.get("pipeline_state", {})
+                                        for upd in retry_result.get("character_updates", []):
+                                            _name = upd.get("name")
+                                            if not _name:
+                                                continue
+                                            _entry = _combat_ps.get("character_states", {}).get(_name)
+                                            if _entry is None:
+                                                continue
+                                            _d = _entry.get("data", _entry)
+                                            _hp_delta = upd.get("hp_delta")
+                                            if _hp_delta is not None:
+                                                _vl = upd.get("vital_label", "HP")
+                                                for _v in _d.get("vitals", []):
+                                                    if _v.get("label") == _vl and "current" in _v:
+                                                        _v["current"] = max(0, _v["current"] + _hp_delta)
+                                                        break
+                                            _conds = _d.setdefault("conditions", [])
+                                            for _c in upd.get("conditions_add", []):
+                                                if _c not in _conds:
+                                                    _conds.append(_c)
+                                            for _c in upd.get("conditions_remove", []):
+                                                if _c in _conds:
+                                                    _conds.remove(_c)
+                                        _new_combat = retry_result.get("combat")
+                                        if retry_result.get("combat_complete") or _new_combat is None:
+                                            _combat_ps["combat"] = None
+                                        elif isinstance(_new_combat, dict):
+                                            _old_start = _combat_ps.get("combat", {}).get("start_message_id")
+                                            _combat_ps["combat"] = _new_combat
+                                            if _old_start and "start_message_id" not in _new_combat:
+                                                _combat_ps["combat"]["start_message_id"] = _old_start
+                                        data["pipeline_state"] = _combat_ps
+                                        logger.info(f"Combat mode: retry succeeded for {username}")
+                                    else:
+                                        logger.warning(f"Combat mode: retry also failed for {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Combat mode: retry error for {username}: {retry_err}")
+
                         # Extract tool_use input for stateful state updates
                         stateful_tool_input = None
                         stateful_tool_retried = False
@@ -3361,6 +3779,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Send state_update SSE event for right panel (single-agent path)
                         if use_stateful and data.get("pipeline_state"):
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                            )
+
+                        # Emit state_update for Claude combat mode
+                        if use_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
                             yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -3532,8 +3958,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if hack_tool_input:
                                 assistant_msg_data["hack_tool_input"] = hack_tool_input
 
+                        # Flag combat mode messages (Claude path)
+                        if use_combat_mode:
+                            assistant_msg_data["combat_mode"] = True
+                            if combat_tool_input:
+                                assistant_msg_data["combat_tool_input"] = combat_tool_input
+
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id
+
+                        # Track combat start_message_id when combat begins
+                        _active_combat = data.get("pipeline_state", {}).get("combat")
+                        if _active_combat and "start_message_id" not in _active_combat:
+                            _active_combat["start_message_id"] = assistant_msg_id
 
                         # Check for hack_trigger in normal stateful tool output
                         if (stateful_tool_input
@@ -3644,6 +4081,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['service_tier'] = service_tier
                         if use_hack_mode:
                             done_data['hack_mode'] = True
+                        if use_combat_mode:
+                            done_data['combat_mode'] = True
                         if not client_disconnected:
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
