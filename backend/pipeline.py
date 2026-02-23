@@ -183,6 +183,14 @@ def build_events_messages(
         pipeline_state.get("scene_state", {}))
     injections.append(cs_injection)
 
+    # 5b. Character features (game-system specific, e.g. subclass features from conversion doc)
+    if game_system and game_system.get("build_features_injection"):
+        feat_inj = game_system["build_features_injection"](
+            pipeline_state.get("character_states", {}),
+            pipeline_state.get("game_state", {}))
+        if feat_inj:
+            injections.append(feat_inj)
+
     # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
         game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
@@ -2256,6 +2264,14 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
         pipeline_state.get("character_states", {}),
         pipeline_state.get("scene_state", {}))
     injections.append(cs)
+
+    # 5b. Character features (game-system specific, e.g. subclass features from conversion doc)
+    if game_system and game_system.get("build_features_injection"):
+        feat_inj = game_system["build_features_injection"](
+            pipeline_state.get("character_states", {}),
+            pipeline_state.get("game_state", {}))
+        if feat_inj:
+            injections.append(feat_inj)
 
     # 6. HUD state (with scene-scoped funds, backfilled from game_state)
     hud = build_hud_state_injection(

@@ -155,22 +155,288 @@ def build_game_injection(game_state):
 # Hack Mode — Matrix Encounters
 # ============================================================
 
-# Ghost subclass features by minimum level
-GHOST_FEATURES = {
-    3: [
-        "Zero Footprint: Advantage on Backdoor Entry. After any node action, may spend 1 round to reduce Alert by 1. Spoof Signal costs 0 Processes.",
-        "Clean Exit: Reaction: Jack Out with no consequences. Alert resets. 1/SR.",
-    ],
-    6: [
-        "Spoof Identity: Enter systems as a scanned user. Bypass barriers at/below clearance. Lasts until Alert reaches Active Search. 1/SR.",
-    ],
-    9: [
-        "Ghost Protocol: Invisible in the Matrix for 1 minute. End early for automatic critical on next hack action. 1/LR.",
-    ],
-    13: [
-        "Digital Phantom: While Ghost Protocol is active, immune to Trace ICE. Can pass through Barrier nodes without checks.",
-    ],
-}
+# ============================================================
+# Conversion Doc Parser & Feature Injection
+# ============================================================
+
+import re
+
+def parse_conversion_features(doc_content: str) -> dict:
+    """Parse Core Conversion.md to extract subclass and custom class features.
+
+    Returns:
+        {
+            "subclasses": {
+                "Ghost": {"parent_class": "Netrunner", "features": [{"level": 2, "text": "**Lvl 2 — ..."}, ...]},
+                ...
+            },
+            "custom_classes": {
+                "Conduit": {"features": [{"level": 1, "text": "**Lvl 1 — ..."}, ...]},
+                ...
+            }
+        }
+    """
+    result = {"subclasses": {}, "custom_classes": {}}
+
+    # Trim to sections 2.1 and 2.2 only (stop at section 3)
+    m_start = re.search(r'^## \*\*2\.1 ', doc_content, re.MULTILINE)
+    m_end = re.search(r'^## \*\*3\.', doc_content, re.MULTILINE)
+    if not m_start:
+        return result
+    section = doc_content[m_start.start():m_end.start()] if m_end else doc_content[m_start.start():]
+
+    # Split into header-delimited blocks (##, ###, or #### level)
+    blocks = re.split(r'^(#{2,4} .+)$', section, flags=re.MULTILINE)
+    # blocks alternates: text_before, header, body, header, body, ...
+
+    i = 1  # skip preamble before first header
+    while i < len(blocks) - 1:
+        header = blocks[i].strip()
+        body = blocks[i + 1] if i + 1 < len(blocks) else ""
+        i += 2
+
+        # ---- Section 2.1 subclasses: ### **CLASS: Subclass** ----
+        m_sub = re.match(r'^### \*\*(\w[\w\s]*?):\s*(\w[\w\s]*?)\*\*', header)
+        if m_sub:
+            parent_class = m_sub.group(1).strip()
+            subclass_name = m_sub.group(2).strip()
+            features = _extract_features(body)
+            result["subclasses"][subclass_name] = {"parent_class": parent_class, "features": features}
+            continue
+
+        # ---- Section 2.2 custom class (full): ## **2.2 ClassName Class (Full)** ----
+        # or ### **CLASSNAME** inside a 2.2 section
+        m_full_header = re.match(r'^## \*\*2\.2\s+(\w[\w\s]*?)\s+Class\s+\(Full\)\*\*', header)
+        if m_full_header:
+            class_name = m_full_header.group(1).strip()
+            # The body may contain #### Core Features, #### Manifestations, etc.
+            # Collect everything until a subclass header appears
+            # But first peek ahead for ### headers that are part of this class block
+            full_body = body
+            # Consume subsequent blocks that are part of this custom class
+            while i < len(blocks) - 1:
+                next_header = blocks[i].strip()
+                # Stop if we hit another ## section (but not ### or ####)
+                if re.match(r'^## [^#]', next_header):
+                    break
+                # Check if this is a subclass of this custom class: ### **CLASS: SubclassName**
+                m_nested_sub = re.match(r'^### \*\*' + re.escape(class_name.upper()) + r':\s*(\w[\w\s]*?)\*\*', next_header)
+                if m_nested_sub:
+                    # This is a subclass under the custom class
+                    sub_name = m_nested_sub.group(1).strip()
+                    sub_body = blocks[i + 1] if i + 1 < len(blocks) else ""
+                    sub_features = _extract_features(sub_body)
+                    result["subclasses"][sub_name] = {"parent_class": class_name, "features": sub_features}
+                    i += 2
+                    continue
+                # Otherwise it's part of the custom class body (#### sections, ### **CLASSNAME**, etc.)
+                full_body += "\n" + next_header + "\n" + (blocks[i + 1] if i + 1 < len(blocks) else "")
+                i += 2
+
+            features = _extract_features(full_body)
+            result["custom_classes"][class_name] = {"features": features}
+            continue
+
+        # ---- Conduit-style full class inline in 2.1: ### **CONDUIT (Full Class)** ----
+        m_inline_full = re.match(r'^### \*\*(\w[\w\s]*?)\s*\(Full Class\)\*\*', header)
+        if m_inline_full:
+            class_name = m_inline_full.group(1).strip()
+            full_body = body
+            # Consume subsequent #### blocks (Core Features, Manifestations, Instability, subclasses)
+            while i < len(blocks) - 1:
+                next_header = blocks[i].strip()
+                if re.match(r'^## [^#]', next_header):
+                    break
+                # Check for subclass: #### ClassName Subclass: SubName
+                m_nested = re.match(r'^####\s+' + re.escape(class_name) + r'\s+Subclass:\s*(\w[\w\s]*?)$', next_header, re.IGNORECASE)
+                if m_nested:
+                    sub_name = m_nested.group(1).strip()
+                    sub_body = blocks[i + 1] if i + 1 < len(blocks) else ""
+                    sub_features = _extract_features(sub_body)
+                    result["subclasses"][sub_name] = {"parent_class": class_name, "features": sub_features}
+                    i += 2
+                    continue
+                # Check if it's a ### that indicates a new top-level class/subclass
+                if next_header.startswith('### ') and not next_header.startswith('#### '):
+                    # Could be ### **CLASSNAME** (the class entry inside a full class section)
+                    # or ### **CLASS: Sub** which means we've left this block
+                    if re.match(r'^### \*\*\w[\w\s]*?:\s*\w', next_header):
+                        break  # New subclass section, not part of this class
+                full_body += "\n" + next_header + "\n" + (blocks[i + 1] if i + 1 < len(blocks) else "")
+                i += 2
+
+            features = _extract_features(full_body)
+            result["custom_classes"][class_name] = {"features": features}
+            continue
+
+    return result
+
+
+def _extract_features(text: str) -> list:
+    """Extract level-gated features from a block of text.
+
+    Finds **Lvl N — Feature Name.** patterns and collects all text until the
+    next feature, --- divider, or #### header. Also handles auto-prepared
+    spell/program tables that follow a feature header.
+
+    Returns list of {"level": int, "text": str} dicts.
+    """
+    features = []
+    # Split on feature headers: **Lvl N — ...**
+    # We need to find each feature start position
+    pattern = re.compile(r'^\*\*Lvl\s+(\d+)\s*[—–-]\s*', re.MULTILINE)
+    matches = list(pattern.finditer(text))
+
+    for idx, match in enumerate(matches):
+        level = int(match.group(1))
+        start = match.start()
+        # Find end: next feature, --- divider, or #### header (whichever comes first)
+        if idx + 1 < len(matches):
+            end = matches[idx + 1].start()
+        else:
+            end = len(text)
+
+        chunk = text[start:end]
+
+        # Trim trailing --- divider and whitespace
+        chunk = re.sub(r'\n---\s*$', '', chunk).strip()
+
+        # Check if there's a table right after the feature header line
+        # Include it as part of this feature
+        if chunk:
+            features.append({"level": level, "text": chunk})
+
+    # Also capture tables (Manifestations, Instability) that aren't under a **Lvl N** header
+    # These are level-1 content for custom classes (available from class start)
+    _extract_tables_as_features(text, features)
+
+    return features
+
+
+def _extract_tables_as_features(text: str, features: list):
+    """Extract Manifestations and Instability tables as level-1 features."""
+    # Look for #### Manifestations section
+    for section_name in ["Manifestations", "Instability Table"]:
+        pattern = re.compile(r'^####\s+' + re.escape(section_name) + r'.*?\n(.*?)(?=\n####|\n---\s*$|\Z)',
+                             re.MULTILINE | re.DOTALL)
+        m = pattern.search(text)
+        if m:
+            table_text = m.group(0).strip()
+            if table_text:
+                features.append({"level": 1, "text": table_text})
+
+
+def _filter_spell_table_rows(feature_text: str, char_level: int) -> str:
+    """Filter auto-prepared spell table rows to only show levels at/below char_level.
+
+    Finds markdown tables within a feature and filters rows where the first column
+    is a level number greater than char_level.
+    """
+    lines = feature_text.split('\n')
+    result = []
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('|') and not in_table:
+            in_table = True
+            result.append(line)
+            continue
+        if in_table:
+            if not stripped.startswith('|'):
+                in_table = False
+                result.append(line)
+                continue
+            # Check if this is a separator row (|:---|...) or header row
+            if re.match(r'^\|[\s:*-]+\|', stripped):
+                result.append(line)
+                continue
+            # Check if first cell is a level number
+            cells = [c.strip() for c in stripped.split('|')]
+            # cells[0] is empty (before first |), cells[1] is first col
+            if len(cells) >= 2:
+                try:
+                    row_level = int(cells[1])
+                    if row_level <= char_level:
+                        result.append(line)
+                    continue
+                except ValueError:
+                    # Header row or non-numeric — keep it
+                    result.append(line)
+                    continue
+            result.append(line)
+        else:
+            result.append(line)
+    return '\n'.join(result)
+
+
+def build_features_injection(character_states: dict, game_state: dict) -> str:
+    """Build [CHARACTER FEATURES] injection block from conversion doc or fallback features.
+
+    For every character with a subclass or custom class, emits their level-filtered
+    features from the parsed conversion doc. Falls back to character_state["features"]
+    if no doc is available.
+    """
+    doc_content = game_state.get("_conversion_doc")
+    parsed = parse_conversion_features(doc_content) if doc_content else None
+
+    # Build case-insensitive lookup maps for parsed data
+    if parsed:
+        cc_lower = {k.lower(): v for k, v in parsed["custom_classes"].items()}
+        sc_lower = {k.lower(): v for k, v in parsed["subclasses"].items()}
+    else:
+        cc_lower = sc_lower = {}
+
+    blocks = []
+    for name, entry in character_states.items():
+        data = entry.get("data", entry)
+        level = data.get("level")
+        if not level or data.get("type") == "ship":
+            continue
+
+        cls = data.get("class", "")
+        subclass = data.get("subclass")
+
+        # Backward compat: extract subclass from "Netrunner (Ghost)" if subclass field missing
+        if subclass is None and "(" in cls:
+            m = re.match(r'^(.+?)\s*\((.+?)\)\s*$', cls)
+            if m:
+                cls = m.group(1).strip()
+                subclass = m.group(2).strip()
+
+        if parsed:
+            char_features = []
+
+            # Custom class features (e.g. Conduit core features)
+            custom = cc_lower.get(cls.lower())
+            if custom:
+                for feat in custom["features"]:
+                    if feat["level"] <= level:
+                        char_features.append(_filter_spell_table_rows(feat["text"], level))
+
+            # Subclass features
+            if subclass:
+                sub_data = sc_lower.get(subclass.lower())
+                if sub_data:
+                    for feat in sub_data["features"]:
+                        if feat["level"] <= level:
+                            char_features.append(_filter_spell_table_rows(feat["text"], level))
+
+            if char_features:
+                label = f"{cls} ({subclass})" if subclass else cls
+                header = f"## {name} — {label}, Level {level}"
+                blocks.append(header + "\n\n" + "\n\n".join(char_features))
+        else:
+            # Fallback: use features array from character_state
+            fallback = data.get("features", [])
+            if fallback:
+                label = f"{cls} ({subclass})" if subclass else cls
+                header = f"## {name} — {label}, Level {level}"
+                blocks.append(header + "\n\n" + "\n".join(f"- {f}" for f in fallback))
+
+    if not blocks:
+        return ""
+    return "[CHARACTER FEATURES]\n" + "\n\n".join(blocks) + "\n[/CHARACTER FEATURES]"
+
 
 ALERT_LEVEL_NAMES = {
     0: "Dormant",
@@ -431,7 +697,7 @@ def build_hack_injection(hack_state):
     return "\n\n".join(parts)
 
 
-def build_hacker_profile(character_states):
+def build_hacker_profile(character_states, conversion_doc=None):
     """Build compact hacker profile from character_states for hack mode context.
     Extracts PC stats relevant to hacking (HP, AC, class features, cyberdeck, programs)."""
     # Find the PC
@@ -452,28 +718,38 @@ def build_hacker_profile(character_states):
 
     # Class and level
     cls = pc_data.get("class", "Unknown")
+    subclass = pc_data.get("subclass")
     level = pc_data.get("level")
+
+    # Backward compat: extract subclass from "Netrunner (Ghost)" if subclass field missing
+    if subclass is None and "(" in cls:
+        m = re.match(r'^(.+?)\s*\((.+?)\)\s*$', cls)
+        if m:
+            cls = m.group(1).strip()
+            subclass = m.group(2).strip()
+
+    label = f"{cls} ({subclass})" if subclass else cls
     if level:
-        lines.append(f"Class: {cls} | Level: {level}")
+        lines.append(f"Class: {label} | Level: {level}")
     else:
-        lines.append(f"Class: {cls}")
+        lines.append(f"Class: {label}")
 
     # Vitals (HP, AC, etc.)
     vitals_parts = []
     for v in pc_data.get("vitals", []):
-        label = v.get("label", "")
+        vlabel = v.get("label", "")
         if "current" in v and "max" in v:
-            vitals_parts.append(f"{label}: {v['current']}/{v['max']}")
+            vitals_parts.append(f"{vlabel}: {v['current']}/{v['max']}")
         elif "value" in v:
-            vitals_parts.append(f"{label}: {v['value']}")
+            vitals_parts.append(f"{vlabel}: {v['value']}")
     if vitals_parts:
         lines.append(" | ".join(vitals_parts))
 
     # Hacking-relevant resources (Processes, Program Slots, etc.)
     for r in pc_data.get("resources", []):
-        label = r.get("label", "")
-        if any(kw in label.lower() for kw in ["process", "program", "hack", "cyberdeck"]):
-            lines.append(f"{label}: {r.get('current', 0)}/{r.get('max', 0)}")
+        rlabel = r.get("label", "")
+        if any(kw in rlabel.lower() for kw in ["process", "program", "hack", "cyberdeck"]):
+            lines.append(f"{rlabel}: {r.get('current', 0)}/{r.get('max', 0)}")
 
     # Conditions
     conditions = pc_data.get("conditions", [])
@@ -485,16 +761,24 @@ def build_hacker_profile(character_states):
     if summary:
         lines.append(f"Notes: {summary}")
 
-    # Ghost subclass features (filtered by level)
-    if level and "ghost" in cls.lower():
+    # Subclass features (filtered by level)
+    if level and subclass:
+        parsed = parse_conversion_features(conversion_doc) if conversion_doc else None
         feature_lines = []
-        for min_level, features in sorted(GHOST_FEATURES.items()):
-            if level >= min_level:
-                feature_lines.extend(features)
+        if parsed:
+            sc_lower = {k.lower(): v for k, v in parsed["subclasses"].items()}
+            sub_data = sc_lower.get(subclass.lower())
+            if sub_data:
+                for feat in sub_data["features"]:
+                    if feat["level"] <= level:
+                        feature_lines.append(feat["text"])
+        if not feature_lines:
+            # Fallback to features array on character_state
+            feature_lines = pc_data.get("features", [])
         if feature_lines:
-            lines.append(f"\nGhost Features (active at Lvl {level}):")
+            lines.append(f"\n{subclass} Features (active at Lvl {level}):")
             for feat in feature_lines:
-                lines.append(f"- {feat}")
+                lines.append(feat if feat.startswith("**") else f"- {feat}")
 
     lines.append("[/HACKER PROFILE]")
     return "\n".join(lines)
@@ -529,7 +813,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Netrunner",
+      "subclass": "Ghost",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 12, "max": 14},
@@ -733,6 +1018,8 @@ CHARACTER STATES:
 - If the injected state conflicts with project files (e.g. character sheets show max HP but state shows current HP after damage), the injected state takes precedence — only update it based on events in the conversation
 - Use the structured format: each character is an object with type, vitals, resources, conditions, and summary
 - Ships should be included as entries with type "ship" — vitals include Hull/Shields, resources include ammo
+- Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost" — NOT "class": "Netrunner (Ghost)". Set subclass to null if the character has no subclass or hasn't reached the level that unlocks it.
+- Only populate the "features" array if there is no Core Conversion doc in the project files. When a conversion doc exists, features are injected automatically from it.
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
@@ -803,7 +1090,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Netrunner",
+      "subclass": "Ghost",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 10, "max": 14},
@@ -838,6 +1126,7 @@ CHARACTER STATES:
 - Include HP, spell slots, class resources, conditions, and any other mechanically relevant state
 - This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
 - Ships should be included as entries with type "ship" — update Hull/Shields/ammo after combat
+- Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost". Set subclass to null if none or not yet unlocked.
 
 SHIP COMBAT HUD:
 - During ship combat, include ship status in the HUD or dramatic_notes
@@ -913,7 +1202,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the character panel (funds derived from ship.credits).
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class and subclass, e.g. "Fighter (Champion)"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Netrunner"), `subclass` (subclass name or null, e.g. "Ghost"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), `summary` (free-text for equipment/notes), and optionally `features` (array of strings — only populate if no Core Conversion doc exists in the project files). Report class and subclass separately — NOT "Netrunner (Ghost)". Set subclass to null if the character has no subclass or hasn't reached the level that unlocks it. Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat (including ship combat). Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
@@ -1083,7 +1372,8 @@ STATE_REPORT_TOOL = {
                     "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
-                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Fighter (Champion)'."},
+                        "class": {"type": "string", "description": "Class only, e.g. 'Netrunner', 'Street Samurai'. Do NOT include subclass here."},
+                        "subclass": {"type": ["string", "null"], "description": "Subclass name (e.g. 'Ghost', 'Tank'). null if none or not yet unlocked."},
                         "level": {"type": ["integer", "null"], "description": "Character level."},
                         "vitals": {
                             "type": "array",
@@ -1117,7 +1407,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "features": {"type": "array", "items": {"type": "string"}, "description": "Fallback: active class/subclass features as text entries. Only populate if no Core Conversion doc exists in the project files."}
                     }
                 }
             },
@@ -1266,6 +1557,8 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Character features (subclass/custom class injection from conversion doc)
+    "build_features_injection": build_features_injection,
     # Hack mode (Matrix encounters)
     "hack_contract": HACK_CONTRACT,
     "hack_tool": REPORT_HACK_STATE_TOOL,

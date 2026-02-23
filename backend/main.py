@@ -958,7 +958,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 HACK_ONLY_FILES = {"Hacking Rulebook.md"}
-COMBAT_ONLY_FILES = {"Core Conversion.md"}
+COMBAT_ONLY_FILES = set()
 
 def load_project_files(username: str, project: str) -> str:
     """Load all staged project files from project's uploads folder.
@@ -2494,9 +2494,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # ============================================================
         hack_ps = data.get("pipeline_state", {})
 
+        # Load conversion doc for feature injection in hack mode
+        hack_conversion_doc = None
+        if request.project:
+            conv_path = os.path.join(get_project_dir(username, request.project), "uploads", "Core Conversion.md")
+            if os.path.exists(conv_path):
+                with open(conv_path, 'r', encoding='utf-8') as f:
+                    hack_conversion_doc = f.read()
+
         # Build system prompt: hack contract + hacker profile
         hack_contract = gs["hack_contract"]
-        hacker_profile = gs["build_hacker_profile"](hack_ps.get("character_states", {}))
+        hacker_profile = gs["build_hacker_profile"](hack_ps.get("character_states", {}), conversion_doc=hack_conversion_doc)
         hack_injection = gs["build_hack_injection"](hack_state)
 
         hack_system_content = hack_contract
@@ -2627,6 +2635,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
 
+        # Load conversion doc for feature injection (transient — after snapshot, stripped after injection)
+        if gs and request.project:
+            conv_path = os.path.join(get_project_dir(username, request.project), "uploads", "Core Conversion.md")
+            if os.path.exists(conv_path):
+                with open(conv_path, 'r', encoding='utf-8') as f:
+                    stateful_pipeline_state.setdefault("game_state", {})["_conversion_doc"] = f.read()
+
         trim_anchor_id = data.get("_trim_anchor_id")
         # Collapse hack and combat messages into summary pairs before context trimming
         branch_path_for_context = collapse_combat_messages(collapse_hack_messages(branch_path))
@@ -2658,6 +2673,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # Build injections for user message
         injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
+
+        # Strip transient _conversion_doc before it can be persisted
+        _gs_state = stateful_pipeline_state.get("game_state")
+        if _gs_state:
+            _gs_state.pop("_conversion_doc", None)
 
         # System prompt: contract + original
         system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
@@ -3176,6 +3196,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 pipeline_state_prev = data.get("pipeline_state")
                 pipeline_trim_anchor_id = data.get("_trim_anchor_id")
 
+                # Load conversion doc for feature injection (transient — injected into a
+                # copy of game_state so we never mutate data["pipeline_state"])
+                if pipeline_state_prev and request.project:
+                    conv_path = os.path.join(get_project_dir(username, request.project), "uploads", "Core Conversion.md")
+                    if os.path.exists(conv_path):
+                        with open(conv_path, 'r', encoding='utf-8') as f:
+                            orig_gs = pipeline_state_prev.get("game_state", {})
+                            pipeline_state_prev = {**pipeline_state_prev, "game_state": {**orig_gs, "_conversion_doc": f.read()}}
+
                 pipeline_result = None
                 pipeline_current_stage = "starting"
 
@@ -3276,6 +3305,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Save pipeline state for next turn
                 if pipeline_result.pipeline_state is not None:
+                    # Strip transient _conversion_doc before persisting
+                    gs_state = pipeline_result.pipeline_state.get("game_state")
+                    if gs_state:
+                        gs_state.pop("_conversion_doc", None)
                     data["pipeline_state"] = pipeline_result.pipeline_state
                     # Send state_update SSE event for right panel
                     yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
