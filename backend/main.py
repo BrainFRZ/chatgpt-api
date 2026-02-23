@@ -958,7 +958,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 HACK_ONLY_FILES = {"Hacking Rulebook.md"}
-COMBAT_ONLY_FILES = {"Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"}
+COMBAT_ONLY_FILES = {"Core Conversion.md"}
 
 def load_project_files(username: str, project: str) -> str:
     """Load all staged project files from project's uploads folder.
