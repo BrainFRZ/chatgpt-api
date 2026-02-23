@@ -570,18 +570,19 @@ def _memory_sort_key(m: dict) -> tuple:
     return (m.get("impact", 0), m.get("turn_created", 0))
 
 
-def filter_ops_by_scene_scope(parsed: dict, npcs_present: set) -> None:
+def filter_ops_by_scene_scope(parsed: dict, scene_state: dict) -> None:
     """Filter npc_memory_ops and relationship_ops to only include NPCs in the current scene.
 
     Mutates parsed dict in-place (so downstream notification extraction sees filtered ops).
     Faction ops (fr) and bootstrap ops (set/npc_set) are always allowed through.
-    If npcs_present is empty/uninitialized, skips filtering (allows all ops — needed for
-    first-turn bootstrap when scene_state hasn't been populated yet).
+    Skips filtering only when scene_state itself is empty/uninitialized (first-turn bootstrap).
+    An initialized scene with npcs_present=[] is valid and means no NPC ops are allowed.
     """
-    if not npcs_present:
+    if not scene_state:
         # No scene_state yet (first turn / bootstrap) — allow all ops through
         return
 
+    npcs_present = set(scene_state.get("npcs_present", []))
     skipped = 0
 
     # Filter npc_memory_ops
@@ -1086,9 +1087,8 @@ def run_pipeline(
         current_turn
     )
     # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
-    npcs_in_scene = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
     if events_data.get("npc_memory_ops") or events_data.get("relationship_ops"):
-        filter_ops_by_scene_scope(events_data, npcs_in_scene)
+        filter_ops_by_scene_scope(events_data, pipeline_state.get("scene_state", {}))
     if events_data.get("npc_memory_ops"):
         pipeline_state["npc_memories"] = apply_npc_memory_ops(
             pipeline_state["npc_memories"],
@@ -2127,9 +2127,8 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         )
     # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
     # Mutates parsed in-place so downstream notification extraction also sees filtered ops
-    npcs_present = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
     if parsed.get("npc_memory_ops") or parsed.get("relationship_ops"):
-        filter_ops_by_scene_scope(parsed, npcs_present)
+        filter_ops_by_scene_scope(parsed, pipeline_state.get("scene_state", {}))
     if parsed.get("npc_memory_ops"):
         pipeline_state["npc_memories"] = apply_npc_memory_ops(
             pipeline_state["npc_memories"],
