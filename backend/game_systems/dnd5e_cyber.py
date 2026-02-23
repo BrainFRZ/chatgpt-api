@@ -648,7 +648,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}

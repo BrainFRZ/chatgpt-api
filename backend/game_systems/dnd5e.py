@@ -168,6 +168,9 @@ def _format_npc_line(name, data):
         else:
             parts.append(f"RomS {roms} ({roms_label})")
     line = f"  {name}: {' | '.join(parts)}"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
 
     # Append inter-NPC relationships indented under this NPC
     npc_rels = data.get("npc_relationships", {})
@@ -198,8 +201,13 @@ def _format_faction_line(name, data):
     fr = data.get("fr", 0)
     fr_label, fr_bonus = _fr_tier(fr)
     if fr_bonus:
-        return f"  {name}: FR {fr} ({fr_label} \u2014 {fr_bonus})"
-    return f"  {name}: FR {fr} ({fr_label})"
+        line = f"  {name}: FR {fr} ({fr_label} \u2014 {fr_bonus})"
+    else:
+        line = f"  {name}: FR {fr} ({fr_label})"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
+    return line
 
 
 def build_game_injection(game_state):
@@ -345,7 +353,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
@@ -681,7 +689,7 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Faction Reputation change. Clamped -100 to +100.
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
