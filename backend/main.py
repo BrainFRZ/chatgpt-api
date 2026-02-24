@@ -3202,6 +3202,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 pipeline_result = None
                 pipeline_current_stage = "starting"
+                # Snapshot old voice values for voice_update notifications
+                _old_cs = pipeline_state_prev.get("character_states", {}) if pipeline_state_prev else {}
+                pipeline_old_voice_snapshot = {
+                    name: entry.get("data", entry).get("voice")
+                    for name, entry in _old_cs.items()
+                }
 
                 # Use a sentinel to avoid StopIteration propagation in async generator (PEP 479)
                 _PIPELINE_STOP = object()
@@ -3320,7 +3326,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # from raw JSON, so it has unfiltered ops unlike the applied state)
                         ps_scene = (pipeline_result.pipeline_state or {}).get("scene_state", {})
                         notif_npcs = set(ps_scene.get("npcs_present", []))
-                        notifs = extract_state_notifications(events_parsed, npcs_present=notif_npcs)
+                        notifs = extract_state_notifications(
+                            events_parsed, npcs_present=notif_npcs,
+                            old_character_states=pipeline_old_voice_snapshot)
                         if notifs:
                             yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
                             await sync_manager.broadcast_to_chat(chat_key,
@@ -3749,7 +3757,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Extract tool_use input for stateful state updates
                         stateful_tool_input = None
                         stateful_tool_retried = False
+                        old_voice_snapshot = None
                         if use_stateful and stateful_pipeline_state is not None:
+                            # Snapshot old voice values for voice_update notifications
+                            old_voice_snapshot = {
+                                name: entry.get("data", entry).get("voice")
+                                for name, entry in stateful_pipeline_state.get("character_states", {}).items()
+                            }
                             tool_input = usage.get('tool_use_input')
                             if tool_input:
                                 is_ooc = tool_input.get("is_ooc", False)
@@ -3836,7 +3850,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Emit state change notifications (single-agent path)
                         if stateful_tool_input:
-                            notifs = extract_state_notifications(stateful_tool_input)
+                            notifs = extract_state_notifications(
+                                stateful_tool_input,
+                                old_character_states=old_voice_snapshot)
                             if notifs:
                                 yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
                                 await sync_manager.broadcast_to_chat(chat_key,

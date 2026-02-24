@@ -2337,12 +2337,15 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     return "\n\n".join(injections) if injections else ""
 
 
-def extract_state_notifications(ops_source: dict, npcs_present: set = None) -> list:
+def extract_state_notifications(ops_source: dict, npcs_present: set = None,
+                                old_character_states: dict = None) -> list:
     """Extract user-visible notifications from relationship_ops and npc_memory_ops.
 
     Returns a list of notification dicts for the frontend to display.
     Skips bootstrap ops (set/npc_set) and drop actions — only meaningful changes.
     If npcs_present is provided, filters out ops targeting NPCs not in the scene.
+    If old_character_states is provided (name → old voice string or None),
+    emits voice_update notifications when voice is set or changed.
     """
     notifications = []
 
@@ -2396,5 +2399,20 @@ def extract_state_notifications(ops_source: dict, npcs_present: set = None) -> l
             "severity": op.get("severity"),
             "episode": op.get("episode"),
         })
+
+    # Voice profile updates for NPCs/enemies
+    if old_character_states is not None:
+        for name, cs_entry in ops_source.get("character_states", {}).items():
+            cs_data = cs_entry.get("data", cs_entry) if isinstance(cs_entry, dict) else {}
+            new_voice = cs_data.get("voice")
+            if new_voice and cs_data.get("type") in ("npc", "enemy"):
+                old_voice = old_character_states.get(name)
+                if new_voice != old_voice:
+                    notifications.append({
+                        "type": "voice_update",
+                        "npc": name,
+                        "voice": new_voice,
+                        "old_voice": old_voice,
+                    })
 
     return notifications

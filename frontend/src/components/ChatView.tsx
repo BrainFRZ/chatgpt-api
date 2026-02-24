@@ -508,6 +508,14 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'voice_update') {
+                return (
+                  <div key={i} style={styles.voiceNotification}>
+                    <span style={styles.notificationLabel}>{n.npc}</span>
+                    {' voice '}{n.old_voice ? 'updated' : 'set'}{': '}{n.voice}
+                  </div>
+                );
+              }
               if (n.type === 'plot_decision') {
                 const isDivergence = n.severity === 'divergence';
                 return (

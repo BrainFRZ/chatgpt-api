@@ -573,7 +573,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "class": "Private Investigator", "level": null, "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`
+- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "class": "Private Investigator", "level": null, "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`. Optional `voice` field for NPCs/enemies (1-2 sentence voice/personality profile).
+  - **`voice` field**: Generate `voice` for NPCs/enemies that are NOT in the NPC docs (improvised/emergent characters). 1-2 sentences capturing speech patterns, accent, demeanor. Do NOT set `voice` for NPCs that have a full profile in the project documents — the docs are the source of truth. Update `voice` only when there's a fundamental long-term shift in an NPC's demeanor (shell-shocked after trauma, major loss, sudden confidence gain) — not for temporary mood.
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -739,7 +740,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "voice": {"type": ["string", "null"], "description": "1-2 sentence voice/personality profile. Speech patterns, accent, demeanor. Set once when NPC is introduced; omit for PCs. Example: 'Thick Boston accent, nervous stammer when lying. Chain-smokes and avoids eye contact.'"}
                     }
                 }
             },
@@ -908,6 +910,9 @@ NARRATIVE STYLE:
 - Present tense, dread-soaked, immediate. 2–5 sentences.
 - Name combatants. Violence is horrible and consequential — describe injury, shock, the smell of gunpowder.
 - End each exchange setting up what the next active combatant faces.
+
+NPC VOICE:
+- The combatant roster includes "Voice:" blurbs for NPCs/enemies. Use these for dialogue consistency — full NPC personality docs are not available in combat context, so the voice blurb is your guide for speech patterns, accent, and demeanor.
 
 REPORT REQUIREMENTS (report_combat_state):
 - narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.

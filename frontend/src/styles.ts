@@ -1245,6 +1245,15 @@ export const styles: { [key: string]: React.CSSProperties } = {
     color: '#ccc',
     borderLeft: '3px solid #9c27b0',
   },
+  voiceNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(255,255,255,0.03)',
+    color: '#ccc',
+    borderLeft: '3px solid #00bcd4',
+  },
   plotNotification: {
     padding: '4px 10px',
     borderRadius: '4px',

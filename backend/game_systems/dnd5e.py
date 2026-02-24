@@ -677,7 +677,8 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Fighter"), `subclass` (subclass name or null if none/not yet unlocked, e.g. "Champion"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Fighter"), `subclass` (subclass name or null if none/not yet unlocked, e.g. "Champion"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), `summary` (free-text for equipment/notes), and optional `voice` (1-2 sentence voice/personality profile for NPCs/enemies). Full replacement each turn.
+  - **`voice` field**: Generate `voice` for NPCs/enemies that are NOT in the NPC docs (improvised/emergent characters). 1-2 sentences capturing speech patterns, accent, demeanor. Do NOT set `voice` for NPCs that have a full profile in the project documents — the docs are the source of truth. Update `voice` only when there's a fundamental long-term shift in an NPC's demeanor (shell-shocked after trauma, major loss, sudden confidence gain) — not for temporary mood.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
@@ -871,7 +872,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "voice": {"type": ["string", "null"], "description": "1-2 sentence voice/personality profile. Speech patterns, accent, demeanor. Set once when NPC is introduced; omit for PCs. Example: 'Gruff dwarven accent, clipped sentences, calls everyone \"lad\". Fiercely loyal but hides it behind sarcasm.'"}
                     }
                 }
             },
@@ -1029,6 +1031,9 @@ NARRATIVE STYLE:
 - Name combatants. Describe what dice results mean in fiction, not just numbers.
 - End each exchange by setting up what the next active combatant faces.
 
+NPC VOICE:
+- The combatant roster includes "Voice:" blurbs for NPCs/enemies. Use these for dialogue consistency — full NPC personality docs are not available in combat context, so the voice blurb is your guide for speech patterns, accent, and demeanor.
+
 REPORT REQUIREMENTS (report_combat_state):
 - narrative_summary: ONLY when combat_complete=true — a 1–3 sentence summary of the ENTIRE fight written with the full combat history in mind. This becomes the lasting narrative record once combat is collapsed from context."""
 
@@ -1158,6 +1163,9 @@ def build_combat_profile(character_states, combat):
         summary = d.get("summary", "")
         if summary:
             line += f"\n    {summary}"
+        voice = d.get("voice")
+        if voice and d.get("type") in ("npc", "enemy"):
+            line += f"\n    Voice: {voice}"
         lines.append(line)
 
     lines.append("[/COMBATANT ROSTER]")
