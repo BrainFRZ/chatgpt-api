@@ -20,6 +20,7 @@ class ParsedResponse:
     cache_creation_tokens: int   # Tokens written to cache
     output_tokens: int
     reasoning_tokens: int
+    full_output_text: Optional[str] = None  # Full output including tool calls (for cross-model token counting)
 
 
 @dataclass

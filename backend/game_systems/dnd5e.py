@@ -259,7 +259,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Fighter",
+      "subclass": "Champion",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 25, "max": 30},
@@ -545,7 +546,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Fighter",
+      "subclass": "Champion",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 22, "max": 30},
@@ -675,7 +677,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class and subclass, e.g. "Fighter (Champion)"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Fighter"), `subclass` (subclass name or null if none/not yet unlocked, e.g. "Champion"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
@@ -834,7 +836,8 @@ STATE_REPORT_TOOL = {
                     "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
-                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Druid' or 'Bard (College of Eloquence)'."},
+                        "class": {"type": "string", "description": "Class only, e.g. 'Fighter', 'Druid', 'Bard'. Do NOT include subclass here."},
+                        "subclass": {"type": ["string", "null"], "description": "Subclass name (e.g. 'Champion', 'College of Eloquence'). null if none or not yet unlocked."},
                         "level": {"type": ["integer", "null"], "description": "Character level."},
                         "vitals": {
                             "type": "array",
@@ -1118,12 +1121,14 @@ def build_combat_profile(character_states, combat):
         parts = []
 
         char_class = d.get("class", "")
+        char_subclass = d.get("subclass")
+        char_label = f"{char_class} ({char_subclass})" if char_class and char_subclass else char_class
         char_level = d.get("level")
         char_type = d.get("type", "pc")
-        if char_class and char_level:
-            parts.append(f"{char_class} {char_level}")
-        elif char_class:
-            parts.append(char_class)
+        if char_label and char_level:
+            parts.append(f"{char_label} {char_level}")
+        elif char_label:
+            parts.append(char_label)
         else:
             parts.append(char_type.upper())
 

@@ -2049,7 +2049,7 @@ def send_message(request: SendMessageRequest):
 
             # Assistant message tokens
             assistant_claude_tokens = parsed.output_tokens
-            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
+            assistant_gpt_tokens = gpt_provider.count_tokens(parsed.full_output_text or assistant_message)
         else:
             # GPT response: We have accurate GPT tokens from API
             # Calculate user message GPT tokens from API response (input - known)
@@ -3884,7 +3884,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     break
 
                             assistant_claude_tokens = usage['output_tokens']
-                            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
+                            # Count GPT tokens on full output (narrative + tool call) for consistency
+                            full_output = assistant_message
+                            if stateful_tool_input:
+                                full_output = assistant_message + "\n" + json.dumps(stateful_tool_input)
+                            assistant_gpt_tokens = gpt_provider.count_tokens(full_output)
                         else:
                             known_tokens = system_msg_ref.get("total_gpt_tokens", 0)
                             for msg in branch_path[context_start_index:-1]:

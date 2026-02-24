@@ -382,7 +382,7 @@ export default function CharacterPanel({
     const conditions = data.conditions || [];
     const resources = (data.resources || []).slice(0, 2);
     const summary = data.summary || '';
-    const charClass = data.class || '';
+    const charClass = data.subclass ? `${data.class || ''} (${data.subclass})`.trim() : (data.class || '');
     const level = data.level;
     const barVitals = vitals.filter((v: any) => 'current' in v && 'max' in v);
     const flatVitals = vitals.filter((v: any) => 'value' in v && !('current' in v && 'max' in v));
@@ -411,17 +411,35 @@ export default function CharacterPanel({
           </div>
         </div>
         {(charClass || level || flatVitals.length > 0) && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-            <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ') || ''}</span>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              {flatVitals.map((v: any, i: number) => (
-                <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                  <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+          flatVitals.length > 1 ? (
+            <>
+              {(charClass || level) && (
+                <div style={{ marginBottom: '2px' }}>
+                  <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ')}</span>
                 </div>
-              ))}
+              )}
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '2px' }}>
+                {flatVitals.map((v: any, i: number) => (
+                  <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                    <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+              <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ') || ''}</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {flatVitals.map((v: any, i: number) => (
+                  <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                    <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )
         )}
         {barVitals.map((v: any, i: number) => (
           <div key={i} style={{ marginBottom: '2px' }}>
@@ -956,9 +974,9 @@ export default function CharacterPanel({
           </div>
 
           {/* Class & Level */}
-          {(data.class || data.level != null) && (
+          {(data.class || data.subclass || data.level != null) && (
             <div style={{ fontSize: '0.85rem', color: '#999', marginBottom: '12px', marginTop: '-8px' }}>
-              {[data.class, data.level != null ? `Level ${data.level}` : ''].filter(Boolean).join(' · ')}
+              {[data.subclass ? `${data.class || ''} (${data.subclass})`.trim() : data.class, data.level != null ? `Level ${data.level}` : ''].filter(Boolean).join(' · ')}
             </div>
           )}
 

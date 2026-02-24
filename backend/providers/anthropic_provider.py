@@ -2,6 +2,7 @@
 Anthropic Claude Sonnet 4.5 provider implementation with extended thinking.
 """
 
+import json
 from typing import Any, Optional, Iterator
 import anthropic
 
@@ -231,6 +232,7 @@ class AnthropicProvider(ModelProvider):
         """Parse Anthropic response into standardized format."""
         content = None
         reasoning = None
+        tool_use_parts = []
 
         # Extract content and thinking from response
         for block in response.content:
@@ -238,9 +240,16 @@ class AnthropicProvider(ModelProvider):
                 content = block.text
             elif block.type == "thinking":
                 reasoning = block.thinking
+            elif block.type == "tool_use":
+                tool_use_parts.append(json.dumps(block.input))
 
         if content is None:
             raise ValueError("No text content in Anthropic response")
+
+        # Build full output text (narrative + tool call JSON) for cross-model token counting
+        full_output_text = content
+        if tool_use_parts:
+            full_output_text = content + "\n" + "\n".join(tool_use_parts)
 
         # Extract token usage
         usage = response.usage
@@ -279,7 +288,8 @@ class AnthropicProvider(ModelProvider):
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
             output_tokens=text_output_tokens,
-            reasoning_tokens=thinking_tokens
+            reasoning_tokens=thinking_tokens,
+            full_output_text=full_output_text if tool_use_parts else None
         )
 
     def calculate_cost(self, parsed: ParsedResponse) -> float:
