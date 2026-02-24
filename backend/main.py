@@ -2904,6 +2904,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["reasoning"] = reasoning_summary
                 if service_tier:
                     assistant_msg_data["service_tier"] = service_tier
+                if data.get("pipeline_state"):
+                    assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
+                if data.get("hack_state"):
+                    assistant_msg_data["hack_state_after"] = copy.deepcopy(data["hack_state"])
 
                 data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
@@ -3109,6 +3113,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["reasoning"] = reasoning_summary
                 if service_tier:
                     assistant_msg_data["service_tier"] = service_tier
+                if data.get("pipeline_state"):
+                    assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
 
                 # Track combat start_message_id (fires when combat first becomes active)
                 active_combat = data.get("pipeline_state", {}).get("combat")
@@ -4014,6 +4020,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["hack_mode"] = True
                             if hack_tool_input:
                                 assistant_msg_data["hack_tool_input"] = hack_tool_input
+                            if data.get("hack_state"):
+                                assistant_msg_data["hack_state_after"] = copy.deepcopy(data["hack_state"])
 
                         # Flag combat mode messages (Claude path)
                         if use_combat_mode:
@@ -4351,6 +4359,23 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
             restored_state = data["pipeline_state"]
             break
 
+    # Restore hack_state from the target branch's most recent hack snapshot
+    restored_hack = None
+    for msg in reversed(branch_path):
+        if msg.get("role") != "assistant":
+            continue
+        if "hack_state_after" in msg:
+            hs = msg["hack_state_after"]
+            if isinstance(hs, dict) and hs.get("active"):
+                restored_hack = copy.deepcopy(hs)
+            break  # Found most recent assistant msg with hack snapshot
+        if not msg.get("hack_mode"):
+            break  # Hit a non-hack assistant message — no active hack on this branch
+    data["hack_state"] = restored_hack
+
+    # Reset trim anchor (meaningless across branches)
+    data["_trim_anchor_id"] = None
+
     save_chat(username, chat_name, data, project)
 
     # Regenerate debug transcript for the new branch
@@ -4367,6 +4392,8 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
     }
     if restored_state is not None:
         broadcast_data["pipeline_state"] = restored_state
+    if restored_hack is not None:
+        broadcast_data["hack_state"] = restored_hack
     chat_key = sync_manager.make_chat_key(username, project, chat_name)
     await sync_manager.broadcast_to_chat(
         chat_key,
@@ -4382,6 +4409,7 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
     }
     if restored_state is not None:
         response["pipeline_state"] = restored_state
+    response["hack_state"] = restored_hack
     return response
 
 

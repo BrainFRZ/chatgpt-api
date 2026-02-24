@@ -524,8 +524,9 @@ function App() {
       setHasMoreMessages(chatData.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
 
-      // Note: hackState and pipelineState are chat-global (not per-branch),
-      // so we don't update them here — they're already set from the latest turn.
+      // Restore branch-local state from the target branch
+      setPipelineState(chatData.pipeline_state || null);
+      setHackState(chatData.hack_state || null);
 
     } catch (err) {
       console.error('Error switching branch:', err);
