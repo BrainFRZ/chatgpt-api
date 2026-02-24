@@ -1202,6 +1202,7 @@ class ChatResponse(BaseModel):
     anthropic_sync: bool | None = None  # Whether Anthropic caching is enabled (sync mode)
     pipeline_state: dict | None = None  # Character/scene state for right panel
     game_system: str | None = None  # Game system ID for this chat's project
+    hack_state: dict | None = None  # Active hack encounter state for overlay
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -1775,6 +1776,11 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         proj_meta = load_project_metadata(username, project)
         chat_game_system = proj_meta.get("game_system")
 
+    # Only return hack_state if the hack is still active
+    active_hack_state = data.get("hack_state")
+    if active_hack_state and not active_hack_state.get("active"):
+        active_hack_state = None
+
     return ChatResponse(
         messages=paginated_messages,
         all_messages=all_messages,  # Full tree for branch navigation
@@ -1785,7 +1791,8 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         model=data.get("model", DEFAULT_MODEL),
         anthropic_sync=data.get("anthropic_sync", True),
         pipeline_state=data.get("pipeline_state"),
-        game_system=chat_game_system
+        game_system=chat_game_system,
+        hack_state=active_hack_state
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
