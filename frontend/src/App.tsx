@@ -524,6 +524,10 @@ function App() {
       setHasMoreMessages(chatData.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
 
+      // Restore right-panel state from the new branch
+      setPipelineState(chatData.pipeline_state || null);
+      setHackState(chatData.hack_state || null);
+
     } catch (err) {
       console.error('Error switching branch:', err);
       setError('Could not switch branch');
