@@ -996,6 +996,25 @@ def load_project_files(username: str, project: str) -> str:
 
     return combined
 
+def get_staged_project_filenames(username: str, project: str) -> set:
+    """Return a set of lowercased filename stems (no extensions) for all staged, non-mode-specific project files."""
+    uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
+    if not os.path.exists(uploads_dir):
+        return set()
+    tokens_cache = load_file_tokens_cache(username, project)
+    stems = set()
+    for filename in os.listdir(uploads_dir):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in ALLOWED_FILE_EXTENSIONS:
+            continue
+        if filename in HACK_ONLY_FILES or filename in COMBAT_ONLY_FILES:
+            continue
+        if not tokens_cache.get(filename, {}).get("staged", True):
+            continue
+        stems.add(os.path.splitext(filename)[0].lower())
+    return stems
+
+
 def load_project_files_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load staged files filtered to a specific pipeline agent."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
@@ -2704,7 +2723,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # Build injections for user message
         sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
-        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool)
+        sa_doc_stems = get_staged_project_filenames(username, request.project)
+        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems)
 
         # Strip transient _conversion_doc before it can be persisted
         _gs_state = stateful_pipeline_state.get("game_state")
@@ -3270,6 +3290,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Run pipeline in thread pool to avoid blocking the event loop
                 # during synchronous API calls (Events/Mechanics stages)
+                doc_stems = get_staged_project_filenames(username, request.project)
                 pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,
@@ -3281,7 +3302,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     agent_files=agent_files,
                     pipeline_state=pipeline_state_prev,
                     game_system=gs["id"],
-                    trim_anchor_id=pipeline_trim_anchor_id
+                    trim_anchor_id=pipeline_trim_anchor_id,
+                    doc_file_stems=doc_stems
                 )
 
                 client_disconnected = False

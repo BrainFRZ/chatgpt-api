@@ -566,6 +566,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Structured per-character objects with type, vitals (HP/MP), resources (Luck), conditions, and summary — NOT SAN/Bonds/Mythos
+- **[NPC VOICES]**: Voice/personality blurbs for improvised NPCs in the scene (not in project docs). Use for dialogue consistency.
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
 

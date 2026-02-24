@@ -262,17 +262,22 @@ def build_mechanics_messages(
 def build_narration_messages(
     system_prompt: str,
     recent_pairs: list[dict],
-    mechanics_json: dict
+    mechanics_json: dict,
+    npc_voices: str = ""
 ) -> list[dict]:
     """
     Build the message list for the Narration agent.
 
     Narration sees the last N user-assistant pairs for voice consistency,
-    plus the Mechanics JSON as the current user message.
+    plus the Mechanics JSON as the current user message, optionally prefixed
+    with [NPC VOICES] for dialogue consistency.
     """
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(recent_pairs)
-    messages.append({"role": "user", "content": json.dumps(mechanics_json, indent=2)})
+    user_content = json.dumps(mechanics_json, indent=2)
+    if npc_voices:
+        user_content = npc_voices + "\n\n" + user_content
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -995,6 +1000,51 @@ def build_character_states_injection(character_states: dict, scene_state: dict =
     return "\n".join(lines)
 
 
+def build_npc_voices_injection(character_states: dict, scene_state: dict = None, doc_file_stems: set = None) -> str:
+    """Build [NPC VOICES] injection with voice blurbs for improvised NPCs in the scene.
+
+    Filters to scene-present NPCs/enemies that have a voice blurb and are NOT
+    defined in project doc files (doc-defined NPCs have full profiles in the system prompt).
+    """
+    if not character_states:
+        return ""
+
+    # Scene-scope filter: only NPCs currently present
+    if scene_state:
+        present = set(scene_state.get("npcs_present", []))
+        if not present:
+            return ""
+    else:
+        return ""
+
+    doc_file_stems = doc_file_stems or set()
+
+    lines = []
+    for name, entry in character_states.items():
+        if name not in present:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data") or entry.get("state")
+        if not isinstance(data, dict):
+            continue
+        char_type = data.get("type", "")
+        if char_type not in ("npc", "enemy"):
+            continue
+        voice = data.get("voice")
+        if not voice:
+            continue
+        # Skip doc-defined NPCs (case-insensitive substring match)
+        name_lower = name.lower()
+        if doc_file_stems and any(name_lower in stem or stem in name_lower for stem in doc_file_stems):
+            continue
+        lines.append(f"{name}: {voice}")
+
+    if not lines:
+        return ""
+    return "[NPC VOICES]\n" + "\n".join(lines) + "\n[/NPC VOICES]"
+
+
 def run_pipeline_stage(
     provider: OpenAIProvider,
     client,
@@ -1071,7 +1121,8 @@ def run_pipeline(
     agent_files: dict[str, str],
     pipeline_state: Optional[dict],
     game_system: str = "dnd5e",
-    trim_anchor_id: Optional[str] = None
+    trim_anchor_id: Optional[str] = None,
+    doc_file_stems: set = None
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -1263,7 +1314,11 @@ def run_pipeline(
 
     narration_system = build_agent_system_prompt(gs["narration_contract"], agent_instructions["narration"], agent_files["narration"])
     # Reuse events pairs — same thresholds, same branch_path, same anchor → same result
-    narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data)
+    npc_voices = build_npc_voices_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}),
+        doc_file_stems)
+    narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data, npc_voices=npc_voices)
 
     narration_params = provider.build_pipeline_request(
         messages=narration_messages,
@@ -2272,7 +2327,7 @@ def build_player_agency_reminder(user_message: str, character_states: dict) -> s
     )
 
 
-def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "") -> str:
+def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "", doc_file_stems: set = None) -> str:
     """Build the full injection string for a single-agent stateful user message."""
     injections = []
 
@@ -2306,6 +2361,14 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
         pipeline_state.get("character_states", {}),
         pipeline_state.get("scene_state", {}))
     injections.append(cs)
+
+    # 5a. NPC voices (scene-scoped, improvised NPCs only)
+    voices = build_npc_voices_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}),
+        doc_file_stems)
+    if voices:
+        injections.append(voices)
 
     # 5b. Character features (game-system specific, e.g. subclass features from conversion doc)
     if game_system and game_system.get("build_features_injection"):
