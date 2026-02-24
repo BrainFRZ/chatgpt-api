@@ -20,6 +20,7 @@ import logging
 import fcntl
 import uuid
 import hashlib
+import copy
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
@@ -1709,15 +1710,6 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     # Get the branch path (messages from root to target leaf)
     if target_leaf and is_migrated(data):
         branch_messages = get_path_to_root(all_messages, target_leaf)
-        # Update current_leaf_id if navigating to a different leaf
-        if leaf_id and leaf_id != current_leaf:
-            data["current_leaf_id"] = leaf_id
-            # Regenerate debug transcript for the new branch
-            try:
-                debug_chat_path = get_chat_path(username, chat_name, project)
-                generate_debug_transcript(data, debug_chat_path, chat_name)
-            except Exception:
-                pass
     else:
         # Fallback for non-migrated chats or no leaf specified: use linear order
         branch_messages = all_messages
@@ -1941,6 +1933,7 @@ def send_message(request: SendMessageRequest):
         user_msg_data["attached_files"] = attached_files_data
 
     data["messages"].append(user_msg_data)
+    save_chat(username, request.chat_name, data, request.project)  # Persist user msg before streaming
 
     # Get provider client
     client = provider.get_client(api_key)
@@ -2631,8 +2624,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
-        import copy as _copy
-        stateful_pipeline_state = migrate_pipeline_state(_copy.deepcopy(data.get("pipeline_state")))
+        stateful_pipeline_state = migrate_pipeline_state(copy.deepcopy(data.get("pipeline_state")))
         stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
 
         # Load conversion doc for feature injection (transient — after snapshot, stripped after injection)
@@ -3422,6 +3414,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["mechanics_stage"] = pipeline_result.mechanics_json
                 if pipeline_result.injected_state is not None:
                     assistant_msg_data["pipeline_state_injected"] = pipeline_result.injected_state
+                if pipeline_result.pipeline_state is not None:
+                    assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
                 if pipeline_result.stage_usage is not None:
                     assistant_msg_data["pipeline_stage_usage"] = pipeline_result.stage_usage
 
@@ -3808,7 +3802,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Snapshot state after ops applied (for debug transcript delta)
                         stateful_after_snapshot = None
                         if use_stateful and stateful_tool_input is not None and stateful_pipeline_state is not None:
-                            stateful_after_snapshot = json.dumps(stateful_pipeline_state)
+                            stateful_after_snapshot = copy.deepcopy(stateful_pipeline_state)
 
                         # Send state_update SSE event for right panel (single-agent path)
                         if use_stateful and data.get("pipeline_state"):
@@ -4314,6 +4308,19 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
 
     # Update current_leaf_id
     data["current_leaf_id"] = new_leaf_id
+
+    # Restore pipeline_state from the last assistant message on the target branch
+    restored_state = None
+    branch_path = get_path_to_root(all_messages, new_leaf_id)
+    for msg in reversed(branch_path):
+        if msg.get("role") == "assistant" and "pipeline_state_after" in msg:
+            restored = msg["pipeline_state_after"]
+            if isinstance(restored, str):  # Legacy JSON-string format
+                restored = json.loads(restored)
+            data["pipeline_state"] = copy.deepcopy(restored)
+            restored_state = data["pipeline_state"]
+            break
+
     save_chat(username, chat_name, data, project)
 
     # Regenerate debug transcript for the new branch
@@ -4324,22 +4331,28 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
         logger.warning(f"switch_branch: failed to generate debug transcript: {e}")
 
     # Broadcast branch switch to other clients
+    broadcast_data = {
+        "new_leaf_id": new_leaf_id,
+        "target_message_id": target_message_id
+    }
+    if restored_state is not None:
+        broadcast_data["pipeline_state"] = restored_state
     chat_key = sync_manager.make_chat_key(username, project, chat_name)
     await sync_manager.broadcast_to_chat(
         chat_key,
         SyncEvent(
             type=SyncEventType.BRANCH_SWITCHED,
-            data={
-                "new_leaf_id": new_leaf_id,
-                "target_message_id": target_message_id
-            }
+            data=broadcast_data
         )
     )
 
-    return {
+    response = {
         "status": "ok",
         "new_leaf_id": new_leaf_id
     }
+    if restored_state is not None:
+        response["pipeline_state"] = restored_state
+    return response
 
 
 class RenameChatRequest(BaseModel):

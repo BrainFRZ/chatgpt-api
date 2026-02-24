@@ -1752,7 +1752,7 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 state_after_raw = msg.get("pipeline_state_after")
                 if state_after_raw and injected_state_raw:
                     try:
-                        state_after = json.loads(state_after_raw)
+                        state_after = state_after_raw if isinstance(state_after_raw, dict) else json.loads(state_after_raw)
                         state_before = json.loads(injected_state_raw)
                         applied_delta = _compute_state_delta(state_before, state_after)
                         if applied_delta:
