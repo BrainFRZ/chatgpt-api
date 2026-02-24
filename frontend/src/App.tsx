@@ -524,9 +524,8 @@ function App() {
       setHasMoreMessages(chatData.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
 
-      // Restore right-panel state from the new branch
-      setPipelineState(chatData.pipeline_state || null);
-      setHackState(chatData.hack_state || null);
+      // Note: hackState and pipelineState are chat-global (not per-branch),
+      // so we don't update them here — they're already set from the latest turn.
 
     } catch (err) {
       console.error('Error switching branch:', err);
