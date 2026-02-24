@@ -504,6 +504,10 @@ Handling ICE: **Bypass** (Hacking vs 10 + SR, free, Ghost: Advantage), **Disable
 - Apply advantage/disadvantage when applicable (Ghost features, Control Points, etc.)
 - Nat 20: exceptional success (extra benefit). Nat 1: catastrophic failure (ICE counterattack, Alert spike).
 
+### Roll Adjudication
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+
 ### Completing the Hack
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, resources spent, damage taken, any real-world consequences) when:
 - Target objective achieved

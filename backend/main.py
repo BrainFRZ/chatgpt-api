@@ -2524,9 +2524,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if found_start and msg.get("hack_mode"):
                 hack_history.append({"role": msg["role"], "content": msg["content"]})
 
-        # User message with hack state injection prepended
+        # User message with hack state injection + dice pool prepended
+        hack_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
         user_content = build_message_content(branch_path[-1])
-        user_content = hack_injection + "\n\n" + user_content
+        user_content = hack_injection + "\n\n" + (hack_dice_pool + "\n\n" if hack_dice_pool else "") + user_content
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + hack_history + [new_user_msg]
