@@ -9,6 +9,7 @@ Only activates for GPT-5.2 project chats; Anthropic models use the existing sing
 import copy
 import json
 import logging
+import random
 import re
 from dataclasses import dataclass
 from typing import Optional, Iterator
@@ -130,6 +131,41 @@ def _parse_stage_json(content: str, stage_name: str) -> dict:
         raise ValueError(f"Pipeline {stage_name} produced invalid JSON: {e}")
 
 
+# ============================================================
+# Dice Pool Generation
+# ============================================================
+
+DICE_POOL_SPECS = {
+    "dnd5e": [(20, 10), (12, 5), (10, 5), (8, 5), (6, 10), (4, 5)],
+    "dnd5e_cyber": [(20, 10), (12, 5), (10, 5), (8, 5), (6, 10), (4, 5)],
+    "coc7e": [(100, 10), (10, 5), (8, 5), (6, 5), (4, 5)],
+    "sr6e": [(6, 40), (20, 5)],
+    "cpred": [(10, 15), (6, 10)],
+}
+
+
+def generate_dice_pool(game_system_id: str) -> str:
+    """Generate a pre-rolled dice pool for the given game system.
+
+    Returns a formatted [DICE POOL] block with random values for each die type.
+    Fresh pool every turn — no state carried across turns.
+    """
+    spec = DICE_POOL_SPECS.get(game_system_id, DICE_POOL_SPECS["dnd5e"])
+    lines = []
+    for sides, count in spec:
+        rolls = [random.randint(1, sides) for _ in range(count)]
+        lines.append(f"d{sides}: {', '.join(str(r) for r in rolls)}")
+
+    return (
+        "[DICE POOL]\n"
+        "Use these pre-rolled results in order (left to right) for each die type.\n"
+        "Do NOT invent your own rolls. If you exhaust a row, note it in your output.\n"
+        "\n"
+        + "\n".join(lines)
+        + "\n[/DICE POOL]"
+    )
+
+
 def build_events_messages(
     system_prompt: str,
     history_messages: list[dict],
@@ -207,14 +243,19 @@ def build_events_messages(
 def build_mechanics_messages(
     system_prompt: str,
     events_json: dict,
+    dice_pool: str = "",
 ) -> list[dict]:
     """
     Build the message list for the Mechanics agent.
 
     Mechanics is stateless: only system prompt + Events JSON output.
+    Dice pool is appended after the Events JSON for external RNG.
     """
     messages = [{"role": "system", "content": system_prompt}]
-    messages.append({"role": "user", "content": json.dumps(events_json, indent=2)})
+    user_content = json.dumps(events_json, indent=2)
+    if dice_pool:
+        user_content += "\n\n" + dice_pool
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -1173,8 +1214,9 @@ def run_pipeline(
     # ---- STAGE 2: Mechanics ----
     yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
+    dice_pool = generate_dice_pool(game_system)
     mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
-    mechanics_messages = build_mechanics_messages(mechanics_system, events_data)
+    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool)
 
     mechanics_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["mechanics"],
@@ -2230,7 +2272,7 @@ def build_player_agency_reminder(user_message: str, character_states: dict) -> s
     )
 
 
-def build_single_agent_injections(pipeline_state: dict, game_system: dict = None) -> str:
+def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "") -> str:
     """Build the full injection string for a single-agent stateful user message."""
     injections = []
 
@@ -2287,6 +2329,10 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
         game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
         if game_injection:
             injections.append(game_injection)
+
+    # 8. Dice pool (always last — model consumes these for rolls)
+    if dice_pool:
+        injections.append(dice_pool)
 
     return "\n\n".join(injections) if injections else ""
 

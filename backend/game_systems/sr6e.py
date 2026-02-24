@@ -534,7 +534,17 @@ CHARACTER STATES:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through runner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version — apply beat outcomes"""
+- character_states is YOUR updated version — apply beat outcomes
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pipeline for Shadowrun 6th Edition. You are the final stage.
 
@@ -677,13 +687,14 @@ When triggered, guide the player through SR6E character creation **one step at a
 - Violence is consequential
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -905,6 +916,16 @@ DICE ROLLING:
 - Damage: "9P DV → guard soak: Body 3 + Armor 9 = 12d6 [5,2,3,6,1,4,3,5,2,1,6,4] = 4 hits → 9−4 = 5P net → 5 boxes Physical CM"
 - Apply wound modifier to all pools: Pool − (filled ÷ 3).
 - Exploding 6s: for each 6 in an Edge-boosted roll, roll one additional die.
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ENEMY TACTICS:
 - Enemies focus wounded runners (highest wound mod), use cover, Disengage when outmatched.

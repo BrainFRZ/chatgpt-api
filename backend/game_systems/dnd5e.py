@@ -607,7 +607,14 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - You have NO conversation history. All context comes from Events' JSON and your assigned documents.
-- Apply rules exactly as written (RAW). Do not bias rolls toward success or failure.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 - The "relationship_ops" array from Events should be passed through to your output unchanged. Do not modify scores.
 - The "arc_label" field from Events should be passed through to your output unchanged.
 - The "callbacks" array from Events should be passed through to your output unchanged.
@@ -775,13 +782,14 @@ When triggered, guide the player through D&D 5E character creation **one step at
 - Omit any modifier with value 0 from the display.
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -992,6 +1000,16 @@ DICE ROLLING:
 - Roll ALL dice yourself. Show your work inline.
 - Example: "Goblin attacks Aedina: 1d20+4 = [11]+4 = 15 vs AC 15 → HIT → 1d6+2 = [4]+2 = 6 damage"
 - Never ask the player to roll. Be mathematically precise.
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ENEMY TACTICS:
 - Enemies act intelligently: focus wounded targets, use terrain, retreat when outmatched.

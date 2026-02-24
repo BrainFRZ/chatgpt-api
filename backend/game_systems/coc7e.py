@@ -505,7 +505,17 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes"""
+- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the final stage.
 
@@ -637,13 +647,14 @@ When triggered, guide the player through CoC 7E investigator creation **one step
 - Horror tone: creeping dread, cosmic indifference, unreliable perception
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ### Combat Tracking
 - When combat begins, report `combat` in report_state: `{"round": 1, "initiative_order": ["name1", ...], "current_turn": "name"}`
@@ -871,6 +882,16 @@ DICE ROLLING:
 - Standard roll: "Harvey fires revolver: d100[47] vs Firearms 55% → Regular success → 1d8[5] damage → cultist HP 7 to 2"
 - With bonus/penalty dice: "tens rolled: [4, 7], units: [3]. Keeping lower tens 4 → result 43 vs Library Use 60% → Regular success"
 - Fumble: "d100[99] vs Fighting 35% (skill < 50%) → FUMBLE — weapon jams / investigator falls"
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ENEMY TACTICS:
 - Cultists act with fanatical purpose; they protect rituals and escape routes over self.

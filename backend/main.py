@@ -35,6 +35,7 @@ from pipeline import (
     run_pipeline, PipelineResult, generate_debug_transcript,
     apply_single_agent_state_updates,
     build_single_agent_injections, build_player_agency_reminder,
+    generate_dice_pool,
     migrate_pipeline_state,
     get_context_pairs, extract_state_notifications,
     collapse_hack_messages,
@@ -2596,7 +2597,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 combat_history.append({"role": msg["role"], "content": msg["content"]})
 
         user_content = build_message_content(branch_path[-1])
-        user_content = combat_injection + "\n\n" + user_content
+        combat_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        user_content = combat_injection + "\n\n" + (combat_dice_pool + "\n\n" if combat_dice_pool else "") + user_content
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + combat_history + [new_user_msg]
@@ -2664,7 +2666,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             context_start_index = 1
 
         # Build injections for user message
-        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs)
+        sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool)
 
         # Strip transient _conversion_doc before it can be persisted
         _gs_state = stateful_pipeline_state.get("game_state")

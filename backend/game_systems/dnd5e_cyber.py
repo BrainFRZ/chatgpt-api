@@ -1145,7 +1145,17 @@ ROUTING, BEAT, ROLL, and HUD RULES:
 IMPORTANT:
 - Output ONLY valid JSON.
 - Pass through relationship_ops, ship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged.
-- character_states is YOUR updated version — apply all beat outcomes first."""
+- character_states is YOUR updated version — apply all beat outcomes first.
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
@@ -1311,13 +1321,14 @@ When triggered, guide the player through D&D 5E character creation (reflavored f
 - Omit any modifier with value 0 from the display.
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ### Hack Mode Trigger
 When a cyberdeck-equipped PC initiates a hack against a system (Quick Hack or Full Sequence), set `hack_trigger` in your `report_state` call:
