@@ -18,6 +18,7 @@ interface UseMessagingDeps {
   setHasMoreMessages: (v: boolean) => void;
   setMessageOffset: React.Dispatch<React.SetStateAction<number>>;
   selectedModel: string;
+  setSelectedModel: (v: string) => void;
   contextStartIndex: number;
   setContextStartIndex: (v: number) => void;
   stats: ChatStats | null;
@@ -253,6 +254,12 @@ export function useMessaging(deps: UseMessagingDeps) {
               deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
               deps.setStats(data.stats);
               deps.setContextStartIndex(data.context_start_index || 1);
+              // Update model dropdown to reflect what actually ran
+              if (data.original_model && (data.hack_complete || data.combat_complete)) {
+                  deps.setSelectedModel(data.original_model);
+              } else if (data.model) {
+                  deps.setSelectedModel(data.model);
+              }
 
               const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
               deps.setTotalMessages(branchTotalMessages);
@@ -482,6 +489,13 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setMessageOffset(prev => prev + 2);
             deps.setStats(data.stats);
             deps.setContextStartIndex(data.context_start_index || 1);
+            // Update model dropdown to reflect what actually ran
+            if (data.original_model && (data.hack_complete || data.combat_complete)) {
+                // Auto-switched mode just ended — restore to original model
+                deps.setSelectedModel(data.original_model);
+            } else if (data.model) {
+                deps.setSelectedModel(data.model);
+            }
             deps.fetchUserStats();
             deps.fetchFreeTokens();
             // Don't scroll on done - let user stay where they were reading

@@ -2462,6 +2462,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             data["hack_state"] = None
             logger.info(f"Hack: cleared completed hack_state for {username}")
 
+    # Auto-switch Claude to GPT-5.2 for hack mode (preserves Anthropic prompt cache)
+    _original_model = None
+    if use_hack_mode and model_id.startswith("claude"):
+        _original_model = model_id
+        model_id = DEFAULT_MODEL
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+
     if use_hack_mode:
         # Flag the user message as a hack exchange
         user_msg_data["hack_mode"] = True
@@ -2473,9 +2486,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if (not use_hack_mode) and _combat and request.project and gs and gs.get("combat_contract"):
         use_combat_mode = True
 
+    # Auto-switch Claude to GPT-5.2 for combat mode (preserves Anthropic prompt cache)
+    if use_combat_mode and model_id.startswith("claude"):
+        _original_model = model_id
+        model_id = DEFAULT_MODEL
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+
     if use_combat_mode:
         # Flag the user message as a combat exchange
         user_msg_data["combat_mode"] = True
+
+    # Refresh client if model was auto-switched
+    if _original_model:
+        client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     use_stateful = (not use_hack_mode) and (not use_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
@@ -2937,6 +2966,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
+                if _original_model:
+                    done_data['original_model'] = _original_model
+                if hack_json.get("hack_complete"):
+                    done_data['hack_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 await sync_manager.broadcast_to_chat(
@@ -3149,6 +3182,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
+                if _original_model:
+                    done_data['original_model'] = _original_model
+                if combat_json.get("combat_complete") or combat_json.get("combat") is None:
+                    done_data['combat_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 await sync_manager.broadcast_to_chat(
@@ -4148,6 +4185,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['hack_mode'] = True
                         if use_combat_mode:
                             done_data['combat_mode'] = True
+                        if _original_model:
+                            done_data['original_model'] = _original_model
+                        if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
+                            done_data['hack_complete'] = True
+                        if use_combat_mode and combat_tool_input:
+                            if combat_tool_input.get("combat_complete") or combat_tool_input.get("combat") is None:
+                                done_data['combat_complete'] = True
                         if not client_disconnected:
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 

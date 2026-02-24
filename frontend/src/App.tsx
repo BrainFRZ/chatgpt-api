@@ -2233,7 +2233,7 @@ function App() {
     messages, setMessages, allMessages, setAllMessages,
     currentLeafId, setCurrentLeafId,
     totalMessages, setTotalMessages, setHasMoreMessages, setMessageOffset,
-    selectedModel, contextStartIndex, setContextStartIndex,
+    selectedModel, setSelectedModel, contextStartIndex, setContextStartIndex,
     stats, setStats,
     isLoading, setIsLoading,
     setPipelineStage, setPipelineState, setStateNotifications, setHackState, setDocsRefreshed, setError,
