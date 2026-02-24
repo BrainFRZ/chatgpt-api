@@ -2226,29 +2226,29 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-def _stateful_tool_retry(client, model_name: str, system_content, messages, narrative: str, thinking: str, tool_def: dict):
+def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str, tool_def: dict, state_contract: str = ""):
     """Non-streaming follow-up to force report_state when tool_choice: auto didn't produce it.
     Returns (tool_input_dict_or_None, retry_usage_dict).
-    Thinking is included as plain text (not a thinking content block, which would require
-    a cryptographic signature we don't have from streaming)."""
+    Only sends the state contract + tool def + last narrative — no full conversation history."""
     if thinking:
         assistant_text = f"<reasoning>\n{thinking}\n</reasoning>\n\n{narrative}"
     else:
         assistant_text = narrative
-    assistant_content = [{"type": "text", "text": assistant_text}]
 
-    retry_messages = list(messages) + [
-        {"role": "assistant", "content": assistant_content},
-        {"role": "user", "content": "You did not call report_state. Call it now with the state updates for the turn you just wrote."}
+    retry_messages = [
+        {"role": "user", "content": f"Here is the narrative from the turn you just wrote:\n\n{assistant_text}\n\nCall report_state now with the state updates for this turn."},
     ]
-    response = client.messages.create(
-        model=model_name,
-        max_tokens=4096,
-        system=system_content,
-        messages=retry_messages,
-        tools=[tool_def],
-        tool_choice={"type": "tool", "name": tool_def["name"]},
-    )
+    # Minimal system prompt: just the state contract so the model knows the schema
+    params = {
+        "model": model_name,
+        "max_tokens": 4096,
+        "messages": retry_messages,
+        "tools": [tool_def],
+        "tool_choice": {"type": "tool", "name": tool_def["name"]},
+    }
+    if state_contract:
+        params["system"] = state_contract
+    response = client.messages.create(**params)
     tool_input = None
     for block in response.content:
         if block.type == "tool_use":
@@ -3771,11 +3771,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
                                         client, provider.MODEL_NAME,
-                                        request_params.get("system", []),
-                                        request_params["messages"],
                                         accumulated_content,
                                         accumulated_thinking,
-                                        gs["state_report_tool"]
+                                        gs["state_report_tool"],
+                                        gs.get("single_agent_contract", "")
                                     )
                                     if retry_usage:
                                         usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
