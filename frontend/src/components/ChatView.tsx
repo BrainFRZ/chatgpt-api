@@ -223,11 +223,15 @@ export default function ChatView({
           const actualBackendIndex = firstDisplayedBackendIndex + i;
           const isInContext = actualBackendIndex >= contextStartIndex;
 
-          // Choose background color based on context and role
+          // Choose background color based on context, role, and hack mode
           let backgroundColor;
+          const isHackMode = !!(msg as any).hack_mode;
           if (!isInContext) {
             // Out of context: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
+          } else if (isHackMode) {
+            // Hack mode: matrix-themed green/dark tint
+            backgroundColor = msg.role === 'user' ? '#1a2e1a' : '#0f1f0f';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -242,7 +246,8 @@ export default function ChatView({
                 backgroundColor
               }}
             >
-              <div style={styles.messageRole}>
+              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : {})}}>
+                {isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button
@@ -254,7 +259,7 @@ export default function ChatView({
                     ✏️
                   </button>
                 )}
-                {msg.id && bookmarkingMessageIndex !== i && (
+                {msg.role === 'user' && msg.id && bookmarkingMessageIndex !== i && (
                   <button
                     onClick={() => msg.bookmark ? deleteBookmark(i) : startBookmark(i)}
                     style={styles.bookmarkButton}
@@ -282,7 +287,7 @@ export default function ChatView({
                 )}
               </div>
 
-              {bookmarkingMessageIndex === i && (
+              {msg.role === 'user' && bookmarkingMessageIndex === i && (
                 <div style={styles.bookmarkInputContainer}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="#4a4ae8" style={{flexShrink: 0}}>
                     <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
@@ -398,14 +403,8 @@ export default function ChatView({
                     )}
                     {/* Branch navigation - show only for user messages with siblings */}
                     {msg.role === 'user' && (() => {
-                      // Debug: log message info
-                      console.log('User message:', { id: msg.id, parent_id: msg.parent_id, timestamp: msg.timestamp, allMessagesLength: allMessages.length });
-                      if (!msg.id) {
-                        console.log('No msg.id - skipping branch nav');
-                        return null;
-                      }
+                      if (!msg.id) return null;
                       const siblings = getSiblings(allMessages, msg.id);
-                      console.log('Siblings for', msg.id, ':', siblings.map(s => ({ id: s.id, parent_id: s.parent_id })));
                       if (siblings.length <= 1) return null;
                       const currentIndex = siblings.findIndex(s => s.id === msg.id);
                       const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
@@ -441,8 +440,6 @@ export default function ChatView({
                       );
                     })()}
                     {(() => {
-                      // Debug: always log timestamp status
-                      if (!msg.timestamp) console.log('No timestamp for message:', msg.role, msg.id?.slice(0, 8) || 'no-id');
                       return msg.timestamp ? (
                         <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
                       ) : null;
@@ -507,6 +504,35 @@ export default function ChatView({
                     {n.text}
                     {n.quote && (
                       <div style={styles.notificationQuote}>Quote: "{n.quote}"</div>
+                    )}
+                  </div>
+                );
+              }
+              if (n.type === 'voice_update') {
+                return (
+                  <div key={i} style={styles.voiceNotification}>
+                    <span style={styles.notificationLabel}>{n.npc}</span>
+                    {' voice '}{n.old_voice ? 'updated' : 'set'}{': '}{n.voice}
+                  </div>
+                );
+              }
+              if (n.type === 'plot_decision') {
+                const isDivergence = n.severity === 'divergence';
+                return (
+                  <div key={i} style={{
+                    ...styles.plotNotification,
+                    ...(isDivergence ? styles.plotNotificationDivergence : {}),
+                  }}>
+                    <span style={{
+                      ...styles.plotSeverityBadge,
+                      ...(isDivergence ? styles.plotSeverityBadgeDivergence : {}),
+                    }}>
+                      {n.severity || 'plot'}
+                    </span>
+                    {n.key && <span style={styles.notificationLabel}>{n.key}{n.value ? ` = ${n.value}` : ''}</span>}
+                    {n.key ? ' — ' : ''}{n.decision}
+                    {n.episode && (
+                      <span style={{ color: '#666', fontSize: '11px' }}> [{n.episode}]</span>
                     )}
                   </div>
                 );

@@ -9,6 +9,12 @@ Luck (session-spendable), Armor (head/body with ablation), eurobucks, critical i
 import copy
 import logging
 
+from .dnd5e import (
+    REPORT_COMBAT_STATE_TOOL,
+    build_combat_profile,
+    build_combat_injection,
+)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -271,6 +277,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "combat": "<null OR combat object>",
   "callback_ops": [...],
   "npc_memory_ops": [...],
+  "plot_ops": [],
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -295,7 +302,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
 }
 
 EDGERUNNER OPS (structured state tracking):
-You receive an [EDGERUNNER STATE] block with each edgerunner's tracked mechanical state: HP (current/max + seriously wounded flag), Humanity (current/max), Luck (current/max), Armor (head SP/body SP), Eurobucks, Critical Injuries (with Death Save DV mods), and Cyberware. This is your authoritative source — it persists across context trims.
+You receive an [EDGERUNNER STATE] block with each edgerunner's tracked mechanical state: HP (current/max + seriously wounded flag), Humanity (current/max), Luck (current/max), Armor (head SP/body SP), Eurobucks, Critical Injuries (with Death Save DV mods), and Cyberware. This is your authoritative source — it persists across context trims. If the injected state conflicts with project files, the injected state takes precedence — only update it based on events in the conversation.
 
 Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "hp", "change": <signed int>, "reason": "<why>"}
@@ -363,8 +370,16 @@ ARC LABEL:
 - Set to a short label when starting a new gig or subplot
 - null on all other turns
 
-PLOT DIVERGENCE:
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+PLOT OPS (save-state notifications):
+- Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
+- "branch": a defined fork in the plot docs — report which path was taken.
+- "flag": a named variable or flag changed — report the new value.
+- "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
+- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
+
+IRRECONCILABLE PLOT BREAK:
+- If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
 
 CALLBACK LEDGER:
 - Same semantics as standard pipeline (add/resolve/update via callback_ops)
@@ -527,7 +542,17 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through edgerunner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes"""
+- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the final stage.
 
@@ -592,6 +617,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 Optional arrays:
 - **callback_ops**: Add/resolve Fixer deals, gig intel, debts. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Record significant NPC moments
+- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
@@ -666,19 +692,21 @@ When triggered, guide the player through Cyberpunk RED character creation **one 
 ### Rules:
 - Call `report_state` every turn
 - Do NOT reference the state system in your narrative
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
+- If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
+- If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
 - High-octane cyberpunk tone: style over substance, Night City as character
 - Violence is consequential — armor breaks, people die ugly
 - Tech is invasive — cyberware costs humanity
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -833,10 +861,102 @@ STATE_REPORT_TOOL = {
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
+            },
+            "plot_ops": {
+                "type": "array",
+                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
+                "items": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {
+                        "key": {
+                            "type": ["string", "null"],
+                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
+                        },
+                        "value": {
+                            "type": ["string", "null"],
+                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "What the player chose, stated concisely."
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["branch", "flag", "divergence"],
+                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
+                        },
+                        "episode": {
+                            "type": "string",
+                            "description": "Current episode/session from pacing context."
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+# ============================================================
+# Combat Context Mode
+# ============================================================
+
+CPRED_COMBAT_CONTRACT = """You are the COMBAT MASTER for a Cyberpunk RED session. A battle is underway.
+
+YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with visceral intensity. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
+
+Call report_combat_state every exchange, then write your narrative response.
+
+COMBAT RULES (Cyberpunk RED):
+- Dice: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29). Exploding 10s: roll again and add (keep exploding). Fumble 1s: roll again and subtract.
+- Initiative: REF + 1d10; ties broken by REF stat.
+- Action Economy: Move Action + Action per turn.
+- Seriously Wounded: When HP ≤ half max → −2 to ALL actions. Add "Seriously Wounded" condition automatically when threshold is crossed.
+- Armor Ablation: Each penetrating hit (damage after armor > 0) reduces armor SP by 1. Track via character_updates using vital_label: "Armor" and hp_delta: −1 if Armor is tracked as a vital — otherwise note in narrative.
+- Critical Injuries: Triggered when a single hit deals 13+ damage after armor. Roll on critical injury table and add as a condition.
+- Death Saves: At 0 HP — BODY + WILL + d10 vs DV 10 (DV increases by 1 each subsequent round; +1 per critical injury). Fail = dead.
+- Luck: Spend Luck points to add to any roll (1 point = +1). Report spending via character_updates (vital_label: "Luck", hp_delta: −N).
+
+VITAL LABELS for character_updates:
+- HP damage/healing → vital_label: "HP" (default, can omit)
+- Armor ablation → vital_label: "Armor", hp_delta: −1 (only if Armor tracked as a vital)
+- Luck spent → vital_label: "Luck", hp_delta: −N
+
+DICE ROLLING:
+- Roll ALL dice yourself. Show results inline.
+- Attack example: "V attacks: d10[7] + REF 8 + Handgun 6 = 21 vs DV 15 → HIT → 3d6[4,3,5] = 12 damage → Body armor SP 11 → 12−11 = 1 net → SP ablates to 10, 1 HP damage"
+- Exploding 10s example: "d10[10] + d10[6] = 16 + STAT + Skill = total"
+- Fumble 1 example: "d10[1] − d10[4] = −3 + STAT + Skill = total"
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+ENEMY TACTICS:
+- Enemies focus wounded edgerunners, use cover, call reinforcements when outnumbered.
+- Netrunners stay back and attempt network control; solos engage directly; heavies suppress with autofire.
+
+COMBAT FLOW:
+- Each exchange covers the current combatant's turn plus any immediate reactions.
+- Advance current_turn to the next combatant in initiative order after each turn.
+- When the last combatant acts, increment round and return to top.
+- End combat when all enemies are at 0 HP or fled. Set combat_complete=true.
+
+NARRATIVE STYLE:
+- Present tense, visceral, Night City grit. 2–5 sentences.
+- Name combatants. Chrome reflects neon. Armor breaks. Bullets are real and so is death.
+- End each exchange setting up what the next active combatant faces.
+
+REPORT REQUIREMENTS (report_combat_state):
+- narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.
+- Use vital_label: "HP" for health (default). vital_label: "Armor" for SP ablation. vital_label: "Luck" for Luck spent."""
+
 
 # ============================================================
 # Game System Definition
@@ -853,4 +973,9 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Combat context mode
+    "combat_contract": CPRED_COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

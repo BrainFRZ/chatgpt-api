@@ -9,6 +9,12 @@ system-specific state tracking to prevent drift after context trims.
 import copy
 import logging
 
+from .dnd5e import (
+    REPORT_COMBAT_STATE_TOOL,
+    build_combat_profile,
+    build_combat_injection,
+)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -250,6 +256,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "combat": "<null OR combat object>",
   "callback_ops": [...],
   "npc_memory_ops": [...],
+  "plot_ops": [],
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -274,7 +281,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
 }
 
 INVESTIGATOR OPS (structured state tracking):
-You receive an [INVESTIGATOR STATE] block with each investigator's tracked mechanical state: SAN (current/max), Luck, Mythos%, Bonds, Phobias, Manias, and Skill marks. This is your authoritative source — it persists across context trims.
+You receive an [INVESTIGATOR STATE] block with each investigator's tracked mechanical state: SAN (current/max), Luck, Mythos%, Bonds, Phobias, Manias, and Skill marks. This is your authoritative source — it persists across context trims. If the injected state conflicts with project files, the injected state takes precedence — only update it based on events in the conversation.
 
 Use "investigator_ops" to update this state. Operations:
 - {"investigator": "<name>", "op": "san", "change": <signed int>, "reason": "<why>"}
@@ -320,8 +327,16 @@ ARC LABEL:
 - Set to a short label when starting a new scenario beat or invented subplot
 - null on all other turns
 
-PLOT DIVERGENCE:
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+PLOT OPS (save-state notifications):
+- Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
+- "branch": a defined fork in the plot docs — report which path was taken.
+- "flag": a named variable or flag changed — report the new value.
+- "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
+- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
+
+IRRECONCILABLE PLOT BREAK:
+- If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
 
 CALLBACK LEDGER:
 - Same semantics as standard pipeline (add/resolve/update via callback_ops)
@@ -490,7 +505,17 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes"""
+- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG Keeper pipeline for Call of Cthulhu 7th Edition. You are the final stage.
 
@@ -541,6 +566,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Structured per-character objects with type, vitals (HP/MP), resources (Luck), conditions, and summary — NOT SAN/Bonds/Mythos
+- **[NPC VOICES]**: Voice/personality blurbs for improvised NPCs in the scene (not in project docs). Use for dialogue consistency.
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
 
@@ -548,12 +574,14 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "class": "Private Investigator", "level": null, "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`
+- **character_states**: Structured per-character objects: `{"CharacterName": {"type": "pc|npc|enemy", "class": "Private Investigator", "level": null, "vitals": [{"label": "HP", "current": 8, "max": 11}, {"label": "MP", "current": 10, "max": 14}], "resources": [{"label": "Luck", "current": 45, "max": 65}], "conditions": ["Temporary Insanity"], "summary": ".45 revolver, flashlight"}}`. Optional `voice` field for NPCs/enemies (1-2 sentence voice/personality profile).
+  - **`voice` field**: Generate `voice` for NPCs/enemies that are NOT in the NPC docs (improvised/emergent characters). 1-2 sentences capturing speech patterns, accent, demeanor. Do NOT set `voice` for NPCs that have a full profile in the project documents — the docs are the source of truth. Update `voice` only when there's a fundamental long-term shift in an NPC's demeanor (shell-shocked after trauma, major loss, sudden confidence gain) — not for temporary mood.
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
 - **callback_ops**: Add/resolve investigation leads, Mythos clues, NPC promises. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Record significant NPC moments
+- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Scene scope**: Only add or modify npc_memory_ops and relationship_ops for NPCs currently listed in `npcs_present`. If an NPC left the scene, their memories are already stored — you will not see them injected, but they are safe. Do NOT re-add memories for NPCs who are no longer present. If you notice an NPC has no `[NPC MEMORIES]` block, that means they are not in the scene, not that their memories were lost.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
@@ -614,19 +642,21 @@ When triggered, guide the player through CoC 7E investigator creation **one step
 ### Rules:
 - Call `report_state` every turn
 - Do NOT reference the state system in your narrative
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
+- If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
+- If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
 - Percentile rolls: 🎲 [Description]: [**roll**] vs Skill XX% (difficulty) ✓/✗
 - SAN checks: 🧠 SAN Check: [**roll**] vs SAN XX — Pass/Fail (-N)
 - Horror tone: creeping dread, cosmic indifference, unreliable perception
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 ### Combat Tracking
 - When combat begins, report `combat` in report_state: `{"round": 1, "initiative_order": ["name1", ...], "current_turn": "name"}`
@@ -711,7 +741,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "voice": {"type": ["string", "null"], "description": "1-2 sentence voice/personality profile. Speech patterns, accent, demeanor. Set once when NPC is introduced; omit for PCs. Example: 'Thick Boston accent, nervous stammer when lying. Chain-smokes and avoids eye contact.'"}
                     }
                 }
             },
@@ -785,10 +816,109 @@ STATE_REPORT_TOOL = {
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
+            },
+            "plot_ops": {
+                "type": "array",
+                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
+                "items": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {
+                        "key": {
+                            "type": ["string", "null"],
+                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
+                        },
+                        "value": {
+                            "type": ["string", "null"],
+                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "What the player chose, stated concisely."
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["branch", "flag", "divergence"],
+                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
+                        },
+                        "episode": {
+                            "type": "string",
+                            "description": "Current episode/session from pacing context."
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+# ============================================================
+# Combat Context Mode
+# ============================================================
+
+COC_COMBAT_CONTRACT = """You are the COMBAT MASTER for a Call of Cthulhu 7E session. A violent confrontation is underway.
+
+YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with dread and consequence. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
+
+Call report_combat_state every exchange, then write your narrative response.
+
+COMBAT RULES (Call of Cthulhu 7E):
+- Dice: d100 percentile vs skill%. Regular ≤ skill%; Hard ≤ skill%/2 (round down); Extreme ≤ skill%/5 (round down); Critical = 01; Fumble = 100 (or 96–100 if skill < 50%).
+- Initiative: DEX order — no roll needed. Highest DEX acts first. Show sorted order at start of round 1.
+- Action Economy: One meaningful action per round — attack, dodge, maneuver, or other significant action.
+- Dodge: Opposed roll — attacker's Fighting vs defender's Dodge skill (Hard success vs Hard success, etc.).
+- Bonus/Penalty Dice: Roll extra tens die; keep LOWEST tens digit for Bonus, HIGHEST for Penalty. Always show both tens digits.
+- Damage: Directly to HP. Armor provides flat damage reduction (subtract from damage before applying).
+- Major Wound: Single attack dealing ≥ half the target's max HP → apply "Major Wound" condition. Requires CON roll or target falls unconscious.
+- Death: HP reaches 0 → dead (or dying at Keeper discretion until next round without aid).
+- Luck Spending: Spend Luck points to reduce a roll result by 1 per point (cannot be used on SAN checks or Luck rolls). Report spending via character_updates (vital_label: "Luck", hp_delta: −N).
+- SAN Checks: Triggered by combat horror (first encounter with a creature, witnessing gore). Roll d100 vs current SAN; pass loses minimum, fail loses maximum. Report SAN loss via character_updates (vital_label: "SAN", hp_delta: −N) if SAN is tracked as a vital.
+- Pushed Rolls: A failed roll may be pushed (retried once at greater risk). If the pushed roll also fails, consequences are worse.
+
+VITAL LABELS for character_updates:
+- HP damage/healing → vital_label: "HP" (default, can omit)
+- SAN loss → vital_label: "SAN", hp_delta: −N (only if SAN tracked as a vital)
+- Luck spent → vital_label: "Luck", hp_delta: −N (only if Luck tracked as a vital)
+
+DICE ROLLING:
+- Roll ALL dice yourself. Show results inline.
+- Standard roll: "Harvey fires revolver: d100[47] vs Firearms 55% → Regular success → 1d8[5] damage → cultist HP 7 to 2"
+- With bonus/penalty dice: "tens rolled: [4, 7], units: [3]. Keeping lower tens 4 → result 43 vs Library Use 60% → Regular success"
+- Fumble: "d100[99] vs Fighting 35% (skill < 50%) → FUMBLE — weapon jams / investigator falls"
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+ENEMY TACTICS:
+- Cultists act with fanatical purpose; they protect rituals and escape routes over self.
+- Monsters act on instinct or alien intelligence — they may be immune to normal weapons.
+- Enemies pursue fleeing investigators; cornered cultists negotiate.
+
+COMBAT FLOW:
+- Each exchange covers the current combatant's turn plus any immediate reactions.
+- Advance current_turn to the next combatant in DEX order after each turn.
+- When the last combatant acts, increment round and return to top.
+- End combat when enemies are dead or fled, or investigators are all incapacitated. Set combat_complete=true.
+
+NARRATIVE STYLE:
+- Present tense, dread-soaked, immediate. 2–5 sentences.
+- Name combatants. Violence is horrible and consequential — describe injury, shock, the smell of gunpowder.
+- End each exchange setting up what the next active combatant faces.
+
+NPC VOICE:
+- The combatant roster includes "Voice:" blurbs for NPCs/enemies. Use these for dialogue consistency — full NPC personality docs are not available in combat context, so the voice blurb is your guide for speech patterns, accent, and demeanor.
+
+REPORT REQUIREMENTS (report_combat_state):
+- narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.
+- Use vital_label: "HP" for health damage (default). vital_label: "SAN" for sanity loss. vital_label: "Luck" for Luck spent."""
+
 
 # ============================================================
 # Game System Definition
@@ -805,4 +935,9 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Combat context mode
+    "combat_contract": COC_COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

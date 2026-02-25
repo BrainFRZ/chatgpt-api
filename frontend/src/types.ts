@@ -51,6 +51,28 @@ export interface ChatMessage {
   model?: string;  // Model used for this response (assistant messages only)
   service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
   bookmark?: string;  // User-defined bookmark annotation
+  hack_mode?: boolean;  // True for messages during a hack mode encounter
+}
+
+export interface HackState {
+  active: boolean;
+  tier: 'quick_hack' | 'full_sequence';
+  target_system: string;
+  sr: number;
+  alert_level: number;
+  processes_remaining: number;
+  processes_max: number;
+  program_slots_used: string[];
+  current_node: string;
+  nodes_visited: string[];
+  ice_status: Record<string, string>;
+  trace_progress: number | null;
+  tar_stacks: number;
+  hp_change: number;
+  narrative_summary: string | null;
+  available_actions: string[];
+  system_map: any | null;
+  start_message_id: string | null;
 }
 
 export interface ChatStats {

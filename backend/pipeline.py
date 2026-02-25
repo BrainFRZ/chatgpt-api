@@ -9,6 +9,8 @@ Only activates for GPT-5.2 project chats; Anthropic models use the existing sing
 import copy
 import json
 import logging
+import random
+import re
 from dataclasses import dataclass
 from typing import Optional, Iterator
 
@@ -129,6 +131,41 @@ def _parse_stage_json(content: str, stage_name: str) -> dict:
         raise ValueError(f"Pipeline {stage_name} produced invalid JSON: {e}")
 
 
+# ============================================================
+# Dice Pool Generation
+# ============================================================
+
+DICE_POOL_SPECS = {
+    "dnd5e": [(20, 10), (12, 5), (10, 5), (8, 5), (6, 10), (4, 5)],
+    "dnd5e_cyber": [(20, 10), (12, 5), (10, 5), (8, 5), (6, 10), (4, 5)],
+    "coc7e": [(100, 10), (10, 5), (8, 5), (6, 5), (4, 5)],
+    "sr6e": [(6, 40), (20, 5)],
+    "cpred": [(10, 15), (6, 10)],
+}
+
+
+def generate_dice_pool(game_system_id: str) -> str:
+    """Generate a pre-rolled dice pool for the given game system.
+
+    Returns a formatted [DICE POOL] block with random values for each die type.
+    Fresh pool every turn — no state carried across turns.
+    """
+    spec = DICE_POOL_SPECS.get(game_system_id, DICE_POOL_SPECS["dnd5e"])
+    lines = []
+    for sides, count in spec:
+        rolls = [random.randint(1, sides) for _ in range(count)]
+        lines.append(f"d{sides}: {', '.join(str(r) for r in rolls)}")
+
+    return (
+        "[DICE POOL]\n"
+        "Use these pre-rolled results in order (left to right) for each die type.\n"
+        "Do NOT invent your own rolls. If you exhaust a row, note it in your output.\n"
+        "\n"
+        + "\n".join(lines)
+        + "\n[/DICE POOL]"
+    )
+
+
 def build_events_messages(
     system_prompt: str,
     history_messages: list[dict],
@@ -176,9 +213,19 @@ def build_events_messages(
     scene_injection = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene_injection)
 
-    # 5. Character states
-    cs_injection = build_character_states_injection(pipeline_state.get("character_states", {}))
+    # 5. Character states (scene-scoped)
+    cs_injection = build_character_states_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}))
     injections.append(cs_injection)
+
+    # 5b. Character features (game-system specific, e.g. subclass features from conversion doc)
+    if game_system and game_system.get("build_features_injection"):
+        feat_inj = game_system["build_features_injection"](
+            pipeline_state.get("character_states", {}),
+            pipeline_state.get("game_state", {}))
+        if feat_inj:
+            injections.append(feat_inj)
 
     # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
@@ -196,31 +243,41 @@ def build_events_messages(
 def build_mechanics_messages(
     system_prompt: str,
     events_json: dict,
+    dice_pool: str = "",
 ) -> list[dict]:
     """
     Build the message list for the Mechanics agent.
 
     Mechanics is stateless: only system prompt + Events JSON output.
+    Dice pool is appended after the Events JSON for external RNG.
     """
     messages = [{"role": "system", "content": system_prompt}]
-    messages.append({"role": "user", "content": json.dumps(events_json, indent=2)})
+    user_content = json.dumps(events_json, indent=2)
+    if dice_pool:
+        user_content += "\n\n" + dice_pool
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
 def build_narration_messages(
     system_prompt: str,
     recent_pairs: list[dict],
-    mechanics_json: dict
+    mechanics_json: dict,
+    npc_voices: str = ""
 ) -> list[dict]:
     """
     Build the message list for the Narration agent.
 
     Narration sees the last N user-assistant pairs for voice consistency,
-    plus the Mechanics JSON as the current user message.
+    plus the Mechanics JSON as the current user message, optionally prefixed
+    with [NPC VOICES] for dialogue consistency.
     """
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(recent_pairs)
-    messages.append({"role": "user", "content": json.dumps(mechanics_json, indent=2)})
+    user_content = json.dumps(mechanics_json, indent=2)
+    if npc_voices:
+        user_content = npc_voices + "\n\n" + user_content
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -247,6 +304,118 @@ def build_message_content(msg: dict) -> str:
         files_text = "\n\n".join(file_wrappers)
         content = f"{files_text}\n\n{content}"
     return content
+
+
+def collapse_hack_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse hack_mode messages into synthetic summary pairs for normal context building.
+
+    Scans the branch_path for consecutive runs of hack_mode=true messages and replaces
+    each run with a single user/assistant pair containing the hack result summary.
+    System message (first) and current user message (last) are preserved unchanged.
+    Non-hack messages are passed through unmodified.
+
+    This ensures that post-hack normal turns don't include hack exchange details
+    in the API context, keeping the narrative context clean and focused.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    # Check if there are any hack messages (fast path)
+    history = branch_path[1:-1]
+    if not any(msg.get("hack_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]  # Keep system message
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("hack_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found start of hack run — scan to end
+        hack_summary = None
+        j = i
+        while j < len(history) and history[j].get("hack_mode"):
+            # Check for narrative_summary in hack_tool_input on assistant messages
+            tool_input = history[j].get("hack_tool_input", {})
+            if tool_input and tool_input.get("narrative_summary"):
+                hack_summary = tool_input["narrative_summary"]
+            j += 1
+
+        # Replace entire hack run with a synthetic summary pair
+        if hack_summary:
+            result.append({
+                "role": "user",
+                "content": "[The netrunner initiated a hack sequence.]"
+            })
+            result.append({
+                "role": "assistant",
+                "content": f"[HACK RESULT]\n{hack_summary}\n[/HACK RESULT]"
+            })
+        # else: incomplete hack with no summary — drop silently
+
+        i = j  # Skip past all hack messages
+
+    result.append(branch_path[-1])  # Keep current user message
+    return result
+
+
+def collapse_combat_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse combat_mode messages into synthetic summary pairs for normal context building.
+
+    Scans the branch_path for consecutive runs of combat_mode=true messages and replaces
+    each run with a single user/assistant pair containing the combat result summary.
+    System message (first) and current user message (last) are preserved unchanged.
+    Non-combat messages are passed through unmodified.
+
+    This ensures that post-combat normal turns don't include blow-by-blow combat exchange
+    details in the API context, keeping the narrative context clean and focused.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    # Check if there are any combat messages (fast path)
+    history = branch_path[1:-1]
+    if not any(msg.get("combat_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]  # Keep system message
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("combat_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found start of combat run — scan to end
+        combat_summary = None
+        j = i
+        while j < len(history) and history[j].get("combat_mode"):
+            # Check for narrative_summary in combat_tool_input on assistant messages
+            tool_input = history[j].get("combat_tool_input", {})
+            if tool_input and tool_input.get("narrative_summary"):
+                combat_summary = tool_input["narrative_summary"]
+            j += 1
+
+        # Replace entire combat run with a synthetic summary pair
+        if combat_summary:
+            result.append({
+                "role": "user",
+                "content": "[A combat encounter took place.]"
+            })
+            result.append({
+                "role": "assistant",
+                "content": f"[COMBAT RESULT]\n{combat_summary}\n[/COMBAT RESULT]"
+            })
+        # else: incomplete combat with no summary — drop silently
+
+        i = j  # Skip past all combat messages
+
+    result.append(branch_path[-1])  # Keep current user message
+    return result
 
 
 def get_context_pairs(
@@ -455,6 +624,53 @@ def _memory_sort_key(m: dict) -> tuple:
     return (m.get("impact", 0), m.get("turn_created", 0))
 
 
+def filter_ops_by_scene_scope(parsed: dict, scene_state: dict) -> None:
+    """Filter npc_memory_ops and relationship_ops to only include NPCs in the current scene.
+
+    Mutates parsed dict in-place (so downstream notification extraction sees filtered ops).
+    Faction ops (fr) and bootstrap ops (set/npc_set) are always allowed through.
+    Skips filtering only when scene_state itself is empty/uninitialized (first-turn bootstrap).
+    An initialized scene with npcs_present=[] is valid and means no NPC ops are allowed.
+    """
+    if not scene_state:
+        # No scene_state yet (first turn / bootstrap) — allow all ops through
+        return
+
+    npcs_present = set(scene_state.get("npcs_present", []))
+    skipped = 0
+
+    # Filter npc_memory_ops
+    mem_ops = parsed.get("npc_memory_ops")
+    if mem_ops:
+        filtered = [op for op in mem_ops if op.get("npc") in npcs_present]
+        skipped += len(mem_ops) - len(filtered)
+        parsed["npc_memory_ops"] = filtered
+
+    # Filter relationship_ops — only rs/roms/npc_rs/npc_roms for NPCs not present
+    # Allow: fr (factions aren't scene-scoped), set/npc_set (bootstrap)
+    rel_ops = parsed.get("relationship_ops")
+    if rel_ops:
+        filtered_rel = []
+        for op in rel_ops:
+            op_type = op.get("op")
+            if op_type in ("set", "npc_set", "fr"):
+                # Always allow bootstrap and faction ops
+                filtered_rel.append(op)
+            elif op_type in ("rs", "roms", "npc_rs", "npc_roms"):
+                target = op.get("target", "")
+                if target in npcs_present:
+                    filtered_rel.append(op)
+                else:
+                    skipped += 1
+                    logger.info(f"Filtered {op_type} op for '{target}' — not in scene")
+            else:
+                filtered_rel.append(op)
+        parsed["relationship_ops"] = filtered_rel
+
+    if skipped:
+        logger.info(f"Scene-scope filter: dropped {skipped} ops for out-of-scene NPCs")
+
+
 def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
     """Apply npc_memory_ops (add/drop) to the NPC memories dict."""
     if not ops:
@@ -585,10 +801,9 @@ def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) 
     """Return hud_state with funds filtered to scene-present characters.
     Non-character keys (ship, party) pass through. String funds unchanged."""
     funds = hud_state.get("funds")
-    pcs_present = scene_state.get("pcs_present")
-    if not isinstance(funds, dict) or not pcs_present:
+    present = set(scene_state.get("pcs_present") or []) | set(scene_state.get("npcs_present") or [])
+    if not isinstance(funds, dict) or not present:
         return hud_state
-    present = set(pcs_present) | set(scene_state.get("npcs_present", []))
     all_chars = set(character_states.keys())
     return {**hud_state, "funds": {
         k: v for k, v in funds.items() if k in present or k not in all_chars
@@ -757,14 +972,24 @@ def _format_character_data(data) -> str:
     return " | ".join(parts) if parts else json.dumps(data)
 
 
-def build_character_states_injection(character_states: dict) -> str:
+def build_character_states_injection(character_states: dict, scene_state: dict = None) -> str:
     """Build human-readable character states injection for Events.
 
     Entries are stored as {"name": {"data": {...}, "last_updated": N}}.
     Falls back gracefully for old formats.
+    When scene_state is provided, only includes characters in pcs_present + npcs_present.
     """
     if not character_states:
         return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt, or begin interactive character creation if no sheets are available)\n[/CHARACTER STATES]"
+    # Scene-scope filter: only inject characters present in the scene
+    if scene_state:
+        pcs_present = scene_state.get("pcs_present") or []
+        npcs_present = scene_state.get("npcs_present") or []
+        present = set(pcs_present + npcs_present)
+        if present:
+            character_states = {k: v for k, v in character_states.items() if k in present}
+    if not character_states:
+        return "[CHARACTER STATES]\n(no characters in scene)\n[/CHARACTER STATES]"
     lines = ["[CHARACTER STATES]"]
     for name, entry in character_states.items():
         if isinstance(entry, dict):
@@ -774,6 +999,51 @@ def build_character_states_injection(character_states: dict) -> str:
             lines.append(f"{name}: {entry}")
     lines.append("[/CHARACTER STATES]")
     return "\n".join(lines)
+
+
+def build_npc_voices_injection(character_states: dict, scene_state: dict = None, doc_file_stems: set = None) -> str:
+    """Build [NPC VOICES] injection with voice blurbs for improvised NPCs in the scene.
+
+    Filters to scene-present NPCs/enemies that have a voice blurb and are NOT
+    defined in project doc files (doc-defined NPCs have full profiles in the system prompt).
+    """
+    if not character_states:
+        return ""
+
+    # Scene-scope filter: only NPCs currently present
+    if scene_state:
+        present = set(scene_state.get("npcs_present") or [])
+        if not present:
+            return ""
+    else:
+        return ""
+
+    doc_file_stems = doc_file_stems or set()
+
+    lines = []
+    for name, entry in character_states.items():
+        if name not in present:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data") or entry.get("state")
+        if not isinstance(data, dict):
+            continue
+        char_type = data.get("type", "")
+        if char_type not in ("npc", "enemy"):
+            continue
+        voice = data.get("voice")
+        if not voice:
+            continue
+        # Skip doc-defined NPCs (case-insensitive substring match)
+        name_lower = name.lower()
+        if doc_file_stems and any(name_lower in stem or stem in name_lower for stem in doc_file_stems):
+            continue
+        lines.append(f"{name}: {voice}")
+
+    if not lines:
+        return ""
+    return "[NPC VOICES]\n" + "\n".join(lines) + "\n[/NPC VOICES]"
 
 
 def run_pipeline_stage(
@@ -852,7 +1122,8 @@ def run_pipeline(
     agent_files: dict[str, str],
     pipeline_state: Optional[dict],
     game_system: str = "dnd5e",
-    trim_anchor_id: Optional[str] = None
+    trim_anchor_id: Optional[str] = None,
+    doc_file_stems: set = None
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -885,8 +1156,10 @@ def run_pipeline(
     yield ("pipeline_stage", {"stage": "events", "status": "thinking"})
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
+    # Collapse hack and combat messages into summary pairs before context trimming
+    branch_path_for_events = collapse_combat_messages(collapse_hack_messages(branch_path))
     recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
-        branch_path, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
+        branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
     events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs)
@@ -914,19 +1187,13 @@ def run_pipeline(
         events_data.get("callback_ops"),
         current_turn
     )
-    npc_mem_ops = events_data.get("npc_memory_ops")
-    if npc_mem_ops:
-        # Filter out memory ops for NPCs not in scene (use pre-update scene)
-        npcs_in_scene = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
-        if npcs_in_scene:
-            npc_mem_ops = [op for op in npc_mem_ops if op.get("npc") in npcs_in_scene]
-        else:
-            logger.info(f"Filtered all {len(npc_mem_ops)} pipeline npc_memory_ops — no NPCs in scene")
-            npc_mem_ops = []
-    if npc_mem_ops:
+    # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
+    if events_data.get("npc_memory_ops") or events_data.get("relationship_ops"):
+        filter_ops_by_scene_scope(events_data, pipeline_state.get("scene_state", {}))
+    if events_data.get("npc_memory_ops"):
         pipeline_state["npc_memories"] = apply_npc_memory_ops(
             pipeline_state["npc_memories"],
-            npc_mem_ops,
+            events_data["npc_memory_ops"],
             current_turn
         )
     if events_data.get("scene_state"):
@@ -935,7 +1202,7 @@ def run_pipeline(
             existing_scene=pipeline_state.get("scene_state")
         )
 
-    # Apply game-specific state ops (e.g. investigator_ops for CoC 7E)
+    # Apply game-specific state ops (relationship_ops already filtered by scene scope)
     if gs.get("apply_game_state"):
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = gs["init_game_state"]()
@@ -999,8 +1266,9 @@ def run_pipeline(
     # ---- STAGE 2: Mechanics ----
     yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
+    dice_pool = generate_dice_pool(game_system)
     mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
-    mechanics_messages = build_mechanics_messages(mechanics_system, events_data)
+    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool)
 
     mechanics_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["mechanics"],
@@ -1047,7 +1315,11 @@ def run_pipeline(
 
     narration_system = build_agent_system_prompt(gs["narration_contract"], agent_instructions["narration"], agent_files["narration"])
     # Reuse events pairs — same thresholds, same branch_path, same anchor → same result
-    narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data)
+    npc_voices = build_npc_voices_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}),
+        doc_file_stems)
+    narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data, npc_voices=npc_voices)
 
     narration_params = provider.build_pipeline_request(
         messages=narration_messages,
@@ -1578,7 +1850,7 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 state_after_raw = msg.get("pipeline_state_after")
                 if state_after_raw and injected_state_raw:
                     try:
-                        state_after = json.loads(state_after_raw)
+                        state_after = state_after_raw if isinstance(state_after_raw, dict) else json.loads(state_after_raw)
                         state_before = json.loads(injected_state_raw)
                         applied_delta = _compute_state_delta(state_before, state_after)
                         if applied_delta:
@@ -1856,6 +2128,46 @@ def _parse_characters_section(lines: list) -> dict:
     return result
 
 
+def _parse_plot_section(lines: list) -> list:
+    """Parse PLOT section lines into plot_ops list.
+
+    Supports pipe-delimited format:
+        decision text | key=value | severity | episode
+    Also supports simpler formats with fewer fields.
+    """
+    ops = []
+    for line in lines:
+        line = line.strip().lstrip("- ")
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        op = {"decision": parts[0]}
+        for part in parts[1:]:
+            if "=" in part:
+                k, _, v = part.partition("=")
+                k = k.strip().lower()
+                v = v.strip()
+                if k == "key":
+                    op["key"] = v if v.lower() != "null" else None
+                elif k == "value":
+                    op["value"] = v if v.lower() != "null" else None
+                elif k == "severity":
+                    op["severity"] = v
+                elif k == "episode":
+                    op["episode"] = v
+                else:
+                    op["key"] = k
+                    op["value"] = v
+            else:
+                part_lower = part.lower()
+                if part_lower in ("branch", "flag", "divergence"):
+                    op["severity"] = part_lower
+                else:
+                    op["episode"] = part
+        ops.append(op)
+    return ops
+
+
 def parse_state_updates_block(text: str, current_turn: int) -> dict:
     """
     Parse the [STATE UPDATES] block text into ops compatible with existing apply_* functions.
@@ -1867,6 +2179,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         "pacing": None,
         "callback_ops": None,
         "npc_memory_ops": None,
+        "plot_ops": None,
         "scene_state": None,
         "character_states": None,
     }
@@ -1881,6 +2194,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         "SCENE": "SCENE", "CHARACTERS": "CHARACTERS",
         "SCENE STATE": "SCENE", "CHARACTER STATES": "CHARACTERS",
         "NPC MEMORIES": "MEMORIES",
+        "PLOT": "PLOT", "PLOT OPS": "PLOT",
     }
 
     for line in text.split("\n"):
@@ -1901,6 +2215,8 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         result["scene_state"] = _parse_scene_section(section_lines["SCENE"])
     if "CHARACTERS" in section_lines:
         result["character_states"] = _parse_characters_section(section_lines["CHARACTERS"])
+    if "PLOT" in section_lines:
+        result["plot_ops"] = _parse_plot_section(section_lines["PLOT"])
 
     return result
 
@@ -1915,27 +2231,16 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             parsed["callback_ops"],
             current_turn
         )
+    # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
+    # Mutates parsed in-place so downstream notification extraction also sees filtered ops
+    if parsed.get("npc_memory_ops") or parsed.get("relationship_ops"):
+        filter_ops_by_scene_scope(parsed, pipeline_state.get("scene_state", {}))
     if parsed.get("npc_memory_ops"):
-        # Filter out memory ops for NPCs not currently in scene
-        npcs_present = set(pipeline_state.get("scene_state", {}).get("npcs_present", []))
-        if npcs_present:
-            filtered_mem_ops = [
-                op for op in parsed["npc_memory_ops"]
-                if op.get("npc") in npcs_present
-            ]
-            skipped = len(parsed["npc_memory_ops"]) - len(filtered_mem_ops)
-            if skipped:
-                logger.info(f"Filtered {skipped} npc_memory_ops for out-of-scene NPCs")
-        else:
-            filtered_mem_ops = []
-            if parsed["npc_memory_ops"]:
-                logger.info(f"Filtered all {len(parsed['npc_memory_ops'])} npc_memory_ops — no NPCs in scene")
-        if filtered_mem_ops:
-            pipeline_state["npc_memories"] = apply_npc_memory_ops(
-                pipeline_state["npc_memories"],
-                filtered_mem_ops,
-                current_turn
-            )
+        pipeline_state["npc_memories"] = apply_npc_memory_ops(
+            pipeline_state["npc_memories"],
+            parsed["npc_memory_ops"],
+            current_turn
+        )
     if parsed.get("scene_state"):
         pipeline_state["scene_state"] = apply_scene_state(
             parsed["scene_state"],
@@ -1946,7 +2251,7 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         parsed.get("character_states") or {},
         current_turn
     )
-    # Apply game-specific state ops (e.g. investigator_ops for CoC 7E)
+    # Apply game-specific state ops (relationship_ops already filtered by scene scope)
     if game_system and game_system.get("apply_game_state"):
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = game_system["init_game_state"]()
@@ -1954,13 +2259,76 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist HUD state from tool report
     if "hud_state" in parsed:
         pipeline_state["hud_state"] = parsed["hud_state"]
+    # Derive hud_state.funds from ship.credits (single source of truth), then scene-scope
+    pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("game_state"))
+    pipeline_state["hud_state"] = scope_hud_funds(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("scene_state", {}),
+        pipeline_state.get("character_states", {}))
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         pipeline_state["combat"] = parsed["combat"]
     return pipeline_state
 
 
-def build_single_agent_injections(pipeline_state: dict, game_system: dict = None) -> str:
+def build_player_agency_reminder(user_message: str, character_states: dict) -> str:
+    """Build a dynamic player-agency reminder for multi-PC campaigns.
+
+    Detects which PC is prompting from the [tag] at the start of the message,
+    then lists all other PCs as off-limits. Returns empty string for:
+    - Single-player campaigns (0 or 1 PC)
+    - Messages without a recognized player tag
+    - OOC messages
+    """
+    # Collect all PCs from character_states
+    pcs = []
+    for name, cs in character_states.items():
+        data = cs.get("data", cs)  # handle both {data: {type:...}} and flat {type:...}
+        if data.get("type") == "pc":
+            pcs.append(name)
+    if len(pcs) <= 1:
+        return ""
+
+    # Parse [tag] from start of message
+    match = re.match(r'\s*\[([^\]]+)\]', user_message)
+    if not match:
+        return ""
+    tag = match.group(1).strip()
+
+    # Skip OOC tags
+    if tag.upper() in ("OOC",) or tag.upper().startswith("OOC:") or tag.upper().startswith("OOC "):
+        return ""
+
+    # Match tag to a PC name (fuzzy: [A] matches "Aedina", [Aedina] matches "Aedina Lumenvale")
+    prompting_pc = None
+    for pc_name in pcs:
+        first_name = pc_name.split()[0]
+        if first_name.lower().startswith(tag.lower()) or tag.lower().startswith(first_name.lower()):
+            prompting_pc = pc_name
+            break
+
+    if not prompting_pc:
+        return ""
+
+    # Build reminder listing off-limits PCs
+    off_limits = [name for name in pcs if name != prompting_pc]
+    if not off_limits:
+        return ""
+
+    off_limits_names = ", ".join(off_limits)
+    prompting_first = prompting_pc.split()[0]
+
+    return (
+        f"⚠️ PLAYER AGENCY: [{prompting_first}] is prompting. "
+        f"Do NOT author {off_limits_names} — no actions, speech, thoughts, feelings, "
+        f"body language, or physical reactions. Describe only the world and NPC reactions, "
+        f"then prompt the next player."
+    )
+
+
+def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "", doc_file_stems: set = None) -> str:
     """Build the full injection string for a single-agent stateful user message."""
     injections = []
 
@@ -1989,9 +2357,27 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     scene = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene)
 
-    # 5. Character states
-    cs = build_character_states_injection(pipeline_state.get("character_states", {}))
+    # 5. Character states (scene-scoped)
+    cs = build_character_states_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}))
     injections.append(cs)
+
+    # 5a. NPC voices (scene-scoped, improvised NPCs only)
+    voices = build_npc_voices_injection(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("scene_state", {}),
+        doc_file_stems)
+    if voices:
+        injections.append(voices)
+
+    # 5b. Character features (game-system specific, e.g. subclass features from conversion doc)
+    if game_system and game_system.get("build_features_injection"):
+        feat_inj = game_system["build_features_injection"](
+            pipeline_state.get("character_states", {}),
+            pipeline_state.get("game_state", {}))
+        if feat_inj:
+            injections.append(feat_inj)
 
     # 6. HUD state (with scene-scoped funds, backfilled from game_state)
     hud = build_hud_state_injection(
@@ -2008,14 +2394,22 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
         if game_injection:
             injections.append(game_injection)
 
+    # 8. Dice pool (always last — model consumes these for rolls)
+    if dice_pool:
+        injections.append(dice_pool)
+
     return "\n\n".join(injections) if injections else ""
 
 
-def extract_state_notifications(ops_source: dict) -> list:
+def extract_state_notifications(ops_source: dict, npcs_present: set = None,
+                                old_character_states: dict = None) -> list:
     """Extract user-visible notifications from relationship_ops and npc_memory_ops.
 
     Returns a list of notification dicts for the frontend to display.
     Skips bootstrap ops (set/npc_set) and drop actions — only meaningful changes.
+    If npcs_present is provided, filters out ops targeting NPCs not in the scene.
+    If old_character_states is provided (name → old voice string or None),
+    emits voice_update notifications when voice is set or changed.
     """
     notifications = []
 
@@ -2023,6 +2417,11 @@ def extract_state_notifications(ops_source: dict) -> list:
         op_type = op.get("op")
         if op_type in ("set", "npc_set"):
             continue
+        # Scene-scope filter for notifications (when called from pipeline path
+        # where ops_source is re-parsed from raw JSON, not the filtered copy)
+        if npcs_present is not None and op_type in ("rs", "roms", "npc_rs", "npc_roms"):
+            if op.get("target") not in npcs_present:
+                continue
         if op_type in ("rs", "roms", "fr"):
             notifications.append({
                 "type": f"{op_type}_change",
@@ -2044,6 +2443,9 @@ def extract_state_notifications(ops_source: dict) -> list:
     for op in ops_source.get("npc_memory_ops", []):
         if op.get("action") != "add":
             continue
+        # Scene-scope filter for memory notifications
+        if npcs_present is not None and op.get("npc") not in npcs_present:
+            continue
         notifications.append({
             "type": "npc_memory",
             "npc": op.get("npc"),
@@ -2051,5 +2453,30 @@ def extract_state_notifications(ops_source: dict) -> list:
             "quote": op.get("quote"),
             "impact": op.get("impact"),
         })
+
+    for op in ops_source.get("plot_ops", []):
+        notifications.append({
+            "type": "plot_decision",
+            "key": op.get("key"),
+            "value": op.get("value"),
+            "decision": op.get("decision"),
+            "severity": op.get("severity"),
+            "episode": op.get("episode"),
+        })
+
+    # Voice profile updates for NPCs/enemies
+    if old_character_states is not None:
+        for name, cs_entry in ops_source.get("character_states", {}).items():
+            cs_data = cs_entry.get("data", cs_entry) if isinstance(cs_entry, dict) else {}
+            new_voice = cs_data.get("voice")
+            if new_voice and cs_data.get("type") in ("npc", "enemy"):
+                old_voice = old_character_states.get(name)
+                if new_voice != old_voice:
+                    notifications.append({
+                        "type": "voice_update",
+                        "npc": name,
+                        "voice": new_voice,
+                        "old_voice": old_voice,
+                    })
 
     return notifications

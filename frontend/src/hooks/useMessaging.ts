@@ -18,6 +18,7 @@ interface UseMessagingDeps {
   setHasMoreMessages: (v: boolean) => void;
   setMessageOffset: React.Dispatch<React.SetStateAction<number>>;
   selectedModel: string;
+  setSelectedModel: (v: string) => void;
   contextStartIndex: number;
   setContextStartIndex: (v: number) => void;
   stats: ChatStats | null;
@@ -27,6 +28,7 @@ interface UseMessagingDeps {
   setPipelineStage: React.Dispatch<React.SetStateAction<Map<string, {stage: string, status: string}>>>;
   setPipelineState: (v: any) => void;
   setStateNotifications: (v: any[]) => void;
+  setHackState: (v: any) => void;
   setDocsRefreshed: (v: boolean) => void;
   setError: (v: string) => void;
   editingMessageIndex: number | null;
@@ -216,6 +218,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
+            deps.setHackState(event.data);
+          } else if (event.type === 'hack_complete') {
+            deps.setHackState(null);
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -248,6 +254,12 @@ export function useMessaging(deps: UseMessagingDeps) {
               deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
               deps.setStats(data.stats);
               deps.setContextStartIndex(data.context_start_index || 1);
+              // Update model dropdown to reflect what actually ran
+              if (data.original_model && (data.hack_complete || data.combat_complete)) {
+                  deps.setSelectedModel(data.original_model);
+              } else if (data.model) {
+                  deps.setSelectedModel(data.model);
+              }
 
               const branchTotalMessages = data.total_messages || (finalMessages.length + 1);
               deps.setTotalMessages(branchTotalMessages);
@@ -433,6 +445,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
+            deps.setHackState(event.data);
+          } else if (event.type === 'hack_complete') {
+            deps.setHackState(null);
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -453,8 +469,12 @@ export function useMessaging(deps: UseMessagingDeps) {
               cost: data.cost,
               reasoning: data.reasoning,
               model: data.model,
-              service_tier: data.service_tier
+              service_tier: data.service_tier,
+              ...(data.hack_mode ? { hack_mode: true } : {})
             };
+            if (data.hack_mode) {
+              userMsgWithId.hack_mode = true;
+            }
 
             // Replace optimistic messages with complete ones
             deps.setMessages(prev => [...prev.slice(0, -2), userMsgWithId, assistantMessage]);
@@ -469,6 +489,13 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setMessageOffset(prev => prev + 2);
             deps.setStats(data.stats);
             deps.setContextStartIndex(data.context_start_index || 1);
+            // Update model dropdown to reflect what actually ran
+            if (data.original_model && (data.hack_complete || data.combat_complete)) {
+                // Auto-switched mode just ended — restore to original model
+                deps.setSelectedModel(data.original_model);
+            } else if (data.model) {
+                deps.setSelectedModel(data.model);
+            }
             deps.fetchUserStats();
             deps.fetchFreeTokens();
             // Don't scroll on done - let user stay where they were reading

@@ -18,7 +18,152 @@ export interface CharacterPanelProps {
   setShowNpcMemories: (v: string | null) => void;
   mobileBottomSheetOpen: boolean;
   setMobileBottomSheetOpen: (v: boolean) => void;
-  characterSheetMd: string;
+  characterSheetFiles: {name: string, content: string}[];
+  hackState: any;
+}
+
+// ─── VS Code Dark+ YAML Syntax Highlighting ───
+
+const yaml = {
+  key: '#9CDCFE',       // light blue — mapping keys
+  string: '#CE9178',    // orange-brown — quoted & unquoted string values
+  bool: '#569CD6',      // blue — true/false/null
+  number: '#B5CEA8',    // light green — numeric literals
+  comment: '#6A9955',   // green — comments
+  punct: '#D4D4D4',     // gray — colons, dashes, brackets
+  text: '#D4D4D4',      // gray — default text
+  anchor: '#DCDCAA',    // yellow — anchors & aliases
+};
+
+const yamlBoolRe = /^(true|false|yes|no|on|off|null|~)$/i;
+const yamlNumRe = /^[+-]?(\d[\d_]*(\.\d[\d_]*)?([eE][+-]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+|\.inf|\.nan)$/;
+
+/** Find inline comment (# preceded by space, outside quotes). */
+function findInlineComment(s: string): number {
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inDouble) inSingle = !inSingle;
+    else if (c === '"' && !inSingle) inDouble = !inDouble;
+    else if (c === '#' && !inSingle && !inDouble && i > 0 && s[i - 1] === ' ') return i;
+  }
+  return -1;
+}
+
+/** Find key-separating colon (skips colons inside quotes). */
+function findKeyColon(s: string): number {
+  let inSingle = false, inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inDouble) inSingle = !inSingle;
+    else if (c === '"' && !inSingle) inDouble = !inDouble;
+    else if (c === ':' && !inSingle && !inDouble && (i + 1 >= s.length || s[i + 1] === ' ')) return i;
+  }
+  return -1;
+}
+
+/** Render a YAML value span with appropriate coloring. */
+function renderYamlValue(val: string): React.ReactNode {
+  const cIdx = findInlineComment(val);
+  const main = cIdx >= 0 ? val.slice(0, cIdx) : val;
+  const comment = cIdx >= 0 ? val.slice(cIdx) : null;
+  const trimmed = main.trim();
+
+  let color = yaml.string; // default: unquoted string
+  if (trimmed.startsWith('"') || trimmed.startsWith("'")) color = yaml.string;
+  else if (trimmed.startsWith('&') || trimmed.startsWith('*')) color = yaml.anchor;
+  else if (yamlBoolRe.test(trimmed)) color = yaml.bool;
+  else if (yamlNumRe.test(trimmed)) color = yaml.number;
+  else if (trimmed.startsWith('|') || trimmed.startsWith('>')) color = yaml.punct;
+  else if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    // Flow collection — color brackets/commas as punctuation
+    return (
+      <>
+        {main.split(/([[\]{},:])/g).map((part, j) =>
+          /^[[\]{},:]$/.test(part)
+            ? <span key={j} style={{ color: yaml.punct }}>{part}</span>
+            : <span key={j} style={{ color: yaml.text }}>{part}</span>
+        )}
+        {comment && <span style={{ color: yaml.comment }}>{comment}</span>}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <span style={{ color }}>{main}</span>
+      {comment && <span style={{ color: yaml.comment }}>{comment}</span>}
+    </>
+  );
+}
+
+/** YAML content with VS Code Dark+ syntax highlighting. */
+function YamlHighlighted({ content }: { content: string }) {
+  return (
+    <div style={{
+      fontSize: '0.75rem', color: yaml.text, lineHeight: 1.6, marginTop: '8px',
+      fontFamily: "'Consolas', 'Monaco', 'Courier New', monospace",
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      background: '#16162a', borderRadius: '4px', padding: '8px',
+    }}>
+      {content.split('\n').map((line, i) => {
+        if (!line.trim()) return <div key={i}>{'\n'}</div>;
+
+        const trimmed = line.trimStart();
+        const indent = line.length - trimmed.length;
+        const indentSpan = indent > 0 ? <span>{line.slice(0, indent)}</span> : null;
+
+        // Full-line comment
+        if (trimmed.startsWith('#')) {
+          return <div key={i}>{indentSpan}<span style={{ color: yaml.comment }}>{trimmed}</span></div>;
+        }
+        // Document markers
+        if (trimmed === '---' || trimmed === '...') {
+          return <div key={i}>{indentSpan}<span style={{ color: yaml.punct }}>{trimmed}</span></div>;
+        }
+
+        // After indent, check for list dash
+        let pos = indent;
+        const parts: React.ReactNode[] = [];
+        if (indentSpan) parts.push(<span key="ind">{line.slice(0, indent)}</span>);
+
+        if (trimmed.startsWith('- ') || (trimmed === '-')) {
+          parts.push(<span key="dash" style={{ color: yaml.punct }}>-</span>);
+          pos += 1;
+          if (pos < line.length && line[pos] === ' ') {
+            parts.push(<span key="dashsp"> </span>);
+            pos += 1;
+          }
+          if (pos >= line.length) return <div key={i}>{parts}</div>;
+        }
+
+        // Key: value detection
+        const remaining = line.slice(pos);
+        const colonIdx = findKeyColon(remaining);
+        if (colonIdx >= 0) {
+          const key = remaining.slice(0, colonIdx);
+          const keyColor = (key.startsWith('&') || key.startsWith('*')) ? yaml.anchor : yaml.key;
+          parts.push(<span key="key" style={{ color: keyColor }}>{key}</span>);
+          parts.push(<span key="colon" style={{ color: yaml.punct }}>:</span>);
+          const afterColon = remaining.slice(colonIdx + 1);
+          if (afterColon) {
+            const valueStart = afterColon.search(/\S/);
+            if (valueStart < 0) {
+              parts.push(<span key="trail">{afterColon}</span>);
+            } else {
+              parts.push(<span key="sp">{afterColon.slice(0, valueStart)}</span>);
+              parts.push(<React.Fragment key="val">{renderYamlValue(afterColon.slice(valueStart))}</React.Fragment>);
+            }
+          }
+        } else {
+          // No key — treat as value (list item value, etc.)
+          parts.push(<React.Fragment key="val">{renderYamlValue(remaining)}</React.Fragment>);
+        }
+
+        return <div key={i}>{parts}</div>;
+      })}
+    </div>
+  );
 }
 
 export default function CharacterPanel({
@@ -37,7 +182,8 @@ export default function CharacterPanel({
   setShowNpcMemories,
   mobileBottomSheetOpen,
   setMobileBottomSheetOpen,
-  characterSheetMd,
+  characterSheetFiles,
+  hackState,
 }: CharacterPanelProps) {
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
@@ -117,6 +263,117 @@ export default function CharacterPanel({
     return entry.data || entry || {};
   };
 
+  // Alert level labels and colors for hack mode HUD (matches rulebook thresholds)
+  const alertLevelInfo = (level: number): [string, string] => {
+    if (level <= 0) return ['Dormant', '#4ade80'];
+    if (level <= 2) return ['Elevated', '#fbbf24'];
+    if (level <= 4) return ['Active Search', '#fb923c'];
+    if (level <= 6) return ['Lockdown', '#ef4444'];
+    return ['Convergence', '#dc2626'];
+  };
+
+  // Hack mode HUD section
+  const renderHackHud = (condensed?: boolean) => {
+    if (!hackState?.active) return null;
+    const [alertLabel, alertColor] = alertLevelInfo(hackState.alert_level || 0);
+    const procPct = hackState.processes_max > 0 ? Math.max(0, Math.min(100, (hackState.processes_remaining / hackState.processes_max) * 100)) : 0;
+    const iceEntries = Object.entries(hackState.ice_status || {});
+
+    return (
+      <div style={{ padding: condensed ? '6px 8px' : '8px', borderBottom: '1px solid #0a3a0a', backgroundColor: '#0a1a0a' }}>
+        {/* Alert Level */}
+        <div style={{ marginBottom: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+            <span>Alert Level</span>
+            <span style={{ color: alertColor, fontWeight: 600 }}>{hackState.alert_level} — {alertLabel}</span>
+          </div>
+          <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${Math.min(100, ((hackState.alert_level || 0) / 7) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
+          </div>
+        </div>
+
+        {/* Processes */}
+        <div style={{ marginBottom: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+            <span>Processes</span>
+            <span>{hackState.processes_remaining}/{hackState.processes_max}</span>
+          </div>
+          <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${procPct}%`, backgroundColor: '#00ff41', borderRadius: '2px', transition: 'width 0.3s' }} />
+          </div>
+        </div>
+
+        {/* Current Node */}
+        {hackState.current_node && (
+          <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
+            <span>Node: </span>
+            <span style={{ color: '#00ff41', fontWeight: 600 }}>{hackState.current_node}</span>
+            {hackState.nodes_visited?.length > 0 && (
+              <span style={{ color: '#555', marginLeft: '6px' }}>
+                ({(() => { const prior = hackState.nodes_visited.filter((n: string) => n !== hackState.current_node); return prior.length > 0 ? prior.join(' \u2192 ') + ' \u2192 ' + hackState.current_node : hackState.current_node; })()})
+              </span>
+            )}
+          </div>
+        )}
+
+        {!condensed && (
+          <>
+            {/* Active Programs */}
+            {hackState.program_slots_used?.length > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
+                <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+                  {hackState.program_slots_used.map((p: string, i: number) => (
+                    <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: '#00ff4118', color: '#00ff41', fontWeight: 500 }}>{p}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ICE Status */}
+            {iceEntries.length > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>ICE</div>
+                {iceEntries.map(([node, status]: [string, any]) => {
+                  const statusStr = String(status).toLowerCase();
+                  const iceColor = statusStr.includes('destroyed') || statusStr.includes('defeated') ? '#666' : statusStr.includes('active') ? '#ef4444' : '#fb923c';
+                  return (
+                    <div key={node} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', padding: '1px 0' }}>
+                      <span style={{ color: '#999' }}>{node}</span>
+                      <span style={{ color: iceColor }}>{String(status)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Trace Progress */}
+            {hackState.trace_progress != null && hackState.trace_progress > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                {(() => { const traceMax = (hackState.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hackState.trace_progress / traceMax) * 100) : 0; return (<>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
+                  <span style={{ color: '#fbbf24' }}>{'\u26A0'} Trace</span>
+                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{hackState.trace_progress}/{traceMax}</span>
+                </div>
+                <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${tracePct}%`, backgroundColor: tracePct >= 75 ? '#ef4444' : '#fbbf24', borderRadius: '2px', transition: 'width 0.3s' }} />
+                </div>
+                </>); })()}
+              </div>
+            )}
+
+            {/* Tar Stacks */}
+            {hackState.tar_stacks > 0 && (
+              <div style={{ fontSize: '0.68rem', color: '#fb923c' }}>
+                Tar Stacks: {hackState.tar_stacks}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
   // Render a single card
   const renderCard = (name: string, isActive?: boolean) => {
     const data = getCharData(name);
@@ -125,7 +382,7 @@ export default function CharacterPanel({
     const conditions = data.conditions || [];
     const resources = (data.resources || []).slice(0, 2);
     const summary = data.summary || '';
-    const charClass = data.class || '';
+    const charClass = data.subclass ? `${data.class || ''} (${data.subclass})`.trim() : (data.class || '');
     const level = data.level;
     const barVitals = vitals.filter((v: any) => 'current' in v && 'max' in v);
     const flatVitals = vitals.filter((v: any) => 'value' in v && !('current' in v && 'max' in v));
@@ -154,17 +411,35 @@ export default function CharacterPanel({
           </div>
         </div>
         {(charClass || level || flatVitals.length > 0) && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-            <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ') || ''}</span>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              {flatVitals.map((v: any, i: number) => (
-                <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-                  <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
-                  <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+          flatVitals.length > 1 ? (
+            <>
+              {(charClass || level) && (
+                <div style={{ marginBottom: '2px' }}>
+                  <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ')}</span>
                 </div>
-              ))}
+              )}
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '2px' }}>
+                {flatVitals.map((v: any, i: number) => (
+                  <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                    <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+              <span style={{ fontSize: '0.68rem', color: '#888' }}>{[charClass, level != null ? `Lv ${level}` : ''].filter(Boolean).join(' · ') || ''}</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {flatVitals.map((v: any, i: number) => (
+                  <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                    <span style={{ fontSize: '0.68rem', color: '#999' }}>{v.label}: </span>
+                    <span style={{ fontSize: '0.72rem', fontWeight: 600, color: '#94a3b8', backgroundColor: '#2a2a4e', padding: '0 4px', borderRadius: '3px' }}>{v.value}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )
         )}
         {barVitals.map((v: any, i: number) => (
           <div key={i} style={{ marginBottom: '2px' }}>
@@ -229,7 +504,10 @@ export default function CharacterPanel({
             style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer', padding: '4px 8px' }}
             title="Open character panel (Ctrl+])"
           >{'\u00AB'}</button>
-          {charCount > 0 && (
+          {hackState?.active && (
+            <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#00ff41', marginTop: '8px', backgroundColor: '#00ff4118', borderRadius: '8px', padding: '1px 5px' }}>H</span>
+          )}
+          {charCount > 0 && !hackState?.active && (
             <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
           )}
         </div>
@@ -257,15 +535,18 @@ export default function CharacterPanel({
         )}
         {/* Panel header */}
         <div style={{
-          padding: '12px 12px 8px', borderBottom: '1px solid #333', display: 'flex',
+          padding: '12px 12px 8px', borderBottom: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
           justifyContent: 'space-between', alignItems: 'center',
-          backgroundColor: combat ? '#2a1a1a' : 'transparent',
+          backgroundColor: hackState?.active ? '#0a1f0a' : combat ? '#2a1a1a' : 'transparent',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: '#ccc' }}>
-              {combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : '#ccc' }}>
+              {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
-            {combat && (
+            {hackState?.active && (
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
+            )}
+            {!hackState?.active && combat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
             )}
           </div>
@@ -275,6 +556,9 @@ export default function CharacterPanel({
             title="Close character panel (Ctrl+])"
           >{'\u00BB'}</button>
         </div>
+
+        {/* Hack HUD */}
+        {renderHackHud()}
 
         {/* Panel body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px', scrollbarWidth: 'thin' as any }}>
@@ -333,7 +617,7 @@ export default function CharacterPanel({
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
-    if (allPresent.length === 0) return null;
+    if (allPresent.length === 0 && !hackState?.active) return null;
 
     return (
       <>
@@ -350,21 +634,23 @@ export default function CharacterPanel({
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
-        backgroundColor: '#16162a', borderTop: '1px solid #333',
+        backgroundColor: hackState?.active ? '#0a1a0a' : '#16162a', borderTop: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`,
         zIndex: 1500, transition: 'height 0.25s ease',
         display: 'flex', flexDirection: 'column' as const,
       }}>
         {/* Tab handle */}
         <div
           onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? '1px solid #333' : 'none' }}
+          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: hackState?.active ? '#00ff41' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}` : 'none' }}
         >
-          <div style={{ width: '32px', height: '3px', backgroundColor: '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {allPresent.length} characters in scene
+          <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
+          {hackState?.active && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
           <>
+            {renderHackHud(true)}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
               {allPresent.map((name: string) => renderCard(name))}
             </div>
@@ -412,36 +698,41 @@ export default function CharacterPanel({
     const hudFunds = state.hud_state?.funds?.[selectedCharacter];
     const memories = (state.npc_memories || {})[selectedCharacter];
 
-    // Find character section in .md or .yaml sheet
-    const sheetSection = (() => {
-      if (!characterSheetMd) return '';
+    // Find character section in .md or .yaml sheet, tracking source file extension
+    const { sheetSection, sheetIsYaml } = (() => {
+      if (!characterSheetFiles.length) return { sheetSection: '', sheetIsYaml: false };
       const charLower = selectedCharacter.toLowerCase();
-      // Try markdown ## headers first
-      let sections = characterSheetMd.split(/(?=^## )/m);
-      if (sections.length > 1) {
-        const match = sections.find(s => {
-          const heading = s.split('\n')[0].replace(/^## /, '').trim();
-          return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
-        });
-        if (match) return match;
-      }
-      // Try YAML-style: split on banner blocks (# ===...title...# ===)
-      const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
-      const yamlSections: { name: string; start: number; }[] = [];
-      let m;
-      while ((m = yamlPattern.exec(characterSheetMd)) !== null) {
-        yamlSections.push({ name: m[1].trim(), start: m.index });
-      }
-      if (yamlSections.length > 0) {
-        for (let i = 0; i < yamlSections.length; i++) {
-          if (yamlSections[i].name.toLowerCase().includes(charLower)) {
-            const start = yamlSections[i].start;
-            const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : characterSheetMd.length;
-            return characterSheetMd.slice(start, end).trim();
+      for (const file of characterSheetFiles) {
+        const ext = file.name.split('.').pop()?.toLowerCase() || '';
+        const isYaml = ext === 'yaml' || ext === 'yml';
+        if (isYaml) {
+          // YAML: split on banner blocks (# ===...title...# ===)
+          const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
+          const yamlSections: { name: string; start: number; }[] = [];
+          let m;
+          while ((m = yamlPattern.exec(file.content)) !== null) {
+            yamlSections.push({ name: m[1].trim(), start: m.index });
+          }
+          for (let i = 0; i < yamlSections.length; i++) {
+            if (yamlSections[i].name.toLowerCase().includes(charLower)) {
+              const start = yamlSections[i].start;
+              const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : file.content.length;
+              return { sheetSection: file.content.slice(start, end).trim(), sheetIsYaml: true };
+            }
+          }
+        } else {
+          // Markdown: split on ## headers
+          const sections = file.content.split(/(?=^## )/m);
+          if (sections.length > 1) {
+            const match = sections.find(s => {
+              const heading = s.split('\n')[0].replace(/^## /, '').trim();
+              return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
+            });
+            if (match) return { sheetSection: match, sheetIsYaml: false };
           }
         }
       }
-      return '';
+      return { sheetSection: '', sheetIsYaml: false };
     })();
 
     // Game-specific state sections
@@ -683,9 +974,9 @@ export default function CharacterPanel({
           </div>
 
           {/* Class & Level */}
-          {(data.class || data.level != null) && (
+          {(data.class || data.subclass || data.level != null) && (
             <div style={{ fontSize: '0.85rem', color: '#999', marginBottom: '12px', marginTop: '-8px' }}>
-              {[data.class, data.level != null ? `Level ${data.level}` : ''].filter(Boolean).join(' · ')}
+              {[data.subclass ? `${data.class || ''} (${data.subclass})`.trim() : data.class, data.level != null ? `Level ${data.level}` : ''].filter(Boolean).join(' · ')}
             </div>
           )}
 
@@ -734,15 +1025,16 @@ export default function CharacterPanel({
           {/* Game-specific state */}
           {renderGameState()}
 
-          {/* Funds: Ship shows all, PC shows own (or all if no ship in game), NPC hidden */}
+          {/* Funds/Credits: Ship shows all, others show own */}
           {(() => {
             const allFunds = state.hud_state?.funds || {};
-            const hasShipInScene = Object.values(cs).some((e: any) => (e?.data || e)?.type === 'ship');
+            const gs = chatGameSystem || (gameState.ship ? 'dnd5e_cyber' : 'dnd5e');
+            const fundsLabel = ({ dnd5e_cyber: 'Credits', sr6e: 'Nuyen', cpred: 'Eurobucks' } as Record<string, string>)[gs] || 'Funds';
             if (type === 'ship') {
               const entries = Object.entries(allFunds);
               if (entries.length > 0) return (
                 <div style={{ marginTop: '12px' }}>
-                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>{fundsLabel}</div>
                   {entries.map(([k, v]: [string, any]) => (
                     <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
                       <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
@@ -750,28 +1042,13 @@ export default function CharacterPanel({
                   ))}
                 </div>
               );
-            } else if (type === 'pc') {
-              if (!hasShipInScene) {
-                // No ship — PC shows all funds
-                const entries = Object.entries(allFunds);
-                if (entries.length > 0) return (
-                  <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-                    {entries.map(([k, v]: [string, any]) => (
-                      <div key={k} style={{ fontSize: '0.82rem', color: '#fbbf24', display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
-                        <span>{k}</span><span>{typeof v === 'string' ? v : v}</span>
-                      </div>
-                    ))}
-                  </div>
-                );
-              } else if (hudFunds) {
-                return (
-                  <div style={{ marginTop: '12px' }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>Funds</div>
-                    <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : hudFunds}</div>
-                  </div>
-                );
-              }
+            } else if (hudFunds) {
+              return (
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#888', marginBottom: '4px', textTransform: 'uppercase' as const, letterSpacing: '0.05em', borderBottom: '1px solid #2a2a4e', paddingBottom: '4px' }}>{fundsLabel}</div>
+                  <div style={{ fontSize: '0.85rem', color: '#fbbf24' }}>{typeof hudFunds === 'string' ? hudFunds : hudFunds}</div>
+                </div>
+              );
             }
             return null;
           })()}
@@ -800,43 +1077,10 @@ export default function CharacterPanel({
                 if (body.startsWith('## ')) {
                   body = body.split('\n').slice(1).join('\n').trim();
                 } else if (body.startsWith('# ===')) {
-                  // Strip the 3-line banner (# ===, # Title, # ===)
                   body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
                 }
-                const isYaml = /^- \w+:|^\w+:/.test(body.trim());
-                if (isYaml) {
-                  return (
-                    <div style={{ fontSize: '0.75rem', color: '#ccc', lineHeight: 1.6, marginTop: '8px', fontFamily: "'Consolas', 'Monaco', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {body.split('\n').map((line, i) => {
-                        const commentStyle = { color: '#5a8a6a', fontStyle: 'italic' as const };
-                        // Render inline # comments in green
-                        const renderWithComment = (text: string, baseStyle: React.CSSProperties) => {
-                          const cIdx = text.indexOf('  #');
-                          if (cIdx >= 0) return <><span style={baseStyle}>{text.slice(0, cIdx)}</span><span style={commentStyle}>{text.slice(cIdx)}</span></>;
-                          return <span style={baseStyle}>{text}</span>;
-                        };
-                        // Full-line # comments
-                        if (/^\s*#/.test(line)) return <div key={i} style={commentStyle}>{line}</div>;
-                        // Style keys (- name:, class:, etc.) with inline comment support
-                        const keyMatch = line.match(/^(\s*-?\s*)(\w[\w\s]*?)(:)(.*)/);
-                        if (keyMatch) return (
-                          <div key={i}>
-                            <span>{keyMatch[1]}</span>
-                            <span style={{ color: '#60a5fa', fontWeight: 500 }}>{keyMatch[2]}</span>
-                            <span style={{ color: '#666' }}>{keyMatch[3]}</span>
-                            {renderWithComment(keyMatch[4], { color: '#e0e0e0' })}
-                          </div>
-                        );
-                        // List items with inline comment support
-                        if (/^\s+-\s/.test(line)) {
-                          const cIdx = line.indexOf('  #');
-                          if (cIdx >= 0) return <div key={i}><span style={{ color: '#ccc' }}>{line.slice(0, cIdx)}</span><span style={commentStyle}>{line.slice(cIdx)}</span></div>;
-                          return <div key={i} style={{ color: '#ccc' }}>{line}</div>;
-                        }
-                        return <div key={i}>{line}</div>;
-                      })}
-                    </div>
-                  );
+                if (sheetIsYaml) {
+                  return <YamlHighlighted content={body} />;
                 }
                 return (
                   <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>

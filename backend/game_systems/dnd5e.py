@@ -168,6 +168,9 @@ def _format_npc_line(name, data):
         else:
             parts.append(f"RomS {roms} ({roms_label})")
     line = f"  {name}: {' | '.join(parts)}"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
 
     # Append inter-NPC relationships indented under this NPC
     npc_rels = data.get("npc_relationships", {})
@@ -198,8 +201,13 @@ def _format_faction_line(name, data):
     fr = data.get("fr", 0)
     fr_label, fr_bonus = _fr_tier(fr)
     if fr_bonus:
-        return f"  {name}: FR {fr} ({fr_label} \u2014 {fr_bonus})"
-    return f"  {name}: FR {fr} ({fr_label})"
+        line = f"  {name}: FR {fr} ({fr_label} \u2014 {fr_bonus})"
+    else:
+        line = f"  {name}: FR {fr} ({fr_label})"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
+    return line
 
 
 def build_game_injection(game_state):
@@ -251,7 +259,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Fighter",
+      "subclass": "Champion",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 25, "max": 30},
@@ -289,6 +298,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     {"action": "add", "npc": "<NPC name>", "text": "<what happened, ~400 char max>", "quote": "<verbatim quote or null, ~120 char max>", "date": "<in-world date>", "impact": <1-5>},
     {"action": "drop", "npc": "<NPC name>", "index": <0-based index in that NPC's memory list>}
   ],
+  "plot_ops": [],
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -323,8 +333,16 @@ ARC LABEL:
 - Set to null on all other turns (the vast majority)
 - Only set this when a NEW arc or beat is starting, not on every turn within one
 
-PLOT DIVERGENCE:
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+PLOT OPS (save-state notifications):
+- Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
+- "branch": a defined fork in the plot docs — report which path was taken.
+- "flag": a named variable or flag changed — report the new value.
+- "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
+- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
+
+IRRECONCILABLE PLOT BREAK:
+- If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
 
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
@@ -336,7 +354,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
@@ -450,6 +468,7 @@ CHARACTER STATES:
 - Use this as the baseline for your "character_states" output — update it with any changes visible in the current context (damage taken, spells cast, items used, conditions gained/lost)
 - If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
 - This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
+- If the injected state conflicts with project files (e.g. character sheets show max HP but state shows current HP after damage), the injected state takes precedence — only update it based on events in the conversation
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay, even if no dice rolls seem needed (Mechanics always updates the HUD)
@@ -527,7 +546,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Fighter",
+      "subclass": "Champion",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 22, "max": 30},
@@ -589,7 +609,14 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - You have NO conversation history. All context comes from Events' JSON and your assigned documents.
-- Apply rules exactly as written (RAW). Do not bias rolls toward success or failure.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 - The "relationship_ops" array from Events should be passed through to your output unchanged. Do not modify scores.
 - The "arc_label" field from Events should be passed through to your output unchanged.
 - The "callbacks" array from Events should be passed through to your output unchanged.
@@ -643,6 +670,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
+- **[NPC VOICES]**: Voice/personality blurbs for improvised NPCs in the scene (not in project docs). Use for dialogue consistency.
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 
@@ -650,13 +678,15 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn — list every NPC actively in the scene. `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD — list every PC in the scene.
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class and subclass, e.g. "Fighter (Champion)"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Fighter"), `subclass` (subclass name or null if none/not yet unlocked, e.g. "Champion"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Ki Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), `summary` (free-text for equipment/notes), and optional `voice` (1-2 sentence voice/personality profile for NPCs/enemies). Full replacement each turn.
+  - **`voice` field**: Generate `voice` for NPCs/enemies that are NOT in the NPC docs (improvised/emergent characters). 1-2 sentences capturing speech patterns, accent, demeanor. Do NOT set `voice` for NPCs that have a full profile in the project documents — the docs are the source of truth. Update `voice` only when there's a fundamental long-term shift in an NPC's demeanor (shell-shocked after trauma, major loss, sudden confidence gain) — not for temporary mood.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns (meta discussion, zero game content). All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
 - **callback_ops**: Add promises/hooks/foreshadowing (`action: "add"`, `original_text`, `source_npc`, `resolutions`: up to 3 trigger conditions that would close this callback, 200 char limit each) or resolve them (`action: "resolve"`, `id`, `resolution_text`). Each turn, check open callbacks' `[resolves if: ...]` triggers and resolve any whose conditions have been met.
 - **npc_memory_ops**: Add significant NPC moments (`action: "add"`, `npc`, `text` max 640 chars, `quote` max 120 chars, `date`, `impact` 1-5, `focus`: the NPC/location/subject the memory is about) or drop stale ones (`action: "drop"`, `npc`, `index` from injected block). Impact scale: 1-2=flavor, 3=moderate, 4-5=high. Tier caps per NPC: 8 high, 10 moderate, 12 flavor, 30 total.
+- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Scene scope**: Only add or modify npc_memory_ops and relationship_ops for NPCs currently listed in `npcs_present`. If an NPC left the scene, their memories are already stored — you will not see them injected, but they are safe. Do NOT re-add memories for NPCs who are no longer present. If you notice an NPC has no `[NPC MEMORIES]` block, that means they are not in the scene, not that their memories were lost.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
@@ -670,7 +700,7 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Faction Reputation change. Clamped -100 to +100.
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
@@ -734,7 +764,8 @@ When triggered, guide the player through D&D 5E character creation **one step at
 - Call `report_state` every turn — including OOC turns (with `is_ooc: true`)
 - Do NOT reference the state system in your narrative — it is invisible to the player
 - The `focus` field on memories identifies who or what the memory is about (can be a different NPC, a location, or a subject)
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
+- If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
+- If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
 
 ### Dice Mechanics (D&D 5E):
 - Handle ALL dice rolls for the player.
@@ -755,13 +786,14 @@ When triggered, guide the player through D&D 5E character creation **one step at
 - Omit any modifier with value 0 from the display.
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -806,7 +838,8 @@ STATE_REPORT_TOOL = {
                     "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
-                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Druid' or 'Bard (College of Eloquence)'."},
+                        "class": {"type": "string", "description": "Class only, e.g. 'Fighter', 'Druid', 'Bard'. Do NOT include subclass here."},
+                        "subclass": {"type": ["string", "null"], "description": "Subclass name (e.g. 'Champion', 'College of Eloquence'). null if none or not yet unlocked."},
                         "level": {"type": ["integer", "null"], "description": "Character level."},
                         "vitals": {
                             "type": "array",
@@ -840,7 +873,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "voice": {"type": ["string", "null"], "description": "1-2 sentence voice/personality profile. Speech patterns, accent, demeanor. Set once when NPC is introduced; omit for PCs. Example: 'Gruff dwarven accent, clipped sentences, calls everyone \"lad\". Fiercely loyal but hides it behind sarcasm.'"}
                     }
                 }
             },
@@ -913,10 +947,264 @@ STATE_REPORT_TOOL = {
                     "funds": {"description": "Object mapping names to funds (e.g. {\"party chest\": \"500 gp\", \"Aedina\": \"32 gp\"}). Include shared pools as named entries alongside characters."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
+            },
+            "plot_ops": {
+                "type": "array",
+                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
+                "items": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {
+                        "key": {
+                            "type": ["string", "null"],
+                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
+                        },
+                        "value": {
+                            "type": ["string", "null"],
+                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "What the player chose, stated concisely."
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["branch", "flag", "divergence"],
+                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
+                        },
+                        "episode": {
+                            "type": "string",
+                            "description": "Current episode/session from pacing context."
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+# ============================================================
+# Combat Context Mode
+# ============================================================
+
+COMBAT_CONTRACT = """You are the COMBAT MASTER for a D&D 5E session. A battle is underway.
+
+YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with tactical precision. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
+
+Call report_combat_state every exchange, then write your narrative response.
+
+COMBAT RULES (D&D 5E):
+- Action Economy: Each combatant gets an Action, Bonus Action, Reaction, and Movement (30 ft default) per round. Track expenditure.
+- Attack Rolls: 1d20 + attack bonus vs target AC. Hit → roll damage dice + modifier.
+- Saving Throws: 1d20 + save bonus vs DC. Fail → apply effect.
+- Conditions: Prone (attackers within 5 ft have adv, ranged disadv; costs half move to stand), Restrained (disadv attacks, adv against), Poisoned (disadv attacks/ability checks), Paralyzed (auto-crit within 5 ft), Unconscious (incapacitated, drop everything, auto-crit within 5 ft), Frightened (disadv attacks/checks while source visible; can't move closer), Charmed (can't attack charmer), Blinded (disadv attacks, adv against), Stunned (incapacitated, no move, auto-fail Str/Dex saves), Incapacitated (no actions or reactions).
+- Death Saves: DC 10 Wis save each turn at 0 HP. 3 failures = death; 3 successes = stable. Crit hit on unconscious target = 2 failures. Any damage = 1 failure.
+- Concentration: Damage → Con save (DC 10 or half damage, whichever higher). Fail = lose concentration.
+- Opportunity Attacks: Triggered when a hostile creature leaves melee range without Disengage.
+
+DICE ROLLING:
+- Roll ALL dice yourself. Show your work inline.
+- Example: "Goblin attacks Aedina: 1d20+4 = [11]+4 = 15 vs AC 15 → HIT → 1d6+2 = [4]+2 = 6 damage"
+- Never ask the player to roll. Be mathematically precise.
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+ENEMY TACTICS:
+- Enemies act intelligently: focus wounded targets, use terrain, retreat when outmatched.
+- Vary tactics — flanking, conditions, area denial, Disengage from dangerous melee.
+
+COMBAT FLOW:
+- Each exchange covers the current combatant's turn plus any immediate reactions.
+- Advance current_turn to the next combatant in initiative order after each turn.
+- When the last combatant in the order acts, increment the round counter and return to the top.
+- End combat when all enemies are at 0 HP or flee. Set combat_complete=true on the final exchange.
+
+NARRATIVE STYLE:
+- Present tense, immediate, visceral. 2–5 sentences.
+- Name combatants. Describe what dice results mean in fiction, not just numbers.
+- End each exchange by setting up what the next active combatant faces.
+
+NPC VOICE:
+- The combatant roster includes "Voice:" blurbs for NPCs/enemies. Use these for dialogue consistency — full NPC personality docs are not available in combat context, so the voice blurb is your guide for speech patterns, accent, and demeanor.
+
+REPORT REQUIREMENTS (report_combat_state):
+- narrative_summary: ONLY when combat_complete=true — a 1–3 sentence summary of the ENTIRE fight written with the full combat history in mind. This becomes the lasting narrative record once combat is collapsed from context."""
+
+
+REPORT_COMBAT_STATE_TOOL = {
+    "name": "report_combat_state",
+    "description": "Report combat state after each exchange. Call every combat turn, before your narrative.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "rolls", "character_updates", "combat", "combat_complete"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Full narrative of this combat exchange — what happened, who did what, what the dice mean in fiction."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "All dice rolls this exchange (attacks, damage, saves, checks).",
+                "items": {
+                    "type": "object",
+                    "required": ["description", "result"],
+                    "properties": {
+                        "description": {"type": "string"},
+                        "result": {"type": "string", "description": "e.g. '1d20+4 = [11]+4 = 15 vs AC 15 → HIT'"}
+                    }
+                }
+            },
+            "character_updates": {
+                "type": "array",
+                "description": "HP and condition changes for every affected combatant.",
+                "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "hp_delta": {"type": "integer", "description": "Signed HP change. Negative = damage, positive = healing."},
+                        "vital_label": {"type": "string", "description": "Vital to apply hp_delta to (e.g. 'HP', 'Physical', 'Stun', 'SAN', 'Luck', 'Armor'). Defaults to 'HP' if omitted."},
+                        "conditions_add": {"type": "array", "items": {"type": "string"}, "description": "Conditions gained this exchange."},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}, "description": "Conditions cleared this exchange."}
+                    }
+                }
+            },
+            "combat": {
+                "description": "Updated initiative state. Set to null when combat ends.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["round", "initiative_order", "current_turn"],
+                        "properties": {
+                            "round": {"type": "integer"},
+                            "initiative_order": {"type": "array", "items": {"type": "string"}},
+                            "current_turn": {"type": "string"}
+                        }
+                    },
+                    {"type": "null"}
+                ]
+            },
+            "combat_complete": {
+                "type": "boolean",
+                "description": "True when this exchange ends the combat encounter."
+            },
+            "narrative_summary": {
+                "type": "string",
+                "description": "ONLY include when combat_complete=true. 1–3 sentence summary of the ENTIRE fight for the narrative record."
+            }
+        }
+    }
+}
+
+
+def build_combat_profile(character_states, combat):
+    """Build compact combatant roster from character_states for combat mode context."""
+    if not character_states:
+        return ""
+
+    initiative_order = combat.get("initiative_order", []) if combat else []
+
+    lines = ["[COMBATANT ROSTER]"]
+
+    # Order by initiative if available, then remaining characters alphabetically
+    if initiative_order:
+        ordered = [(name, character_states[name]) for name in initiative_order if name in character_states]
+        in_order = set(initiative_order)
+        ordered += [(n, d) for n, d in character_states.items() if n not in in_order]
+    else:
+        ordered = list(character_states.items())
+
+    for name, entry in ordered:
+        d = entry.get("data", entry)
+        parts = []
+
+        char_class = d.get("class", "")
+        char_subclass = d.get("subclass")
+        char_label = f"{char_class} ({char_subclass})" if char_class and char_subclass else char_class
+        char_level = d.get("level")
+        char_type = d.get("type", "pc")
+        if char_label and char_level:
+            parts.append(f"{char_label} {char_level}")
+        elif char_label:
+            parts.append(char_label)
+        else:
+            parts.append(char_type.upper())
+
+        for v in d.get("vitals", []):
+            if v.get("label") == "HP":
+                if "current" in v and "max" in v:
+                    parts.append(f"HP {v['current']}/{v['max']}")
+                elif "value" in v:
+                    parts.append(f"HP {v['value']}")
+            elif v.get("label") == "AC" and "value" in v:
+                parts.append(f"AC {v['value']}")
+
+        conditions = d.get("conditions", [])
+        if conditions:
+            parts.append(f"[{', '.join(conditions)}]")
+
+        key_resources = []
+        for r in d.get("resources", []):
+            cur = r.get("current", 0)
+            mx = r.get("max", 0)
+            if mx > 0:
+                key_resources.append(f"{r.get('label', '?')} {cur}/{mx}")
+        if key_resources:
+            parts.append("| " + ", ".join(key_resources))
+
+        line = f"  {name}: {' | '.join(parts)}"
+        summary = d.get("summary", "")
+        if summary:
+            line += f"\n    {summary}"
+        voice = d.get("voice")
+        if voice and d.get("type") in ("npc", "enemy"):
+            line += f"\n    Voice: {voice}"
+        lines.append(line)
+
+    lines.append("[/COMBATANT ROSTER]")
+    return "\n".join(lines)
+
+
+def build_combat_injection(combat, pipeline_state):
+    """Build [COMBAT STATE] injection prepended to each user message during combat."""
+    if not combat:
+        return ""
+
+    lines = ["[COMBAT STATE]"]
+    lines.append(f"Round: {combat.get('round', 1)}")
+
+    current_turn = combat.get("current_turn", "")
+    initiative_order = combat.get("initiative_order", [])
+    cs = pipeline_state.get("character_states", {})
+
+    lines.append("Initiative Order:")
+    for name in initiative_order:
+        marker = " \u2190 ACTING" if name == current_turn else ""
+        entry = cs.get(name, {})
+        d = entry.get("data", entry)
+        status_parts = []
+        for v in d.get("vitals", []):
+            if v.get("label") == "HP":
+                if "current" in v and "max" in v:
+                    status_parts.append(f"HP {v['current']}/{v['max']}")
+                break
+        conditions = d.get("conditions", [])
+        if conditions:
+            status_parts.append(f"[{', '.join(conditions)}]")
+        status = f" ({', '.join(status_parts)})" if status_parts else ""
+        lines.append(f"  {name}{status}{marker}")
+
+    lines.append("[/COMBAT STATE]")
+    return "\n".join(lines)
+
 
 # ============================================================
 # Game System Definition
@@ -933,4 +1221,9 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Combat context mode
+    "combat_contract": COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }

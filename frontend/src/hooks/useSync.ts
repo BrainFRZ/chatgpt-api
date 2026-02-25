@@ -24,11 +24,13 @@ interface UseSyncDeps {
   setProjectChatsCache: React.Dispatch<React.SetStateAction<{[key: string]: string[]}>>;
   setRootChatsCache: React.Dispatch<React.SetStateAction<string[] | null>>;
   resetChatState: () => void;
+  fetchUserStats: () => void;
 }
 
 export function useSync(deps: UseSyncDeps) {
   const [viewerCount, setViewerCount] = useState(1);
   const [needsSyncReload, setNeedsSyncReload] = useState(false);
+  const depsRef = useRef(deps);
 
   const syncWsRef = useRef<WebSocket | null>(null);
   const syncReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -37,11 +39,17 @@ export function useSync(deps: UseSyncDeps) {
   const userWsReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const userWsHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    depsRef.current = deps;
+  }, [deps]);
+
   // Handle sync events from WebSocket
   const handleSyncEvent = useCallback((event: { type: string; data: any }) => {
+    const latestDeps = depsRef.current;
     // If we're currently streaming (loading) for the current chat, ignore streaming-related
     // sync events since we're already handling them via SSE. This prevents duplicates.
-    const isCurrentlyStreaming = deps.currentChatRef.current && deps.isLoadingRef.current.has(deps.currentChatRef.current);
+    const isCurrentlyStreaming = latestDeps.currentChatRef.current &&
+      latestDeps.isLoadingRef.current.has(latestDeps.currentChatRef.current);
 
     switch (event.type) {
       case 'client_joined':
@@ -52,17 +60,41 @@ export function useSync(deps: UseSyncDeps) {
       case 'user_message_added':
         // Ignore if we're the one streaming - we already added our own message
         if (isCurrentlyStreaming) break;
-        // Another client sent a message - add it to our view
-        deps.setMessages(prev => [...prev, event.data.message]);
+        // Another client sent a message or edited one - add it to our view
         deps.setAllMessages(prev => [...prev, event.data.message]);
         deps.setTotalMessages(prev => prev + 1);
         deps.setCurrentLeafId(event.data.current_leaf_id);
-        // Add streaming placeholder for the upcoming assistant response
-        deps.setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '',
-          timestamp: new Date().toISOString()
-        }]);
+        // Detect branch edits and truncate to show the new branch:
+        // 1. Parent is in our path (not the last msg) → truncate after parent
+        // 2. Parent is the root/system msg (not in visible path) → find sibling
+        //    with same parent_id and truncate before it
+        // 3. Otherwise → append normally (new message at end of conversation)
+        deps.setMessages(prev => {
+          const parentId = event.data.message.parent_id;
+          const parentIndex = parentId ? prev.findIndex(m => m.id === parentId) : -1;
+          if (parentIndex >= 0 && parentIndex < prev.length - 1) {
+            // Parent found in path — truncate after parent
+            const base = prev.slice(0, parentIndex + 1);
+            return [...base, event.data.message, {
+              role: 'assistant', content: '', timestamp: new Date().toISOString()
+            }];
+          }
+          if (parentId && parentIndex === -1) {
+            // Parent not in visible path — check if a sibling exists
+            // (editing the first user msg, whose parent is the system/root msg)
+            const siblingIndex = prev.findIndex(m => m.parent_id === parentId);
+            if (siblingIndex >= 0) {
+              const base = prev.slice(0, siblingIndex);
+              return [...base, event.data.message, {
+                role: 'assistant', content: '', timestamp: new Date().toISOString()
+              }];
+            }
+          }
+          // Normal append — new message at end of conversation
+          return [...prev, event.data.message, {
+            role: 'assistant', content: '', timestamp: new Date().toISOString()
+          }];
+        });
         break;
 
       case 'stream_content':
@@ -99,30 +131,46 @@ export function useSync(deps: UseSyncDeps) {
         });
         break;
 
-      case 'stream_done':
+      case 'stream_done': {
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
         // Replace streaming placeholder with complete message
+        let hadPlaceholder = false;
         deps.setMessages(prev => {
           const newMessages = [...prev];
           const lastIdx = newMessages.length - 1;
-          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
+          if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant' && !newMessages[lastIdx].id) {
+            // Normal path: we have a placeholder from user_message_added
+            hadPlaceholder = true;
             newMessages[lastIdx] = event.data.assistant_message;
+            return newMessages;
           }
-          return newMessages;
+          // No placeholder — earlier events were lost
+          return prev;
         });
-        deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
-        deps.setTotalMessages(prev => prev + 1);
-        deps.setCurrentLeafId(event.data.current_leaf_id);
-        deps.setStats(event.data.stats);
-        deps.setContextStartIndex(event.data.context_start_index || 1);
-        deps.setPipelineStage(prev => {
-          if (!deps.currentChatRef.current) return prev;
-          const next = new Map(prev);
-          next.delete(deps.currentChatRef.current);
-          return next;
-        });
+        if (hadPlaceholder) {
+          // Update metadata for successful placeholder replacement
+          deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
+          deps.setTotalMessages(prev => prev + 1);
+          deps.setCurrentLeafId(event.data.current_leaf_id);
+          deps.setStats(event.data.stats);
+          deps.setContextStartIndex(event.data.context_start_index || 1);
+          if (event.data.pipeline_state) {
+            deps.setPipelineState(event.data.pipeline_state);
+          }
+          latestDeps.fetchUserStats();
+          deps.setPipelineStage(prev => {
+            if (!deps.currentChatRef.current) return prev;
+            const next = new Map(prev);
+            next.delete(deps.currentChatRef.current);
+            return next;
+          });
+        } else {
+          // No placeholder existed — reload to get correct branch state
+          setNeedsSyncReload(true);
+        }
         break;
+      }
 
       case 'stream_error':
         // Ignore if we're the one streaming - we handle this via SSE
@@ -251,7 +299,7 @@ export function useSync(deps: UseSyncDeps) {
         // If the deleted chat is currently open (same name AND same project), close it
         if (deps.currentChatRef.current === event.data.chat_name &&
             (deps.currentProjectRef.current || null) === (event.data.project || null)) {
-          deps.resetChatState();
+          latestDeps.resetChatState();
         }
         break;
     }
@@ -293,14 +341,14 @@ export function useSync(deps: UseSyncDeps) {
         }, 30000); // Ping every 30 seconds
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = (msgEvent) => {
         try {
-          const data = JSON.parse(event.data);
+          const data = JSON.parse(msgEvent.data);
           // Skip user-level events here - they're handled by the user-level WebSocket
           if (data.type === 'chat_created' || data.type === 'chat_deleted') return;
           handleSyncEvent(data);
         } catch (e) {
-          // Ignore parse errors
+          console.error('[WS parse error]', e);
         }
       };
 

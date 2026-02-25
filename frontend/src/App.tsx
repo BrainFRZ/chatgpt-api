@@ -207,10 +207,17 @@ function App() {
   const [isResizing, setIsResizing] = useState(false);
   const [resizeStartY, setResizeStartY] = useState(0);
   const [resizeStartHeight, setResizeStartHeight] = useState(0);
-  const [isLoading, setIsLoading] = useState<Set<string>>(new Set());
   const isLoadingRef = useRef<Set<string>>(new Set());
-  // Keep ref in sync with state for use in useCallback with [] deps
-  useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
+  const [isLoading, setIsLoadingState] = useState<Set<string>>(new Set());
+  // Wrap setIsLoading to update the ref synchronously, so the WS handler's
+  // isCurrentlyStreaming check sees the new value immediately (before render).
+  const setIsLoading: React.Dispatch<React.SetStateAction<Set<string>>> = useCallback((action) => {
+    setIsLoadingState(prev => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      isLoadingRef.current = next;
+      return next;
+    });
+  }, []);
   const [pipelineStage, setPipelineStage] = useState<Map<string, {stage: string, status: string}>>(new Map());
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [freeTokens, setFreeTokens] = useState<FreeTokens | null>(null);
@@ -245,11 +252,12 @@ function App() {
   const [pipelineState, setPipelineState] = useState<any>(null);
   const [stateNotifications, setStateNotifications] = useState<any[]>([]);
   const [chatGameSystem, setChatGameSystem] = useState<string | null>(null);
+  const [hackState, setHackState] = useState<any>(null);
   const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null);
   const [showCharacterSheet, setShowCharacterSheet] = useState(false);
   const [showAllCharactersModal, setShowAllCharactersModal] = useState(false);
   const [showNpcMemories, setShowNpcMemories] = useState<string | null>(null);
-  const [characterSheetMd, setCharacterSheetMd] = useState<string>('');
+  const [characterSheetFiles, setCharacterSheetFiles] = useState<{name: string, content: string}[]>([]);
   const [mobileBottomSheetOpen, setMobileBottomSheetOpen] = useState(false);
 
   // Detect mobile screen size
@@ -349,6 +357,7 @@ function App() {
     setPipelineState(null);
     setStateNotifications([]);
     setChatGameSystem(null);
+    setHackState(null);
     setSelectedCharacter(null);
     setShowCharacterSheet(false);
     setShowAllCharactersModal(false);
@@ -514,6 +523,10 @@ function App() {
       setTotalMessages(chatData.total_messages);
       setHasMoreMessages(chatData.has_more_messages || false);
       setMessageOffset(loadedMessages.length);
+
+      // Restore branch-local state from the target branch
+      setPipelineState(chatData.pipeline_state || null);
+      setHackState(chatData.hack_state || null);
 
     } catch (err) {
       console.error('Error switching branch:', err);
@@ -816,9 +829,9 @@ function App() {
 
     // Fetch character sheet for right panel
     fetch(`/api/character-sheet/${user.username}/${projectName}`)
-      .then(r => r.ok ? r.json() : { content: '' })
-      .then(d => { if (currentProjectRef.current === projectName) setCharacterSheetMd(d.content || ''); })
-      .catch(() => setCharacterSheetMd(''));
+      .then(r => r.ok ? r.json() : { files: [] })
+      .then(d => { if (currentProjectRef.current === projectName) setCharacterSheetFiles(d.files || []); })
+      .catch(() => setCharacterSheetFiles([]));
 
     // Fetch chat list (uses refreshProjectChats which has built-in stale check)
     const chatList = await refreshProjectChats(projectName);
@@ -1665,9 +1678,10 @@ function App() {
       setSelectedModel(data.model || projectModel || 'gpt-5.2');
       setAnthropicSync(data.anthropic_sync !== false);
 
-      // Load pipeline state and game system for right panel
+      // Load pipeline state, game system, and hack state for right panel
       setPipelineState(data.pipeline_state || null);
       setChatGameSystem(data.game_system || null);
+      setHackState(data.hack_state || null);
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -1851,6 +1865,9 @@ function App() {
       const oldScrollHeight = container?.scrollHeight || 0;
       const oldScrollTop = container?.scrollTop || 0;
 
+      if (olderMessages.length > 0) {
+        setEditingMessageIndex(prev => prev == null ? prev : prev + olderMessages.length);
+      }
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
       // Use backend's message count for offset (may include system message on oldest page)
@@ -2219,10 +2236,10 @@ function App() {
     messages, setMessages, allMessages, setAllMessages,
     currentLeafId, setCurrentLeafId,
     totalMessages, setTotalMessages, setHasMoreMessages, setMessageOffset,
-    selectedModel, contextStartIndex, setContextStartIndex,
+    selectedModel, setSelectedModel, contextStartIndex, setContextStartIndex,
     stats, setStats,
     isLoading, setIsLoading,
-    setPipelineStage, setPipelineState, setStateNotifications, setDocsRefreshed, setError,
+    setPipelineStage, setPipelineState, setStateNotifications, setHackState, setDocsRefreshed, setError,
     editingMessageIndex, editingMessageContent,
     setEditingMessageIndex, setEditingMessageContent,
     fetchUserStats, fetchFreeTokens,
@@ -2238,6 +2255,7 @@ function App() {
     setSelectedModel, setAnthropicSync, setDocsRefreshed,
     setChats, setProjectChatsCache, setRootChatsCache,
     resetChatState,
+    fetchUserStats,
   });
 
   // Close attach menu when clicking outside
@@ -2259,8 +2277,7 @@ function App() {
       sync.setNeedsSyncReload(false);
       openChat(currentChat, currentProject);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync.needsSyncReload]);
+  }, [sync.needsSyncReload, sync.setNeedsSyncReload, currentChat, currentProject, openChat]);
 
   // Textarea resize handlers
   const handleResizeStart = (e: React.MouseEvent) => {
@@ -2669,7 +2686,8 @@ function App() {
           setShowNpcMemories={setShowNpcMemories}
           mobileBottomSheetOpen={mobileBottomSheetOpen}
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
-          characterSheetMd={characterSheetMd}
+          characterSheetFiles={characterSheetFiles}
+          hackState={hackState}
         />
       </div>
 

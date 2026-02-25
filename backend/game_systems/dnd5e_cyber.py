@@ -6,12 +6,17 @@ and adds ship state tracking (hull, shields, ammo, credits) via ship_ops.
 """
 
 import copy
+import json
 import logging
 
 from .dnd5e import (
     init_game_state as _dnd5e_init,
     apply_game_state as _dnd5e_apply,
     build_game_injection as _dnd5e_build_injection,
+    COMBAT_CONTRACT,
+    REPORT_COMBAT_STATE_TOOL,
+    build_combat_profile,
+    build_combat_injection,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +152,647 @@ def build_game_injection(game_state):
 
 
 # ============================================================
+# Hack Mode — Matrix Encounters
+# ============================================================
+
+# ============================================================
+# Conversion Doc Parser & Feature Injection
+# ============================================================
+
+import re
+
+def parse_conversion_features(doc_content: str) -> dict:
+    """Parse Core Conversion.md to extract subclass and custom class features.
+
+    Returns:
+        {
+            "subclasses": {
+                "Ghost": {"parent_class": "Netrunner", "features": [{"level": 2, "text": "**Lvl 2 — ..."}, ...]},
+                ...
+            },
+            "custom_classes": {
+                "Conduit": {"features": [{"level": 1, "text": "**Lvl 1 — ..."}, ...]},
+                ...
+            }
+        }
+    """
+    result = {"subclasses": {}, "custom_classes": {}}
+
+    # Trim to sections 2.1 and 2.2 only (stop at section 3)
+    m_start = re.search(r'^## \*\*2\.1 ', doc_content, re.MULTILINE)
+    m_end = re.search(r'^## \*\*3\.', doc_content, re.MULTILINE)
+    if not m_start:
+        return result
+    section = doc_content[m_start.start():m_end.start()] if m_end else doc_content[m_start.start():]
+
+    # Split into header-delimited blocks (##, ###, or #### level)
+    blocks = re.split(r'^(#{2,4} .+)$', section, flags=re.MULTILINE)
+    # blocks alternates: text_before, header, body, header, body, ...
+
+    i = 1  # skip preamble before first header
+    while i < len(blocks) - 1:
+        header = blocks[i].strip()
+        body = blocks[i + 1] if i + 1 < len(blocks) else ""
+        i += 2
+
+        # ---- Section 2.1 subclasses: ### **CLASS: Subclass** ----
+        m_sub = re.match(r'^### \*\*(\w[\w\s]*?):\s*(\w[\w\s]*?)\*\*', header)
+        if m_sub:
+            parent_class = m_sub.group(1).strip()
+            subclass_name = m_sub.group(2).strip()
+            features = _extract_features(body)
+            result["subclasses"][subclass_name] = {"parent_class": parent_class, "features": features}
+            continue
+
+        # ---- Section 2.2 custom class (full): ## **2.2 ClassName Class (Full)** ----
+        # or ### **CLASSNAME** inside a 2.2 section
+        m_full_header = re.match(r'^## \*\*2\.2\s+(\w[\w\s]*?)\s+Class\s+\(Full\)\*\*', header)
+        if m_full_header:
+            class_name = m_full_header.group(1).strip()
+            # The body may contain #### Core Features, #### Manifestations, etc.
+            # Collect everything until a subclass header appears
+            # But first peek ahead for ### headers that are part of this class block
+            full_body = body
+            # Consume subsequent blocks that are part of this custom class
+            while i < len(blocks) - 1:
+                next_header = blocks[i].strip()
+                # Stop if we hit another ## section (but not ### or ####)
+                if re.match(r'^## [^#]', next_header):
+                    break
+                # Check if this is a subclass of this custom class: ### **CLASS: SubclassName**
+                m_nested_sub = re.match(r'^### \*\*' + re.escape(class_name.upper()) + r':\s*(\w[\w\s]*?)\*\*', next_header)
+                if m_nested_sub:
+                    # This is a subclass under the custom class
+                    sub_name = m_nested_sub.group(1).strip()
+                    sub_body = blocks[i + 1] if i + 1 < len(blocks) else ""
+                    sub_features = _extract_features(sub_body)
+                    result["subclasses"][sub_name] = {"parent_class": class_name, "features": sub_features}
+                    i += 2
+                    continue
+                # Otherwise it's part of the custom class body (#### sections, ### **CLASSNAME**, etc.)
+                full_body += "\n" + next_header + "\n" + (blocks[i + 1] if i + 1 < len(blocks) else "")
+                i += 2
+
+            features = _extract_features(full_body)
+            result["custom_classes"][class_name] = {"features": features}
+            continue
+
+        # ---- Conduit-style full class inline in 2.1: ### **CONDUIT (Full Class)** ----
+        m_inline_full = re.match(r'^### \*\*(\w[\w\s]*?)\s*\(Full Class\)\*\*', header)
+        if m_inline_full:
+            class_name = m_inline_full.group(1).strip()
+            full_body = body
+            # Consume subsequent #### blocks (Core Features, Manifestations, Instability, subclasses)
+            while i < len(blocks) - 1:
+                next_header = blocks[i].strip()
+                if re.match(r'^## [^#]', next_header):
+                    break
+                # Check for subclass: #### ClassName Subclass: SubName
+                m_nested = re.match(r'^####\s+' + re.escape(class_name) + r'\s+Subclass:\s*(\w[\w\s]*?)$', next_header, re.IGNORECASE)
+                if m_nested:
+                    sub_name = m_nested.group(1).strip()
+                    sub_body = blocks[i + 1] if i + 1 < len(blocks) else ""
+                    sub_features = _extract_features(sub_body)
+                    result["subclasses"][sub_name] = {"parent_class": class_name, "features": sub_features}
+                    i += 2
+                    continue
+                # Check if it's a ### that indicates a new top-level class/subclass
+                if next_header.startswith('### ') and not next_header.startswith('#### '):
+                    # Could be ### **CLASSNAME** (the class entry inside a full class section)
+                    # or ### **CLASS: Sub** which means we've left this block
+                    if re.match(r'^### \*\*\w[\w\s]*?:\s*\w', next_header):
+                        break  # New subclass section, not part of this class
+                full_body += "\n" + next_header + "\n" + (blocks[i + 1] if i + 1 < len(blocks) else "")
+                i += 2
+
+            features = _extract_features(full_body)
+            result["custom_classes"][class_name] = {"features": features}
+            continue
+
+    return result
+
+
+def _extract_features(text: str) -> list:
+    """Extract level-gated features from a block of text.
+
+    Finds **Lvl N — Feature Name.** patterns and collects all text until the
+    next feature, --- divider, or #### header. Also handles auto-prepared
+    spell/program tables that follow a feature header.
+
+    Returns list of {"level": int, "text": str} dicts.
+    """
+    features = []
+    # Split on feature headers: **Lvl N — ...**
+    # We need to find each feature start position
+    pattern = re.compile(r'^\*\*Lvl\s+(\d+)\s*[—–-]\s*', re.MULTILINE)
+    matches = list(pattern.finditer(text))
+
+    for idx, match in enumerate(matches):
+        level = int(match.group(1))
+        start = match.start()
+        # Find end: next feature, --- divider, or #### header (whichever comes first)
+        if idx + 1 < len(matches):
+            end = matches[idx + 1].start()
+        else:
+            end = len(text)
+
+        chunk = text[start:end]
+
+        # Trim trailing --- divider and whitespace
+        chunk = re.sub(r'\n---\s*$', '', chunk).strip()
+
+        # Check if there's a table right after the feature header line
+        # Include it as part of this feature
+        if chunk:
+            features.append({"level": level, "text": chunk})
+
+    # Also capture tables (Manifestations, Instability) that aren't under a **Lvl N** header
+    # These are level-1 content for custom classes (available from class start)
+    _extract_tables_as_features(text, features)
+
+    return features
+
+
+def _extract_tables_as_features(text: str, features: list):
+    """Extract Manifestations and Instability tables as level-1 features."""
+    # Look for #### Manifestations section
+    for section_name in ["Manifestations", "Instability Table"]:
+        pattern = re.compile(r'^####\s+' + re.escape(section_name) + r'.*?\n(.*?)(?=\n####|\n---\s*$|\Z)',
+                             re.MULTILINE | re.DOTALL)
+        m = pattern.search(text)
+        if m:
+            table_text = m.group(0).strip()
+            if table_text:
+                features.append({"level": 1, "text": table_text})
+
+
+def _filter_spell_table_rows(feature_text: str, char_level: int) -> str:
+    """Filter auto-prepared spell table rows to only show levels at/below char_level.
+
+    Finds markdown tables within a feature and filters rows where the first column
+    is a level number greater than char_level.
+    """
+    lines = feature_text.split('\n')
+    result = []
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('|') and not in_table:
+            in_table = True
+            result.append(line)
+            continue
+        if in_table:
+            if not stripped.startswith('|'):
+                in_table = False
+                result.append(line)
+                continue
+            # Check if this is a separator row (|:---|...) or header row
+            if re.match(r'^\|[\s:*-]+\|', stripped):
+                result.append(line)
+                continue
+            # Check if first cell is a level number
+            cells = [c.strip() for c in stripped.split('|')]
+            # cells[0] is empty (before first |), cells[1] is first col
+            if len(cells) >= 2:
+                try:
+                    row_level = int(cells[1])
+                    if row_level <= char_level:
+                        result.append(line)
+                    continue
+                except ValueError:
+                    # Header row or non-numeric — keep it
+                    result.append(line)
+                    continue
+            result.append(line)
+        else:
+            result.append(line)
+    return '\n'.join(result)
+
+
+def build_features_injection(character_states: dict, game_state: dict) -> str:
+    """Build [CHARACTER FEATURES] injection block from conversion doc or fallback features.
+
+    For every character with a subclass or custom class, emits their level-filtered
+    features from the parsed conversion doc. Falls back to character_state["features"]
+    if no doc is available.
+    """
+    doc_content = game_state.get("_conversion_doc")
+    parsed = parse_conversion_features(doc_content) if doc_content else None
+
+    # Build case-insensitive lookup maps for parsed data
+    if parsed:
+        cc_lower = {k.lower(): v for k, v in parsed["custom_classes"].items()}
+        sc_lower = {k.lower(): v for k, v in parsed["subclasses"].items()}
+    else:
+        cc_lower = sc_lower = {}
+
+    blocks = []
+    for name, entry in character_states.items():
+        data = entry.get("data", entry)
+        level = data.get("level")
+        if not level or data.get("type") == "ship":
+            continue
+
+        cls = data.get("class", "")
+        subclass = data.get("subclass")
+
+        # Backward compat: extract subclass from "Netrunner (Ghost)" if subclass field missing
+        if subclass is None and "(" in cls:
+            m = re.match(r'^(.+?)\s*\((.+?)\)\s*$', cls)
+            if m:
+                cls = m.group(1).strip()
+                subclass = m.group(2).strip()
+
+        if parsed:
+            char_features = []
+
+            # Custom class features (e.g. Conduit core features)
+            custom = cc_lower.get(cls.lower())
+            if custom:
+                for feat in custom["features"]:
+                    if feat["level"] <= level:
+                        char_features.append(_filter_spell_table_rows(feat["text"], level))
+
+            # Subclass features
+            if subclass:
+                sub_data = sc_lower.get(subclass.lower())
+                if sub_data:
+                    for feat in sub_data["features"]:
+                        if feat["level"] <= level:
+                            char_features.append(_filter_spell_table_rows(feat["text"], level))
+
+            if char_features:
+                label = f"{cls} ({subclass})" if subclass else cls
+                header = f"## {name} — {label}, Level {level}"
+                blocks.append(header + "\n\n" + "\n\n".join(char_features))
+        else:
+            # Fallback: use features array from character_state
+            fallback = data.get("features", [])
+            if fallback:
+                label = f"{cls} ({subclass})" if subclass else cls
+                header = f"## {name} — {label}, Level {level}"
+                blocks.append(header + "\n\n" + "\n".join(f"- {f}" for f in fallback))
+
+    if not blocks:
+        return ""
+    return "[CHARACTER FEATURES]\n" + "\n\n".join(blocks) + "\n[/CHARACTER FEATURES]"
+
+
+ALERT_LEVEL_NAMES = {
+    0: "Dormant",
+    1: "Passive Scan",
+    2: "Suspicious",
+    3: "Active Alert",
+    4: "Active Search",
+    5: "Lockdown",
+}
+
+HACK_CONTRACT = """## Hack Mode — Matrix Encounter
+
+You are running a live hacking encounter. A netrunner has jacked into a target system.
+
+### Your Role
+- Describe the Matrix environment from the netrunner's perspective (neon data streams, geometric ICE constructs, digital architecture)
+- Adjudicate all hack actions: resolve dice rolls, apply consequences, track state
+- Call `report_hack_state` after EVERY exchange
+- Set `hack_complete: true` when the hack ends (objective achieved, jack out, or dumped)
+
+### Quick Hack (3-4 exchanges, strictly enforced)
+Direct strike on a single-objective system. No node map. You MUST follow this exact sequence:
+1. **Entry** (exchange 1): Describe jacking into the system, the Matrix environment, and the first obstacle (ICE guarding the path). Present the player's options for handling it. END your exchange here — do NOT resolve the obstacle for the player.
+2. **Obstacle** (exchange 2-3): The player chooses how to handle ICE. Resolve their action with dice rolls. If SR ≥ 3, a second ICE encounter triggers after the first is resolved. Do NOT skip or auto-resolve ICE — the player must act.
+3. **Extraction** (final exchange): The player reaches the objective. Resolve the interaction (download, control, etc.) and any final complications. Set `hack_complete: true`.
+NEVER compress multiple phases into one exchange. NEVER choose actions for the player (e.g. "you bypass the ICE"). Each exchange = one player decision + its resolution.
+
+### Full Sequence (5-8 exchanges)
+Multi-node system crawl. On your FIRST exchange:
+1. Generate the complete system architecture based on the SR and target type
+2. Include it in hack_state.system_map as structured JSON: `{"sr": N, "nodes": {"NodeName": {"type": "gateway|data_cache|control_point|barrier|target", "ice": "patrol|black|tar|trace|barrier|null", "dc": N, "connections": [...], "contents": "..."}}}`
+3. Describe the Gateway node to the player
+4. The player does NOT see the map — reveal only through navigation and Probe actions
+
+### System Rating (SR) — Determines base DCs
+SR 1 (Personal): DC 10-12 | SR 2 (Small biz): DC 12-14 | SR 3 (Corporate): DC 14-16 | SR 4 (Secure): DC 16-18 | SR 5 (Black site): DC 18-20
+
+### Alert Levels
+1–2=Elevated (no mechanical effect, system logs anomaly), 3–4=Active Search (all DCs +2, Patrol ICE rolls with Advantage), 5–6=Lockdown (Hacking check at Base DC to move between nodes, new Trace ICE activates at Gateway), 7+=Convergence (Black ICE spawns at netrunner's node, physical security dispatched, GET OUT).
+Alert rises on: failed Hacking check (+1), Patrol ICE detection (+2), Data Spike (+1), Brute Force (+2), lingering in a node past 3 rounds (+1/round).
+
+### Netrunner Actions (1 per exchange)
+- **Navigate** → Move to an adjacent node. Triggers ICE encounter at destination.
+- **Backdoor Entry** → Enter node stealthily. Hacking check vs (10 + SR). Success = enter without triggering ICE for 1 round. Ghost: Advantage.
+- **Brute Force** → Enter node and auto-overcome its barrier. Alert +2.
+- **Probe** → From adjacent node, learn one fact about target node: ICE type, DC, or contents.
+- **Interact** → Access data cache, control point, or download files. May require Hacking check if encrypted.
+- **Data Spike** → Attack one ICE. Hacking check vs (10 + SR). Success = ICE destroyed. Alert +1.
+- **Deploy Program** → Activate a prepared program at its normal Program Slot cost.
+- **Jack Out** → Disconnect immediately. Safe unless Trace ICE has completed.
+Boosted actions (1 Process each): **Surge** (Advantage on next check), **Mask** (suppress Alert from next failure), **Overclock** (two basic actions this round), **Fortify** (add Firewall to INT save vs Black ICE until next turn), **Spoof Signal** (false signature at visited node, diverts Patrol for 2 rounds; Ghost: free).
+
+### ICE Types
+- **Patrol**: Detection threshold = 10 + SR. On detection: Alert +2. Passive — doesn't attack.
+- **Barrier**: Blocks passage. Hacking check vs DC to bypass. Can be crashed (Data Spike) instead.
+- **Black**: Attacks on detection. Deals 2d6 + SR biofeedback damage (real HP). INT save vs (10 + SR) for half. Attacks every round until destroyed or netrunner leaves node.
+- **Tar**: Activates on detection. +1 Tar stack. Each stack = −2 on hacking checks until hack ends. Can spend 1 Process to clear one stack.
+- **Trace**: Begins tracking on detection. Completes in (6 − SR) rounds (minimum 1). Trace complete = physical location revealed, security dispatched.
+Handling ICE: **Bypass** (Hacking vs 10 + SR, free, Ghost: Advantage), **Disable** (Hacking vs 12 + SR, costs 1 Process, permanent shutdown), **Data Spike** (Hacking vs 10 + SR, free but Alert +1), **Crash** (spend 1 Program Slot, auto-destroy, no Alert).
+
+### Processes & Programs
+- Processes = cyberdeck's Processing stat. Spent to deploy programs or boost checks.
+- Programs are pre-loaded (require Program Slots). Active until dismissed or hack ends.
+- The [HACKER PROFILE] lists available processes and prepared programs.
+
+### Dice Mechanics
+- Hacking check: 1d20 + Hacking Bonus vs DC
+- Show full breakdown: 🎲 [Description]: [**roll**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
+- Apply advantage/disadvantage when applicable (Ghost features, Control Points, etc.)
+- Nat 20: exceptional success (extra benefit). Nat 1: catastrophic failure (ICE counterattack, Alert spike).
+
+### Roll Adjudication
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+
+### Completing the Hack
+Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, resources spent, damage taken, any real-world consequences) when:
+- Target objective achieved
+- Netrunner voluntarily jacks out (partial success possible)
+- Forced disconnect (Convergence, Trace complete, or 0 HP from biofeedback)
+
+### Style
+Describe the Matrix as a neon digital landscape. Data streams as rivers of light, ICE as geometric constructs, firewalls as crystalline walls. Keep it punchy — each exchange is a beat in a heist. Show the tension of stealth vs. speed."""
+
+REPORT_HACK_STATE_TOOL = {
+    "name": "report_hack_state",
+    "description": "Report hack encounter state after each exchange. Call every exchange during hack mode.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "available_actions", "hack_state"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Matrix description — what the netrunner experiences this exchange."
+            },
+            "available_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Available actions the netrunner can take next."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "Dice rolls made this exchange.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "dc": {"type": "integer"},
+                        "roll": {"type": "integer"},
+                        "modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "total": {"type": "integer"},
+                        "advantage": {"type": "boolean"},
+                        "result": {"type": "string", "enum": ["success", "failure"]}
+                    }
+                }
+            },
+            "hack_state": {
+                "type": "object",
+                "description": "Current hack encounter state.",
+                "properties": {
+                    "alert_level": {"type": "integer", "minimum": 0},
+                    "processes_remaining": {"type": "integer", "minimum": 0},
+                    "program_slots_used": {"type": "array", "items": {"type": "string"}},
+                    "current_node": {"type": "string"},
+                    "nodes_visited": {"type": "array", "items": {"type": "string"}},
+                    "ice_status": {
+                        "type": "object",
+                        "description": "Map of node name to ICE status string (e.g. 'Patrol ICE — active', 'Black ICE — disabled').",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "trace_progress": {
+                        "type": ["integer", "null"],
+                        "description": "Trace ICE progress counter. null if no Trace active."
+                    },
+                    "tar_stacks": {"type": "integer", "minimum": 0},
+                    "hp_change": {
+                        "type": "integer",
+                        "description": "Cumulative HP change during this hack (negative = damage taken from biofeedback)."
+                    },
+                    "system_map": {
+                        "type": ["object", "null"],
+                        "description": "Full Sequence only. Set on first exchange with complete system architecture. null for Quick Hacks."
+                    }
+                }
+            },
+            "hack_complete": {
+                "type": "boolean",
+                "description": "True when the hack encounter is over (objective achieved, jacked out, or dumped)."
+            },
+            "narrative_summary": {
+                "type": ["string", "null"],
+                "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, resources spent, damage taken."
+            }
+        }
+    }
+}
+
+
+def init_hack_state(tier="full_sequence", target_system="Unknown", sr=3, processes_max=4):
+    """Return initial hack_state structure."""
+    return {
+        "active": True,
+        "tier": tier,
+        "target_system": target_system,
+        "sr": sr,
+        "start_message_id": None,
+        "system_map": None,
+        "alert_level": 0,
+        "processes_remaining": processes_max,
+        "processes_max": processes_max,
+        "program_slots_used": [],
+        "current_node": "Gateway",
+        "nodes_visited": ["Gateway"],
+        "ice_status": {},
+        "trace_progress": None,
+        "tar_stacks": 0,
+        "hp_change": 0,
+        "narrative_summary": None,
+        "available_actions": [],
+    }
+
+
+def apply_hack_state(hack_state, tool_input):
+    """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
+    hs = tool_input.get("hack_state", {})
+
+    # Update tracked fields from model's state report
+    for field in ["alert_level", "processes_remaining", "program_slots_used",
+                  "current_node", "nodes_visited", "ice_status",
+                  "trace_progress", "tar_stacks", "hp_change"]:
+        if field in hs:
+            hack_state[field] = hs[field]
+
+    # System map (Full Sequence, first exchange only)
+    if hs.get("system_map") and not hack_state.get("system_map"):
+        hack_state["system_map"] = hs["system_map"]
+
+    # Available actions for HUD
+    if tool_input.get("available_actions"):
+        hack_state["available_actions"] = tool_input["available_actions"]
+
+    # Hack completion
+    if tool_input.get("hack_complete"):
+        hack_state["active"] = False
+        hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
+
+    return hack_state
+
+
+def build_hack_injection(hack_state):
+    """Build state injection string for hack exchange user messages."""
+    parts = []
+
+    # Core hack state
+    alert_name = ALERT_LEVEL_NAMES.get(hack_state.get("alert_level", 0), "Unknown")
+    processes_max = hack_state.get("processes_max", 4)
+    lines = [
+        "[HACK STATE]",
+        f"Target: {hack_state.get('target_system', 'Unknown')} (SR {hack_state.get('sr', 3)})",
+        f"Tier: {hack_state.get('tier', 'full_sequence').replace('_', ' ').title()}",
+        f"Alert Level: {hack_state.get('alert_level', 0)} ({alert_name})",
+        f"Processes: {hack_state.get('processes_remaining', 0)}/{processes_max}",
+    ]
+
+    programs = hack_state.get("program_slots_used", [])
+    lines.append(f"Active Programs: {', '.join(programs) if programs else 'None'}")
+    lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
+    lines.append(f"Nodes Visited: {', '.join(hack_state.get('nodes_visited', ['Gateway']))}")
+
+    ice = hack_state.get("ice_status", {})
+    if ice:
+        lines.append("ICE Status:")
+        for node, status in ice.items():
+            lines.append(f"  {node}: {status}")
+
+    trace = hack_state.get("trace_progress")
+    if trace is not None:
+        sr = hack_state.get("sr", 3)
+        lines.append(f"Trace Progress: {trace}/{sr * 2}")
+
+    tar = hack_state.get("tar_stacks", 0)
+    if tar:
+        lines.append(f"Tar Stacks: {tar} (−{tar * 2} to hacking checks)")
+
+    hp = hack_state.get("hp_change", 0)
+    if hp:
+        lines.append(f"HP Change This Hack: {hp}")
+
+    lines.append("[/HACK STATE]")
+    parts.append("\n".join(lines))
+
+    # System map (Full Sequence — model reference, NOT shown to player)
+    system_map = hack_state.get("system_map")
+    if system_map:
+        parts.append(f"[SYSTEM MAP]\n{json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+
+    return "\n\n".join(parts)
+
+
+def build_hacker_profile(character_states, conversion_doc=None):
+    """Build compact hacker profile from character_states for hack mode context.
+    Extracts PC stats relevant to hacking (HP, AC, class features, cyberdeck, programs)."""
+    # Find the PC
+    pc_name = None
+    pc_data = None
+    for name, entry in character_states.items():
+        data = entry.get("data", entry)  # handle both wrapped and unwrapped formats
+        if data.get("type") == "pc":
+            pc_name = name
+            pc_data = data
+            break
+
+    if not pc_data:
+        return ""
+
+    lines = ["[HACKER PROFILE]"]
+    lines.append(f"Name: {pc_name}")
+
+    # Class and level
+    cls = pc_data.get("class", "Unknown")
+    subclass = pc_data.get("subclass")
+    level = pc_data.get("level")
+
+    # Backward compat: extract subclass from "Netrunner (Ghost)" if subclass field missing
+    if subclass is None and "(" in cls:
+        m = re.match(r'^(.+?)\s*\((.+?)\)\s*$', cls)
+        if m:
+            cls = m.group(1).strip()
+            subclass = m.group(2).strip()
+
+    label = f"{cls} ({subclass})" if subclass else cls
+    if level:
+        lines.append(f"Class: {label} | Level: {level}")
+    else:
+        lines.append(f"Class: {label}")
+
+    # Vitals (HP, AC, etc.)
+    vitals_parts = []
+    for v in pc_data.get("vitals", []):
+        vlabel = v.get("label", "")
+        if "current" in v and "max" in v:
+            vitals_parts.append(f"{vlabel}: {v['current']}/{v['max']}")
+        elif "value" in v:
+            vitals_parts.append(f"{vlabel}: {v['value']}")
+    if vitals_parts:
+        lines.append(" | ".join(vitals_parts))
+
+    # Hacking-relevant resources (Processes, Program Slots, etc.)
+    for r in pc_data.get("resources", []):
+        rlabel = r.get("label", "")
+        if any(kw in rlabel.lower() for kw in ["process", "program", "hack", "cyberdeck"]):
+            lines.append(f"{rlabel}: {r.get('current', 0)}/{r.get('max', 0)}")
+
+    # Conditions
+    conditions = pc_data.get("conditions", [])
+    if conditions:
+        lines.append(f"Conditions: {', '.join(conditions)}")
+
+    # Summary (may contain cyberdeck info, hacking bonus, prepared programs, etc.)
+    summary = pc_data.get("summary", "")
+    if summary:
+        lines.append(f"Notes: {summary}")
+
+    # Subclass features (filtered by level)
+    if level and subclass:
+        parsed = parse_conversion_features(conversion_doc) if conversion_doc else None
+        feature_lines = []
+        if parsed:
+            sc_lower = {k.lower(): v for k, v in parsed["subclasses"].items()}
+            sub_data = sc_lower.get(subclass.lower())
+            if sub_data:
+                for feat in sub_data["features"]:
+                    if feat["level"] <= level:
+                        feature_lines.append(feat["text"])
+        if not feature_lines:
+            # Fallback to features array on character_state
+            feature_lines = pc_data.get("features", [])
+        if feature_lines:
+            lines.append(f"\n{subclass} Features (active at Lvl {level}):")
+            for feat in feature_lines:
+                lines.append(feat if feat.startswith("**") else f"- {feat}")
+
+    lines.append("[/HACKER PROFILE]")
+    return "\n".join(lines)
+
+
+# ============================================================
 # Pipeline Contracts
 # ============================================================
 
@@ -175,7 +821,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Netrunner",
+      "subclass": "Ghost",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 12, "max": 14},
@@ -229,6 +876,8 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     {"action": "add", "npc": "<NPC name>", "text": "<what happened, ~400 char max>", "quote": "<verbatim quote or null, ~120 char max>", "date": "<in-world date>", "impact": <1-5>},
     {"action": "drop", "npc": "<NPC name>", "index": <0-based index in that NPC's memory list>}
   ],
+  "plot_ops": [],
+  "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -263,8 +912,24 @@ ARC LABEL:
 - Set to null on all other turns (the vast majority)
 - Only set this when a NEW arc or beat is starting, not on every turn within one
 
-PLOT DIVERGENCE:
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, route to "output" and tell the player OOC so the plot doc can be updated with the new branch before continuing.
+PLOT OPS (save-state notifications):
+- Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
+- "branch": a defined fork in the plot docs — report which path was taken.
+- "flag": a named variable or flag changed — report the new value.
+- "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
+- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
+
+IRRECONCILABLE PLOT BREAK:
+- If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
+
+HACK TRIGGER:
+- When a cyberdeck-equipped PC initiates a Quick Hack or Full Sequence, set "hack_trigger" in your output:
+  {"tier": "quick_hack" or "full_sequence", "target_system": "<name of target system>", "sr": <1-5>}
+- Simple Checks (single Hacking skill check) resolve normally via Mechanics — no hack_trigger needed.
+- Only trigger for Quick Hacks (2-4 exchanges) or Full Sequences (5-8 exchanges) where the netrunner jacks into a system.
+- Set to null on all other turns (the vast majority).
+- Describe the moment of jacking in narratively in the current turn. The app will switch to hack mode for subsequent exchanges.
 
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
@@ -276,7 +941,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
@@ -358,8 +1023,11 @@ CHARACTER STATES:
 - Use this as the baseline for your "character_states" output — update it with any changes visible in the current context (damage taken, spells cast, items used, conditions gained/lost)
 - If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
 - This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
+- If the injected state conflicts with project files (e.g. character sheets show max HP but state shows current HP after damage), the injected state takes precedence — only update it based on events in the conversation
 - Use the structured format: each character is an object with type, vitals, resources, conditions, and summary
 - Ships should be included as entries with type "ship" — vitals include Hull/Shields, resources include ammo
+- Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost" — NOT "class": "Netrunner (Ghost)". Set subclass to null if the character has no subclass or hasn't reached the level that unlocks it.
+- Only populate the "features" array if there is no Core Conversion doc in the project files. When a conversion doc exists, features are injected automatically from it.
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
@@ -430,7 +1098,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   "character_states": {
     "<CharacterName>": {
       "type": "pc|npc|enemy|ship",
-      "class": "Fighter (Champion)",
+      "class": "Netrunner",
+      "subclass": "Ghost",
       "level": 5,
       "vitals": [
         {"label": "HP", "current": 10, "max": 14},
@@ -465,6 +1134,7 @@ CHARACTER STATES:
 - Include HP, spell slots, class resources, conditions, and any other mechanically relevant state
 - This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
 - Ships should be included as entries with type "ship" — update Hull/Shields/ammo after combat
+- Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost". Set subclass to null if none or not yet unlocked.
 
 SHIP COMBAT HUD:
 - During ship combat, include ship status in the HUD or dramatic_notes
@@ -483,7 +1153,17 @@ ROUTING, BEAT, ROLL, and HUD RULES:
 IMPORTANT:
 - Output ONLY valid JSON.
 - Pass through relationship_ops, ship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged.
-- character_states is YOUR updated version — apply all beat outcomes first."""
+- character_states is YOUR updated version — apply all beat outcomes first.
+
+ROLL ADJUDICATION:
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
+- Apply rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
 
@@ -540,13 +1220,14 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking. Increment `responses` each turn on the same beat.
 - **scene_state**: Current scene. `npcs_present` controls which NPC memories are injected next turn. `pcs_present` together with `npcs_present` controls which per-character funds appear in the character panel (funds derived from ship.credits).
-- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class and subclass, e.g. "Fighter (Champion)"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), and `summary` (free-text for equipment/notes). Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
+- **character_states**: Map of character name → structured object with `type` (pc/npc/enemy/ship), `class` (class only, e.g. "Netrunner"), `subclass` (subclass name or null, e.g. "Ghost"), `level` (integer or null for non-leveled characters), `vitals` (array of {label, current, max} or {label, value} — e.g. HP, AC), `resources` (array of {label, current, max} — e.g. Spell Slots, Tech Points), `conditions` (array of strings — e.g. "Poisoned", "Exhausted"), `summary` (free-text for equipment/notes), and optionally `features` (array of strings — only populate if no Core Conversion doc exists in the project files). Report class and subclass separately — NOT "Netrunner (Ghost)". Set subclass to null if the character has no subclass or hasn't reached the level that unlocks it. Ships use type "ship" with Hull/Shields as vitals and ammo as resources. Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat (including ship combat). Set to `null` when combat ends or when not in combat.
 - **is_ooc**: Set `true` ONLY for pure OOC turns. All other turns: `false`.
 
 Optional arrays (omit or leave empty when no ops occurred):
 - **callback_ops**: Add/resolve promises and plot hooks. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Add/drop significant NPC moments. Impact 1-2=flavor, 3=moderate, 4-5=high.
+- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
@@ -626,7 +1307,8 @@ When triggered, guide the player through D&D 5E character creation (reflavored f
 - Call `report_state` every turn — including OOC turns (with `is_ooc: true`)
 - Do NOT reference the state system in your narrative — it is invisible to the player
 - The `focus` field on memories identifies who or what the memory is about
-- If the player makes a decision that fundamentally breaks from the plot documents' planned path, stop and tell them OOCly so the plot doc can be updated with the new branch before continuing.
+- If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
+- If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
 
 ### Dice Mechanics (D&D 5E):
 - Handle ALL dice rolls for the player.
@@ -647,13 +1329,24 @@ When triggered, guide the player through D&D 5E character creation (reflavored f
 - Omit any modifier with value 0 from the display.
 
 ### Roll Adjudication
-- Use strict mathematical randomness for all dice rolls. Do not bias rolls toward success or failure. Do not decide outcomes based on narrative preference.
+- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 - Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
 - Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice rolls. Show the actual numbers and math for the player's rolls.
-- Do not fudge rolls to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the roll as a success. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If a result would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
+- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+
+### Hack Mode Trigger
+When a cyberdeck-equipped PC initiates a hack against a system (Quick Hack or Full Sequence), set `hack_trigger` in your `report_state` call:
+- `tier`: "quick_hack" (2-4 exchanges, single objective) or "full_sequence" (5-8 exchanges, node crawl)
+- `target_system`: Name/description of the target system (e.g. "Meridian Corp personnel database")
+- `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
+
+Simple Checks (single Hacking skill check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Sequences where the cyberdeck-equipped netrunner is jacking into a system.
+
+Describe the moment of jacking in narratively (the character connecting, the Matrix materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -698,7 +1391,8 @@ STATE_REPORT_TOOL = {
                     "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy", "ship"]},
-                        "class": {"type": "string", "description": "Class and subclass, e.g. 'Fighter (Champion)'."},
+                        "class": {"type": "string", "description": "Class only, e.g. 'Netrunner', 'Street Samurai'. Do NOT include subclass here."},
+                        "subclass": {"type": ["string", "null"], "description": "Subclass name (e.g. 'Ghost', 'Tank'). null if none or not yet unlocked."},
                         "level": {"type": ["integer", "null"], "description": "Character level."},
                         "vitals": {
                             "type": "array",
@@ -732,7 +1426,8 @@ STATE_REPORT_TOOL = {
                             "items": {"type": "string"},
                             "description": "Active conditions: Poisoned, Exhausted, Blessed, etc."
                         },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."},
+                        "features": {"type": "array", "items": {"type": "string"}, "description": "Fallback: active class/subclass features as text entries. Only populate if no Core Conversion doc exists in the project files."}
                     }
                 }
             },
@@ -821,6 +1516,46 @@ STATE_REPORT_TOOL = {
                     "funds": {"description": "Auto-derived from ship.credits. Do NOT set — use ship_ops credits instead."},
                     "trackables": {"description": "null or object of resource name → value"}
                 }
+            },
+            "plot_ops": {
+                "type": "array",
+                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
+                "items": {
+                    "type": "object",
+                    "required": ["decision"],
+                    "properties": {
+                        "key": {
+                            "type": ["string", "null"],
+                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
+                        },
+                        "value": {
+                            "type": ["string", "null"],
+                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "What the player chose, stated concisely."
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["branch", "flag", "divergence"],
+                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
+                        },
+                        "episode": {
+                            "type": "string",
+                            "description": "Current episode/session from pacing context."
+                        }
+                    }
+                }
+            },
+            "hack_trigger": {
+                "type": ["object", "null"],
+                "description": "Set when a cyberdeck-equipped PC initiates a Quick Hack or Full Sequence. null on normal turns. Simple Checks resolve in the narrative — no trigger needed.",
+                "properties": {
+                    "tier": {"type": "string", "enum": ["quick_hack", "full_sequence"]},
+                    "target_system": {"type": "string", "description": "Name/description of the target system"},
+                    "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"}
+                }
             }
         }
     }
@@ -841,4 +1576,18 @@ GAME_SYSTEM = {
     "init_game_state": init_game_state,
     "apply_game_state": apply_game_state,
     "build_game_injection": build_game_injection,
+    # Character features (subclass/custom class injection from conversion doc)
+    "build_features_injection": build_features_injection,
+    # Hack mode (Matrix encounters)
+    "hack_contract": HACK_CONTRACT,
+    "hack_tool": REPORT_HACK_STATE_TOOL,
+    "init_hack_state": init_hack_state,
+    "apply_hack_state": apply_hack_state,
+    "build_hack_injection": build_hack_injection,
+    "build_hacker_profile": build_hacker_profile,
+    # Combat context mode (inherits from dnd5e)
+    "combat_contract": COMBAT_CONTRACT,
+    "combat_tool": REPORT_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_combat_profile,
+    "build_combat_injection": build_combat_injection,
 }
