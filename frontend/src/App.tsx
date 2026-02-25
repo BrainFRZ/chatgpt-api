@@ -1865,6 +1865,9 @@ function App() {
       const oldScrollHeight = container?.scrollHeight || 0;
       const oldScrollTop = container?.scrollTop || 0;
 
+      if (olderMessages.length > 0) {
+        setEditingMessageIndex(prev => prev == null ? prev : prev + olderMessages.length);
+      }
       setMessages(prev => [...olderMessages, ...prev]);
       setHasMoreMessages(data.has_more_messages || false);
       // Use backend's message count for offset (may include system message on oldest page)
@@ -2274,8 +2277,7 @@ function App() {
       sync.setNeedsSyncReload(false);
       openChat(currentChat, currentProject);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync.needsSyncReload]);
+  }, [sync.needsSyncReload, sync.setNeedsSyncReload, currentChat, currentProject, openChat]);
 
   // Textarea resize handlers
   const handleResizeStart = (e: React.MouseEvent) => {

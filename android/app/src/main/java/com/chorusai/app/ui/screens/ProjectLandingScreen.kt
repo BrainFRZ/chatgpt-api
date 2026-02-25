@@ -388,7 +388,9 @@ private fun ProjectLandingContent(
 
             if (uiState.hasMore && query.isEmpty()) {
                 item(key = "load_more") {
-                    LaunchedEffect(uiState.chats.size) { onLoadMore() }
+                    LaunchedEffect(Unit) {
+                        if (!uiState.isLoadingMore) onLoadMore()
+                    }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()

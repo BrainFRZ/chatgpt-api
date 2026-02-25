@@ -36,6 +36,7 @@ from pipeline import (
     build_npc_memories_injection,
     build_scene_state_injection,
     build_character_states_injection,
+    build_npc_voices_injection,
 )
 
 
@@ -441,6 +442,24 @@ class TestBuildSingleAgentInjections:
         result = build_single_agent_injections(state)
         assert "[PIPELINE STATE]" in result
         assert "[CALLBACK LEDGER]" not in result
+
+
+class TestBuildNpcVoicesInjection:
+    def test_scene_state_null_npcs_present_does_not_crash(self):
+        character_states = {
+            "Goblin Scout": {
+                "data": {"type": "enemy", "voice": "Hisses short clipped threats."}
+            }
+        }
+        scene_state = {
+            "location": "Ruins",
+            "pcs_present": ["Hero"],
+            "npcs_present": None,
+        }
+
+        result = build_npc_voices_injection(character_states, scene_state, set())
+
+        assert result == ""
 
 
 # ============================================================

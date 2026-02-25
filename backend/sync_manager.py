@@ -223,6 +223,15 @@ class SyncManager:
                 if chat_key in self._connections:
                     for conn_id in failed_connections:
                         self._connections[chat_key].pop(conn_id, None)
+                    if not self._connections[chat_key]:
+                        del self._connections[chat_key]
+                # Chat-scoped connections are also registered at user scope.
+                # Remove stale IDs there too so future user broadcasts don't keep failing.
+                for username, user_conns in list(self._user_connections.items()):
+                    for conn_id in failed_connections:
+                        user_conns.pop(conn_id, None)
+                    if not user_conns:
+                        del self._user_connections[username]
 
         return sent_count
 

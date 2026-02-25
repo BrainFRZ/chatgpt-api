@@ -111,7 +111,11 @@ class ChatListViewModel @Inject constructor(
         try {
             val response = chatRepo.getChats(username, pageSize, 0)
             if (response.isSuccessful) {
-                val body = response.body()!!
+                val body = response.body()
+                if (body == null) {
+                    _uiState.update { it.copy(error = "Failed to load chats: empty response") }
+                    return
+                }
                 _uiState.update {
                     it.copy(
                         chats = body.chats,
@@ -152,7 +156,7 @@ class ChatListViewModel @Inject constructor(
             try {
                 val response = chatRepo.getChats(username, pageSize, offset)
                 if (response.isSuccessful) {
-                    val body = response.body()!!
+                    val body = response.body() ?: return@launch
                     _uiState.update {
                         it.copy(
                             chats = it.chats + body.chats,

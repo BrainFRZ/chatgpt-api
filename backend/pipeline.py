@@ -801,10 +801,9 @@ def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) 
     """Return hud_state with funds filtered to scene-present characters.
     Non-character keys (ship, party) pass through. String funds unchanged."""
     funds = hud_state.get("funds")
-    pcs_present = scene_state.get("pcs_present")
-    if not isinstance(funds, dict) or not pcs_present:
+    present = set(scene_state.get("pcs_present") or []) | set(scene_state.get("npcs_present") or [])
+    if not isinstance(funds, dict) or not present:
         return hud_state
-    present = set(pcs_present) | set(scene_state.get("npcs_present", []))
     all_chars = set(character_states.keys())
     return {**hud_state, "funds": {
         k: v for k, v in funds.items() if k in present or k not in all_chars
@@ -984,7 +983,9 @@ def build_character_states_injection(character_states: dict, scene_state: dict =
         return "[CHARACTER STATES]\n(empty — bootstrap from character sheets in system prompt, or begin interactive character creation if no sheets are available)\n[/CHARACTER STATES]"
     # Scene-scope filter: only inject characters present in the scene
     if scene_state:
-        present = set(scene_state.get("pcs_present", []) + scene_state.get("npcs_present", []))
+        pcs_present = scene_state.get("pcs_present") or []
+        npcs_present = scene_state.get("npcs_present") or []
+        present = set(pcs_present + npcs_present)
         if present:
             character_states = {k: v for k, v in character_states.items() if k in present}
     if not character_states:
@@ -1011,7 +1012,7 @@ def build_npc_voices_injection(character_states: dict, scene_state: dict = None,
 
     # Scene-scope filter: only NPCs currently present
     if scene_state:
-        present = set(scene_state.get("npcs_present", []))
+        present = set(scene_state.get("npcs_present") or [])
         if not present:
             return ""
     else:

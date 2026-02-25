@@ -1015,6 +1015,21 @@ def get_staged_project_filenames(username: str, project: str) -> set:
     return stems
 
 
+def extract_project_file_stems(project_files_blob: str) -> set:
+    """Extract lowercased filename stems from `FILE: ...` headers in a combined project-files blob."""
+    if not project_files_blob:
+        return set()
+    stems = set()
+    for line in project_files_blob.splitlines():
+        if not line.startswith("FILE: "):
+            continue
+        filename = line[len("FILE: "):].strip()
+        if not filename:
+            continue
+        stems.add(os.path.splitext(filename)[0].lower())
+    return stems
+
+
 def load_project_files_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load staged files filtered to a specific pipeline agent."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
@@ -3290,7 +3305,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Run pipeline in thread pool to avoid blocking the event loop
                 # during synchronous API calls (Events/Mechanics stages)
-                doc_stems = get_staged_project_filenames(username, request.project)
+                doc_stems = extract_project_file_stems(agent_files.get("narration", ""))
                 pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,

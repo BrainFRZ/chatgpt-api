@@ -30,6 +30,7 @@ interface UseSyncDeps {
 export function useSync(deps: UseSyncDeps) {
   const [viewerCount, setViewerCount] = useState(1);
   const [needsSyncReload, setNeedsSyncReload] = useState(false);
+  const depsRef = useRef(deps);
 
   const syncWsRef = useRef<WebSocket | null>(null);
   const syncReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -38,11 +39,17 @@ export function useSync(deps: UseSyncDeps) {
   const userWsReconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const userWsHeartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    depsRef.current = deps;
+  }, [deps]);
+
   // Handle sync events from WebSocket
   const handleSyncEvent = useCallback((event: { type: string; data: any }) => {
+    const latestDeps = depsRef.current;
     // If we're currently streaming (loading) for the current chat, ignore streaming-related
     // sync events since we're already handling them via SSE. This prevents duplicates.
-    const isCurrentlyStreaming = deps.currentChatRef.current && deps.isLoadingRef.current.has(deps.currentChatRef.current);
+    const isCurrentlyStreaming = latestDeps.currentChatRef.current &&
+      latestDeps.isLoadingRef.current.has(latestDeps.currentChatRef.current);
 
     switch (event.type) {
       case 'client_joined':
@@ -151,7 +158,7 @@ export function useSync(deps: UseSyncDeps) {
           if (event.data.pipeline_state) {
             deps.setPipelineState(event.data.pipeline_state);
           }
-          deps.fetchUserStats();
+          latestDeps.fetchUserStats();
           deps.setPipelineStage(prev => {
             if (!deps.currentChatRef.current) return prev;
             const next = new Map(prev);
@@ -292,7 +299,7 @@ export function useSync(deps: UseSyncDeps) {
         // If the deleted chat is currently open (same name AND same project), close it
         if (deps.currentChatRef.current === event.data.chat_name &&
             (deps.currentProjectRef.current || null) === (event.data.project || null)) {
-          deps.resetChatState();
+          latestDeps.resetChatState();
         }
         break;
     }

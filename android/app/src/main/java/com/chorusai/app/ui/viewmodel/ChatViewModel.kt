@@ -146,7 +146,11 @@ class ChatViewModel @Inject constructor(
                 offset = 0
             )
             if (response.isSuccessful) {
-                val body = response.body()!!
+                val body = response.body()
+                if (body == null) {
+                    _uiState.update { it.copy(error = "Failed to load chat: empty response") }
+                    return
+                }
                 _uiState.update {
                     it.copy(
                         messages = body.messages,
@@ -196,7 +200,7 @@ class ChatViewModel @Inject constructor(
                     offset = state.messages.size
                 )
                 if (response.isSuccessful) {
-                    val body = response.body()!!
+                    val body = response.body() ?: return@launch
                     _uiState.update {
                         it.copy(
                             messages = body.messages + it.messages,
@@ -511,7 +515,11 @@ class ChatViewModel @Inject constructor(
                         offset = 0
                     )
                     if (chatResponse.isSuccessful) {
-                        val body = chatResponse.body()!!
+                        val body = chatResponse.body()
+                        if (body == null) {
+                            _uiState.update { it.copy(isSwitchingBranch = false) }
+                            return@launch
+                        }
                         _uiState.update {
                             it.copy(
                                 messages = body.messages,
@@ -946,7 +954,7 @@ class ChatViewModel @Inject constructor(
                 offset = 0
             )
             if (response.isSuccessful) {
-                val body = response.body()!!
+                val body = response.body() ?: return
                 _uiState.update {
                     it.copy(allMessages = body.allMessages ?: body.messages)
                 }

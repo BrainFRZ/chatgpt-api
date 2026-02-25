@@ -40,6 +40,26 @@ AGENT_NAMES = ["events", "mechanics", "narration"]
 # Fixtures
 # ============================================================
 
+
+class TestExtractProjectFileStems:
+    def test_extracts_only_assigned_file_headers(self):
+        narration_files = (
+            "\n\n============================================================\n"
+            "FILE: Goblin Chief.md\n"
+            "============================================================\n\n"
+            "Profile content"
+        )
+        all_staged_but_unassigned = {
+            "goblin chief",   # assigned to narration
+            "merchant anna",  # staged elsewhere, not assigned to narration
+        }
+
+        stems = main.extract_project_file_stems(narration_files)
+
+        assert stems == {"goblin chief"}
+        assert stems != all_staged_but_unassigned
+
+
 @pytest.fixture
 def temp_data_dir(monkeypatch):
     """Create a temporary data directory and patch main.DATA_DIR."""

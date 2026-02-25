@@ -2691,6 +2691,13 @@ class TestScopeHudFunds:
         result = scope_hud_funds(hud, scene, chars)
         assert result["funds"] == {"Aedina": "32 gp", "Orrophim": "18 gp"}
 
+    def test_npc_only_scene_filters_to_present_npcs(self):
+        hud = {"funds": {"Aedina": "32 gp", "Squire Tam": "8 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": [], "npcs_present": ["Squire Tam"]}
+        chars = {"Aedina": {}, "Squire Tam": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"Squire Tam": "8 gp"}
+
     def test_empty_hud_state(self):
         result = scope_hud_funds({}, {}, {})
         assert result == {}
