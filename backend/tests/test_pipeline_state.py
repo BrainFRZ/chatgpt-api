@@ -276,7 +276,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter"}
 
 
 # ============================================================
@@ -929,26 +929,26 @@ class TestGetContextPairs:
     def test_under_threshold_includes_all(self):
         """Under threshold: all pairs included (prefix preserved for caching)."""
         branch = self._make_branch(30)
-        pairs = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
+        pairs, _, _ = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
         assert len(pairs) == 60  # All 30 pairs included
 
     def test_at_threshold_includes_all(self):
         """At exactly threshold: all pairs included (no trim needed)."""
         branch = self._make_branch(40)
-        pairs = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
+        pairs, _, _ = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
         assert len(pairs) == 80  # All 40 pairs included
 
     def test_over_threshold_trims_to_target(self):
         """Over threshold: trimmed to target pairs."""
         branch = self._make_branch(41)
-        pairs = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
+        pairs, _, _ = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
         assert len(pairs) == 40  # Trimmed to 20 pairs
         # Should be the LAST 20 pairs
         assert pairs[0]["content"] == "user msg 21"
 
     def test_excludes_system_and_current_user(self):
         branch = self._make_branch(5)
-        pairs = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
+        pairs, _, _ = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
         assert all(p["content"] != "system prompt" for p in pairs)
         assert all(p["content"] != "current user message" for p in pairs)
 
@@ -959,7 +959,7 @@ class TestGetContextPairs:
             {"role": "assistant", "content": "response"},
             {"role": "user", "content": "next"},
         ]
-        pairs = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
+        pairs, _, _ = get_context_pairs(branch, threshold_pairs=40, target_pairs=20)
         assert "====FILE: test.md====" in pairs[0]["content"]
         assert "file content" in pairs[0]["content"]
 
@@ -1397,7 +1397,7 @@ class TestRunPipelineE2E:
         state = result.pipeline_state
 
         # Verify full nested structure exists
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter"}
 
         # Turn counter should be 1 (migrated from 0 + increment)
         assert state["turn_counter"] == 1

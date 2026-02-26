@@ -131,18 +131,36 @@ export function useSync(deps: UseSyncDeps) {
         });
         break;
 
+      case 'ship_combat_auto_init':
+        // Ignore if we're the one streaming - we handle this via SSE
+        if (isCurrentlyStreaming) break;
+        // Chained ship-combat init starts a second assistant stream in the same request.
+        // Add a fresh placeholder so subsequent stream_content deltas don't overwrite
+        // the already-completed primary assistant message.
+        deps.setMessages(prev => [...prev, {
+          role: 'assistant', content: '', timestamp: new Date().toISOString()
+        }]);
+        break;
+
       case 'stream_done': {
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
         // Replace streaming placeholder with complete message
         let hadPlaceholder = false;
+        let hadHiddenInit = false;
         deps.setMessages(prev => {
           const newMessages = [...prev];
           const lastIdx = newMessages.length - 1;
+          const hiddenInitMessage = event.data.ship_combat_init_message;
           if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant' && !newMessages[lastIdx].id) {
             // Normal path: we have a placeholder from user_message_added
             hadPlaceholder = true;
-            newMessages[lastIdx] = event.data.assistant_message;
+            if (hiddenInitMessage && (hiddenInitMessage as any).ship_combat_hidden_init) {
+              hadHiddenInit = true;
+              newMessages.splice(lastIdx, 1, hiddenInitMessage, event.data.assistant_message);
+            } else {
+              newMessages[lastIdx] = event.data.assistant_message;
+            }
             return newMessages;
           }
           // No placeholder — earlier events were lost
@@ -150,8 +168,13 @@ export function useSync(deps: UseSyncDeps) {
         });
         if (hadPlaceholder) {
           // Update metadata for successful placeholder replacement
-          deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
-          deps.setTotalMessages(prev => prev + 1);
+          if (hadHiddenInit && event.data.ship_combat_init_message) {
+            deps.setAllMessages(prev => [...prev, event.data.ship_combat_init_message, event.data.assistant_message]);
+            deps.setTotalMessages(prev => prev + 2);
+          } else {
+            deps.setAllMessages(prev => [...prev, event.data.assistant_message]);
+            deps.setTotalMessages(prev => prev + 1);
+          }
           deps.setCurrentLeafId(event.data.current_leaf_id);
           deps.setStats(event.data.stats);
           deps.setContextStartIndex(event.data.context_start_index || 1);

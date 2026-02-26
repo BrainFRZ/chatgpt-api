@@ -116,6 +116,22 @@ data class HackState(
     @SerializedName("narrative_summary") val narrativeSummary: String? = null
 )
 
+data class ShipInitiative(
+    @SerializedName("ship_name") val shipName: String = "",
+    val initiative: Int = 0,
+    val faction: String = "neutral"  // "ally", "enemy", "neutral"
+)
+
+data class ShipCombatState(
+    val round: Int = 0,
+    @SerializedName("initiative_order") val initiativeOrder: List<ShipInitiative> = emptyList(),
+    @SerializedName("current_ship") val currentShip: String? = null,
+    @SerializedName("current_role") val currentRole: String? = null,
+    val environment: String = "Open Space",
+    @SerializedName("handoff_summary") val handoffSummary: String? = null,
+    @SerializedName("opening_narration") val openingNarration: String? = null
+)
+
 data class PipelineState(
     val pacing: PacingInfo = PacingInfo(),
     @SerializedName("callback_ledger") val callbackLedger: CallbackLedger = CallbackLedger(),
@@ -125,5 +141,6 @@ data class PipelineState(
     @SerializedName("game_state") val gameState: Map<String, Any> = emptyMap(),
     @SerializedName("hud_state") val hudState: HudState? = null,
     val combat: CombatState? = null,
+    @SerializedName("ship_combat") val shipCombat: ShipCombatState? = null,
     @SerializedName("turn_counter") val turnCounter: Int = 0
 )

@@ -28,6 +28,24 @@ sealed class SseEvent {
 
     data class HackStateUpdate(val hackState: HackState) : SseEvent()
 
+    data class ShipCombatAutoInit(val parentId: String?) : SseEvent()
+    data class ShipCombatError(
+        val detail: String
+    ) : SseEvent()
+    data class ShipCombatDone(
+        val tokens: String? = null,
+        val cost: String? = null,
+        val stats: Map<String, Any>? = null,
+        val userMessageId: String? = null,
+        val assistantMessageId: String? = null,
+        val shipCombatInitMessage: ChatMessage? = null,
+        val currentLeafId: String? = null,
+        val totalMessages: Int? = null,
+        val model: String? = null,
+        val reasoning: String? = null,
+        val contextStartIndex: Int? = null
+    ) : SseEvent()
+
     data object DocsRefreshed : SseEvent()
 
     data class Done(

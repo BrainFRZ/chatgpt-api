@@ -418,6 +418,82 @@ def collapse_combat_messages(branch_path: list[dict]) -> list[dict]:
     return result
 
 
+def collapse_ship_combat_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse ship_combat_mode messages into synthetic summary pairs for normal context."""
+    if len(branch_path) < 3:
+        return branch_path
+
+    history = branch_path[1:-1]
+    if not any(msg.get("ship_combat_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("ship_combat_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        ship_combat_summary = None
+        combat_outcome = None
+        first_sc_msg = history[i]
+        last_sc_msg = history[i]
+        j = i
+        while j < len(history) and history[j].get("ship_combat_mode"):
+            last_sc_msg = history[j]
+            tool_input = history[j].get("ship_combat_tool_input", {})
+            if tool_input and tool_input.get("narrative_summary"):
+                ship_combat_summary = tool_input["narrative_summary"]
+            if tool_input and tool_input.get("combat_outcome"):
+                combat_outcome = tool_input["combat_outcome"]
+            # Also check dedicated field on message
+            if history[j].get("ship_combat_combat_outcome"):
+                combat_outcome = history[j]["ship_combat_combat_outcome"]
+            j += 1
+
+        if ship_combat_summary:
+            collapsed_parts = ["[SHIP COMBAT RESULT]"]
+            collapsed_parts.append(ship_combat_summary)
+            if combat_outcome:
+                collapsed_parts.append(f"Outcome: {combat_outcome.get('outcome', 'unknown')} — {combat_outcome.get('outcome_detail', '')}")
+                collapsed_parts.append(f"Rounds: {combat_outcome.get('rounds_fought', '?')}")
+                for ship in combat_outcome.get("ship_final_states", []):
+                    collapsed_parts.append(f"  {ship.get('ship_name', '?')} ({ship.get('faction', '')}): {ship.get('status', '')} — {ship.get('hull_percent', '')}% hull")
+                for evt in combat_outcome.get("notable_events", []):
+                    collapsed_parts.append(f"  - {evt}")
+            collapsed_parts.append("[/SHIP COMBAT RESULT]")
+            result.append({
+                "id": first_sc_msg.get("id"),
+                "role": "user",
+                "content": "[A ship combat encounter took place.]"
+            })
+            result.append({
+                "id": last_sc_msg.get("id"),
+                "role": "assistant",
+                "content": "\n".join(collapsed_parts)
+            })
+        else:
+            # Preserve a placeholder for unfinished/interrupted ship combat runs so
+            # trimmed context doesn't silently lose the encounter.
+            result.append({
+                "id": first_sc_msg.get("id"),
+                "role": "user",
+                "content": "[A ship combat encounter is in progress.]"
+            })
+            result.append({
+                "id": last_sc_msg.get("id"),
+                "role": "assistant",
+                "content": "[SHIP COMBAT STATUS]\nShip combat is ongoing; use current ship_combat state for details.\n[/SHIP COMBAT STATUS]"
+            })
+
+        i = j
+
+    result.append(branch_path[-1])
+    return result
+
+
 def get_context_pairs(
     branch_path: list[dict],
     threshold_pairs: int,
@@ -490,6 +566,7 @@ def _fresh_pipeline_state() -> dict:
         "game_state": {},
         "hud_state": {},
         "combat": None,
+        "ship_combat": None,
         "turn_counter": 0
     }
 
@@ -510,6 +587,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "game_state": {},
             "hud_state": {},
             "combat": None,
+            "ship_combat": None,
             "turn_counter": 0
         }
 
@@ -542,6 +620,17 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("game_state", {})
     state.setdefault("hud_state", {})
     state.setdefault("combat", None)
+    state.setdefault("ship_combat", None)
+    if isinstance(state.get("ship_combat"), dict):
+        sc = state["ship_combat"]
+        sc.setdefault("round", 1)
+        sc.setdefault("initiative_order", [])
+        sc.setdefault("current_ship", None)
+        sc.setdefault("current_role", None)
+        sc.setdefault("environment", "Open Space")
+        sc.setdefault("bootstrap_done", False)
+        sc.setdefault("ship_combat_handoff_source", None)
+        sc.setdefault("bootstrap_messages", [])
     state.setdefault("turn_counter", 0)
     return state
 
@@ -1157,7 +1246,7 @@ def run_pipeline(
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
     # Collapse hack and combat messages into summary pairs before context trimming
-    branch_path_for_events = collapse_combat_messages(collapse_hack_messages(branch_path))
+    branch_path_for_events = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
     recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
         branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
@@ -1686,6 +1775,21 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
     prev_state = None  # Track previous state for delta computation
     latest_state_raw = None  # Track the latest full state for the end block
 
+    def _append_hidden_ship_bootstrap(lines_out: list, msg_obj: dict):
+        hidden_bootstrap = msg_obj.get("ship_combat_bootstrap_messages")
+        if not hidden_bootstrap:
+            # Fallback: inspect pipeline_state_after.ship_combat.bootstrap_messages if present
+            ps_after = msg_obj.get("pipeline_state_after")
+            if isinstance(ps_after, dict):
+                hidden_bootstrap = (((ps_after.get("ship_combat") or {}) if isinstance(ps_after.get("ship_combat"), dict) else {}).get("bootstrap_messages"))
+        if hidden_bootstrap:
+            lines_out.append("--- HIDDEN SHIP COMBAT BOOTSTRAP MESSAGES ---")
+            try:
+                lines_out.append(json.dumps(hidden_bootstrap, indent=2))
+            except TypeError:
+                lines_out.append(str(hidden_bootstrap))
+            lines_out.append("")
+
     for msg in path:
         role = msg.get("role", "")
         if role == "system":
@@ -1789,6 +1893,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                     lines.append(_format_stage_usage("Narration", stage_usage["narration"]))
                     lines.append("")
 
+                _append_hidden_ship_bootstrap(lines, msg)
+
                 # Total usage across all stages for this turn
                 if stage_usage:
                     total_cost = sum(s.get("cost", 0) for s in stage_usage.values())
@@ -1882,6 +1988,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                         lines.append("\n".join(ops_parts))
                         lines.append("")
 
+                _append_hidden_ship_bootstrap(lines, msg)
+
                 lines.append("--- OUTPUT ---")
                 lines.append(content)
                 lines.append("")
@@ -1889,6 +1997,7 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 # Non-pipeline, non-stateful assistant message
                 cost = msg.get("cost", "")
                 lines.append(f"[ASSISTANT] {timestamp}  {cost}")
+                _append_hidden_ship_bootstrap(lines, msg)
                 lines.append(content)
                 lines.append("")
 
@@ -2479,4 +2588,19 @@ def extract_state_notifications(ops_source: dict, npcs_present: set = None,
                         "old_voice": old_voice,
                     })
 
+    return notifications
+
+
+def extract_ship_combat_notifications(ship_combat_tool_input: dict) -> list:
+    """Convert ship combat npc_actions into user-visible state notification entries."""
+    notifications = []
+    for action in (ship_combat_tool_input or {}).get("npc_actions", []) or []:
+        notifications.append({
+            "type": "ship_npc_action",
+            "ship_name": action.get("ship_name"),
+            "role": action.get("role"),
+            "character_name": action.get("character_name"),
+            "action": action.get("action"),
+            "effect": action.get("effect"),
+        })
     return notifications

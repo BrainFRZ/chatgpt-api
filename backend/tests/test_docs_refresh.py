@@ -275,7 +275,7 @@ class TestGetContextPairsAfterRefresh:
         num_pairs = SINGLE_AGENT_THRESHOLD_PAIRS + 5
         branch_path = _make_branch_path("Updated system content", num_pairs=num_pairs)
 
-        pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
         # Each pair = 2 messages (user + assistant)
         assert len(pairs) == SINGLE_AGENT_TARGET_PAIRS * 2
 
@@ -284,7 +284,7 @@ class TestGetContextPairsAfterRefresh:
         num_pairs = SINGLE_AGENT_THRESHOLD_PAIRS - 5
         branch_path = _make_branch_path("System content", num_pairs=num_pairs)
 
-        pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
         assert len(pairs) == num_pairs * 2
 
     def test_trimmed_pairs_are_most_recent(self):
@@ -292,7 +292,7 @@ class TestGetContextPairsAfterRefresh:
         num_pairs = SINGLE_AGENT_THRESHOLD_PAIRS + 5
         branch_path = _make_branch_path("System", num_pairs=num_pairs)
 
-        pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
         # The last pair should be the most recent
         last_pair_assistant = pairs[-1]
         assert f"Assistant message {num_pairs}" in last_pair_assistant["content"]
@@ -300,14 +300,14 @@ class TestGetContextPairsAfterRefresh:
     def test_system_content_excluded_from_pairs(self):
         """System message should never appear in context pairs."""
         branch_path = _make_branch_path("Secret system content", num_pairs=10)
-        pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
         for p in pairs:
             assert "Secret system content" not in p["content"]
 
     def test_current_user_message_excluded_from_pairs(self):
         """The current (last) user message should not be in context pairs."""
         branch_path = _make_branch_path("System", num_pairs=10)
-        pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
         for p in pairs:
             assert "Current user message" not in p["content"]
 
@@ -393,7 +393,7 @@ class TestEndToEndRefreshSimulation:
             branch_path[0].pop("total_claude_tokens", None)
 
         # Step 4: get_context_pairs
-        context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        context_pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
         # Step 5: Build system_content (as main.py does)
         MOCK_CONTRACT = "[STATE CONTRACT]"
@@ -418,7 +418,7 @@ class TestEndToEndRefreshSimulation:
         if total_pairs > SINGLE_AGENT_THRESHOLD_PAIRS:
             docs_refreshed = True
 
-        context_pairs = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
+        context_pairs, _, _ = get_context_pairs(branch_path, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS)
 
         MOCK_CONTRACT = "[STATE CONTRACT]"
         system_content = MOCK_CONTRACT + "\n\n" + branch_path[0]["content"]

@@ -793,6 +793,506 @@ def build_hacker_profile(character_states, conversion_doc=None):
 
 
 # ============================================================
+# Ship Combat Mode — Ship-to-Ship Space Battles
+# ============================================================
+
+SHIP_COMBAT_CONTRACT = """## Ship Combat Mode — Space Engagement
+
+You are running a live ship-to-ship space combat encounter. Multiple ships are engaged in tactical combat with crew role sub-actions.
+
+### Your Role
+- Describe the space battle from the bridge perspective — sensor readouts, shield flickers, hull impacts, crew coordination
+- Adjudicate all ship combat actions: resolve dice rolls, apply damage, track initiative and crew roles
+- Call `report_ship_combat_state` after EVERY exchange
+- Set `ship_combat_complete: true` when the engagement ends
+
+### Turn Structure
+Ships roll initiative (1d20 + pilot's DEX modifier). Each ship's turn has crew role sub-actions resolved in fixed order:
+1. Captain
+2. Sensors
+3. Pilot
+4. Gunner
+5. Engineer
+
+Not all roles need to act every turn — skip roles with no meaningful action. NPC crews act as a block (you choose their role actions). Do not decide a PC's action for the player.
+
+### NPC Action Reporting
+- For every NPC ship's turn, report each crew role action in the `npc_actions` array.
+- One entry per role action taken (skip roles that don't act).
+- Only report roles that actually exist on that ship (based on generated crew assignments / automation). Do not assume every ship has all five roles.
+- These are displayed as state notification banners so the player can see exactly what each NPC did mechanically.
+- Format: `{ship_name, role, character_name (if named), action, effect}`
+
+### Ship Generation & Crew Coverage
+- Generate ship crews/role coverage based on fiction, ship type/size, and current story context.
+- A ship may cover all five roles, but this is not required.
+- Small craft may combine duties or omit roles entirely (e.g. a one-seat starfighter may only have a pilot role).
+- Larger ships may have broader role coverage and named specialists.
+- Persist crew assignments/role coverage in the ship and/or crew state so future exchanges remain consistent.
+- On the first ship combat exchange, if ships/crew coverage are not already established in state, initialize them before resolving the exchange and keep them consistent afterward.
+
+### Dice Mechanics
+- Ship weapons: attack roll = 1d20 + weapon bonus vs target ship AC
+- Crew actions: 1d20 + relevant ability modifier + proficiency (if proficient)
+- Show full breakdown when narrating rolls
+
+### Roll Adjudication
+- A [DICE POOL] block is provided with pre-rolled random values. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
+- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this.
+
+### Narrative Style
+- Present tense, visceral, cinematic. Think Expanse-style naval combat.
+- 3-6 sentences per exchange. Name ships, crew members, and systems.
+- Describe shield impacts as energy flares, hull hits as shrapnel and decompression, near-misses as course corrections.
+- Reference bridge chaos: alarms, damage reports, crew shouting status updates.
+
+### Completing Ship Combat
+Set `ship_combat_complete: true` and include BOTH `narrative_summary` AND `combat_outcome` when the engagement is decisively over.
+- `narrative_summary`: Free-text 2-4 sentence summary (outcome, ships disabled/destroyed, hull damage taken, crew casualties, resources expended, narrative consequences) for standard mode context.
+- `combat_outcome`: Structured data with `outcome` (victory/defeat/escape/surrender/ceasefire/interrupted), `outcome_detail`, `rounds_fought`, `ship_final_states` (each ship's name, faction, hull_percent, status), and `notable_events` (key moments worth remembering).
+
+Valid end conditions include (not limited to):
+- All enemies destroyed or disabled
+- All enemies surrender (or are otherwise no longer fighting)
+- The player crew escapes / disengages successfully
+- The player crew abandons ship (combat ends even if the ship remains in danger)
+- A negotiated ceasefire, parley, or stand-down ends hostilities"""
+
+
+REPORT_SHIP_COMBAT_STATE_TOOL = {
+    "name": "report_ship_combat_state",
+    "description": "Report ship combat state after each exchange. Call every exchange during ship combat mode.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "ship_combat", "ship_combat_complete"],
+        "properties": {
+            "narrative": {"type": "string"},
+            "rolls": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "dc": {"type": "integer"},
+                        "roll": {"type": "integer"},
+                        "modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "integer"},
+                                }
+                            }
+                        },
+                        "total": {"type": "integer"},
+                        "advantage": {"type": "boolean"},
+                        "result": {"type": "string", "enum": ["success", "failure", "hit", "miss"]}
+                    }
+                }
+            },
+            "ship_updates": {
+                "type": "array",
+                "description": "Delta updates to ship stats/resources/subsystems",
+                "items": {
+                    "type": "object",
+                    "required": ["ship_name"],
+                    "properties": {
+                        "ship_name": {"type": "string"},
+                        "hull_delta": {"type": "integer"},
+                        "shield_delta": {"type": "integer"},
+                        "hull_current": {"type": "integer"},
+                        "hull_max": {"type": "integer"},
+                        "shields_current": {"type": "integer"},
+                        "shields_max": {"type": "integer"},
+                        "ammo_changes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "weapon": {"type": "string"},
+                                    "amount": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "conditions_add": {"type": "array", "items": {"type": "string"}},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}},
+                        "crew_roles_present": {"type": "array", "items": {"type": "string"}},
+                        "crew_manifest": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": ["string", "null"]},
+                                    "roles": {"type": "array", "items": {"type": "string"}},
+                                    "source": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "character_updates": {
+                "type": "array",
+                "description": "Crew injuries/conditions",
+                "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "hp_delta": {"type": "integer"},
+                        "conditions_add": {"type": "array", "items": {"type": "string"}},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}}
+                    }
+                }
+            },
+            "ship_combat": {
+                "type": ["object", "null"],
+                "description": "Current ship combat tracker state. null when combat ends.",
+                "properties": {
+                    "round": {"type": "integer", "minimum": 1},
+                    "initiative_order": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["ship_name", "initiative", "faction"],
+                            "properties": {
+                                "ship_name": {"type": "string"},
+                                "initiative": {"type": "integer"},
+                                "faction": {"type": "string", "enum": ["ally", "enemy", "neutral"]}
+                            }
+                        }
+                    },
+                    "current_ship": {"type": ["string", "null"]},
+                    "current_role": {"type": ["string", "null"], "enum": ["captain", "sensors", "pilot", "gunner", "engineer", None]},
+                    "environment": {"type": "string"}
+                }
+            },
+            "npc_actions": {
+                "type": "array",
+                "description": "NPC crew/ship actions this exchange. Displayed as state notification banners.",
+                "items": {
+                    "type": "object",
+                    "required": ["ship_name", "role", "action", "effect"],
+                    "properties": {
+                        "ship_name": {"type": "string"},
+                        "role": {"type": "string", "enum": ["captain", "sensors", "pilot", "gunner", "engineer"]},
+                        "character_name": {"type": ["string", "null"]},
+                        "action": {"type": "string"},
+                        "effect": {"type": "string"}
+                    }
+                }
+            },
+            "ship_combat_complete": {"type": "boolean"},
+            "narrative_summary": {"type": ["string", "null"]},
+            "combat_outcome": {
+                "type": "object",
+                "description": "Required when ship_combat_complete is true. Structured summary of combat result.",
+                "properties": {
+                    "outcome": {"type": "string", "enum": ["victory", "defeat", "escape", "surrender", "ceasefire", "interrupted"]},
+                    "outcome_detail": {"type": "string", "description": "1-2 sentence description of how combat ended"},
+                    "rounds_fought": {"type": "integer"},
+                    "ship_final_states": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ship_name": {"type": "string"},
+                                "faction": {"type": "string"},
+                                "hull_percent": {"type": "integer", "description": "Hull remaining as percentage"},
+                                "status": {"type": "string", "enum": ["operational", "disabled", "destroyed", "fled", "surrendered"]}
+                            }
+                        }
+                    },
+                    "notable_events": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Key moments worth remembering (boarding attempts, critical hits, dramatic maneuvers)"
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+def build_ship_combat_profile(character_states, ship_combat):
+    """Build [SHIP ROSTER] block for ship combat system prompt."""
+    if not character_states:
+        return ""
+
+    ships = {}
+    crew_by_ship = {}
+    for name, entry in character_states.items():
+        d = entry.get("data", entry)
+        if d.get("type") == "ship":
+            ships[name] = d
+        else:
+            assigned_ship = d.get("ship") or d.get("assigned_ship") or d.get("stationed_on")
+            if assigned_ship:
+                crew_by_ship.setdefault(assigned_ship, []).append((name, d))
+
+    if not ships:
+        return ""
+
+    init_map = {}
+    for row in (ship_combat or {}).get("initiative_order", []) or []:
+        if isinstance(row, dict) and row.get("ship_name"):
+            init_map[row["ship_name"]] = row
+
+    ordered_ship_names = list(ships.keys())
+    if init_map:
+        ordered_ship_names.sort(key=lambda s: init_map.get(s, {}).get("initiative", -999), reverse=True)
+
+    lines = ["[SHIP ROSTER]"]
+    for ship_name in ordered_ship_names:
+        s = ships[ship_name]
+        line = [f"## {ship_name}"]
+        if ship_name in init_map:
+            row = init_map[ship_name]
+            line.append(f"(Init {row.get('initiative')}, {row.get('faction', 'neutral')})")
+        lines.append(" ".join(line))
+
+        # vitals/resources/conditions summary
+        for v in s.get("vitals", []):
+            label = v.get("label")
+            if "current" in v and "max" in v:
+                lines.append(f"- {label}: {v['current']}/{v['max']}")
+            elif "value" in v:
+                lines.append(f"- {label}: {v['value']}")
+        for r in s.get("resources", []):
+            if "current" in r and "max" in r:
+                lines.append(f"- {r.get('label')}: {r['current']}/{r['max']}")
+
+        conditions = s.get("conditions") or []
+        if conditions:
+            lines.append(f"- Conditions: {', '.join(str(c) for c in conditions)}")
+
+        # explicit role coverage hints if present on ship data
+        roles_present = s.get("crew_roles_present") or s.get("roles_present")
+        if roles_present:
+            lines.append(f"- Roles Present: {', '.join(roles_present)}")
+
+        manifest = s.get("crew_manifest")
+        if manifest and isinstance(manifest, list):
+            lines.append("- Crew Manifest:")
+            for m in manifest:
+                if not isinstance(m, dict):
+                    continue
+                mname = m.get("name") or "Unnamed/Automated"
+                mroles = ", ".join(m.get("roles", [])) if isinstance(m.get("roles"), list) else ""
+                extra = f" ({m.get('source')})" if m.get("source") else ""
+                lines.append(f"  - {mname}: {mroles}{extra}")
+
+        crew_entries = crew_by_ship.get(ship_name, [])
+        if crew_entries:
+            lines.append("- Assigned Crew:")
+            for cname, cd in crew_entries:
+                roles = cd.get("roles") or cd.get("crew_roles")
+                roles_text = f" [{', '.join(roles)}]" if isinstance(roles, list) and roles else ""
+                lines.append(f"  - {cname}{roles_text}")
+        lines.append("")
+
+    lines.append("[/SHIP ROSTER]")
+    return "\n".join(lines)
+
+
+def build_ship_combat_injection(ship_combat, pipeline_state):
+    """Build state injection string for ship combat exchanges."""
+    sc = ship_combat or {}
+    lines = ["[SHIP COMBAT STATE]"]
+    lines.append(f"Round: {sc.get('round', 1)}")
+    if sc.get("environment"):
+        lines.append(f"Environment: {sc.get('environment')}")
+    if sc.get("encounter_type"):
+        lines.append(f"Encounter Type: {sc.get('encounter_type')}")
+    if sc.get("objective"):
+        lines.append(f"Objective: {sc.get('objective')}")
+    if sc.get("positioning"):
+        lines.append(f"Positioning: {sc.get('positioning')}")
+    complications = sc.get("immediate_complications") or []
+    if complications:
+        lines.append("Complications:")
+        for c in complications:
+            lines.append(f"  - {c}")
+    if sc.get("handoff_summary"):
+        lines.append(f"Handoff Summary: {sc.get('handoff_summary')}")
+    if sc.get("opening_narration"):
+        lines.append(f"Opening Narration Hint: {sc.get('opening_narration')}")
+    if sc.get("current_ship"):
+        current_phase = sc.get("current_role")
+        if current_phase:
+            lines.append(f"Current Phase: {sc.get('current_ship')} — {str(current_phase).title()}")
+        else:
+            lines.append(f"Current Ship: {sc.get('current_ship')}")
+    init_order = sc.get("initiative_order") or []
+    if init_order:
+        lines.append("Initiative Order:")
+        for row in init_order:
+            if isinstance(row, dict):
+                lines.append(f"  - {row.get('ship_name')} (Init {row.get('initiative')}, {row.get('faction')})")
+            else:
+                lines.append(f"  - {row}")
+    lines.append("[/SHIP COMBAT STATE]")
+    return "\n".join(lines)
+
+
+def apply_ship_combat_state(pipeline_state, tool_input):
+    """Apply ship combat tool output to pipeline_state and return it."""
+    ps = pipeline_state if isinstance(pipeline_state, dict) else {}
+    cs = ps.setdefault("character_states", {})
+
+    def _ensure_ship_entry(name: str, upd: dict | None = None):
+        entry = cs.get(name)
+        if entry:
+            return entry
+        upd = upd or {}
+        hull_delta = upd.get("hull_delta")
+        shield_delta = upd.get("shield_delta")
+        hull_current = upd.get("hull_current")
+        hull_max = upd.get("hull_max")
+        shields_current = upd.get("shields_current")
+        shields_max = upd.get("shields_max")
+
+        def _seed_pair(cur, mx, delta):
+            if isinstance(cur, (int, float)) or isinstance(mx, (int, float)):
+                cur_v = int(cur if isinstance(cur, (int, float)) else (mx if isinstance(mx, (int, float)) else 1))
+                max_v = int(mx if isinstance(mx, (int, float)) else max(cur_v, 1))
+                return max(0, cur_v), max(1, max_v)
+            if isinstance(delta, (int, float)):
+                base = max(1, int(abs(delta)))
+                if delta >= 0:
+                    return base, base
+                return max(0, base + int(delta)), base
+            return 1, 1
+
+        hull_cur_seed, hull_max_seed = _seed_pair(hull_current, hull_max, hull_delta)
+        shields_cur_seed, shields_max_seed = _seed_pair(shields_current, shields_max, shield_delta)
+        # Seed a minimal ship state so first-turn updates for newly generated ships
+        # are persisted instead of being dropped.
+        entry = {
+            "data": {
+                "type": "ship",
+                "vitals": [
+                    {"label": "Hull", "current": hull_cur_seed, "max": hull_max_seed},
+                    {"label": "Shields", "current": shields_cur_seed, "max": shields_max_seed},
+                ],
+                "resources": [],
+                "conditions": [],
+                "summary": "",
+            }
+        }
+        cs[name] = entry
+        return entry
+
+    for upd in tool_input.get("ship_updates", []):
+        ship_name = upd.get("ship_name")
+        if not ship_name:
+            continue
+        entry = _ensure_ship_entry(ship_name, upd)
+        d = entry.get("data", entry)
+        # hull/shields
+        hull_delta = upd.get("hull_delta")
+        shield_delta = upd.get("shield_delta")
+        has_hull_abs = isinstance(upd.get("hull_current"), (int, float))
+        has_shield_abs = isinstance(upd.get("shields_current"), (int, float))
+        for v in d.get("vitals", []):
+            label = str(v.get("label", "")).lower()
+            if label == "hull":
+                if isinstance(upd.get("hull_max"), (int, float)):
+                    v["max"] = max(1, int(upd["hull_max"]))
+                if isinstance(upd.get("hull_current"), (int, float)):
+                    vmax = max(1, int(v.get("max", upd["hull_current"])))
+                    v["current"] = max(0, min(vmax, int(upd["hull_current"])))
+            # If an absolute current value is present, it wins; ignore delta to avoid double-application.
+            if (not has_hull_abs) and hull_delta is not None and label == "hull" and "current" in v:
+                vmax = v.get("max", v["current"])
+                if isinstance(vmax, (int, float)) and vmax > 0:
+                    v["current"] = max(0, min(vmax, v["current"] + hull_delta))
+                else:
+                    v["current"] = max(0, v["current"] + hull_delta)
+            if label == "shields":
+                if isinstance(upd.get("shields_max"), (int, float)):
+                    v["max"] = max(1, int(upd["shields_max"]))
+                if isinstance(upd.get("shields_current"), (int, float)):
+                    vmax = max(1, int(v.get("max", upd["shields_current"])))
+                    v["current"] = max(0, min(vmax, int(upd["shields_current"])))
+            # If an absolute current value is present, it wins; ignore delta to avoid double-application.
+            if (not has_shield_abs) and shield_delta is not None and label == "shields" and "current" in v:
+                vmax = v.get("max", v["current"])
+                if isinstance(vmax, (int, float)) and vmax > 0:
+                    v["current"] = max(0, min(vmax, v["current"] + shield_delta))
+                else:
+                    v["current"] = max(0, v["current"] + shield_delta)
+        # ammo/resources
+        for ammo_entry in upd.get("ammo_changes", []) or []:
+            weapon = str(ammo_entry.get("weapon", "")).lower()
+            amount = ammo_entry.get("amount", 0)
+            for r in d.get("resources", []):
+                rlabel = str(r.get("label", "")).lower()
+                if weapon and weapon in rlabel and "current" in r:
+                    r["current"] = max(0, r["current"] + amount)
+        # conditions
+        conds = d.setdefault("conditions", [])
+        for c in upd.get("conditions_add", []) or []:
+            if c not in conds:
+                conds.append(c)
+        for c in upd.get("conditions_remove", []) or []:
+            if c in conds:
+                conds.remove(c)
+        if isinstance(upd.get("crew_roles_present"), list):
+            d["crew_roles_present"] = list(upd.get("crew_roles_present"))
+        if isinstance(upd.get("crew_manifest"), list):
+            d["crew_manifest"] = copy.deepcopy(upd.get("crew_manifest"))
+
+    for upd in tool_input.get("character_updates", []):
+        name = upd.get("name")
+        if not name or name not in cs:
+            continue
+        d = cs[name].get("data", cs[name])
+        hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v:
+                    v["current"] = max(0, v["current"] + hp_delta)
+                    break
+        conds = d.setdefault("conditions", [])
+        for c in upd.get("conditions_add", []) or []:
+            if c not in conds:
+                conds.append(c)
+        for c in upd.get("conditions_remove", []) or []:
+            if c in conds:
+                conds.remove(c)
+
+    new_sc = tool_input.get("ship_combat")
+    if tool_input.get("ship_combat_complete") or new_sc is None:
+        ps["ship_combat"] = None
+    elif isinstance(new_sc, dict):
+        old_sc = ps.get("ship_combat") or {}
+        old_start = old_sc.get("start_message_id")
+        ps["ship_combat"] = new_sc
+        if old_start and "start_message_id" not in new_sc:
+            ps["ship_combat"]["start_message_id"] = old_start
+        # Preserve app-managed handoff/bootstrap metadata across model updates
+        for meta_key in [
+            "handoff_summary",
+            "opening_narration",
+            "encounter_type",
+            "objective",
+            "positioning",
+            "immediate_complications",
+            "enemy_ships",
+            "bootstrap_done",
+            "ship_combat_handoff_source",
+            "bootstrap_messages",
+        ]:
+            if meta_key in old_sc and meta_key not in ps["ship_combat"]:
+                ps["ship_combat"][meta_key] = copy.deepcopy(old_sc[meta_key])
+
+    return ps
+
+
+# ============================================================
 # Pipeline Contracts
 # ============================================================
 
@@ -878,6 +1378,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   ],
   "plot_ops": [],
   "hack_trigger": null,
+  "ship_combat_trigger": null,
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -928,6 +1429,17 @@ HACK TRIGGER:
   {"tier": "quick_hack" or "full_sequence", "target_system": "<name of target system>", "sr": <1-5>}
 - Simple Checks (single Hacking skill check) resolve normally via Mechanics — no hack_trigger needed.
 - Only trigger for Quick Hacks (2-4 exchanges) or Full Sequences (5-8 exchanges) where the netrunner jacks into a system.
+- Set to null on all other turns (the vast majority).
+
+SHIP COMBAT TRIGGER:
+- When ships engage in combat (ambush, piracy, naval battle, patrol encounter), set "ship_combat_trigger":
+  {"environment":"<space environment>","enemy_ships":[{"name":"<ship>","faction":"<faction>"}]}
+- Treat this as the canonical Opus->GPT handoff for ship combat mode. Prefer a strong trigger when possible.
+- Include these fields when known from the fiction: `encounter_type`, `objective`, `positioning`, `immediate_complications`, `handoff_summary`, optional `opening_narration`.
+- `handoff_summary` should be a 1-3 sentence canonical summary of the immediate setup that ship combat mode can use to initialize ships, crews, and initiative.
+- `opening_narration` is optional player-facing prose the app may show as `BEGINNING SHIP COMBAT`.
+- `enemy_ships` entries may include optional `ship_type` and `size_class` hints to improve crew/role coverage generation.
+- Only trigger for actual ship-to-ship weaponized engagements. Docking disputes, boarding-only scenes, or disengagement without weapons fire do not trigger ship combat mode.
 - Set to null on all other turns (the vast majority).
 - Describe the moment of jacking in narratively in the current turn. The app will switch to hack mode for subsequent exchanges.
 
@@ -1240,6 +1752,7 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
   * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
   * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
+- **ship_combat_trigger**: When ships engage in actual ship-to-ship combat, set a handoff object so the app can enter ship combat mode. Include `environment`, `enemy_ships`, and when available `encounter_type`, `objective`, `positioning`, `immediate_complications`, and a 1-3 sentence `handoff_summary`. Optional `opening_narration` can be used for the player-facing "BEGINNING SHIP COMBAT" intro.
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
   - Tier boundary checking: Note new tier in reason, narratively reflect the shift, show 📊 line.
   - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty.
@@ -1556,6 +2069,31 @@ STATE_REPORT_TOOL = {
                     "target_system": {"type": "string", "description": "Name/description of the target system"},
                     "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"}
                 }
+            },
+            "ship_combat_trigger": {
+                "type": ["object", "null"],
+                "description": "Set when ships engage in combat. null on normal turns.",
+                "properties": {
+                    "environment": {"type": "string", "description": "Space environment (open space, asteroid field, nebula, etc.)"},
+                    "encounter_type": {"type": "string", "description": "Combat framing (ambush, pursuit, blockade, patrol stop gone hot, etc.)"},
+                    "objective": {"type": "string", "description": "Primary immediate objective (escape, disable, survive, seize cargo, etc.)"},
+                    "positioning": {"type": "string", "description": "Brief opening tactical positioning/range summary"},
+                    "immediate_complications": {"type": "array", "items": {"type": "string"}},
+                    "handoff_summary": {"type": "string", "description": "1-3 sentence canonical handoff summary for ship combat initialization"},
+                    "opening_narration": {"type": "string", "description": "Optional player-facing opening narration for ship combat start"},
+                    "enemy_ships": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "faction": {"type": "string"},
+                                "ship_type": {"type": "string"},
+                                "size_class": {"type": "string"}
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1590,4 +2128,10 @@ GAME_SYSTEM = {
     "combat_tool": REPORT_COMBAT_STATE_TOOL,
     "build_combat_profile": build_combat_profile,
     "build_combat_injection": build_combat_injection,
+    # Ship combat mode (space battles)
+    "ship_combat_contract": SHIP_COMBAT_CONTRACT,
+    "ship_combat_tool": REPORT_SHIP_COMBAT_STATE_TOOL,
+    "build_ship_combat_profile": build_ship_combat_profile,
+    "build_ship_combat_injection": build_ship_combat_injection,
+    "apply_ship_combat_state": apply_ship_combat_state,
 }

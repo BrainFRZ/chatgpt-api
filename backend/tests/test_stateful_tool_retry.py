@@ -130,11 +130,10 @@ def _call_retry(**overrides):
     kwargs = dict(
         client=overrides.get("client"),
         model_name=overrides.get("model_name", MODEL_NAME),
-        system_content=overrides.get("system_content", SAMPLE_SYSTEM),
-        messages=overrides.get("messages", SAMPLE_MESSAGES),
         narrative=overrides.get("narrative", SAMPLE_NARRATIVE),
         thinking=overrides.get("thinking", SAMPLE_THINKING),
         tool_def=overrides.get("tool_def", STATE_REPORT_TOOL),
+        state_contract=overrides.get("system_content", SAMPLE_SYSTEM),
     )
     return _stateful_tool_retry(**kwargs)
 
@@ -183,21 +182,17 @@ class TestRetryMessageConstruction:
         return client.messages.create.call_args.kwargs["messages"]
 
     def test_thinking_embedded_as_plain_text(self):
-        """Thinking is wrapped in <reasoning> tags as plain text (not a thinking content block,
-        which would require a cryptographic signature we don't have from streaming)."""
+        """Thinking is embedded into the single retry user prompt."""
         tool_input = _sample_tool_input()
         client = _make_client(_make_response([_make_tool_use_block(tool_input)], _make_usage()))
         _call_retry(client=client, thinking="Deep analysis here")
 
         msgs = self._get_retry_messages(client)
-        assistant_msg = msgs[-2]
-        assert assistant_msg["role"] == "assistant"
-        # Single text block, no thinking content block
-        assert len(assistant_msg["content"]) == 1
-        text = assistant_msg["content"][0]["text"]
-        assert assistant_msg["content"][0]["type"] == "text"
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+        text = msgs[0]["content"]
         assert "<reasoning>\nDeep analysis here\n</reasoning>" in text
-        assert text.endswith(SAMPLE_NARRATIVE)
+        assert SAMPLE_NARRATIVE in text
 
     def test_no_reasoning_tags_when_thinking_empty(self):
         """When thinking is empty, just the narrative with no reasoning tags."""
@@ -206,10 +201,10 @@ class TestRetryMessageConstruction:
         _call_retry(client=client, thinking="")
 
         msgs = self._get_retry_messages(client)
-        assistant_msg = msgs[-2]
-        assert len(assistant_msg["content"]) == 1
-        assert assistant_msg["content"][0]["text"] == SAMPLE_NARRATIVE
-        assert "<reasoning>" not in assistant_msg["content"][0]["text"]
+        assert len(msgs) == 1
+        text = msgs[0]["content"]
+        assert SAMPLE_NARRATIVE in text
+        assert "<reasoning>" not in text
 
     def test_no_reasoning_tags_when_thinking_none(self):
         """When thinking is None, just the narrative with no reasoning tags."""
@@ -218,9 +213,8 @@ class TestRetryMessageConstruction:
         _call_retry(client=client, thinking=None)
 
         msgs = self._get_retry_messages(client)
-        assistant_msg = msgs[-2]
-        assert len(assistant_msg["content"]) == 1
-        assert assistant_msg["content"][0]["text"] == SAMPLE_NARRATIVE
+        assert len(msgs) == 1
+        assert SAMPLE_NARRATIVE in msgs[0]["content"]
 
     def test_retry_user_prompt_is_last_message(self):
         tool_input = _sample_tool_input()
@@ -231,21 +225,17 @@ class TestRetryMessageConstruction:
         last_msg = msgs[-1]
         assert last_msg["role"] == "user"
         assert "report_state" in last_msg["content"]
-        assert "did not call" in last_msg["content"].lower()
+        assert "Call report_state now" in last_msg["content"]
 
-    def test_original_messages_at_start(self):
-        original = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there"},
-            {"role": "user", "content": "Enter tavern"},
-        ]
+    def test_original_messages_ignored_in_minimal_retry(self):
+        original = [{"role": "user", "content": "Hello"}]
         tool_input = _sample_tool_input()
         client = _make_client(_make_response([_make_tool_use_block(tool_input)], _make_usage()))
         _call_retry(client=client, messages=original)
 
         msgs = self._get_retry_messages(client)
-        assert msgs[:3] == original
-        assert len(msgs) == 5  # 3 original + assistant + user retry
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
 
     def test_original_messages_not_mutated(self):
         original = [{"role": "user", "content": "Hello"}]
@@ -256,27 +246,24 @@ class TestRetryMessageConstruction:
         assert original == original_copy
 
     def test_empty_messages_list(self):
-        """Edge case: no prior conversation history."""
+        """Edge case: no prior conversation history (ignored by minimal retry)."""
         tool_input = _sample_tool_input()
         client = _make_client(_make_response([_make_tool_use_block(tool_input)], _make_usage()))
         _call_retry(client=client, messages=[])
 
         msgs = self._get_retry_messages(client)
-        assert len(msgs) == 2  # assistant + user retry
-        assert msgs[0]["role"] == "assistant"
-        assert msgs[1]["role"] == "user"
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
 
     def test_narrative_in_assistant_text_block(self):
-        """The narrative text should appear in the text block content."""
+        """The narrative text should appear in the retry user prompt."""
         custom_narrative = "A dragon descends from the sky, scales glinting."
         tool_input = _sample_tool_input()
         client = _make_client(_make_response([_make_tool_use_block(tool_input)], _make_usage()))
         _call_retry(client=client, narrative=custom_narrative, thinking="")
 
         msgs = self._get_retry_messages(client)
-        assistant_msg = msgs[-2]
-        text_block = [b for b in assistant_msg["content"] if b["type"] == "text"][0]
-        assert text_block["text"] == custom_narrative
+        assert custom_narrative in msgs[-1]["content"]
 
 
 # ============================================================
@@ -961,8 +948,7 @@ class TestRetryFullScenario:
 
         # 3. Call the retry function
         retry_result, retry_usage = _stateful_tool_retry(
-            client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-            SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL
+            client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM
         )
 
         # 4. Accumulate usage (simulate main.py)
@@ -1012,8 +998,7 @@ class TestRetryFullScenario:
         )
 
         retry_result, retry_usage = _stateful_tool_retry(
-            client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-            SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL
+            client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM
         )
 
         assert retry_result is not None
@@ -1048,8 +1033,7 @@ class TestRetryFullScenario:
         )
 
         retry_result, retry_usage = _stateful_tool_retry(
-            client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-            SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL
+            client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM
         )
 
         assert retry_result is None
@@ -1076,8 +1060,7 @@ class TestRetryAsyncThread:
         result, usage = asyncio.run(
             asyncio.to_thread(
                 _stateful_tool_retry,
-                client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-                SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL,
+                client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM,
             )
         )
 
@@ -1092,8 +1075,7 @@ class TestRetryAsyncThread:
         result, usage = asyncio.run(
             asyncio.to_thread(
                 _stateful_tool_retry,
-                client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-                SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL,
+                client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM,
             )
         )
 
@@ -1108,8 +1090,7 @@ class TestRetryAsyncThread:
             asyncio.run(
                 asyncio.to_thread(
                     _stateful_tool_retry,
-                    client, MODEL_NAME, SAMPLE_SYSTEM, SAMPLE_MESSAGES,
-                    SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL,
+                    client, MODEL_NAME, SAMPLE_NARRATIVE, SAMPLE_THINKING, STATE_REPORT_TOOL, SAMPLE_SYSTEM,
                 )
             )
 
@@ -1128,12 +1109,12 @@ class TestRetryAsyncThread:
         async def run_both():
             r1, r2 = await asyncio.gather(
                 asyncio.to_thread(
-                    _stateful_tool_retry, client_1, MODEL_NAME, SAMPLE_SYSTEM,
-                    SAMPLE_MESSAGES, "Narrative 1", "", STATE_REPORT_TOOL,
+                    _stateful_tool_retry, client_1, MODEL_NAME,
+                    "Narrative 1", "", STATE_REPORT_TOOL, SAMPLE_SYSTEM,
                 ),
                 asyncio.to_thread(
-                    _stateful_tool_retry, client_2, MODEL_NAME, SAMPLE_SYSTEM,
-                    SAMPLE_MESSAGES, "Narrative 2", "", STATE_REPORT_TOOL,
+                    _stateful_tool_retry, client_2, MODEL_NAME,
+                    "Narrative 2", "", STATE_REPORT_TOOL, SAMPLE_SYSTEM,
                 ),
             )
             return r1, r2
@@ -1161,8 +1142,7 @@ class TestRetryEdgeCases:
 
         assert result == tool_input
         msgs = client.messages.create.call_args.kwargs["messages"]
-        text_block = [b for b in msgs[-2]["content"] if b["type"] == "text"][0]
-        assert len(text_block["text"]) == 100_000
+        assert len(msgs[-1]["content"]) >= 100_000
 
     def test_empty_narrative(self):
         """Retry should handle empty narrative text."""
@@ -1174,8 +1154,7 @@ class TestRetryEdgeCases:
 
         assert result == tool_input
         msgs = client.messages.create.call_args.kwargs["messages"]
-        text_block = [b for b in msgs[-2]["content"] if b["type"] == "text"][0]
-        assert text_block["text"] == ""
+        assert "Here is the narrative from the turn you just wrote:" in msgs[-1]["content"]
 
     def test_unicode_in_narrative_and_thinking(self):
         """Retry should handle unicode characters in both narrative and thinking."""
@@ -1191,7 +1170,7 @@ class TestRetryEdgeCases:
         assert result == tool_input
         # Verify thinking is embedded in the text
         msgs = client.messages.create.call_args.kwargs["messages"]
-        text = msgs[-2]["content"][0]["text"]
+        text = msgs[-1]["content"]
         assert "Analyzing \u2014" in text
 
     def test_system_content_empty_list(self):
@@ -1203,7 +1182,7 @@ class TestRetryEdgeCases:
         result, _ = _call_retry(client=client, system_content=[])
 
         kwargs = client.messages.create.call_args.kwargs
-        assert kwargs["system"] == []
+        assert "system" not in kwargs
         assert result == tool_input
 
     def test_tool_input_with_nested_structures(self):
@@ -1254,6 +1233,6 @@ class TestRetryEdgeCases:
         result, _ = _call_retry(client=client, messages=large_history)
 
         msgs = client.messages.create.call_args.kwargs["messages"]
-        # 200 original + 1 assistant + 1 user retry = 202
-        assert len(msgs) == 202
+        # Minimal retry ignores the prior history and sends one user message.
+        assert len(msgs) == 1
         assert result == tool_input

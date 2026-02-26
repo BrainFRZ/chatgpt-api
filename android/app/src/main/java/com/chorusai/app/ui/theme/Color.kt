@@ -69,6 +69,13 @@ val MatrixCardBg = Color(0xFF0D200D)
 val MatrixTrace = Color(0xFFFBBF24)
 val MatrixTar = Color(0xFFFB923C)
 
+// Ship Combat Mode
+val ShipCombatBg = Color(0xFF0A1520)
+val ShipCombatAccent = Color(0xFF38BDF8)
+val ShipCombatBorder = Color(0xFF1E3A5F)
+val ShipCombatMuted = Color(0xFF4A6A8A)
+val ShipCombatCardBg = Color(0xFF0D1A2D)
+
 // Relationship colors
 val RelationshipPurple = Color(0xFFA78BFA)
 val RelationshipGreen = Color(0xFF4ADE80)

@@ -36,6 +36,8 @@ class SyncEventType(Enum):
     DOCS_REFRESHED = "docs_refreshed"
     STATE_UPDATE = "state_update"
     STATE_NOTIFICATIONS = "state_notifications"
+    SHIP_COMBAT_AUTO_INIT = "ship_combat_auto_init"
+    SHIP_COMBAT_DONE = "ship_combat_done"
     # User-level events (chat list changes)
     CHAT_CREATED = "chat_created"
     CHAT_DELETED = "chat_deleted"

@@ -49,7 +49,7 @@ class TestFreshPipelineState:
         state = _fresh_pipeline_state()
         expected_keys = {
             "pacing", "callback_ledger", "npc_memories", "scene_state",
-            "character_states", "game_state", "hud_state", "combat", "turn_counter"
+            "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter"
         }
         assert set(state.keys()) == expected_keys
 
@@ -477,8 +477,9 @@ class TestGameSystemSchemas:
         gs = self.get_game_system(system_id)
         props = gs["state_report_tool"]["input_schema"]["properties"]
         cs = props["character_states"]
-        assert cs["additionalProperties"] is True, f"{system_id}: character_states should have additionalProperties: True"
         assert cs["type"] == "object", f"{system_id}: character_states should be type object"
+        assert "additionalProperties" in cs, f"{system_id}: character_states should define additionalProperties"
+        assert isinstance(cs["additionalProperties"], (bool, dict)), f"{system_id}: additionalProperties should be bool or object schema"
 
     @pytest.mark.parametrize("system_id", ["dnd5e", "coc7e", "sr6e", "cpred", "dnd5e_cyber"])
     def test_character_states_description_mentions_structured(self, system_id):
@@ -648,7 +649,7 @@ class TestFrontendIntegration:
         assert 'showCharacterSheet' in self.content
         assert 'showAllCharactersModal' in self.content
         assert 'showNpcMemories' in self.content
-        assert 'characterSheetMd' in self.content
+        assert 'characterSheetFiles' in self.content
         assert 'mobileBottomSheetOpen' in self.content
 
     def test_keyboard_shortcut_ctrl_bracket(self):
@@ -673,7 +674,7 @@ class TestFrontendIntegration:
 
     def test_character_sheet_fetched_on_project_enter(self):
         assert '/api/character-sheet/' in self.content
-        assert 'setCharacterSheetMd' in self.content
+        assert 'setCharacterSheetFiles' in self.content
 
     def test_right_panel_collapsed_strip(self):
         """Collapsed strip should have « button and character count badge."""

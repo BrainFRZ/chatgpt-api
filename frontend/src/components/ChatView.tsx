@@ -215,6 +215,28 @@ export default function ChatView({
           <div style={styles.loadingMoreMessages}>Loading older messages...</div>
         )}
         {messages.map((msg, i) => {
+          const nextMsg = i + 1 < messages.length ? messages[i + 1] : null;
+          const prevMsg = i > 0 ? messages[i - 1] : null;
+          const hideShipCombatInitUser =
+            msg.role === 'user' &&
+            !!((msg as any).ship_combat_hidden_init);
+          if (hideShipCombatInitUser) {
+            const opening = String((nextMsg as any)?.ship_combat_opening_narration || '').trim();
+            const openingEmbedded = !!(nextMsg as any)?.ship_combat_opening_embedded;
+            return (
+              <div key={i} className="message" style={{ ...styles.message, backgroundColor: '#23190f' }}>
+                <div style={styles.shipCombatStartBanner}>BEGINNING SHIP COMBAT</div>
+                {opening && !openingEmbedded && (
+                  <div style={styles.shipCombatOpeningNarration}>
+                    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                      {convertMathDelimiters(opening)}
+                    </ReactMarkdown>
+                  </div>
+                )}
+              </div>
+            );
+          }
+
           // Determine if this message is in context
           // Map display index to actual backend index
           // totalMessages includes system message, messages.length does not
@@ -226,12 +248,16 @@ export default function ChatView({
           // Choose background color based on context, role, and hack mode
           let backgroundColor;
           const isHackMode = !!(msg as any).hack_mode;
+          const isShipCombatMode = !!(msg as any).ship_combat_mode;
           if (!isInContext) {
             // Out of context: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
           } else if (isHackMode) {
             // Hack mode: matrix-themed green/dark tint
             backgroundColor = msg.role === 'user' ? '#1a2e1a' : '#0f1f0f';
+          } else if (isShipCombatMode) {
+            // Ship combat mode: tactical amber/copper tint
+            backgroundColor = msg.role === 'user' ? '#312417' : '#23190f';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -246,8 +272,9 @@ export default function ChatView({
                 backgroundColor
               }}
             >
-              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : {})}}>
+              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} : {})}}>
                 {isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
+                {!isHackMode && isShipCombatMode && <span style={{color: '#f59e0b', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>SHIP</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button
@@ -390,6 +417,24 @@ export default function ChatView({
                       )}
                     </div>
                   )}
+                  {msg.role === 'assistant' && (msg as any).ship_combat_started && !(prevMsg && prevMsg.role === 'user' && (prevMsg as any).ship_combat_hidden_init) && (
+                    <>
+                      <div style={styles.shipCombatStartBanner}>BEGINNING SHIP COMBAT</div>
+                      {(() => {
+                        const opening = String((msg as any).ship_combat_opening_narration || '').trim();
+                        const openingEmbedded = !!(msg as any).ship_combat_opening_embedded;
+                        if (!opening) return null;
+                        if (openingEmbedded) return null;
+                        return (
+                          <div style={styles.shipCombatOpeningNarration}>
+                            <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                              {convertMathDelimiters(opening)}
+                            </ReactMarkdown>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
                   <div style={styles.messageContent} className="messageContent">
                     <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
                   </div>
@@ -494,6 +539,14 @@ export default function ChatView({
             ...(isMobile ? styles.stateNotificationsContainerMobile : {}),
           }}>
             {stateNotifications.map((n: any, i: number) => {
+              if (n.type === 'ship_npc_action') {
+                const actor = n.character_name || (n.role ? `${String(n.role).charAt(0).toUpperCase()}${String(n.role).slice(1)}` : 'Crew');
+                return (
+                  <div key={i} style={styles.shipNpcActionNotification}>
+                    {n.ship_name || 'Ship'} - {actor}: {n.action || 'Action'} - {n.effect || 'No effect reported'}
+                  </div>
+                );
+              }
               if (n.type === 'npc_memory') {
                 return (
                   <div key={i} style={styles.memoryNotification}>

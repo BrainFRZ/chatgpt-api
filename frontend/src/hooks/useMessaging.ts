@@ -137,6 +137,9 @@ export function useMessaging(deps: UseMessagingDeps) {
       let accumulatedContent = '';
       let accumulatedThinking = '';
       let userMsgId: string | null = null;
+      let shipCombatChaining = false;
+      let shipCombatChainContent = '';
+      let shipCombatChainThinking = '';
 
       const response = await fetch('/api/send-message-stream', {
         method: 'POST',
@@ -195,22 +198,36 @@ export function useMessaging(deps: UseMessagingDeps) {
               return next;
             });
           } else if (event.type === 'content') {
-            accumulatedContent += event.data.delta;
+            if (shipCombatChaining) {
+              shipCombatChainContent += event.data.delta;
+            } else {
+              accumulatedContent += event.data.delta;
+            }
             deps.setMessages(prev => {
               const newMessages = [...prev];
               const lastIdx = newMessages.length - 1;
               if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = { ...newMessages[lastIdx], content: accumulatedContent };
+                newMessages[lastIdx] = {
+                  ...newMessages[lastIdx],
+                  content: shipCombatChaining ? shipCombatChainContent : accumulatedContent
+                };
               }
               return newMessages;
             });
           } else if (event.type === 'thinking') {
-            accumulatedThinking += event.data.delta;
+            if (shipCombatChaining) {
+              shipCombatChainThinking += event.data.delta;
+            } else {
+              accumulatedThinking += event.data.delta;
+            }
             deps.setMessages(prev => {
               const newMessages = [...prev];
               const lastIdx = newMessages.length - 1;
               if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
-                newMessages[lastIdx] = { ...newMessages[lastIdx], reasoning: accumulatedThinking };
+                newMessages[lastIdx] = {
+                  ...newMessages[lastIdx],
+                  reasoning: shipCombatChaining ? shipCombatChainThinking : accumulatedThinking
+                };
               }
               return newMessages;
             });
@@ -233,10 +250,13 @@ export function useMessaging(deps: UseMessagingDeps) {
               timestamp: new Date().toISOString(),
               attached_files: originalMessage.attached_files
             };
+            if (data.ship_combat_mode) (newUserMessage as any).ship_combat_mode = true;
 
             const assistantMessage: ChatMessage = {
               id: data.assistant_message_id,
-              parent_id: data.user_message_id,
+              parent_id: (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+                ? data.ship_combat_init_message.id
+                : data.user_message_id,
               role: 'assistant',
               content: data.assistant_message,
               timestamp: new Date().toISOString(),
@@ -246,16 +266,27 @@ export function useMessaging(deps: UseMessagingDeps) {
               model: data.model,
               service_tier: data.service_tier
             };
+            if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
+            if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
+            if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+              ? (data.ship_combat_init_message as ChatMessage)
+              : null;
 
             if (!ctx.isStale()) {
-              const finalMessages = [...truncatedMessages, newUserMessage, assistantMessage];
+              const finalMessages = hiddenInitMessage
+                ? [...truncatedMessages, newUserMessage, hiddenInitMessage, assistantMessage]
+                : [...truncatedMessages, newUserMessage, assistantMessage];
               deps.setMessages(finalMessages);
-              deps.setAllMessages(prev => [...prev, newUserMessage, assistantMessage]);
+              deps.setAllMessages(prev => hiddenInitMessage
+                ? [...prev, newUserMessage, hiddenInitMessage, assistantMessage]
+                : [...prev, newUserMessage, assistantMessage]);
               deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
               deps.setStats(data.stats);
               deps.setContextStartIndex(data.context_start_index || 1);
               // Update model dropdown to reflect what actually ran
-              if (data.original_model && (data.hack_complete || data.combat_complete)) {
+              if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete)) {
                   deps.setSelectedModel(data.original_model);
               } else if (data.model) {
                   deps.setSelectedModel(data.model);
@@ -268,6 +299,67 @@ export function useMessaging(deps: UseMessagingDeps) {
 
               deps.fetchUserStats();
               deps.fetchFreeTokens();
+            }
+          } else if (event.type === 'ship_combat_auto_init') {
+            shipCombatChaining = true;
+            shipCombatChainContent = '';
+            shipCombatChainThinking = '';
+            const chainPlaceholder: ChatMessage = {
+              role: 'assistant',
+              content: '',
+              timestamp: new Date().toISOString()
+            };
+            deps.setMessages(prev => [...prev, chainPlaceholder]);
+          } else if (event.type === 'ship_combat_done') {
+            const data = event.data;
+            shipCombatChaining = false;
+            const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+              ? (data.ship_combat_init_message as ChatMessage)
+              : null;
+            const chainAddedCount = hiddenInitMessage ? 2 : 1;
+            const assistantMessage: ChatMessage = {
+              id: data.assistant_message_id,
+              parent_id: hiddenInitMessage?.id || data.user_message_id,
+              role: 'assistant',
+              content: data.assistant_message || shipCombatChainContent,
+              timestamp: new Date().toISOString(),
+              tokens: data.tokens,
+              cost: data.cost,
+              reasoning: shipCombatChainThinking || data.reasoning,
+              model: data.model,
+              service_tier: data.service_tier
+            };
+            if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
+            if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
+            if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+
+            deps.setMessages(prev => {
+              const base = prev.slice(0, -1); // drop chain placeholder
+              return hiddenInitMessage ? [...base, hiddenInitMessage, assistantMessage] : [...base, assistantMessage];
+            });
+            deps.setAllMessages(prev => hiddenInitMessage
+              ? [...prev, hiddenInitMessage, assistantMessage]
+              : [...prev, assistantMessage]);
+            deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+            deps.setStats(data.stats);
+            deps.setContextStartIndex(data.context_start_index || 1);
+            deps.setTotalMessages(prev => data.total_messages || (prev + chainAddedCount));
+            deps.setMessageOffset(prev => prev + chainAddedCount);
+            if (data.original_model && data.ship_combat_complete) {
+              deps.setSelectedModel(data.original_model);
+            } else if (data.model) {
+              deps.setSelectedModel(data.model);
+            }
+            deps.fetchUserStats();
+            deps.fetchFreeTokens();
+          } else if (event.type === 'ship_combat_error') {
+            shipCombatChaining = false;
+            shipCombatChainContent = '';
+            shipCombatChainThinking = '';
+            deps.setError(event.data.detail || 'Ship combat init failed');
+            if (!ctx.isStale()) {
+              deps.setMessages(prev => prev.slice(0, -1)); // remove chain placeholder only
             }
           } else if (event.type === 'error') {
             deps.setError(event.data.detail || 'Failed to regenerate response');
@@ -342,6 +434,9 @@ export function useMessaging(deps: UseMessagingDeps) {
     // Track accumulated content for the streaming message
     let accumulatedContent = '';
     let accumulatedThinking = '';
+    let shipCombatChainContent = '';
+    let shipCombatChainThinking = '';
+    let shipCombatChaining = false;
     let userMsgId: string | null = null;
 
     // Create AbortController for cancellation
@@ -413,7 +508,12 @@ export function useMessaging(deps: UseMessagingDeps) {
               return next;
             });
           } else if (event.type === 'content') {
-            accumulatedContent += event.data.delta;
+            if (shipCombatChaining) {
+              shipCombatChainContent += event.data.delta;
+            } else {
+              accumulatedContent += event.data.delta;
+            }
+            const displayContent = shipCombatChaining ? shipCombatChainContent : accumulatedContent;
             // Update the streaming message with new content
             deps.setMessages(prev => {
               const newMessages = [...prev];
@@ -421,14 +521,19 @@ export function useMessaging(deps: UseMessagingDeps) {
               if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
                 newMessages[lastIdx] = {
                   ...newMessages[lastIdx],
-                  content: accumulatedContent
+                  content: displayContent
                 };
               }
               return newMessages;
             });
             // Don't auto-scroll during streaming - let user read from the top
           } else if (event.type === 'thinking') {
-            accumulatedThinking += event.data.delta;
+            if (shipCombatChaining) {
+              shipCombatChainThinking += event.data.delta;
+            } else {
+              accumulatedThinking += event.data.delta;
+            }
+            const displayThinking = shipCombatChaining ? shipCombatChainThinking : accumulatedThinking;
             // Update reasoning in real-time
             deps.setMessages(prev => {
               const newMessages = [...prev];
@@ -436,7 +541,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               if (lastIdx >= 0 && newMessages[lastIdx].role === 'assistant') {
                 newMessages[lastIdx] = {
                   ...newMessages[lastIdx],
-                  reasoning: accumulatedThinking
+                  reasoning: displayThinking
                 };
               }
               return newMessages;
@@ -461,7 +566,9 @@ export function useMessaging(deps: UseMessagingDeps) {
 
             const assistantMessage: ChatMessage = {
               id: data.assistant_message_id,
-              parent_id: data.user_message_id,
+              parent_id: (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+                ? data.ship_combat_init_message.id
+                : data.user_message_id,
               role: 'assistant',
               content: data.assistant_message,
               timestamp: new Date().toISOString(),
@@ -472,25 +579,41 @@ export function useMessaging(deps: UseMessagingDeps) {
               service_tier: data.service_tier,
               ...(data.hack_mode ? { hack_mode: true } : {})
             };
+            if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
+            if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
+            if (typeof data.ship_combat_opening_embedded === 'boolean') {
+              (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            }
             if (data.hack_mode) {
               userMsgWithId.hack_mode = true;
             }
+            if (data.ship_combat_mode) {
+              (userMsgWithId as any).ship_combat_mode = true;
+            }
+            const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+              ? (data.ship_combat_init_message as ChatMessage)
+              : null;
 
             // Replace optimistic messages with complete ones
-            deps.setMessages(prev => [...prev.slice(0, -2), userMsgWithId, assistantMessage]);
+            deps.setMessages(prev => hiddenInitMessage
+              ? [...prev.slice(0, -2), userMsgWithId, hiddenInitMessage, assistantMessage]
+              : [...prev.slice(0, -2), userMsgWithId, assistantMessage]);
 
             // Add to the full message tree
-            deps.setAllMessages(prev => [...prev, userMsgWithId, assistantMessage]);
+            deps.setAllMessages(prev => hiddenInitMessage
+              ? [...prev, userMsgWithId, hiddenInitMessage, assistantMessage]
+              : [...prev, userMsgWithId, assistantMessage]);
 
             // Update current leaf
             deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
 
-            deps.setTotalMessages(prev => prev + 1);
-            deps.setMessageOffset(prev => prev + 2);
+            deps.setTotalMessages(prev => prev + (hiddenInitMessage ? 2 : 1));
+            deps.setMessageOffset(prev => prev + (hiddenInitMessage ? 3 : 2));
             deps.setStats(data.stats);
             deps.setContextStartIndex(data.context_start_index || 1);
             // Update model dropdown to reflect what actually ran
-            if (data.original_model && (data.hack_complete || data.combat_complete)) {
+            if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete)) {
                 // Auto-switched mode just ended — restore to original model
                 deps.setSelectedModel(data.original_model);
             } else if (data.model) {
@@ -499,6 +622,70 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.fetchUserStats();
             deps.fetchFreeTokens();
             // Don't scroll on done - let user stay where they were reading
+          } else if (event.type === 'ship_combat_auto_init') {
+            // Backend chained ship combat init — add a new assistant message placeholder
+            shipCombatChaining = true;
+            shipCombatChainContent = '';
+            shipCombatChainThinking = '';
+            deps.setStateNotifications([]);
+            const chainPlaceholder: ChatMessage = {
+              role: 'assistant',
+              content: '',
+              timestamp: new Date().toISOString()
+            };
+            deps.setMessages(prev => [...prev, chainPlaceholder]);
+          } else if (event.type === 'ship_combat_done') {
+            // Finalize the chained ship combat assistant message
+            const data = event.data;
+            shipCombatChaining = false;
+            const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
+              ? (data.ship_combat_init_message as ChatMessage)
+              : null;
+            const assistantMessage: ChatMessage = {
+              id: data.assistant_message_id,
+              parent_id: hiddenInitMessage?.id || data.user_message_id,
+              role: 'assistant',
+              content: data.assistant_message,
+              timestamp: new Date().toISOString(),
+              tokens: data.tokens,
+              cost: data.cost,
+              reasoning: data.reasoning,
+              model: data.model,
+              service_tier: data.service_tier
+            };
+            if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
+            if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
+            if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+
+            deps.setMessages(prev => {
+              const base = prev.slice(0, -1);  // Remove chain placeholder
+              if (hiddenInitMessage) return [...base, hiddenInitMessage, assistantMessage];
+              return [...base, assistantMessage];
+            });
+            deps.setAllMessages(prev => hiddenInitMessage
+              ? [...prev, hiddenInitMessage, assistantMessage]
+              : [...prev, assistantMessage]);
+            deps.setCurrentLeafId(data.current_leaf_id || data.assistant_message_id);
+            deps.setTotalMessages(prev => prev + (hiddenInitMessage ? 2 : 1));
+            deps.setMessageOffset(prev => prev + (hiddenInitMessage ? 2 : 1));
+            deps.setStats(data.stats);
+            deps.setContextStartIndex(data.context_start_index || 1);
+            if (data.original_model && data.ship_combat_complete) {
+              deps.setSelectedModel(data.original_model);
+            } else if (data.model) {
+              deps.setSelectedModel(data.model);
+            }
+            deps.fetchUserStats();
+            deps.fetchFreeTokens();
+          } else if (event.type === 'ship_combat_error') {
+            shipCombatChaining = false;
+            shipCombatChainContent = '';
+            shipCombatChainThinking = '';
+            deps.setError(event.data.detail || 'Ship combat init failed');
+            if (!ctx.isStale()) {
+              deps.setMessages(prev => prev.slice(0, -1)); // remove chain placeholder only
+            }
           } else if (event.type === 'error') {
             deps.setError(event.data.detail || 'Failed to send message');
             if (!ctx.isStale()) {

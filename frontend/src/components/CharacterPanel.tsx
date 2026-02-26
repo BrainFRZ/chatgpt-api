@@ -374,6 +374,87 @@ export default function CharacterPanel({
     );
   };
 
+  const renderShipCombatHud = (condensed?: boolean) => {
+    const shipCombat = pipelineState?.ship_combat;
+    if (!shipCombat) return null;
+
+    const initOrder = shipCombat.initiative_order || [];
+    const currentShip = shipCombat.current_ship;
+    const currentRole = shipCombat.current_role;
+    const env = shipCombat.environment || 'Open Space';
+    const roleOrder = ['captain', 'sensors', 'pilot', 'gunner', 'engineer'];
+    const roleIndex = currentRole ? roleOrder.indexOf(currentRole) : -1;
+
+    return (
+      <div style={{ padding: condensed ? '6px 8px' : '8px', borderBottom: '1px solid #1a1a3a', backgroundColor: '#0a0a2a' }}>
+        <div style={{ fontSize: '0.65rem', color: '#64748b', marginBottom: '6px' }}>
+          {env}
+        </div>
+
+        {initOrder.length > 0 && (
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '3px' }}>Initiative</div>
+            {initOrder.map((entry: any, i: number) => {
+              const shipName = typeof entry === 'string' ? entry : entry.ship_name;
+              const isActing = shipName === currentShip;
+              const faction = typeof entry === 'object' ? entry.faction : null;
+              const factionColor = faction === 'ally' ? '#38bdf8' : faction === 'enemy' ? '#ef4444' : '#94a3b8';
+              const shipData = (pipelineState?.character_states || {})?.[shipName];
+              const d = shipData?.data || shipData || {};
+              let hullPct = 100, shieldPct = 100;
+              for (const v of (d.vitals || [])) {
+                if (v.label === 'Hull' && v.max > 0) hullPct = Math.round((v.current / v.max) * 100);
+                if (v.label === 'Shields' && v.max > 0) shieldPct = Math.round((v.current / v.max) * 100);
+              }
+              return (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '3px 4px', marginBottom: '2px', borderRadius: '3px',
+                  backgroundColor: isActing ? '#38bdf815' : 'transparent',
+                  borderLeft: isActing ? '2px solid #38bdf8' : '2px solid transparent',
+                }}>
+                  <span style={{ fontSize: '0.68rem', color: factionColor, fontWeight: isActing ? 700 : 500, flex: 1 }}>
+                    {shipName}
+                  </span>
+                  <div style={{ width: '30px', height: '3px', backgroundColor: '#1a1a3a', borderRadius: '1px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${hullPct}%`, backgroundColor: hullPct > 50 ? '#94a3b8' : hullPct > 25 ? '#fb923c' : '#ef4444', borderRadius: '1px' }} />
+                  </div>
+                  <div style={{ width: '30px', height: '3px', backgroundColor: '#1a1a3a', borderRadius: '1px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${shieldPct}%`, backgroundColor: '#38bdf8', borderRadius: '1px' }} />
+                  </div>
+                  {isActing && <span style={{ fontSize: '0.55rem', color: '#38bdf8', fontWeight: 700 }}>ACTING</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {currentShip && (
+          <div style={{ marginBottom: condensed ? '0' : '4px' }}>
+            <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '3px' }}>Crew Phase</div>
+            <div style={{ display: 'flex', gap: '2px' }}>
+              {roleOrder.map((role, i) => {
+                const isActive = role === currentRole;
+                const isPast = roleIndex >= 0 && i < roleIndex;
+                return (
+                  <span key={role} style={{
+                    fontSize: '0.55rem', padding: '1px 4px', borderRadius: '2px',
+                    backgroundColor: isActive ? '#38bdf830' : isPast ? '#38bdf810' : '#1a1a3a',
+                    color: isActive ? '#38bdf8' : isPast ? '#64748b' : '#333',
+                    fontWeight: isActive ? 700 : 400,
+                    textTransform: 'capitalize' as const,
+                  }}>
+                    {role.charAt(0).toUpperCase() + role.slice(1, 3)}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // Render a single card
   const renderCard = (name: string, isActive?: boolean) => {
     const data = getCharData(name);
@@ -386,6 +467,7 @@ export default function CharacterPanel({
     const level = data.level;
     const barVitals = vitals.filter((v: any) => 'current' in v && 'max' in v);
     const flatVitals = vitals.filter((v: any) => 'value' in v && !('current' in v && 'max' in v));
+    const shipCombat = state?.ship_combat;
     return (
       <div
         key={name}
@@ -468,9 +550,24 @@ export default function CharacterPanel({
         )}
         {conditions.length > 0 && (
           <div style={{ display: 'flex', gap: '3px', marginTop: '3px', flexWrap: 'wrap' }}>
-            {conditions.map((c: string, i: number) => (
+            {conditions
+              .filter((c: string) => !(shipCombat && type === 'ship' && c.includes(':')))
+              .map((c: string, i: number) => (
               <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '8px', backgroundColor: condColor(c) + '22', color: condColor(c), fontWeight: 500 }}>{c}</span>
             ))}
+          </div>
+        )}
+        {shipCombat && type === 'ship' && conditions.length > 0 && (
+          <div style={{ marginTop: '4px', display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+            {conditions.filter((c: string) => c.includes(':')).map((c: string, i: number) => {
+              const tier = c.toLowerCase();
+              const color = tier.includes('destroyed') ? '#ef4444' : tier.includes('damaged') ? '#fb923c' : tier.includes('strained') ? '#fbbf24' : '#94a3b8';
+              return (
+                <span key={`sys-${i}`} style={{ fontSize: '0.55rem', padding: '1px 4px', borderRadius: '2px', backgroundColor: `${color}18`, color }}>
+                  {c}
+                </span>
+              );
+            })}
           </div>
         )}
       </div>
@@ -478,7 +575,7 @@ export default function CharacterPanel({
   };
 
   // Use pipelineState if available, otherwise empty fallback for project chats
-  const state = pipelineState || { character_states: {}, scene_state: {}, npc_memories: {}, combat: null };
+  const state = pipelineState || { character_states: {}, scene_state: {}, npc_memories: {}, combat: null, ship_combat: null };
 
   // --- Desktop Right Panel ---
   const renderDesktopPanel = () => {
@@ -487,6 +584,7 @@ export default function CharacterPanel({
     const cs = state.character_states || {};
     const scene = state.scene_state || {};
     const combat = state.combat;
+    const shipCombat = state.ship_combat;
     const ledger = state.callback_ledger;
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
@@ -507,7 +605,10 @@ export default function CharacterPanel({
           {hackState?.active && (
             <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#00ff41', marginTop: '8px', backgroundColor: '#00ff4118', borderRadius: '8px', padding: '1px 5px' }}>H</span>
           )}
-          {charCount > 0 && !hackState?.active && (
+          {shipCombat && !hackState?.active && (
+            <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', marginTop: '8px', backgroundColor: '#38bdf818', borderRadius: '8px', padding: '1px 5px' }}>SC</span>
+          )}
+          {charCount > 0 && !hackState?.active && !shipCombat && (
             <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
           )}
         </div>
@@ -537,14 +638,17 @@ export default function CharacterPanel({
         <div style={{
           padding: '12px 12px 8px', borderBottom: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
           justifyContent: 'space-between', alignItems: 'center',
-          backgroundColor: hackState?.active ? '#0a1f0a' : combat ? '#2a1a1a' : 'transparent',
+          backgroundColor: hackState?.active ? '#0a1f0a' : shipCombat ? '#0a0a2a' : combat ? '#2a1a1a' : 'transparent',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : '#ccc' }}>
-              {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
+              {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
             {hackState?.active && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
+            )}
+            {!hackState?.active && !combat && shipCombat && (
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px' }}>SHIP COMBAT</span>
             )}
             {!hackState?.active && combat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
@@ -559,10 +663,21 @@ export default function CharacterPanel({
 
         {/* Hack HUD */}
         {renderHackHud()}
+        {renderShipCombatHud()}
 
         {/* Panel body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px', scrollbarWidth: 'thin' as any }}>
-          {combat ? (
+          {shipCombat ? (
+            <>
+              {(shipCombat.initiative_order || []).map((entry: any, i: number) => {
+                const shipName = typeof entry === 'string' ? entry : entry.ship_name;
+                return shipName ? renderCard(shipName, shipName === shipCombat.current_ship) : <div key={`missing-${i}`} />;
+              })}
+              {(shipCombat.initiative_order || []).length === 0 && (
+                <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No ship initiative order set</div>
+              )}
+            </>
+          ) : combat ? (
             // Combat mode: initiative order
             <>
               {(combat.initiative_order || []).map((name: string) => renderCard(name, combat.current_turn === name))}
@@ -617,7 +732,8 @@ export default function CharacterPanel({
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
-    if (allPresent.length === 0 && !hackState?.active) return null;
+    const shipCombat = state.ship_combat;
+    if (allPresent.length === 0 && !hackState?.active && !shipCombat) return null;
 
     return (
       <>
@@ -634,25 +750,34 @@ export default function CharacterPanel({
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
-        backgroundColor: hackState?.active ? '#0a1a0a' : '#16162a', borderTop: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`,
+        backgroundColor: hackState?.active ? '#0a1a0a' : shipCombat ? '#0a0a2a' : '#16162a', borderTop: `1px solid ${hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}`,
         zIndex: 1500, transition: 'height 0.25s ease',
         display: 'flex', flexDirection: 'column' as const,
       }}>
         {/* Tab handle */}
         <div
           onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: hackState?.active ? '#00ff41' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}` : 'none' }}
+          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}` : 'none' }}
         >
-          <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
+          <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
           {hackState?.active && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : `${allPresent.length} characters in scene`}
+          {!hackState?.active && shipCombat && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
           <>
             {renderHackHud(true)}
+            {renderShipCombatHud(true)}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-              {allPresent.map((name: string) => renderCard(name))}
+              {shipCombat ? (
+                (shipCombat.initiative_order || []).map((entry: any, i: number) => {
+                  const shipName = typeof entry === 'string' ? entry : entry.ship_name;
+                  return shipName ? renderCard(shipName, shipName === shipCombat.current_ship) : <div key={`mship-${i}`} />;
+                })
+              ) : (
+                allPresent.map((name: string) => renderCard(name))
+              )}
             </div>
             <div style={{ padding: '8px 12px', borderTop: '1px solid #333', flexShrink: 0, display: 'flex', flexDirection: 'column' as const, gap: '6px' }}>
               {(() => {

@@ -179,7 +179,8 @@ fun ChatScreen(
         val ps = state.pipelineState
         val hackState = state.hackState
         val hasCharacterPanel = hackState?.active == true ||
-            (ps != null && (ps.sceneState.pcsPresent.isNotEmpty() ||
+            (ps != null && (ps.shipCombat != null ||
+             ps.sceneState.pcsPresent.isNotEmpty() ||
              ps.sceneState.npcsPresent.isNotEmpty() ||
              ps.characterStates.isNotEmpty()))
 

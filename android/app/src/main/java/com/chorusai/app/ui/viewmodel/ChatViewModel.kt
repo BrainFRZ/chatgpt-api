@@ -292,6 +292,11 @@ class ChatViewModel @Inject constructor(
 
             val accumulatedContent = StringBuilder()
             val accumulatedReasoning = StringBuilder()
+            // Ship combat chaining state
+            var shipCombatChaining = false
+            val shipCombatChainContent = StringBuilder()
+            val shipCombatChainReasoning = StringBuilder()
+            var shipCombatChainAssistantId = ""
 
             try {
                 chatRepo.streamMessage(
@@ -314,21 +319,41 @@ class ChatViewModel @Inject constructor(
                             }
                         }
                         is SseEvent.Content -> {
-                            accumulatedContent.append(event.delta)
-                            val newContent = accumulatedContent.toString()
-                            _uiState.update {
-                                it.copy(messages = it.messages.map { msg ->
-                                    if (msg.id == tempAssistantId) msg.copy(content = newContent) else msg
-                                })
+                            if (shipCombatChaining) {
+                                shipCombatChainContent.append(event.delta)
+                                val newContent = shipCombatChainContent.toString()
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == shipCombatChainAssistantId) msg.copy(content = newContent) else msg
+                                    })
+                                }
+                            } else {
+                                accumulatedContent.append(event.delta)
+                                val newContent = accumulatedContent.toString()
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == tempAssistantId) msg.copy(content = newContent) else msg
+                                    })
+                                }
                             }
                         }
                         is SseEvent.Thinking -> {
-                            accumulatedReasoning.append(event.delta)
-                            val newReasoning = accumulatedReasoning.toString()
-                            _uiState.update {
-                                it.copy(messages = it.messages.map { msg ->
-                                    if (msg.id == tempAssistantId) msg.copy(reasoning = newReasoning) else msg
-                                })
+                            if (shipCombatChaining) {
+                                shipCombatChainReasoning.append(event.delta)
+                                val newReasoning = shipCombatChainReasoning.toString()
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == shipCombatChainAssistantId) msg.copy(reasoning = newReasoning) else msg
+                                    })
+                                }
+                            } else {
+                                accumulatedReasoning.append(event.delta)
+                                val newReasoning = accumulatedReasoning.toString()
+                                _uiState.update {
+                                    it.copy(messages = it.messages.map { msg ->
+                                        if (msg.id == tempAssistantId) msg.copy(reasoning = newReasoning) else msg
+                                    })
+                                }
                             }
                         }
                         is SseEvent.StateUpdate -> {
@@ -336,6 +361,82 @@ class ChatViewModel @Inject constructor(
                         }
                         is SseEvent.HackStateUpdate -> {
                             _uiState.update { it.copy(hackState = event.hackState) }
+                        }
+                        is SseEvent.ShipCombatAutoInit -> {
+                            // Backend chained ship combat init — add a new assistant message placeholder
+                            shipCombatChaining = true
+                            shipCombatChainContent.clear()
+                            shipCombatChainReasoning.clear()
+                            shipCombatChainAssistantId = "temp_sc_${UUID.randomUUID()}"
+                            val chainPlaceholder = ChatMessage(
+                                id = shipCombatChainAssistantId,
+                                role = "assistant",
+                                content = ""
+                            )
+                            _uiState.update {
+                                it.copy(
+                                    messages = it.messages + chainPlaceholder,
+                                    isSending = true,
+                                    isStreaming = true,
+                                    streamingMessageId = shipCombatChainAssistantId
+                                )
+                            }
+                        }
+                        is SseEvent.ShipCombatDone -> {
+                            // Finalize the chained ship combat assistant message
+                            shipCombatChaining = false
+                            val placeholderId = shipCombatChainAssistantId
+                            shipCombatChainAssistantId = ""
+                            val hiddenInitMessage = event.shipCombatInitMessage
+                            val finalScMessage = ChatMessage(
+                                id = event.assistantMessageId ?: placeholderId,
+                                parentId = hiddenInitMessage?.id ?: event.userMessageId,
+                                role = "assistant",
+                                content = shipCombatChainContent.toString(),
+                                tokens = event.tokens,
+                                cost = event.cost,
+                                model = event.model,
+                                reasoning = shipCombatChainReasoning.toString().ifEmpty { null }
+                                    ?: event.reasoning
+                            )
+                            _uiState.update {
+                                it.copy(
+                                    messages = buildList {
+                                        for (msg in it.messages) {
+                                            if (msg.id == placeholderId) {
+                                                if (hiddenInitMessage != null) add(hiddenInitMessage)
+                                                add(finalScMessage)
+                                            } else {
+                                                add(msg)
+                                            }
+                                        }
+                                    },
+                                    currentLeafId = event.currentLeafId ?: it.currentLeafId,
+                                    totalMessages = event.totalMessages ?: it.totalMessages,
+                                    contextStartIndex = event.contextStartIndex ?: it.contextStartIndex,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
+                            // Reload allMessages to include chained ship-combat messages / hidden init
+                            reloadAllMessages()
+                        }
+                        is SseEvent.ShipCombatError -> {
+                            shipCombatChaining = false
+                            shipCombatChainContent.clear()
+                            shipCombatChainReasoning.clear()
+                            val placeholderId = shipCombatChainAssistantId
+                            shipCombatChainAssistantId = ""
+                            _uiState.update {
+                                it.copy(
+                                    messages = it.messages.filterNot { msg -> msg.id == placeholderId },
+                                    sendError = event.detail,
+                                    isStreaming = false,
+                                    streamingMessageId = null,
+                                    isSending = false
+                                )
+                            }
                         }
                         is SseEvent.Done -> {
                             val finalMessage = ChatMessage(
@@ -366,14 +467,27 @@ class ChatViewModel @Inject constructor(
                             reloadAllMessages()
                         }
                         is SseEvent.Error -> {
+                            val chainPlaceholderId = shipCombatChainAssistantId
+                            if (shipCombatChaining) {
+                                shipCombatChaining = false
+                                shipCombatChainContent.clear()
+                                shipCombatChainReasoning.clear()
+                                shipCombatChainAssistantId = ""
+                            }
                             _uiState.update {
                                 it.copy(
                                     messages = if (accumulatedContent.isEmpty()) {
                                         it.messages.filter { msg ->
-                                            msg.id != tempAssistantId && msg.id != tempUserId
+                                            msg.id != tempAssistantId &&
+                                                msg.id != tempUserId &&
+                                                msg.id != chainPlaceholderId
                                         }
                                     } else {
-                                        it.messages
+                                        if (chainPlaceholderId.isNotEmpty()) {
+                                            it.messages.filter { msg -> msg.id != chainPlaceholderId }
+                                        } else {
+                                            it.messages
+                                        }
                                     },
                                     sendError = event.detail,
                                     isStreaming = false,
@@ -388,14 +502,27 @@ class ChatViewModel @Inject constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                val chainPlaceholderId = shipCombatChainAssistantId
+                if (shipCombatChaining) {
+                    shipCombatChaining = false
+                    shipCombatChainContent.clear()
+                    shipCombatChainReasoning.clear()
+                    shipCombatChainAssistantId = ""
+                }
                 _uiState.update {
                     it.copy(
                         messages = if (accumulatedContent.isEmpty()) {
                             it.messages.filter { msg ->
-                                msg.id != tempAssistantId && msg.id != tempUserId
+                                msg.id != tempAssistantId &&
+                                    msg.id != tempUserId &&
+                                    msg.id != chainPlaceholderId
                             }
                         } else {
-                            it.messages
+                            if (chainPlaceholderId.isNotEmpty()) {
+                                it.messages.filter { msg -> msg.id != chainPlaceholderId }
+                            } else {
+                                it.messages
+                            }
                         },
                         sendError = e.message ?: "Streaming error",
                         isStreaming = false,

@@ -211,7 +211,8 @@ fun CharacterPanel(
     val allInScene = sceneNames.ifEmpty { characterStates.keys.toList() }
     val charCount = allInScene.size
 
-    if (charCount == 0 && hackState?.active != true) return
+    val shipCombatActive = pipelineState.shipCombat != null
+    if (charCount == 0 && hackState?.active != true && !shipCombatActive) return
 
     var expanded by remember { mutableStateOf(false) }
     var selectedCharName by remember { mutableStateOf<String?>(null) }
@@ -245,7 +246,11 @@ fun CharacterPanel(
         }
 
         val hackActive = hackState?.active == true
-        val sheetBg = if (hackActive) MatrixBg else CharPanelBg
+        val sheetBg = when {
+            hackActive -> MatrixBg
+            shipCombatActive -> ShipCombatBg
+            else -> CharPanelBg
+        }
 
         // Bottom sheet — consumes clicks so they don't pass through to backdrop
         Column(
@@ -273,18 +278,23 @@ fun CharacterPanel(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Drag indicator bar
+                    val indicatorColor = when {
+                        hackActive -> MatrixGreen
+                        shipCombatActive -> ShipCombatAccent
+                        else -> TextMuted.copy(alpha = 0.5f)
+                    }
                     Box(
                         modifier = Modifier
                             .width(32.dp)
                             .height(3.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(if (hackActive) MatrixGreen else TextMuted.copy(alpha = 0.5f))
+                            .background(indicatorColor)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Icon(
                         imageVector = if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
                         contentDescription = if (expanded) "Collapse" else "Expand",
-                        tint = if (hackActive) MatrixGreen else TextMuted,
+                        tint = indicatorColor,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -304,6 +314,26 @@ fun CharacterPanel(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(3.dp))
                                 .background(MatrixGreen.copy(alpha = 0.15f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                } else if (shipCombatActive) {
+                    val sc = pipelineState.shipCombat!!
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Ship Combat \u2014 Round ${sc.round}",
+                            color = ShipCombatAccent,
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "SHIPS",
+                            color = ShipCombatAccent,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(ShipCombatAccent.copy(alpha = 0.15f))
                                 .padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
@@ -382,6 +412,136 @@ fun CharacterPanel(
                         item {
                             Spacer(modifier = Modifier.height(6.dp))
                             HackHud(hackState)
+                        }
+                    }
+
+                    SheetFooter(
+                        openCallbackCount = pipelineState.callbackLedger.open.size,
+                        totalCharCount = characterStates.size,
+                        onCallbacksClick = { showCallbacks = true },
+                        onViewAllClick = { showAllChars = true }
+                    )
+                } else if (shipCombatActive) {
+                    // ── Ship Combat Layout ──
+                    val sc = pipelineState.shipCombat!!
+                    val shipNames = characterStates.filter { it.value.data.type?.lowercase() == "ship" }.keys.toList()
+                    val crewNames = characterStates.filter { it.value.data.type?.lowercase() != "ship" }.keys.toList()
+                    val initOrder = sc.initiativeOrder
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp)
+                    ) {
+                        // Initiative order
+                        if (initOrder.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "INITIATIVE ORDER \u2022 Round ${sc.round}",
+                                    color = ShipCombatMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(initOrder, key = { it.shipName }) { entry ->
+                                val isCurrent = entry.shipName == sc.currentShip
+                                val factionColor = when (entry.faction) {
+                                    "ally" -> ShipCombatAccent
+                                    "enemy" -> VitalRed
+                                    else -> TextMuted
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .then(
+                                            if (isCurrent) Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(ShipCombatAccent.copy(alpha = 0.1f))
+                                                .border(1.dp, ShipCombatBorder, RoundedCornerShape(4.dp))
+                                            else Modifier
+                                        )
+                                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = entry.shipName,
+                                            color = if (isCurrent) ShipCombatAccent else TextPrimary,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = entry.faction.uppercase(),
+                                            color = factionColor,
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(factionColor.copy(alpha = 0.15f))
+                                                .padding(horizontal = 3.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = "Init ${entry.initiative}",
+                                        color = ShipCombatMuted,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                            item { Spacer(modifier = Modifier.height(6.dp)) }
+                        }
+
+                        // Ship cards
+                        if (shipNames.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "SHIPS",
+                                    color = ShipCombatMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(shipNames.distinct(), key = { it }) { name ->
+                                val cs = characterStates[name]
+                                val data = cs?.data ?: CharacterData()
+                                CharacterCard(
+                                    name = name,
+                                    data = data,
+                                    isActiveTurn = name == sc.currentShip,
+                                    onClick = { selectedCharName = name }
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                        }
+
+                        // Crew cards
+                        if (crewNames.isNotEmpty()) {
+                            item {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "CREW",
+                                    color = ShipCombatMuted,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp)
+                                )
+                            }
+                            items(crewNames.distinct(), key = { it }) { name ->
+                                val cs = characterStates[name]
+                                val data = cs?.data ?: CharacterData()
+                                CharacterCard(
+                                    name = name,
+                                    data = data,
+                                    isActiveTurn = false,
+                                    onClick = { selectedCharName = name }
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
                         }
                     }
 

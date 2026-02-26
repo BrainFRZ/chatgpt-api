@@ -115,6 +115,36 @@ class SseClient(
                     val hs = gson.fromJson(data, HackState::class.java)
                     if (hs != null) SseEvent.HackStateUpdate(hackState = hs) else null
                 }
+                "ship_combat_auto_init" -> {
+                    val map: Map<String, Any> = gson.fromJson(data, mapType)
+                    SseEvent.ShipCombatAutoInit(parentId = map["parent_id"] as? String)
+                }
+                "ship_combat_error" -> {
+                    val map: Map<String, Any> = gson.fromJson(data, mapType)
+                    SseEvent.ShipCombatError(detail = map["detail"] as? String ?: data)
+                }
+                "ship_combat_done" -> {
+                    val jsonEl = gson.fromJson(data, JsonElement::class.java)
+                    val obj = jsonEl.asJsonObject
+                    val shipCombatInitMessage = obj.get("ship_combat_init_message")?.takeIf { !it.isJsonNull }?.let {
+                        gson.fromJson(it, com.chorusai.app.model.ChatMessage::class.java)
+                    }
+                    SseEvent.ShipCombatDone(
+                        tokens = obj.get("tokens")?.takeIf { !it.isJsonNull }?.asString,
+                        cost = obj.get("cost")?.takeIf { !it.isJsonNull }?.asString,
+                        stats = obj.get("stats")?.takeIf { !it.isJsonNull }?.let {
+                            gson.fromJson<Map<String, Any>>(it, mapType)
+                        },
+                        userMessageId = obj.get("user_message_id")?.takeIf { !it.isJsonNull }?.asString,
+                        assistantMessageId = obj.get("assistant_message_id")?.takeIf { !it.isJsonNull }?.asString,
+                        shipCombatInitMessage = shipCombatInitMessage,
+                        currentLeafId = obj.get("current_leaf_id")?.takeIf { !it.isJsonNull }?.asString,
+                        totalMessages = obj.get("total_messages")?.takeIf { !it.isJsonNull }?.asInt,
+                        model = obj.get("model")?.takeIf { !it.isJsonNull }?.asString,
+                        reasoning = obj.get("reasoning")?.takeIf { !it.isJsonNull }?.asString,
+                        contextStartIndex = obj.get("context_start_index")?.takeIf { !it.isJsonNull }?.asInt
+                    )
+                }
                 "docs_refreshed" -> SseEvent.DocsRefreshed
                 "done" -> {
                     val jsonEl = gson.fromJson(data, JsonElement::class.java)

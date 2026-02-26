@@ -37,9 +37,10 @@ from pipeline import (
     build_single_agent_injections, build_player_agency_reminder,
     generate_dice_pool,
     migrate_pipeline_state,
-    get_context_pairs, extract_state_notifications,
+    get_context_pairs, extract_state_notifications, extract_ship_combat_notifications,
     collapse_hack_messages,
     collapse_combat_messages,
+    collapse_ship_combat_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -2010,6 +2011,42 @@ def send_message(request: SendMessageRequest):
                 content = f"{files_text}\n\n{content}"
             return content
 
+        def build_ship_combat_hidden_init_message(parent_id: str, opening_override: str | None = None) -> dict:
+            sc_state = (data.get("pipeline_state", {}).get("ship_combat") or {})
+            handoff_summary = str(sc_state.get("handoff_summary") or "").strip()
+            opening_hint = str(opening_override if opening_override is not None else (sc_state.get("opening_narration") or "")).strip()
+            hidden_payload = {
+                "handoff_summary": handoff_summary or None,
+                "environment": sc_state.get("environment"),
+                "encounter_type": sc_state.get("encounter_type"),
+                "objective": sc_state.get("objective"),
+                "positioning": sc_state.get("positioning"),
+                "immediate_complications": sc_state.get("immediate_complications") or [],
+                "enemy_ships": sc_state.get("enemy_ships") or [],
+            }
+            hidden_lines = [
+                "This is the current situation for ship combat initialization.",
+            ]
+            if handoff_summary:
+                hidden_lines.append(f"Handoff summary (canonical): {handoff_summary}")
+            hidden_lines.append(
+                "Initialize ship combat mode: generate participating ships, crews/role coverage, and initiative order based on the fiction, then describe the opening exchange state."
+            )
+            if opening_hint:
+                hidden_lines.append(f"Opening narration hint (optional): {opening_hint}")
+            hidden_lines.append("")
+            hidden_lines.append(json.dumps(hidden_payload, indent=2))
+            return {
+                "id": generate_message_id(),
+                "parent_id": parent_id,
+                "role": "user",
+                "content": "\n".join(hidden_lines),
+                "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                "ship_combat_mode": True,
+                "ship_combat_system_init": True,
+                "ship_combat_hidden_init": True,
+            }
+
         # Build messages for API: system + in-context history + new user message
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in branch_path[context_start_index:-1]]
@@ -2276,8 +2313,9 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
     else:
         assistant_text = narrative
 
+    tool_name = str(tool_def.get("name") or "report_state")
     retry_messages = [
-        {"role": "user", "content": f"Here is the narrative from the turn you just wrote:\n\n{assistant_text}\n\nCall report_state now with the state updates for this turn."},
+        {"role": "user", "content": f"Here is the narrative from the turn you just wrote:\n\n{assistant_text}\n\nCall {tool_name} now with the state updates for this turn."},
     ]
     # Minimal system prompt: just the state contract so the model knows the schema
     params = {
@@ -2453,6 +2491,42 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             content = f"{files_text}\n\n{content}"
         return content
 
+    def build_ship_combat_hidden_init_message(parent_id: str, opening_override: str | None = None) -> dict:
+        sc_state = (data.get("pipeline_state", {}).get("ship_combat") or {})
+        handoff_summary = str(sc_state.get("handoff_summary") or "").strip()
+        opening_hint = str(opening_override if opening_override is not None else (sc_state.get("opening_narration") or "")).strip()
+        hidden_payload = {
+            "handoff_summary": handoff_summary or None,
+            "environment": sc_state.get("environment"),
+            "encounter_type": sc_state.get("encounter_type"),
+            "objective": sc_state.get("objective"),
+            "positioning": sc_state.get("positioning"),
+            "immediate_complications": sc_state.get("immediate_complications") or [],
+            "enemy_ships": sc_state.get("enemy_ships") or [],
+        }
+        hidden_lines = [
+            "This is the current situation for ship combat initialization.",
+        ]
+        if handoff_summary:
+            hidden_lines.append(f"Handoff summary (canonical): {handoff_summary}")
+        hidden_lines.append(
+            "Initialize ship combat mode: generate participating ships, crews/role coverage, and initiative order based on the fiction, then describe the opening exchange state."
+        )
+        if opening_hint:
+            hidden_lines.append(f"Opening narration hint (optional): {opening_hint}")
+        hidden_lines.append("")
+        hidden_lines.append(json.dumps(hidden_payload, indent=2))
+        return {
+            "id": generate_message_id(),
+            "parent_id": parent_id,
+            "role": "user",
+            "content": "\n".join(hidden_lines),
+            "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+            "ship_combat_mode": True,
+            "ship_combat_system_init": True,
+            "ship_combat_hidden_init": True,
+        }
+
     # Load game system for this project
     gs = None
     if request.project:
@@ -2536,12 +2610,34 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Flag the user message as a combat exchange
         user_msg_data["combat_mode"] = True
 
+    # Check if ship combat mode is active
+    use_ship_combat_mode = False
+    _ps_for_ship_combat = data.get("pipeline_state", {})
+    _ship_combat = _ps_for_ship_combat.get("ship_combat")
+    if (not use_hack_mode) and (not use_combat_mode) and _ship_combat and request.project and gs and gs.get("ship_combat_contract"):
+        use_ship_combat_mode = True
+
+    # Auto-switch Claude to GPT-5.2 for ship combat mode
+    if use_ship_combat_mode and model_id.startswith("claude"):
+        _original_model = model_id
+        model_id = DEFAULT_MODEL
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+
+    if use_ship_combat_mode:
+        user_msg_data["ship_combat_mode"] = True
+
     # Refresh client if model was auto-switched
     if _original_model:
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_ship_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
@@ -2551,6 +2647,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # GPT-5.2 combat request params (non-streaming JSON call, built separately)
     combat_gpt_request_params = None
+    # GPT-5.2 ship combat request params (non-streaming JSON call, built separately)
+    ship_combat_gpt_request_params = None
+    ship_combat_init_hidden_message_prebuilt = None
 
     if use_hack_mode:
         # ============================================================
@@ -2695,6 +2794,86 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 json_mode=True,
             )
 
+    elif use_ship_combat_mode:
+        # ============================================================
+        # Ship combat mode: stripped context with ship combat contract + roster
+        # ============================================================
+        ship_combat_ps = data.get("pipeline_state", {})
+        ship_combat = ship_combat_ps.get("ship_combat", {})
+
+        ship_combat_contract = gs["ship_combat_contract"]
+        ship_profile = gs["build_ship_combat_profile"](ship_combat_ps.get("character_states", {}), ship_combat)
+        ship_injection = gs["build_ship_combat_injection"](ship_combat, ship_combat_ps)
+
+        ship_combat_system_content = ship_combat_contract
+        if ship_profile:
+            ship_combat_system_content += "\n\n" + ship_profile
+
+        if request.project:
+            uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            for fname in ["Ship Systems.md", "Core Conversion.md"]:
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        ship_combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+            for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        ship_combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                    break
+
+        system_msg = {"role": "system", "content": ship_combat_system_content}
+
+        ship_combat_start_id = ship_combat.get("start_message_id")
+        ship_combat_history = []
+        for _bm in (ship_combat.get("bootstrap_messages") or []):
+            if isinstance(_bm, dict) and _bm.get("role") in ("user", "assistant") and isinstance(_bm.get("content"), str):
+                ship_combat_history.append({"role": _bm["role"], "content": _bm["content"]})
+        found_start = not ship_combat_start_id
+        visible_ship_combat_history_count = 0
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == ship_combat_start_id:
+                found_start = True
+            if found_start and msg.get("ship_combat_mode"):
+                ship_combat_history.append({"role": msg["role"], "content": msg["content"]})
+                visible_ship_combat_history_count += 1
+
+        user_content = build_message_content(branch_path[-1])
+        sc_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        _ship_visible_user_content = ship_injection + "\n\n" + (sc_dice_pool + "\n\n" if sc_dice_pool else "") + user_content
+        _is_first_ship_exchange_outer = not any(m.get("ship_combat_mode") for m in branch_path[1:-1])
+        if _is_first_ship_exchange_outer:
+            ship_combat_init_hidden_message_prebuilt = build_ship_combat_hidden_init_message(user_msg_id)
+            user_content = ship_combat_init_hidden_message_prebuilt["content"]
+        else:
+            user_content = _ship_visible_user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + ship_combat_history + [new_user_msg]
+        # Context index is for visible chat history only (branch_path); hidden bootstrap
+        # messages are injected into API history but do not exist in branch_path.
+        context_start_index = max(1, len(branch_path) - visible_ship_combat_history_count - 1)
+
+        logger.info(f"Ship combat mode: round {ship_combat.get('round', 1)} for {username}, "
+                    f"{len(ship_combat_history)} prior ship combat exchanges")
+
+        if model_id == "gpt-5.2":
+            gpt_ship_combat_messages = [
+                {"role": "system", "content": ship_combat_system_content
+                 + "\n\nYou MUST output valid JSON matching the report_ship_combat_state schema:\n"
+                 + json.dumps(gs["ship_combat_tool"]["input_schema"], indent=2)},
+            ] + ship_combat_history + [new_user_msg]
+            ship_combat_gpt_request_params = provider.build_pipeline_request(
+                messages=gpt_ship_combat_messages,
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="ship_combat",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
     elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
         stateful_pipeline_state = migrate_pipeline_state(copy.deepcopy(data.get("pipeline_state")))
@@ -2709,7 +2888,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         trim_anchor_id = data.get("_trim_anchor_id")
         # Collapse hack and combat messages into summary pairs before context trimming
-        branch_path_for_context = collapse_combat_messages(collapse_hack_messages(branch_path))
+        branch_path_for_context = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
             branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
         )
@@ -2767,7 +2946,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         # Collapse hack and combat messages in non-stateful path too
-        bp_filtered = collapse_combat_messages(collapse_hack_messages(branch_path))
+        bp_filtered = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
 
@@ -2807,6 +2986,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     elif use_combat_mode:
         # GPT-5.2 combat mode: request_params not used (combat_gpt_request_params used instead)
         request_params = {}
+    elif use_ship_combat_mode and model_id.startswith("claude"):
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
+        request_params["tools"] = [gs["ship_combat_tool"]]
+        request_params["tool_choice"] = {"type": "auto"}
+    elif use_ship_combat_mode:
+        request_params = {}
     else:
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -2829,6 +3021,438 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_start_index = _outer_context_start_index
         accumulated_content = ""
         accumulated_thinking = ""
+        ship_combat_triggered_this_turn = False
+        ship_combat_started_this_turn = bool(use_ship_combat_mode and not any(m.get("ship_combat_mode") for m in branch_path[1:-1]))
+        ship_combat_opening_narration_hint = (((data.get("pipeline_state") or {}).get("ship_combat") or {}).get("opening_narration")
+                                              if use_ship_combat_mode else None)
+        ship_combat_bootstrap_messages_snapshot = None
+        ship_combat_init_hidden_message_data = copy.deepcopy(ship_combat_init_hidden_message_prebuilt) if ship_combat_init_hidden_message_prebuilt else None
+
+        def _ship_combat_trigger_is_strong(sc: dict) -> bool:
+            if not isinstance(sc, dict):
+                return False
+            if not sc.get("handoff_summary"):
+                return False
+            detail_fields = [
+                sc.get("encounter_type"),
+                sc.get("objective"),
+                sc.get("positioning"),
+                sc.get("immediate_complications"),
+                sc.get("enemy_ships"),
+            ]
+            return any(bool(v) for v in detail_fields)
+
+        def _ship_opening_embedded(opening: str | None, content: str | None) -> bool:
+            if not opening or not content:
+                return False
+            norm = lambda s: " ".join(str(s).lower().split())
+            return norm(opening) in norm(content)
+
+        async def _run_ship_combat_gpt_exchange(
+            parent_msg_id: str,
+            is_first_exchange: bool,
+            opening_narration_hint: str | None,
+            result_out: dict,
+        ):
+            """Run a single ship combat GPT-5.2 exchange (bootstrap + API call + state apply).
+
+            Yields SSE event strings. Mutates data in place. Writes results into result_out.
+            Must be called via `async for event in _run_ship_combat_gpt_exchange(...)`.
+            Closure over event_generator locals: data, gs, provider, client, username, request,
+            branch_path, chat_key, sync_manager.
+            """
+            nonlocal context_start_index
+
+            if data.get("pipeline_state"):
+                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+
+            _sc_state = (data.get("pipeline_state") or {}).get("ship_combat") or {}
+            _bootstrap_done = bool(_sc_state.get("bootstrap_done"))
+            bootstrap_usage = {
+                'input_tokens': 0, 'cache_read_tokens': 0,
+                'cache_creation_tokens': 0, 'output_tokens': 0, 'reasoning_tokens': 0,
+            }
+            _local_opening_narration_hint = opening_narration_hint
+            _local_bootstrap_messages_snapshot = None
+            _local_hidden_init_data = None
+
+            try:
+                if not _bootstrap_done:
+                    if _ship_combat_trigger_is_strong(_sc_state):
+                        _sc_state["bootstrap_done"] = True
+                        _sc_state["ship_combat_handoff_source"] = "trigger"
+                        if not _sc_state.get("bootstrap_messages"):
+                            _trigger_brief = {
+                                "environment": _sc_state.get("environment"),
+                                "encounter_type": _sc_state.get("encounter_type"),
+                                "objective": _sc_state.get("objective"),
+                                "positioning": _sc_state.get("positioning"),
+                                "immediate_complications": _sc_state.get("immediate_complications", []),
+                                "enemy_ships": _sc_state.get("enemy_ships", []),
+                                "handoff_summary": _sc_state.get("handoff_summary"),
+                            }
+                            _assistant_bootstrap_text = (_sc_state.get("opening_narration") or "").strip()
+                            if _sc_state.get("handoff_summary"):
+                                _assistant_bootstrap_text = (
+                                    f"[HIDDEN SHIP COMBAT HANDOFF SUMMARY]\n{_sc_state.get('handoff_summary')}\n[/HIDDEN SHIP COMBAT HANDOFF SUMMARY]\n\n"
+                                    + _assistant_bootstrap_text
+                                ).strip()
+                            _sc_state["bootstrap_messages"] = [
+                                {
+                                    "role": "user",
+                                    "content": "Generate a set-up for ship combat mode briefly summarizing the immediate scene and lead-in.\n"
+                                               + json.dumps(_trigger_brief, indent=2),
+                                    "ship_combat_bootstrap_hidden": True,
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": _assistant_bootstrap_text or (_sc_state.get("handoff_summary") or ""),
+                                    "ship_combat_bootstrap_hidden": True,
+                                },
+                            ]
+                    else:
+                        bootstrap_schema = {
+                            "type": "object",
+                            "required": ["handoff_summary", "opening_narration"],
+                            "properties": {
+                                "handoff_summary": {"type": "string"},
+                                "opening_narration": {"type": "string"},
+                                "encounter_type": {"type": ["string", "null"]},
+                                "objective": {"type": ["string", "null"]},
+                                "positioning": {"type": ["string", "null"]},
+                                "immediate_complications": {"type": "array", "items": {"type": "string"}}
+                            }
+                        }
+                        bootstrap_system = (
+                            "You generate a hidden ship combat handoff bootstrap for a TTRPG app. "
+                            "Return JSON only. Produce a canonical handoff_summary in 1-3 sentences and a short player-facing opening narration. "
+                            "The handoff_summary must include the immediate lead-in to combat (what the crew was doing / what led to this encounter), "
+                            "not just a snapshot of the current battlefield. "
+                            "Example of good handoff_summary: 'The crew has decided to hunt pirates to make the shipping lane safer. It ran into two ships attacking a single freighter.' "
+                            "Example of too-thin handoff_summary: 'Two pirate ships are attacking a single freighter.' "
+                            "Do not resolve combat. Do not generate initiative, ship stats, or outcomes."
+                        )
+                        bootstrap_user_payload = {
+                            "task": "Create a hidden ship-combat handoff bootstrap because the trigger lacks detail.",
+                            "current_user_message": build_message_content(branch_path[-1]),
+                            "ship_combat_trigger_state": _sc_state,
+                        }
+                        bootstrap_messages = [
+                            {"role": "system", "content": bootstrap_system + "\n\nSchema:\n" + json.dumps(bootstrap_schema, indent=2)},
+                            {"role": "user", "content": json.dumps(bootstrap_user_payload, indent=2)},
+                        ]
+                        bootstrap_params = provider.build_pipeline_request(
+                            messages=bootstrap_messages,
+                            username=username,
+                            project=request.project or "",
+                            chat_name=request.chat_name,
+                            stage_name="ship_combat_bootstrap",
+                            reasoning_effort="low",
+                            json_mode=True,
+                        )
+                        bootstrap_json = {}
+                        bootstrap_ok = False
+                        # Bounded same-turn retry with minimal bootstrap-only context.
+                        for bootstrap_attempt in range(2):
+                            bootstrap_resp = await asyncio.to_thread(
+                                provider.send_request_non_streaming,
+                                client, bootstrap_params, 45.0
+                            )
+                            for k in bootstrap_usage:
+                                bootstrap_usage[k] += bootstrap_resp.get(k, 0) or 0
+                            bootstrap_content = bootstrap_resp.get("content", "")
+                            try:
+                                bootstrap_json = json.loads(bootstrap_content) if bootstrap_content else {}
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    f"Ship combat bootstrap parse failed for {username} "
+                                    f"(attempt {bootstrap_attempt + 1}/2): {bootstrap_content[:200]}"
+                                )
+                                bootstrap_json = {}
+                                continue
+
+                            if not isinstance(bootstrap_json, dict):
+                                logger.warning(
+                                    f"Ship combat bootstrap returned non-object JSON for {username} "
+                                    f"(attempt {bootstrap_attempt + 1}/2)"
+                                )
+                                bootstrap_json = {}
+                                continue
+
+                            if bootstrap_json.get("handoff_summary") or bootstrap_json.get("opening_narration"):
+                                bootstrap_ok = True
+                                break
+
+                            logger.warning(
+                                f"Ship combat bootstrap missing handoff/opening for {username} "
+                                f"(attempt {bootstrap_attempt + 1}/2)"
+                            )
+
+                        if bootstrap_ok:
+                            if bootstrap_json.get("handoff_summary"):
+                                _sc_state["handoff_summary"] = bootstrap_json.get("handoff_summary")
+                            if bootstrap_json.get("opening_narration"):
+                                _sc_state["opening_narration"] = bootstrap_json.get("opening_narration")
+                            for _f in ("encounter_type", "objective", "positioning"):
+                                if not _sc_state.get(_f) and bootstrap_json.get(_f):
+                                    _sc_state[_f] = bootstrap_json.get(_f)
+                            if not _sc_state.get("immediate_complications") and bootstrap_json.get("immediate_complications"):
+                                _sc_state["immediate_complications"] = bootstrap_json.get("immediate_complications")
+                            _sc_state["bootstrap_done"] = True
+                            _sc_state["ship_combat_handoff_source"] = "bootstrap"
+                            _sc_state["bootstrap_messages"] = [
+                                {
+                                    "role": "user",
+                                    "content": "Generate a set-up for ship combat mode briefly summarizing the immediate scene and lead-in.\n"
+                                               + json.dumps(bootstrap_user_payload, indent=2),
+                                    "ship_combat_bootstrap_hidden": True,
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": (
+                                        f"[HIDDEN SHIP COMBAT HANDOFF SUMMARY]\n{bootstrap_json.get('handoff_summary', '')}\n[/HIDDEN SHIP COMBAT HANDOFF SUMMARY]\n\n"
+                                        f"{bootstrap_json.get('opening_narration', '')}"
+                                    ).strip(),
+                                    "ship_combat_bootstrap_hidden": True,
+                                },
+                            ]
+                            logger.info(f"Ship combat hidden bootstrap generated for {username}")
+                        else:
+                            logger.warning(
+                                f"Ship combat hidden bootstrap unavailable for {username}; "
+                                "leaving bootstrap pending for next ship combat exchange"
+                            )
+
+                    _local_opening_narration_hint = _sc_state.get("opening_narration") or _local_opening_narration_hint
+            except Exception as _sc_bootstrap_err:
+                logger.warning(f"Ship combat bootstrap/handoff prep failed for {username}: {_sc_bootstrap_err}")
+
+            # Build ship combat system content and request
+            _ps = data.get("pipeline_state", {})
+            _sc = _ps.get("ship_combat", {})
+            _ship_contract = gs["ship_combat_contract"]
+            _ship_profile = gs["build_ship_combat_profile"](_ps.get("character_states", {}), _sc)
+            _ship_injection = gs["build_ship_combat_injection"](_sc, _ps)
+            _ship_system_content = _ship_contract + ("\n\n" + _ship_profile if _ship_profile else "")
+            if request.project:
+                uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                for fname in ["Ship Systems.md", "Core Conversion.md"]:
+                    fpath = os.path.join(uploads_dir, fname)
+                    if os.path.exists(fpath):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            _ship_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                    fpath = os.path.join(uploads_dir, fname)
+                    if os.path.exists(fpath):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            _ship_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                        break
+
+            # Build history
+            _ship_history = []
+            for _bm in (_sc.get("bootstrap_messages") or []):
+                if isinstance(_bm, dict) and _bm.get("role") in ("user", "assistant") and isinstance(_bm.get("content"), str):
+                    _ship_history.append({"role": _bm["role"], "content": _bm["content"]})
+            _found_start = not _sc.get("start_message_id")
+            for _m in branch_path[1:-1]:
+                if not _found_start and _m.get("id") == _sc.get("start_message_id"):
+                    _found_start = True
+                if _found_start and _m.get("ship_combat_mode"):
+                    _ship_history.append({"role": _m["role"], "content": _m["content"]})
+
+            # Build user message
+            _user_content = build_message_content(branch_path[-1])
+            _dice = generate_dice_pool(gs["id"]) if gs else ""
+            if is_first_exchange:
+                _local_hidden_init_data = build_ship_combat_hidden_init_message(
+                    parent_msg_id,
+                    opening_override=_local_opening_narration_hint
+                )
+                _new_user_msg = {"role": "user", "content": _local_hidden_init_data["content"]}
+            else:
+                _visible_ship_user_content = _ship_injection + "\n\n" + (_dice + "\n\n" if _dice else "") + _user_content
+                _new_user_msg = {"role": "user", "content": _visible_ship_user_content}
+
+            ship_combat_request_params = provider.build_pipeline_request(
+                messages=[
+                    {"role": "system", "content": _ship_system_content + "\n\nYou MUST output valid JSON matching the report_ship_combat_state schema:\n" + json.dumps(gs["ship_combat_tool"]["input_schema"], indent=2)}
+                ] + _ship_history + [_new_user_msg],
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="ship_combat",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
+            # Make API call
+            ship_combat_response = await asyncio.to_thread(
+                provider.send_request_non_streaming,
+                client, ship_combat_request_params, 60.0
+            )
+
+            ship_combat_content = ship_combat_response.get('content', '')
+            ship_combat_reasoning = ship_combat_response.get('reasoning')
+
+            ship_combat_json_valid = True
+            try:
+                ship_combat_json = json.loads(ship_combat_content)
+            except json.JSONDecodeError:
+                logger.error(f"Ship combat mode: failed to parse JSON: {ship_combat_content[:200]}")
+                ship_combat_json_valid = False
+                ship_combat_json = {}
+
+            narrative = ship_combat_json.get("narrative", ship_combat_content)
+            if narrative:
+                yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
+                )
+
+            # Snapshot bootstrap messages before state apply
+            if is_first_exchange:
+                _sc_dbg_pre = (data.get("pipeline_state", {}).get("ship_combat") or {})
+                if _sc_dbg_pre.get("bootstrap_messages"):
+                    _local_bootstrap_messages_snapshot = copy.deepcopy(_sc_dbg_pre.get("bootstrap_messages"))
+
+            # Apply state only if ship-combat JSON parsed successfully.
+            # A malformed/truncated model response should not clear the active encounter.
+            if ship_combat_json_valid:
+                ship_combat_ps = data.get("pipeline_state", {})
+                gs["apply_ship_combat_state"](ship_combat_ps, ship_combat_json)
+                data["pipeline_state"] = ship_combat_ps
+
+                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                )
+
+                ship_notifs = extract_ship_combat_notifications(ship_combat_json)
+                if ship_notifs:
+                    yield f"event: state_notifications\ndata: {json.dumps(ship_notifs)}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": ship_notifs})
+                    )
+
+            # Calculate costs
+            usage = {
+                'input_tokens': ship_combat_response.get('input_tokens', 0) + bootstrap_usage.get('input_tokens', 0),
+                'cache_read_tokens': ship_combat_response.get('cache_read_tokens', 0) + bootstrap_usage.get('cache_read_tokens', 0),
+                'cache_creation_tokens': ship_combat_response.get('cache_creation_tokens', 0) + bootstrap_usage.get('cache_creation_tokens', 0),
+                'output_tokens': ship_combat_response.get('output_tokens', 0) + bootstrap_usage.get('output_tokens', 0),
+                'reasoning_tokens': ship_combat_response.get('reasoning_tokens', 0) + bootstrap_usage.get('reasoning_tokens', 0),
+            }
+
+            from providers import ParsedResponse
+            parsed = ParsedResponse(
+                content=narrative,
+                reasoning=ship_combat_reasoning,
+                input_tokens=usage['input_tokens'],
+                cache_read_tokens=usage['cache_read_tokens'],
+                cache_creation_tokens=usage['cache_creation_tokens'],
+                output_tokens=usage['output_tokens'],
+                reasoning_tokens=usage['reasoning_tokens']
+            )
+
+            service_tier = ship_combat_response.get('service_tier')
+            new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+            total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+            if service_tier:
+                total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+            else:
+                total_cost = provider.calculate_cost(parsed)
+            tokens_str = provider.format_token_string(parsed)
+
+            actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+            stats = data.get("stats", create_empty_stats())
+            stats["total_input_tokens"] += new_input_tokens
+            stats["total_cached_tokens"] += parsed.cache_read_tokens
+            stats["total_output_tokens"] += parsed.output_tokens
+            stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+            stats["total_cost"] += actual_cost
+            stats["total_prompts"] += 1
+            stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            data["stats"] = stats
+
+            # Build assistant message
+            assistant_msg_id = generate_message_id()
+            assistant_parent_id = parent_msg_id
+            if is_first_exchange and _local_hidden_init_data:
+                data["messages"].append(_local_hidden_init_data)
+                assistant_parent_id = _local_hidden_init_data["id"]
+
+            assistant_msg_data = {
+                "id": assistant_msg_id,
+                "parent_id": assistant_parent_id,
+                "role": "assistant",
+                "content": narrative,
+                "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                "tokens": tokens_str,
+                "cost": cost_str,
+                "total_tokens": usage['output_tokens'],
+                "total_gpt_tokens": usage['output_tokens'],
+                "model": model_id,
+                "ship_combat_mode": True,
+                "ship_combat_tool_input": ship_combat_json,
+            }
+            if ship_combat_json_valid and ship_combat_json.get("combat_outcome"):
+                assistant_msg_data["ship_combat_combat_outcome"] = ship_combat_json["combat_outcome"]
+            if is_first_exchange:
+                assistant_msg_data["ship_combat_started"] = True
+                if _local_opening_narration_hint:
+                    assistant_msg_data["ship_combat_opening_narration"] = _local_opening_narration_hint
+                    assistant_msg_data["ship_combat_opening_embedded"] = _ship_opening_embedded(
+                        _local_opening_narration_hint, narrative
+                    )
+                _sc_dbg = (data.get("pipeline_state", {}).get("ship_combat") or {})
+                if _sc_dbg.get("bootstrap_messages"):
+                    assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(_sc_dbg.get("bootstrap_messages"))
+                elif _local_bootstrap_messages_snapshot:
+                    assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(_local_bootstrap_messages_snapshot)
+            if ship_combat_reasoning:
+                assistant_msg_data["reasoning"] = ship_combat_reasoning
+            if service_tier:
+                assistant_msg_data["service_tier"] = service_tier
+            if data.get("pipeline_state"):
+                assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
+
+            _active_ship_combat = data.get("pipeline_state", {}).get("ship_combat")
+            if _active_ship_combat and "start_message_id" not in _active_ship_combat:
+                _active_ship_combat["start_message_id"] = assistant_msg_id
+
+            data["messages"].append(assistant_msg_data)
+            data["current_leaf_id"] = assistant_msg_id
+            save_chat(username, request.chat_name, data, request.project)
+
+            if pending_usage is not None:
+                save_daily_usage(username, pending_usage)
+
+            update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens,
+                                    parsed.output_tokens, parsed.reasoning_tokens, actual_cost,
+                                    model=model_id, context_tokens=0)
+
+            branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+
+            # Write results for the caller
+            result_out.update({
+                "assistant_msg_id": assistant_msg_id,
+                "assistant_msg_data": assistant_msg_data,
+                "hidden_init_data": _local_hidden_init_data,
+                "narrative": narrative,
+                "reasoning": ship_combat_reasoning,
+                "tokens_str": tokens_str,
+                "cost_str": cost_str,
+                "stats": stats,
+                "service_tier": service_tier,
+                "opening_narration_hint": _local_opening_narration_hint,
+                "ship_combat_json": ship_combat_json,
+                "branch_path_final": branch_path_final,
+            })
 
         try:
             # Send init event with user message ID
@@ -2846,8 +3470,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
-            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode
-            # use_stateful, use_hack_mode, use_combat_mode are computed in the outer scope (before event_generator)
+            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode and not use_ship_combat_mode
+            # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
 
             if use_hack_mode and model_id == "gpt-5.2":
                 # ============================================================
@@ -2950,9 +3574,41 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Create assistant message (flagged as hack_mode)
                 assistant_msg_id = generate_message_id()
+                assistant_parent_id = user_msg_id
+                if ship_combat_started_this_turn:
+                    _sc_for_hidden = (data.get("pipeline_state", {}).get("ship_combat") or {})
+                    _hidden_summary = (_sc_for_hidden.get("handoff_summary") or "").strip()
+                    _hidden_opening = (ship_combat_opening_narration_hint or "").strip()
+                    _hidden_payload = {
+                        "summary": _hidden_summary,
+                        "objective": _sc_for_hidden.get("objective"),
+                        "positioning": _sc_for_hidden.get("positioning"),
+                    }
+                    hidden_content = (
+                        "This is the current situation: "
+                        f"{_hidden_summary or 'Use the ship combat trigger context and hidden handoff summary.'}\n"
+                        "Initialize ship combat mode: generate participating ships, crews/role coverage, and initiative order based on the fiction, "
+                        "then describe the opening exchange state."
+                    )
+                    if _hidden_opening:
+                        hidden_content += f"\nOpening narration hint: {_hidden_opening}"
+                    hidden_content += "\n\n" + json.dumps(_hidden_payload, indent=2)
+                    hidden_init_msg_id = generate_message_id()
+                    ship_combat_init_hidden_message_data = {
+                        "id": hidden_init_msg_id,
+                        "parent_id": user_msg_id,
+                        "role": "user",
+                        "content": hidden_content,
+                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                        "ship_combat_mode": True,
+                        "ship_combat_system_init": True,
+                        "ship_combat_hidden_init": True,
+                    }
+                    data["messages"].append(ship_combat_init_hidden_message_data)
+                    assistant_parent_id = hidden_init_msg_id
                 assistant_msg_data = {
                     "id": assistant_msg_id,
-                    "parent_id": user_msg_id,
+                    "parent_id": assistant_parent_id,
                     "role": "assistant",
                     "content": assistant_message,
                     "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
@@ -3163,9 +3819,41 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Create assistant message (flagged as combat_mode)
                 assistant_msg_id = generate_message_id()
+                assistant_parent_id = user_msg_id
+                if ship_combat_started_this_turn:
+                    _sc_for_hidden = (data.get("pipeline_state", {}).get("ship_combat") or {})
+                    _hidden_summary = (_sc_for_hidden.get("handoff_summary") or "").strip()
+                    _hidden_opening = (ship_combat_opening_narration_hint or "").strip()
+                    _hidden_payload = {
+                        "summary": _hidden_summary,
+                        "objective": _sc_for_hidden.get("objective"),
+                        "positioning": _sc_for_hidden.get("positioning"),
+                    }
+                    hidden_content = (
+                        "This is the current situation: "
+                        f"{_hidden_summary or 'Use the ship combat trigger context and hidden handoff summary.'}\n"
+                        "Initialize ship combat mode: generate participating ships, crews/role coverage, and initiative order based on the fiction, "
+                        "then describe the opening exchange state."
+                    )
+                    if _hidden_opening:
+                        hidden_content += f"\nOpening narration hint: {_hidden_opening}"
+                    hidden_content += "\n\n" + json.dumps(_hidden_payload, indent=2)
+                    hidden_init_msg_id = generate_message_id()
+                    ship_combat_init_hidden_message_data = {
+                        "id": hidden_init_msg_id,
+                        "parent_id": user_msg_id,
+                        "role": "user",
+                        "content": hidden_content,
+                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                        "ship_combat_mode": True,
+                        "ship_combat_system_init": True,
+                        "ship_combat_hidden_init": True,
+                    }
+                    data["messages"].append(ship_combat_init_hidden_message_data)
+                    assistant_parent_id = hidden_init_msg_id
                 assistant_msg_data = {
                     "id": assistant_msg_id,
-                    "parent_id": user_msg_id,
+                    "parent_id": assistant_parent_id,
                     "role": "assistant",
                     "content": assistant_message,
                     "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
@@ -3242,6 +3930,92 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 logger.info(f"Combat mode (GPT-5.2): completed for {username}, "
                             f"combat_complete={combat_json.get('combat_complete', False)}")
+
+            elif use_ship_combat_mode and model_id == "gpt-5.2":
+                # ============================================================
+                # GPT-5.2 Ship combat mode: non-streaming JSON call
+                # ============================================================
+                logger.info(f"Ship combat mode (GPT-5.2): starting for {username}")
+
+                _sc_result = {}
+                async for sse_event in _run_ship_combat_gpt_exchange(
+                    parent_msg_id=user_msg_id,
+                    is_first_exchange=ship_combat_started_this_turn,
+                    opening_narration_hint=ship_combat_opening_narration_hint,
+                    result_out=_sc_result,
+                ):
+                    yield sse_event
+
+                accumulated_content = _sc_result.get("narrative", "")
+                if _sc_result.get("reasoning"):
+                    accumulated_thinking = _sc_result["reasoning"]
+                ship_combat_init_hidden_message_data = _sc_result.get("hidden_init_data")
+                ship_combat_opening_narration_hint = _sc_result.get("opening_narration_hint", ship_combat_opening_narration_hint)
+
+                assistant_msg_id = _sc_result["assistant_msg_id"]
+                assistant_msg_data = _sc_result["assistant_msg_data"]
+                branch_path_final = _sc_result["branch_path_final"]
+                stats = _sc_result["stats"]
+                tokens_str = _sc_result["tokens_str"]
+                cost_str = _sc_result["cost_str"]
+                service_tier = _sc_result.get("service_tier")
+                ship_combat_json = _sc_result.get("ship_combat_json", {})
+
+                done_data = {
+                    'assistant_message': accumulated_content,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': _sc_result.get("reasoning"),
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': len(branch_path_final),
+                    'model': model_id,
+                    'ship_combat_mode': True,
+                }
+                if ship_combat_started_this_turn:
+                    done_data['ship_combat_started'] = True
+                    done_data['ship_combat_system_init'] = True
+                    if ship_combat_init_hidden_message_data:
+                        done_data['ship_combat_init_message'] = copy.deepcopy(ship_combat_init_hidden_message_data)
+                    if ship_combat_opening_narration_hint:
+                        done_data['ship_combat_opening_narration'] = ship_combat_opening_narration_hint
+                        done_data['ship_combat_opening_embedded'] = _ship_opening_embedded(
+                            ship_combat_opening_narration_hint, accumulated_content
+                        )
+                if service_tier:
+                    done_data['service_tier'] = service_tier
+                if _original_model:
+                    done_data['original_model'] = _original_model
+                if (
+                    isinstance(ship_combat_json, dict)
+                    and ("ship_combat" in ship_combat_json)
+                    and (ship_combat_json.get("ship_combat_complete") or ship_combat_json.get("ship_combat") is None)
+                ):
+                    done_data['ship_combat_complete'] = True
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "ship_combat_init_message": copy.deepcopy(ship_combat_init_hidden_message_data) if ship_combat_init_hidden_message_data else None,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": len(branch_path_final),
+                            "stats": stats,
+                            "context_start_index": context_start_index,
+                            "pipeline_state": data.get("pipeline_state")
+                        }
+                    )
+                )
+
+                logger.info(f"Ship combat mode (GPT-5.2): completed for {username}")
 
             elif use_pipeline:
                 # ============================================================
@@ -3525,6 +4299,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _pipeline_combat = data.get("pipeline_state", {}).get("combat")
                 if _pipeline_combat and "start_message_id" not in _pipeline_combat:
                     _pipeline_combat["start_message_id"] = assistant_msg_id
+                _pipeline_ship_combat = data.get("pipeline_state", {}).get("ship_combat")
+                if _pipeline_ship_combat and "start_message_id" not in _pipeline_ship_combat:
+                    _pipeline_ship_combat["start_message_id"] = assistant_msg_id
 
                 # Check for hack_trigger from pipeline events
                 if pipeline_result.events_json and gs and gs.get("init_hack_state"):
@@ -3552,6 +4329,39 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Pipeline hack trigger: {ht.get('tier')} on "
                                         f"{ht.get('target_system')} SR{ht.get('sr')} for {username}")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Check for ship_combat_trigger from pipeline events
+                if pipeline_result.events_json and gs and gs.get("ship_combat_contract"):
+                    try:
+                        _evts = json.loads(pipeline_result.events_json) if isinstance(pipeline_result.events_json, str) else pipeline_result.events_json
+                        if _evts.get("ship_combat_trigger"):
+                            sct = _evts["ship_combat_trigger"]
+                            _ps = data.get("pipeline_state", {})
+                            _ps["ship_combat"] = {
+                                "round": 1,
+                                "initiative_order": [],
+                                "current_ship": None,
+                                "current_role": None,
+                                "environment": sct.get("environment", "Open Space"),
+                                "handoff_summary": sct.get("handoff_summary"),
+                                "opening_narration": sct.get("opening_narration"),
+                                "encounter_type": sct.get("encounter_type"),
+                                "objective": sct.get("objective"),
+                                "positioning": sct.get("positioning"),
+                                "immediate_complications": sct.get("immediate_complications", []),
+                                "enemy_ships": sct.get("enemy_ships", []),
+                                "bootstrap_done": False,
+                                "ship_combat_handoff_source": "trigger" if sct.get("handoff_summary") else None,
+                                "bootstrap_messages": [],
+                                "start_message_id": assistant_msg_id,
+                            }
+                            data["pipeline_state"] = _ps
+                            ship_combat_triggered_this_turn = True
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            logger.info(f"Pipeline ship_combat trigger: {sct.get('environment')} "
+                                        f"enemies={sct.get('enemy_ships', [])} for {username}")
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -3654,6 +4464,98 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     SyncEvent(type=SyncEventType.STREAM_DONE, data=pipeline_stream_done_data)
                 )
 
+                # Chain ship combat init within same SSE stream if triggered this turn
+                if ship_combat_triggered_this_turn and gs and gs.get("ship_combat_contract") and not client_disconnected:
+                    logger.info(f"Pipeline: chaining ship combat init for {username}")
+                    try:
+                        yield f"event: ship_combat_auto_init\ndata: {json.dumps({'parent_id': assistant_msg_id})}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.SHIP_COMBAT_AUTO_INIT, data={"parent_id": assistant_msg_id})
+                        )
+
+                        _chain_result = {}
+                        _chain_opening = ((data.get("pipeline_state") or {}).get("ship_combat") or {}).get("opening_narration")
+                        async for sse_event in _run_ship_combat_gpt_exchange(
+                            parent_msg_id=assistant_msg_id,
+                            is_first_exchange=True,
+                            opening_narration_hint=_chain_opening,
+                            result_out=_chain_result,
+                        ):
+                            yield sse_event
+
+                        _chain_assistant_msg_id = _chain_result["assistant_msg_id"]
+                        _chain_assistant_msg_data = _chain_result["assistant_msg_data"]
+                        _chain_hidden_init = _chain_result.get("hidden_init_data")
+                        _chain_branch_path = _chain_result["branch_path_final"]
+                        _chain_opening_hint = _chain_result.get("opening_narration_hint")
+                        _chain_narrative = _chain_result.get("narrative", "")
+                        _chain_sc_json = _chain_result.get("ship_combat_json", {})
+
+                        ship_combat_done_data = {
+                            'assistant_message': _chain_narrative,
+                            'tokens': _chain_result["tokens_str"],
+                            'cost': _chain_result["cost_str"],
+                            'stats': _chain_result["stats"],
+                            'context_start_index': context_start_index,
+                            'reasoning': _chain_result.get("reasoning"),
+                            'user_message_id': user_msg_id,
+                            'assistant_message_id': _chain_assistant_msg_id,
+                            'current_leaf_id': _chain_assistant_msg_id,
+                            'total_messages': len(_chain_branch_path),
+                            'model': model_id,
+                            'ship_combat_mode': True,
+                            'ship_combat_started': True,
+                            'ship_combat_system_init': True,
+                        }
+                        if _chain_hidden_init:
+                            ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)
+                        if _chain_opening_hint:
+                            ship_combat_done_data['ship_combat_opening_narration'] = _chain_opening_hint
+                            ship_combat_done_data['ship_combat_opening_embedded'] = _ship_opening_embedded(
+                                _chain_opening_hint, _chain_narrative
+                            )
+                        if _chain_result.get("service_tier"):
+                            ship_combat_done_data['service_tier'] = _chain_result["service_tier"]
+                        if _original_model:
+                            ship_combat_done_data['original_model'] = _original_model
+                        if (
+                            isinstance(_chain_sc_json, dict)
+                            and ("ship_combat" in _chain_sc_json)
+                            and (_chain_sc_json.get("ship_combat_complete") or _chain_sc_json.get("ship_combat") is None)
+                        ):
+                            ship_combat_done_data['ship_combat_complete'] = True
+
+                        yield f"event: ship_combat_done\ndata: {json.dumps(ship_combat_done_data)}\n\n"
+
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(
+                                type=SyncEventType.STREAM_DONE,
+                                data={
+                                    "ship_combat_auto_init": True,
+                                    "assistant_message": _chain_assistant_msg_data,
+                                    "ship_combat_init_message": copy.deepcopy(_chain_hidden_init) if _chain_hidden_init else None,
+                                    "user_message_id": user_msg_id,
+                                    "assistant_message_id": _chain_assistant_msg_id,
+                                    "current_leaf_id": _chain_assistant_msg_id,
+                                    "total_messages": len(_chain_branch_path),
+                                    "stats": _chain_result["stats"],
+                                    "context_start_index": context_start_index,
+                                    "pipeline_state": data.get("pipeline_state")
+                                }
+                            )
+                        )
+                        logger.info(f"Pipeline: ship combat chained init completed for {username}")
+                    except Exception as chain_err:
+                        logger.error(f"Pipeline: ship combat chaining failed for {username}: {chain_err}")
+                        _chain_err_detail = f"Ship combat init failed: {chain_err}"
+                        yield f"event: ship_combat_error\ndata: {json.dumps({'detail': _chain_err_detail})}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": _chain_err_detail, "ship_combat_auto_init": True})
+                        )
+
                 logger.info(f"Pipeline: completed for user {username}, stages: {pipeline_result.stages_run}")
 
             else:
@@ -3721,11 +4623,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
                                         client, provider.MODEL_NAME,
-                                        request_params.get("system", []),
-                                        request_params["messages"],
                                         accumulated_content,
                                         accumulated_thinking,
-                                        gs["hack_tool"]
+                                        gs["hack_tool"],
+                                        gs.get("hack_contract", "")
                                     )
                                     if retry_usage:
                                         usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
@@ -3744,6 +4645,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Handle combat mode tool output (Claude combat mode)
                         combat_tool_input = None
+                        ship_combat_tool_input = None
                         if use_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input:
@@ -3790,11 +4692,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
                                         client, provider.MODEL_NAME,
-                                        request_params.get("system", []),
-                                        request_params["messages"],
                                         accumulated_content,
                                         accumulated_thinking,
-                                        gs["combat_tool"]
+                                        gs["combat_tool"],
+                                        gs.get("combat_contract", "")
                                     )
                                     if retry_usage:
                                         usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
@@ -3841,6 +4742,51 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         logger.warning(f"Combat mode: retry also failed for {username}")
                                 except Exception as retry_err:
                                     logger.error(f"Combat mode: retry error for {username}: {retry_err}")
+
+                        # Handle ship combat mode tool output (Claude ship combat mode)
+                        if use_ship_combat_mode and model_id.startswith("claude"):
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input:
+                                ship_combat_tool_input = tool_input
+                                _ship_combat_ps = data.get("pipeline_state", {})
+                                if ship_combat_started_this_turn:
+                                    _sc_dbg_pre = (_ship_combat_ps.get("ship_combat") or {})
+                                    if _sc_dbg_pre.get("bootstrap_messages"):
+                                        ship_combat_bootstrap_messages_snapshot = copy.deepcopy(_sc_dbg_pre.get("bootstrap_messages"))
+                                gs["apply_ship_combat_state"](_ship_combat_ps, tool_input)
+                                data["pipeline_state"] = _ship_combat_ps
+                                logger.info(f"Ship combat mode: applied state for {username}, "
+                                            f"complete={tool_input.get('ship_combat_complete', False)}")
+                            else:
+                                logger.warning(f"Ship combat mode: no tool_use_input for {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        gs["ship_combat_tool"],
+                                        gs.get("ship_combat_contract", "")
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        ship_combat_tool_input = retry_result
+                                        _ship_combat_ps = data.get("pipeline_state", {})
+                                        if ship_combat_started_this_turn:
+                                            _sc_dbg_pre = (_ship_combat_ps.get("ship_combat") or {})
+                                            if _sc_dbg_pre.get("bootstrap_messages"):
+                                                ship_combat_bootstrap_messages_snapshot = copy.deepcopy(_sc_dbg_pre.get("bootstrap_messages"))
+                                        gs["apply_ship_combat_state"](_ship_combat_ps, retry_result)
+                                        data["pipeline_state"] = _ship_combat_ps
+                                        logger.info(f"Ship combat mode: retry succeeded for {username}")
+                                    else:
+                                        logger.warning(f"Ship combat mode: retry also failed for {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Ship combat mode: retry error for {username}: {retry_err}")
 
                         # Extract tool_use input for stateful state updates
                         stateful_tool_input = None
@@ -3924,6 +4870,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                             )
 
+                        # Emit state_update for Claude ship combat mode
+                        if use_ship_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                            )
+
                         # Emit hack state update SSE events (Claude hack mode)
                         if use_hack_mode and hack_tool_input:
                             yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
@@ -3945,6 +4899,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": notifs}))
+
+                        # Emit ship combat NPC action banners (Claude ship combat path)
+                        if ship_combat_tool_input:
+                            ship_notifs = extract_ship_combat_notifications(ship_combat_tool_input)
+                            if ship_notifs:
+                                yield f"event: state_notifications\ndata: {json.dumps(ship_notifs)}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": ship_notifs})
+                                )
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
@@ -4062,9 +5026,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Add assistant message
                         assistant_msg_id = generate_message_id()
+                        assistant_parent_id = user_msg_id
+                        ship_combat_init_hidden_message_data = None
+                        if use_ship_combat_mode and ship_combat_started_this_turn:
+                            ship_combat_init_hidden_message_data = build_ship_combat_hidden_init_message(
+                                user_msg_id,
+                                opening_override=ship_combat_opening_narration_hint
+                            )
+                            data["messages"].append(ship_combat_init_hidden_message_data)
+                            assistant_parent_id = ship_combat_init_hidden_message_data["id"]
                         assistant_msg_data = {
                             "id": assistant_msg_id,
-                            "parent_id": user_msg_id,
+                            "parent_id": assistant_parent_id,
                             "role": "assistant",
                             "content": assistant_message,
                             "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
@@ -4103,6 +5076,26 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if combat_tool_input:
                                 assistant_msg_data["combat_tool_input"] = combat_tool_input
 
+                        # Flag ship combat mode messages (Claude path)
+                        if use_ship_combat_mode:
+                            assistant_msg_data["ship_combat_mode"] = True
+                            if ship_combat_tool_input:
+                                assistant_msg_data["ship_combat_tool_input"] = ship_combat_tool_input
+                                if ship_combat_tool_input.get("combat_outcome"):
+                                    assistant_msg_data["ship_combat_combat_outcome"] = ship_combat_tool_input["combat_outcome"]
+                            if ship_combat_started_this_turn:
+                                assistant_msg_data["ship_combat_started"] = True
+                                if ship_combat_opening_narration_hint:
+                                    assistant_msg_data["ship_combat_opening_narration"] = ship_combat_opening_narration_hint
+                                    assistant_msg_data["ship_combat_opening_embedded"] = _ship_opening_embedded(
+                                        ship_combat_opening_narration_hint, assistant_message
+                                    )
+                                _sc_dbg = (data.get("pipeline_state", {}).get("ship_combat") or {})
+                                if _sc_dbg.get("bootstrap_messages"):
+                                    assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(_sc_dbg.get("bootstrap_messages"))
+                                elif ship_combat_bootstrap_messages_snapshot:
+                                    assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(ship_combat_bootstrap_messages_snapshot)
+
                         data["messages"].append(assistant_msg_data)
                         data["current_leaf_id"] = assistant_msg_id
 
@@ -4110,6 +5103,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _active_combat = data.get("pipeline_state", {}).get("combat")
                         if _active_combat and "start_message_id" not in _active_combat:
                             _active_combat["start_message_id"] = assistant_msg_id
+                        _active_ship_combat = data.get("pipeline_state", {}).get("ship_combat")
+                        if _active_ship_combat and "start_message_id" not in _active_ship_combat:
+                            _active_ship_combat["start_message_id"] = assistant_msg_id
 
                         # Check for hack_trigger in normal stateful tool output
                         if (stateful_tool_input
@@ -4139,6 +5135,36 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Hack trigger: {ht.get('tier')} on {ht.get('target_system')} "
                                         f"SR{ht.get('sr')} for {username}")
+
+                        # Check for ship_combat_trigger in normal stateful tool output
+                        if (stateful_tool_input
+                            and stateful_tool_input.get("ship_combat_trigger")
+                            and gs and gs.get("ship_combat_contract")):
+                            sct = stateful_tool_input["ship_combat_trigger"]
+                            _sc_ps = data.get("pipeline_state", {})
+                            _sc_ps["ship_combat"] = {
+                                "round": 1,
+                                "initiative_order": [],
+                                "current_ship": None,
+                                "current_role": None,
+                                "environment": sct.get("environment", "Open Space"),
+                                "handoff_summary": sct.get("handoff_summary"),
+                                "opening_narration": sct.get("opening_narration"),
+                                "encounter_type": sct.get("encounter_type"),
+                                "objective": sct.get("objective"),
+                                "positioning": sct.get("positioning"),
+                                "immediate_complications": sct.get("immediate_complications", []),
+                                "enemy_ships": sct.get("enemy_ships", []),
+                                "bootstrap_done": False,
+                                "ship_combat_handoff_source": "trigger" if sct.get("handoff_summary") else None,
+                                "bootstrap_messages": [],
+                                "start_message_id": assistant_msg_id,
+                            }
+                            data["pipeline_state"] = _sc_ps
+                            ship_combat_triggered_this_turn = True
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            logger.info(f"Ship combat trigger: {sct.get('environment')} "
+                                        f"enemies={sct.get('enemy_ships', [])} for {username}")
 
                         save_chat(username, request.chat_name, data, request.project)
                         logger.info(f"Stream: saved chat for user {username}")
@@ -4222,6 +5248,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['hack_mode'] = True
                         if use_combat_mode:
                             done_data['combat_mode'] = True
+                        if use_ship_combat_mode:
+                            done_data['ship_combat_mode'] = True
+                            if ship_combat_started_this_turn:
+                                done_data['ship_combat_started'] = True
+                                done_data['ship_combat_system_init'] = True
+                                if ship_combat_init_hidden_message_data:
+                                    done_data['ship_combat_init_message'] = copy.deepcopy(ship_combat_init_hidden_message_data)
+                                if ship_combat_opening_narration_hint:
+                                    done_data['ship_combat_opening_narration'] = ship_combat_opening_narration_hint
+                                    done_data['ship_combat_opening_embedded'] = _ship_opening_embedded(
+                                        ship_combat_opening_narration_hint, assistant_message
+                                    )
                         if _original_model:
                             done_data['original_model'] = _original_model
                         if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
@@ -4229,13 +5267,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_combat_mode and combat_tool_input:
                             if combat_tool_input.get("combat_complete") or combat_tool_input.get("combat") is None:
                                 done_data['combat_complete'] = True
+                        if use_ship_combat_mode and ship_combat_tool_input:
+                            if ship_combat_tool_input.get("ship_combat_complete") or ship_combat_tool_input.get("ship_combat") is None:
+                                done_data['ship_combat_complete'] = True
                         if not client_disconnected:
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                         # Broadcast stream done to other clients
                         stream_done_data = {
-                            "assistant_message": assistant_msg_data,
-                            "user_message_id": user_msg_id,
+                                "assistant_message": assistant_msg_data,
+                                "ship_combat_init_message": copy.deepcopy(ship_combat_init_hidden_message_data) if (use_ship_combat_mode and ship_combat_started_this_turn and ship_combat_init_hidden_message_data) else None,
+                                "user_message_id": user_msg_id,
                             "assistant_message_id": assistant_msg_id,
                             "current_leaf_id": assistant_msg_id,
                             "total_messages": branch_total_messages,
@@ -4248,6 +5290,120 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             chat_key,
                             SyncEvent(type=SyncEventType.STREAM_DONE, data=stream_done_data)
                         )
+
+                        # Chain ship combat init within same SSE stream if triggered this turn
+                        if ship_combat_triggered_this_turn and not use_ship_combat_mode and gs and gs.get("ship_combat_contract") and not client_disconnected:
+                            logger.info(f"Chaining ship combat init for {username}")
+                            try:
+                                # Signal frontend to create a new assistant message placeholder
+                                yield f"event: ship_combat_auto_init\ndata: {json.dumps({'parent_id': assistant_msg_id})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(type=SyncEventType.SHIP_COMBAT_AUTO_INIT, data={"parent_id": assistant_msg_id})
+                                )
+
+                                _chain_result = {}
+                                _chain_opening = ((data.get("pipeline_state") or {}).get("ship_combat") or {}).get("opening_narration")
+                                _chain_prev_model_id = model_id
+                                _chain_prev_provider = provider
+                                _chain_prev_client = client
+                                _chain_original_model = None
+                                _chain_actual_model_id = model_id
+                                if model_id.startswith("claude"):
+                                    _chain_original_model = model_id
+                                    _chain_model_id = DEFAULT_MODEL
+                                    _chain_provider = ProviderRegistry.get(_chain_model_id)
+                                    _chain_api_key = get_api_key(username, ProviderRegistry.get_required_api_key(_chain_model_id))
+                                    if not _chain_provider or not _chain_api_key:
+                                        raise RuntimeError("Ship combat auto-init requires a GPT provider/API key")
+                                    model_id = _chain_model_id
+                                    _chain_actual_model_id = _chain_model_id
+                                    provider = _chain_provider
+                                    client = provider.get_client(_chain_api_key)
+                                try:
+                                    async for sse_event in _run_ship_combat_gpt_exchange(
+                                        parent_msg_id=assistant_msg_id,
+                                        is_first_exchange=True,
+                                        opening_narration_hint=_chain_opening,
+                                        result_out=_chain_result,
+                                    ):
+                                        yield sse_event
+                                finally:
+                                    model_id = _chain_prev_model_id
+                                    provider = _chain_prev_provider
+                                    client = _chain_prev_client
+
+                                _chain_assistant_msg_id = _chain_result["assistant_msg_id"]
+                                _chain_assistant_msg_data = _chain_result["assistant_msg_data"]
+                                _chain_hidden_init = _chain_result.get("hidden_init_data")
+                                _chain_branch_path = _chain_result["branch_path_final"]
+                                _chain_opening_hint = _chain_result.get("opening_narration_hint")
+                                _chain_narrative = _chain_result.get("narrative", "")
+                                _chain_sc_json = _chain_result.get("ship_combat_json", {})
+
+                                ship_combat_done_data = {
+                                    'assistant_message': _chain_narrative,
+                                    'tokens': _chain_result["tokens_str"],
+                                    'cost': _chain_result["cost_str"],
+                                    'stats': _chain_result["stats"],
+                                    'context_start_index': context_start_index,
+                                    'reasoning': _chain_result.get("reasoning"),
+                                    'user_message_id': user_msg_id,
+                                    'assistant_message_id': _chain_assistant_msg_id,
+                                    'current_leaf_id': _chain_assistant_msg_id,
+                                    'total_messages': len(_chain_branch_path),
+                                    'model': _chain_actual_model_id,
+                                    'ship_combat_mode': True,
+                                    'ship_combat_started': True,
+                                    'ship_combat_system_init': True,
+                                }
+                                if _chain_hidden_init:
+                                    ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)
+                                if _chain_opening_hint:
+                                    ship_combat_done_data['ship_combat_opening_narration'] = _chain_opening_hint
+                                    ship_combat_done_data['ship_combat_opening_embedded'] = _ship_opening_embedded(
+                                        _chain_opening_hint, _chain_narrative
+                                    )
+                                if _chain_result.get("service_tier"):
+                                    ship_combat_done_data['service_tier'] = _chain_result["service_tier"]
+                                if _chain_original_model or _original_model:
+                                    ship_combat_done_data['original_model'] = _chain_original_model or _original_model
+                                if (
+                                    isinstance(_chain_sc_json, dict)
+                                    and ("ship_combat" in _chain_sc_json)
+                                    and (_chain_sc_json.get("ship_combat_complete") or _chain_sc_json.get("ship_combat") is None)
+                                ):
+                                    ship_combat_done_data['ship_combat_complete'] = True
+
+                                yield f"event: ship_combat_done\ndata: {json.dumps(ship_combat_done_data)}\n\n"
+
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(
+                                        type=SyncEventType.STREAM_DONE,
+                                        data={
+                                            "ship_combat_auto_init": True,
+                                            "assistant_message": _chain_assistant_msg_data,
+                                            "ship_combat_init_message": copy.deepcopy(_chain_hidden_init) if _chain_hidden_init else None,
+                                            "user_message_id": user_msg_id,
+                                            "assistant_message_id": _chain_assistant_msg_id,
+                                            "current_leaf_id": _chain_assistant_msg_id,
+                                            "total_messages": len(_chain_branch_path),
+                                            "stats": _chain_result["stats"],
+                                            "context_start_index": context_start_index,
+                                            "pipeline_state": data.get("pipeline_state")
+                                        }
+                                    )
+                                )
+                                logger.info(f"Ship combat chained init completed for {username}")
+                            except Exception as chain_err:
+                                logger.error(f"Ship combat chaining failed for {username}: {chain_err}")
+                                _chain_err_detail = f"Ship combat init failed: {chain_err}"
+                                yield f"event: ship_combat_error\ndata: {json.dumps({'detail': _chain_err_detail})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(type=SyncEventType.STREAM_ERROR, data={"detail": _chain_err_detail, "ship_combat_auto_init": True})
+                                )
 
                 logger.info(f"Stream loop completed for user {username}")
 
