@@ -813,6 +813,7 @@ Ships roll initiative (1d20 + pilot's DEX modifier). Each ship's turn has crew r
 3. Pilot
 4. Gunner
 5. Engineer
+6. Boarding (only when boarding_active — character-level combat within the ship)
 
 Not all roles need to act every turn — skip roles with no meaningful action. NPC crews act as a block (you choose their role actions). Do not decide a PC's action for the player.
 
@@ -822,6 +823,7 @@ Not all roles need to act every turn — skip roles with no meaningful action. N
 - Only report roles that actually exist on that ship (based on generated crew assignments / automation). Do not assume every ship has all five roles.
 - These are displayed as state notification banners so the player can see exactly what each NPC did mechanically.
 - Format: `{ship_name, role, character_name (if named), action, effect}`
+- Boarding NPC actions use `role: "boarding"` — one entry per boarding combatant who acts.
 
 ### Ship Generation & Crew Coverage
 - Generate ship crews/role coverage based on fiction, ship type/size, and current story context.
@@ -840,6 +842,44 @@ Not all roles need to act every turn — skip roles with no meaningful action. N
 - A [DICE POOL] block is provided with pre-rolled random values. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
 - When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this.
 
+### Boarding Operations
+Boarding is a sub-phase of ship combat that handles character-level fighting inside a boarded vessel. Both theaters (bridge crew managing ship systems + boarding party fighting in corridors) coexist within the same turn structure.
+
+**Initiating Boarding:**
+- A Captain can order boarding when ships are grappled, docked, or hull-breached at close range.
+- Add the `boarding_active` condition to both the attacking and defending ship.
+- Report the initial `boarding_state` with attacker/defender ships, parties, and contested sections.
+
+**Boarding Turn Structure:**
+- Phase 6 after Engineer. Boarding combatants act in character initiative order (1d20 + DEX mod).
+- Uses simplified D&D 5E: Action + Bonus Action + Movement (30 ft through ship corridors).
+- Attack rolls: 1d20 + attack bonus vs AC. Damage per weapon/ability as normal.
+- The boarding phase resolves all boarding combatant actions before the next ship's turn.
+
+**Boarding-Specific Actions:**
+- **Breach Airlock** (Captain/Engineer): Force open a docking seal or internal hatch. STR or Tech check vs DC set by hull integrity.
+- **Defend Corridor**: Take a defensive position in a chokepoint. Attackers moving through have disadvantage on attacks against you.
+- **Seal Bulkhead** (Engineer): Seal a corridor to block movement. Requires a STR/Tech check to re-open.
+- **Vent Atmosphere** (Engineer): Decompress a section. All creatures in section make CON save DC 15 or take 3d6 damage and are stunned for 1 round. Requires life support access.
+- **Emergency Maneuver** (Pilot): Sharp thrust or spin. All unsecured creatures on both ships DEX save DC 14 or fall prone.
+- **Rally Crew** (Captain): Inspiring command. Allies in earshot gain advantage on their next attack roll or saving throw.
+- **Suppressive Fire at Airlock** (Gunner): Lay down fire at a breach point. Creatures attempting to pass make DEX save DC 15 or take 2d8 damage and must stop movement.
+
+**Crew Role Interactions During Boarding:**
+- **Captain**: Order boarding, Rally Crew, coordinate boarding party priorities.
+- **Sensors**: Scan for life signs to locate defenders, identify ambush points, track boarding party progress.
+- **Pilot**: Emergency Maneuver to disrupt boarders, maintain stable docking, attempt emergency undock.
+- **Gunner**: Suppressive Fire at Airlock, continue ship-to-ship fire if other enemies present.
+- **Engineer**: Seal Bulkhead, Vent Atmosphere, lock/unlock internal doors, maintain life support.
+
+**Boarding Resolution:**
+Boarding ends (remove `boarding_active` from both ships) when:
+- All attackers are down or retreat back to their ship.
+- All defenders are down or surrender.
+- The bridge is secured — the attacking party captures the ship.
+- Mutual withdrawal — both sides disengage.
+Set `boarding_phase` to "repelled" or "secured" accordingly and include `boarding_outcome` in `combat_outcome` if ship combat also ends.
+
 ### Narrative Style
 - Present tense, visceral, cinematic. Think Expanse-style naval combat.
 - 3-6 sentences per exchange. Name ships, crew members, and systems.
@@ -856,7 +896,8 @@ Valid end conditions include (not limited to):
 - All enemies surrender (or are otherwise no longer fighting)
 - The player crew escapes / disengages successfully
 - The player crew abandons ship (combat ends even if the ship remains in danger)
-- A negotiated ceasefire, parley, or stand-down ends hostilities"""
+- A negotiated ceasefire, parley, or stand-down ends hostilities
+- Enemy ship captured via boarding (bridge secured by attacking party)"""
 
 
 REPORT_SHIP_COMBAT_STATE_TOOL = {
@@ -949,6 +990,7 @@ REPORT_SHIP_COMBAT_STATE_TOOL = {
             "ship_combat": {
                 "type": ["object", "null"],
                 "description": "Current ship combat tracker state. null when combat ends.",
+                "required": ["boarding_state"],
                 "properties": {
                     "round": {"type": "integer", "minimum": 1},
                     "initiative_order": {
@@ -964,8 +1006,45 @@ REPORT_SHIP_COMBAT_STATE_TOOL = {
                         }
                     },
                     "current_ship": {"type": ["string", "null"]},
-                    "current_role": {"type": ["string", "null"], "enum": ["captain", "sensors", "pilot", "gunner", "engineer", None]},
-                    "environment": {"type": "string"}
+                    "current_role": {"type": ["string", "null"], "enum": ["captain", "sensors", "pilot", "gunner", "engineer", "boarding", None]},
+                    "environment": {"type": "string"},
+                    "boarding_state": {
+                        "type": ["object", "null"],
+                        "description": "Active boarding operation state. null when no boarding is in progress.",
+                        "properties": {
+                            "attacker_ship": {"type": "string"},
+                            "defender_ship": {"type": "string"},
+                            "boarding_round": {"type": "integer", "minimum": 1},
+                            "attacker_party": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name", "status"],
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "status": {"type": "string", "enum": ["active", "down", "retreated"]}
+                                    }
+                                }
+                            },
+                            "defender_party": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name", "status"],
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "status": {"type": "string", "enum": ["active", "down", "surrendered"]}
+                                    }
+                                }
+                            },
+                            "boarding_phase": {"type": "string", "enum": ["breach", "fighting", "secured", "repelled"]},
+                            "contested_sections": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Ship sections being fought over (e.g. 'airlock-2', 'corridor-b', 'bridge')"
+                            }
+                        }
+                    }
                 }
             },
             "npc_actions": {
@@ -976,7 +1055,7 @@ REPORT_SHIP_COMBAT_STATE_TOOL = {
                     "required": ["ship_name", "role", "action", "effect"],
                     "properties": {
                         "ship_name": {"type": "string"},
-                        "role": {"type": "string", "enum": ["captain", "sensors", "pilot", "gunner", "engineer"]},
+                        "role": {"type": "string", "enum": ["captain", "sensors", "pilot", "gunner", "engineer", "boarding"]},
                         "character_name": {"type": ["string", "null"]},
                         "action": {"type": "string"},
                         "effect": {"type": "string"}
@@ -1000,7 +1079,7 @@ REPORT_SHIP_COMBAT_STATE_TOOL = {
                                 "ship_name": {"type": "string"},
                                 "faction": {"type": "string"},
                                 "hull_percent": {"type": "integer", "description": "Hull remaining as percentage"},
-                                "status": {"type": "string", "enum": ["operational", "disabled", "destroyed", "fled", "surrendered"]}
+                                "status": {"type": "string", "enum": ["operational", "disabled", "destroyed", "fled", "surrendered", "captured"]}
                             }
                         }
                     },
@@ -1008,6 +1087,16 @@ REPORT_SHIP_COMBAT_STATE_TOOL = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Key moments worth remembering (boarding attempts, critical hits, dramatic maneuvers)"
+                    },
+                    "boarding_outcome": {
+                        "type": ["object", "null"],
+                        "description": "Boarding result when boarding was part of the engagement. null if no boarding occurred.",
+                        "properties": {
+                            "result": {"type": "string", "enum": ["captured", "repelled", "mutual_withdrawal", "defenders_overwhelmed"]},
+                            "captured_ship": {"type": ["string", "null"]},
+                            "casualties_attacker": {"type": "integer"},
+                            "casualties_defender": {"type": "integer"}
+                        }
                     }
                 }
             }
@@ -1133,6 +1222,39 @@ def build_ship_combat_injection(ship_combat, pipeline_state):
                 lines.append(f"  - {row.get('ship_name')} (Init {row.get('initiative')}, {row.get('faction')})")
             else:
                 lines.append(f"  - {row}")
+    # Boarding state rendering
+    boarding = sc.get("boarding_state")
+    if isinstance(boarding, dict) and boarding.get("attacker_ship"):
+        lines.append("--- BOARDING ACTIVE ---")
+        lines.append(f"Attacker: {boarding.get('attacker_ship')} → Defender: {boarding.get('defender_ship')}")
+        lines.append(f"Boarding Round: {boarding.get('boarding_round', 1)}  Phase: {boarding.get('boarding_phase', 'breach')}")
+        sections = boarding.get("contested_sections") or []
+        if sections:
+            lines.append(f"Contested Sections: {', '.join(sections)}")
+        for side_key, side_label in [("attacker_party", "Attackers"), ("defender_party", "Defenders")]:
+            party = boarding.get(side_key) or []
+            if party:
+                active = []
+                not_active = []
+                for m in party:
+                    if not isinstance(m, dict):
+                        continue
+                    name = m.get("name")
+                    status = m.get("status", "?")
+                    if not name:
+                        continue
+                    if status == "active":
+                        active.append(name)
+                    else:
+                        not_active.append(f"{name} ({status})")
+                parts = []
+                if active:
+                    parts.append(", ".join(active))
+                if not_active:
+                    parts.append("; ".join(not_active))
+                if parts:
+                    lines.append(f"  {side_label}: {' | '.join(parts)}")
+        lines.append("--- END BOARDING ---")
     lines.append("[/SHIP COMBAT STATE]")
     return "\n".join(lines)
 
@@ -1439,7 +1561,7 @@ SHIP COMBAT TRIGGER:
 - `handoff_summary` should be a 1-3 sentence canonical summary of the immediate setup that ship combat mode can use to initialize ships, crews, and initiative.
 - `opening_narration` is optional player-facing prose the app may show as `BEGINNING SHIP COMBAT`.
 - `enemy_ships` entries may include optional `ship_type` and `size_class` hints to improve crew/role coverage generation.
-- Only trigger for actual ship-to-ship weaponized engagements. Docking disputes, boarding-only scenes, or disengagement without weapons fire do not trigger ship combat mode.
+- Trigger for ship-to-ship weaponized engagements and boarding operations. Boarding-only scenes (pirate boarding, marine assault) DO trigger ship combat mode — the boarding sub-phase handles character-level combat within ship combat. Docking disputes or disengagement without weapons fire or boarding do not trigger ship combat mode.
 - Set to null on all other turns (the vast majority).
 - Describe the moment of jacking in narratively in the current turn. The app will switch to hack mode for subsequent exchanges.
 
