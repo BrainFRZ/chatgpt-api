@@ -469,6 +469,7 @@ CHARACTER STATES:
 - If the block is absent (first turn or no prior Mechanics data), derive character states from the context window and project files
 - This is persisted across turns by Mechanics — it is your authoritative source for mechanical state that may have scrolled out of the context window
 - If the injected state conflicts with project files (e.g. character sheets show max HP but state shows current HP after damage), the injected state takes precedence — only update it based on events in the conversation
+- DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay, even if no dice rolls seem needed (Mechanics always updates the HUD)
@@ -568,6 +569,13 @@ CHARACTER STATES:
 - Start from the "character_states" in the Events JSON (the previous turn's state) and apply all state_changes from your beats
 - Include HP, spell slots, class resources, conditions, and any other mechanically relevant state
 - This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
+- DELTA OPS: Instead of rewriting the full character state, you can include delta fields to modify the existing persisted state:
+  - "_conditions_add": ["Poisoned", "Frightened"] → appends conditions to the character
+  - "_conditions_remove": ["Blessed"] → removes conditions from the character
+  - "_resource_deltas": [{"label": "Spell Slots (1st)", "delta": -1}] → adjusts a resource's current value by delta (clamped to 0..max)
+  - Delta ops are merged into the existing persisted state, so you only need to specify what changed — not reproduce the entire block
+  - You can combine delta ops with full fields (e.g. provide updated "vitals" alongside "_conditions_add")
+  - Example: {"Kira": {"type": "pc", "_conditions_add": ["Exhausted"], "_resource_deltas": [{"label": "Spell Slots (2nd)", "delta": -1}]}}
 
 SCHEMA B - Route to Output (ONLY for OOC mechanics questions):
 {

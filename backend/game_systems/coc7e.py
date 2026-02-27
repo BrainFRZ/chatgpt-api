@@ -311,6 +311,7 @@ CHARACTER STATES (structured format):
 - "conditions": array of active conditions (e.g. "Temporary Insanity", "Major Wound", "Poisoned")
 - "summary": brief string for equipment/notes
 - Do NOT include SAN, Bonds, or Mythos here — those are managed by investigator_ops and shown in [INVESTIGATOR STATE]
+- DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 COMBAT (CoC style):
 - DEX-order initiative (highest DEX acts first)
@@ -506,6 +507,11 @@ IMPORTANT:
 - Output ONLY valid JSON
 - Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
+- DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
+  - "_conditions_add": ["Temporary Insanity"] → appends conditions
+  - "_conditions_remove": ["Major Wound"] → removes conditions
+  - "_resource_deltas": [{"label": "Luck", "delta": -5}] → adjusts resource current value (clamped to 0..max)
+  - Delta ops merge into existing persisted state — you only need to specify what changed
 
 ROLL ADJUDICATION:
 - A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.

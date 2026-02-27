@@ -342,6 +342,7 @@ CHARACTER STATES (structured format):
 - "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
 - "summary": brief string for weapons, armor SP, equipment
 - Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks — character_states mirrors vitals/resources for HUD rendering
+- DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 COMBAT (Cyberpunk RED):
 - Initiative: REF + 1d10; ties broken by REF stat
@@ -543,6 +544,11 @@ IMPORTANT:
 - Output ONLY valid JSON
 - Pass through edgerunner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
+- DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
+  - "_conditions_add": ["Seriously Wounded"] → appends conditions
+  - "_conditions_remove": ["Critical Injury: Broken Arm"] → removes conditions
+  - "_resource_deltas": [{"label": "Luck", "delta": -1}] → adjusts resource current value (clamped to 0..max)
+  - Delta ops merge into existing persisted state — you only need to specify what changed
 
 ROLL ADJUDICATION:
 - A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.

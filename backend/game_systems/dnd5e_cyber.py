@@ -1662,6 +1662,7 @@ CHARACTER STATES:
 - Ships should be included as entries with type "ship" — vitals include Hull/Shields, resources include ammo
 - Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost" — NOT "class": "Netrunner (Ghost)". Set subclass to null if the character has no subclass or hasn't reached the level that unlocks it.
 - Only populate the "features" array if there is no Core Conversion doc in the project files. When a conversion doc exists, features are injected automatically from it.
+- DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
@@ -1769,6 +1770,13 @@ CHARACTER STATES:
 - This is persisted across turns — if you don't include a spent spell slot, it will appear unspent next turn
 - Ships should be included as entries with type "ship" — update Hull/Shields/ammo after combat
 - Report "class" and "subclass" as separate fields: e.g. "class": "Netrunner", "subclass": "Ghost". Set subclass to null if none or not yet unlocked.
+- DELTA OPS: Instead of rewriting the full character state, you can include delta fields to modify the existing persisted state:
+  - "_conditions_add": ["Poisoned", "Frightened"] → appends conditions to the character
+  - "_conditions_remove": ["Blessed"] → removes conditions from the character
+  - "_resource_deltas": [{"label": "Spell Slots (1st)", "delta": -1}] → adjusts a resource's current value by delta (clamped to 0..max)
+  - Delta ops are merged into the existing persisted state, so you only need to specify what changed — not reproduce the entire block
+  - You can combine delta ops with full fields (e.g. provide updated "vitals" alongside "_conditions_add")
+  - Example: {"Kira": {"type": "pc", "_conditions_add": ["Exhausted"], "_resource_deltas": [{"label": "Spell Slots (2nd)", "delta": -1}]}}
 
 SHIP COMBAT HUD:
 - During ship combat, include ship status in the HUD or dramatic_notes

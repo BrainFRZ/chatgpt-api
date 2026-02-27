@@ -342,6 +342,7 @@ CHARACTER STATES:
 - "conditions": array of strings — "Wounded", "Stun Overflow", etc.
 - "summary": free-text for equipment, active cyberware, gear
 - Essence, Nuyen, Sustained Spells, Active Effects are tracked via runner_ops — NOT in character_states
+- DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 COMBAT (Shadowrun 6E):
 - Initiative: Reaction + Intuition + modifiers; ties broken by Edge, then REA
@@ -530,6 +531,12 @@ CHARACTER STATES:
 - Start from the "character_states" in the Events JSON (the previous turn's state) and apply all state_changes from your beats
 - Include Physical/Stun CM, Edge, conditions, and any other mechanically relevant state
 - This is persisted across turns — if you don't include a change, it will appear unchanged next turn
+- DELTA OPS: Instead of rewriting the full character state, you can include delta fields to modify the existing persisted state:
+  - "_conditions_add": ["Wounded"] → appends conditions to the character
+  - "_conditions_remove": ["Stun Overflow"] → removes conditions from the character
+  - "_resource_deltas": [{"label": "Edge", "delta": -1}] → adjusts a resource's current value by delta (clamped to 0..max)
+  - Delta ops are merged into the existing persisted state, so you only need to specify what changed — not reproduce the entire block
+  - You can combine delta ops with full fields (e.g. provide updated "vitals" alongside "_conditions_add")
 
 IMPORTANT:
 - Output ONLY valid JSON

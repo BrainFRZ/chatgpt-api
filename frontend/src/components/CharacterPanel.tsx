@@ -542,7 +542,7 @@ export default function CharacterPanel({
               <div key={i} style={{ fontSize: '0.65rem', color: '#999' }}>
                 <span>{r.label}: </span>
                 {Array.from({ length: r.max || 0 }, (_, pi) => (
-                  <span key={pi} style={{ color: pi < (r.current || 0) ? resourceColor(r.label) : '#3a3a5e', fontSize: '0.75rem' }}>{pi < (r.current || 0) ? '●' : '○'}</span>
+                  <span key={pi} style={{ color: pi < (r.current || 0) ? resourceColor(r.label) : '#3a3a5e', fontSize: '0.75rem' }}>●</span>
                 ))}
               </div>
             ))}

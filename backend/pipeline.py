@@ -863,12 +863,61 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
     Accepts both:
       - New structured format: {"name": {"type": "pc", "vitals": [...], ...}}
       - Old string format: {"name": "state string"} → wrapped as {"data": {"summary": str}, ...}
+
+    Delta ops (applied on top of existing state before full replacement):
+      - "_conditions_add": ["Poisoned", ...] → append to existing conditions
+      - "_conditions_remove": ["Blessed", ...] → remove from existing conditions
+      - "_resource_deltas": [{"label": "Spell Slots (1st)", "delta": -1}, ...] → adjust current value
+
     Entries not updated in CHARACTER_STATE_TTL turns are pruned.
     """
     # Merge new entries from Mechanics
     for name, state_val in mechanics_output.items():
         if isinstance(state_val, dict):
-            existing[name] = {"data": state_val, "last_updated": current_turn}
+            # Check for delta ops — apply against existing state
+            cond_add = state_val.pop("_conditions_add", None)
+            cond_remove = state_val.pop("_conditions_remove", None)
+            res_deltas = state_val.pop("_resource_deltas", None)
+
+            if cond_add or cond_remove or res_deltas:
+                # Start from existing data if available, merge new fields on top
+                old_entry = existing.get(name)
+                if isinstance(old_entry, dict):
+                    base = dict(old_entry.get("data", {}))
+                else:
+                    base = {}
+                # Overlay any non-delta fields the model provided
+                for k, v in state_val.items():
+                    base[k] = v
+                # Apply condition deltas
+                conditions = list(base.get("conditions", []))
+                if cond_add:
+                    for c in cond_add:
+                        if c not in conditions:
+                            conditions.append(c)
+                if cond_remove:
+                    for c in cond_remove:
+                        if c in conditions:
+                            conditions.remove(c)
+                base["conditions"] = conditions
+                # Apply resource deltas
+                if res_deltas and isinstance(res_deltas, list):
+                    resources = base.get("resources", [])
+                    for rd in res_deltas:
+                        label = rd.get("label")
+                        delta = rd.get("delta", 0)
+                        if not label or not delta:
+                            continue
+                        for res in resources:
+                            if res.get("label") == label and "current" in res:
+                                res["current"] = max(0, res["current"] + delta)
+                                if "max" in res:
+                                    res["current"] = min(res["current"], res["max"])
+                                break
+                    base["resources"] = resources
+                existing[name] = {"data": base, "last_updated": current_turn}
+            else:
+                existing[name] = {"data": state_val, "last_updated": current_turn}
         else:
             # Old string format → wrap into structured format
             existing[name] = {"data": {"summary": str(state_val)}, "last_updated": current_turn}

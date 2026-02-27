@@ -1027,14 +1027,20 @@ private fun ResourceDotsRow(resource: ResourceEntry) {
     val color = resourceDotColor(resource.label)
     val cur = resource.current.toInt().coerceIn(0, 20)
     val mx = resource.max.toInt().coerceIn(0, 20)
-    val dots = buildString {
-        repeat(cur) { append("\u25CF") }
-        repeat((mx - cur).coerceAtLeast(0)) { append("\u25CB") }
-    }
+    val emptyColor = Color(0xFF3A3A5E)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(text = resource.label, color = TextMuted, fontSize = 10.sp)
         Spacer(modifier = Modifier.width(4.dp))
-        Text(text = dots, color = color, fontSize = 8.sp, letterSpacing = 1.sp)
+        val filledDots = "\u25CF".repeat(cur)
+        val emptyDots = "\u25CF".repeat((mx - cur).coerceAtLeast(0))
+        Text(
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = color)) { append(filledDots) }
+                withStyle(SpanStyle(color = emptyColor)) { append(emptyDots) }
+            },
+            fontSize = 8.sp,
+            letterSpacing = 1.sp
+        )
     }
 }
 
