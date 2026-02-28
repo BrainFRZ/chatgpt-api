@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { ChatMessage, ChatStats } from '../types';
 
 interface UseMessagingDeps {
@@ -40,13 +40,37 @@ interface UseMessagingDeps {
 }
 
 export function useMessaging(deps: UseMessagingDeps) {
-  const [newMessage, setNewMessage] = useState('');
+  const [newMessage, setNewMessageRaw] = useState('');
   const [stagedFiles, setStagedFiles] = useState<{filename: string, content: string}[]>([]);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [textareaHeight, setTextareaHeight] = useState(85);
 
   const chatFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load draft from sessionStorage when chat changes
+  useEffect(() => {
+    if (deps.user && deps.currentChat) {
+      const key = `inputDraft:${deps.user.username}:${deps.currentChat}`;
+      const saved = sessionStorage.getItem(key);
+      setNewMessageRaw(saved || '');
+    } else {
+      setNewMessageRaw('');
+    }
+  }, [deps.currentChat, deps.user?.username]);
+
+  // Wrapped setter that persists to sessionStorage
+  const setNewMessage = useCallback((value: string) => {
+    setNewMessageRaw(value);
+    if (deps.user && deps.currentChat) {
+      const key = `inputDraft:${deps.user.username}:${deps.currentChat}`;
+      if (value) {
+        sessionStorage.setItem(key, value);
+      } else {
+        sessionStorage.removeItem(key);
+      }
+    }
+  }, [deps.user?.username, deps.currentChat]);
 
   const createContextGuard = () => {
     const chat = deps.currentChat;
