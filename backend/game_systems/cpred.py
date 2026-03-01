@@ -56,7 +56,7 @@ def _default_edgerunner():
 def _update_seriously_wounded(er):
     """Auto-derive seriously_wounded flag from HP."""
     hp = er.get("hp", {})
-    hp["seriously_wounded"] = hp.get("current", 0) <= hp.get("max", 40) // 2
+    hp["seriously_wounded"] = hp.get("current", 0) < (hp.get("max", 40) + 1) // 2
 
 
 def apply_game_state(game_state, agent_json, turn):
@@ -87,7 +87,7 @@ def apply_game_state(game_state, agent_json, turn):
     for op_data in ops:
         er_name = op_data.get("edgerunner")
         op = op_data.get("op")
-        if not er_name or not op:
+        if not isinstance(er_name, str) or not er_name or not op:
             continue
 
         # Auto-create edgerunner stub if not yet tracked
@@ -381,6 +381,8 @@ Use "edgerunner_ops" to update this state. Operations:
 
 IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
 
+OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Do NOT emit HP, armor, critical injury, or Luck-spent ops for outcomes that depend on Mechanics — Mechanics emits those after adjudication.
+
 CHARACTER STATES (structured format):
 - "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
 - "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
@@ -400,15 +402,20 @@ COMBAT (Cyberpunk RED):
   {"round": 1, "initiative_order": ["<name1>", ...], "current_turn": "<name>"}
 - Cyberpunk RED combat is brutal — armor ablates, critical injuries accumulate, death spirals fast
 
-DICE MECHANICS (teach to Mechanics via beats):
-- Skill checks: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29)
-- Exploding 10s: roll again and add; keep exploding
-- Fumble 1s: roll again and subtract from total
-- Luck: spend Luck points to add to any roll (1:1)
-- Armor ablation: SP drops by 1 per penetrating hit
-- Seriously Wounded: -2 to all actions when HP ≤ half max
-- Critical injuries: triggered at 13+ damage in a single hit after armor
-- Death Saves: BODY + WILL + d10 vs DV 10 (+1 per round, +dv_mod from injuries)
+RULES REFERENCE:
+The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you reference most often — defer to the Core Rulebook for edge cases and detailed tables.
+
+DICE MECHANICS (quick reference — teach to Mechanics via beats):
+- Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
+- DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
+- Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
+- Critical failure: natural 1 → roll another d10 and subtract. Does NOT chain on a second 1.
+- Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
+- Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
+- Armor ablation: SP drops by 1 per penetrating hit. AP ammo ablates by 2.
+- Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
+- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
+- Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Flag social encounters so Mechanics applies these correctly.
 
 PACING:
 - Gigs are job-based: Contact → Legwork → Action → Payoff
@@ -457,12 +464,7 @@ ROUTING RULES:
 - Route to "output" ONLY for pure OOC questions
 
 CHARACTER CREATION:
-- When [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are in the system prompt, the player needs to create an edgerunner.
-- Route to "output" during creation (this is OOC). Write conversational creation guidance as "content", walking the player through one step at a time.
-- Include partial "character_states" in your output as the edgerunner takes shape — the system will persist these even on output-routed turns.
-- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB as those values are determined during creation.
-- Leave callback_ops and npc_memory_ops empty during creation.
-- Maintain scene_state unchanged (or minimal) during creation.
+- Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -506,20 +508,26 @@ SCHEMA A - Route to Narration (default):
       ],
       "damage": {
         "weapon": "<weapon used>",
+        "hit_location": "head|body",
         "base_damage": <weapon damage>,
         "rolls": [<damage dice>],
         "total_damage": <total>,
-        "armor_sp": <target SP>,
+        "armor_sp": <location SP>,
         "damage_after_armor": <penetrating damage>,
         "ablation": <true if armor penetrated>,
-        "critical_injury": "<null or injury name if 13+ damage>"
+        "critical_injury": "<null or injury name+effect if 2+ damage dice show 6>"
       },
       "state_changes": ["<change from this beat>", ...]
     }
   ],
   "dramatic_notes": "<tone/pacing guidance — high-octane cyberpunk>",
   "hud": "<HUD line>",
-  "edgerunner_ops": <pass through from Events JSON unchanged>,
+  "edgerunner_ops": [
+    {"edgerunner": "<name>", "op": "hp", "change": <int>, "reason": "<why>"},
+    {"edgerunner": "<name>", "op": "armor", "location": "head|body", "change": <int>, "reason": "<why>"},
+    {"edgerunner": "<name>", "op": "luck", "change": <int>, "reason": "<why>"},
+    {"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "<injury>", "effect": "<effect>", "dv_mod": <int>}
+  ],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
   "current_player": <pass through from Events unchanged>,
@@ -550,34 +558,37 @@ SCHEMA B - Route to Output (OOC rules questions):
   "content": "<rules explanation>"
 }
 
+RULES REFERENCE:
+The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you adjudicate most often — defer to the Core Rulebook for edge cases and detailed tables.
+
 SKILL CHECK RULES (Cyberpunk RED):
-- Roll: d10 + STAT + Skill vs DV
-- Standard DVs: Everyday 9, Professional 13, Difficult 15, Expert 17, Heroic 21, Incredible 24, Legendary 29
-- Exploding 10s: if d10 = 10, roll again and add. Keep rolling on 10s.
-- Fumble 1s: if d10 = 1, roll again and SUBTRACT from total
-- Luck: player may spend Luck points to add to total (1 point = +1)
-- Net success = total - DV (degree of success)
+- Roll: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
+- DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
+- Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
+- Critical failure: natural 1 → roll another d10 and subtract. Does NOT chain on a second 1.
+- Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
+- Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
 
-COMBAT RULES:
-- Attack: d10 + REF + Weapon Skill vs DV (based on range)
-- Damage: roll weapon damage dice
-- Armor: subtract SP from damage. If damage > 0, armor ablates (SP -1)
-- Seriously Wounded: at HP ≤ half max, -2 to ALL actions
-- Critical injury: if single hit deals 13+ damage after armor, roll on critical injury table
-- Death Save: BODY + WILL + d10 vs DV 10 (+1 per round, +dv_mod from injuries)
+DAMAGE RESOLUTION:
+1. Roll weapon damage dice.
+2. Critical injury check: if 2+ dice show 6 → critical injury triggered. 5 bonus damage direct to HP (ignores SP) + injury effect from table.
+3. Subtract location SP from damage. If damage ≤ SP, no penetration — stop (crit bonus from step 2 still applies).
+4. Ablation: if damage penetrates, SP drops by 1. AP ammo: SP drops by 2.
+5. Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
+6. Remaining damage after SP → applied to HP.
 
-ARMOR ABLATION:
-- Each penetrating hit (damage > SP) reduces SP by 1
-- Track via edgerunner_ops (but pass through unchanged — Events records the op)
-- Non-penetrating hits (damage ≤ SP) do NOT ablate
+DEATH SAVES (at 0 HP):
+- Roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails.
+- Cumulative +1 per save already made. Critical injuries add their dv_mod to the roll.
 
-MELEE & MARTIAL ARTS:
-- Melee attack: d10 + DEX + Melee Weapon vs DV 13 (usually)
-- Martial Arts: special moves available based on form
+SOCIAL MECHANICS:
+- Social Ceiling (§11A): lifestyle/presentation tier caps social check totals. Style Over Substance overrides at high skill.
+- Degree of Success: margin over/under DV scales social outcomes (basic/strong/exceptional success; simple/bad/disastrous failure).
 
-AUTOFIRE & SUPPRESSIVE FIRE:
-- Autofire: d10 + REF + Autofire vs DV, hits = multiplier
-- Suppressive Fire: REF + Concentration + d10 vs DV to avoid, area denial
+COMBAT (incidental — structured combat uses combat mode):
+- For incidental attacks outside structured combat, consult Core Rulebook §3–§5 for attack DVs and damage resolution.
+- Autofire: d10 + REF + Autofire vs Autofire DV table. On hit: 2d6 × margin (capped by weapon autofire value: 3 SMG, 4 AR). 10 rounds per burst.
+- Suppressive Fire: everyone in 25m out of cover rolls WILL + Concentration + d10 vs attacker's REF + Autofire + d10. Failures must take cover.
 
 ROLL FORMAT (for display by Narration):
 🎲 [Description]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
@@ -591,7 +602,8 @@ HUD:
 
 IMPORTANT:
 - Output ONLY valid JSON
-- Pass through edgerunner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
+- Emit edgerunner_ops for state changes from your adjudicated rolls: HP damage (op: "hp"), armor ablation (op: "armor", location: "head|body"), Luck spent (op: "luck"), critical injuries (op: "critical_injury"). Same format as Events. Events handles pre-roll ops — do not duplicate.
+- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
 - DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
   - "_conditions_add": ["Seriously Wounded"] → appends conditions
@@ -641,6 +653,9 @@ TONE:
 - Dark humor: gallows wit, corporate satire, the absurdity of late-stage hypercapitalism
 - Tech is invasive: cyberware costs humanity, the Net is hostile, everything is hackable
 - Social stratification: the contrast between corpo towers and combat zone squalor
+
+RULES REFERENCE:
+Consult the Core Rulebook for any mechanical details referenced in the Mechanics output.
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
@@ -699,15 +714,21 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 
 HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
 
+### Rules Reference:
+The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you use most often — defer to the Core Rulebook for edge cases and detailed tables.
+
 ### Dice Mechanics:
-- Skill checks: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29)
-- Exploding 10s: roll again and add; keeps exploding
-- Fumble 1s: roll again and subtract
-- Luck: spend points to add to any roll (1:1)
-- Armor ablation: SP -1 per penetrating hit
-- Seriously Wounded: -2 all actions at ≤ half HP
-- Critical injuries: 13+ damage in one hit
-- Death Saves: BODY + WILL + d10 vs DV 10 (+1/round +injury mods)
+- Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
+- DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
+- Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
+- Critical failure: natural 1 → roll another d10 and subtract. Does NOT chain on a second 1.
+- Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
+- Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
+- Armor ablation: SP -1 per penetrating hit. AP ammo ablates by 2.
+- Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
+- Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
+- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
+- Social Ceiling (§11A): lifestyle/presentation caps social check totals. Degree of Success scales social outcomes by margin.
 - Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 
 ### HUD Line
@@ -724,29 +745,8 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets
 - Add callback_ops for open gig threads, Fixer contacts
 
-### Character Creation (interactive):
-**Trigger**: [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are found in the system prompt.
-
-When triggered, guide the player through Cyberpunk RED character creation **one step at a time**, waiting for player input before proceeding:
-
-1. **Handle & Concept** — Ask the player for a handle (street name), real name, and character concept
-2. **Role** — Present the 10 Roles (Rockerboy, Solo, Netrunner, Tech, Medtech, Media, Exec, Lawman, Fixer, Nomad) with their Role Abilities
-3. **Stats** — Allocate 62 points across 10 stats (INT, REF, DEX, TECH, COOL, WILL, LUCK, MOVE, BODY, EMP); derive HP, Humanity, Wound Threshold
-4. **Skills** — Allocate skill points: 60 career skill points among Role skills, plus Education/Language points
-5. **Lifepath** — Walk through the Lifepath system: cultural background, personality, clothing style, hairstyle, motivations, life goals, friends, enemies, romance
-6. **Gear** — Spend starting eurobucks (2550 eb) on weapons, armor, gear, fashion, and housing
-7. **Cyberware** — Optional: install starting cyberware (track Humanity loss); calculate starting Humanity
-8. **Recap** — Summarize the complete edgerunner; transition to gameplay
-
-**State reporting during creation:**
-- Set `is_ooc: true` on every creation step — state persists but turn_counter does not advance
-- Call `report_state` after EACH step with partial `character_states` (build up vitals, resources, conditions, summary as values are determined)
-- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB as those values are determined during creation
-- Use the `summary` field to track creation progress (e.g. "Solo — allocating stats...")
-- Suppress callback_ops, npc_memory_ops until gameplay begins — leave them as empty arrays
-- Set scene_state to a minimal OOC state (location: "Character Creation", npcs_present: [], atmosphere: "OOC")
-
-**Transition to gameplay**: After the recap step, set `is_ooc: false` and bootstrap all remaining state blocks (pacing, scene_state, callbacks) as you begin the first narrative turn.
+### Character Creation:
+Character creation is handled externally via the web app. If [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are found in the system prompt, inform the player that character sheets are required to begin the campaign. Do not attempt in-chat character creation.
 
 ### Rules:
 - Call `report_state` every turn
@@ -1134,20 +1134,19 @@ KEY RULES:
 - Action Economy: Move Action (up to MOVE×2 m/yds) + Action per turn.
 - Ranged Attack: d10 + REF + Weapon Skill vs DV (from range/DV table in Ruleset §3).
 - Melee Attack: d10 + DEX + Melee Weapon/Martial Arts vs defender's d10 + DEX + Evasion.
-- Crit Success: natural 10 on d10 → roll another d10 and ADD (keep exploding on 10s).
-- Crit Failure: natural 1 on d10 → roll another d10 and SUBTRACT from total.
-- Luck: spend Luck points to add to any roll (1 point = +1).
-- Seriously Wounded: when HP ≤ half max → −2 to ALL actions. Add condition automatically.
+- Crit Success: natural 10 on d10 → roll another d10 and ADD. Does NOT chain on a second 10.
+- Crit Failure: natural 1 on d10 → roll another d10 and SUBTRACT. Does NOT chain on a second 1.
+- Luck: spend Luck points to add to roll (1 point = +1). CANNOT spend on damage rolls, Death Saves, or Initiative.
+- Seriously Wounded: when HP is below half max (rounded up) → −2 to ALL actions. Add condition automatically.
 
 DAMAGE RESOLUTION:
 1. Roll weapon damage dice.
-2. Crit check: if TWO or more dice show 6 → critical injury + 5 bonus damage applied DIRECTLY to HP (bypasses armor).
+2. Crit check: if TWO or more dice show 6 → critical injury triggered. 5 bonus damage direct to HP (bypasses armor). Roll 2d6 on body or head table (Ruleset §15). Report via critical_injury_add with location, effect, and dv_mod.
 3. Determine hit location (body unless called shot to head).
-4. Subtract location SP from remaining damage total. If damage ≤ SP, no penetration — stop.
+4. Subtract location SP from damage total. If damage ≤ SP, no penetration — no HP damage and no ablation (crit bonus from step 2 still applies).
 5. Ablation: if damage penetrates (damage > SP), SP drops by 1. AP ammo: SP drops by 2.
-6. Melee weapons: halve SP before comparing (round down). Brawling does NOT halve SP.
+6. Melee weapons: halve defender's SP before comparing (round up). Brawling does NOT halve SP.
 7. Remaining damage after SP → applied to HP.
-8. Critical injury: if a single hit deals 13+ damage after armor, roll on critical injury table (Ruleset §15). Add via critical_injury_add with location, effect, and dv_mod.
 
 DEATH SAVES:
 At 0 HP, character must make a Death Save each round:
@@ -1170,11 +1169,35 @@ STATE TRACKING via report_combat_state:
 
 ENEMY BOOTSTRAP (first exchange):
 When enemies first appear, use set_combat_stats to define their mechanical identity:
-- hp_max: sets both current and max HP
-- armor: {head: SP, body: SP}
-- weapons: [{name, damage, ammo, magazine, skill}]
+- hp_max: sets both current and max HP (derive from BODY+WILL via HP table in Ruleset §13)
+- armor: {head: SP, body: SP} (see armor table in Ruleset §11)
+- weapons: [{name, damage, ammo, magazine, skill}] (see weapon tables in Ruleset §10)
 - stats: {REF, DEX, BODY, WILL, COOL, ...} — combat-relevant stats
 After bootstrap, use hp_delta/armor_delta/ammo to track changes.
+
+NPC STAT GENERATION:
+Use the "combat number" system for enemies — a single base value (STAT+Skill combined) for attacks and defense instead of individual skills. Scale by threat tier:
+
+| Tier        | Combat# | HP    | Armor SP | Typical Enemy                        |
+|-------------|---------|-------|----------|--------------------------------------|
+| Mook        | 10–12   | 20–25 | 4–7      | Ganger, scav, boostergang foot       |
+| Lieutenant  | 12–14   | 25–35 | 7–11     | Gang leader, corpo security, fixer   |
+| Mini-Boss   | 14–16   | 35–45 | 11–13    | Experienced solo, cyberpsycho, elite |
+| Boss        | 16–18   | 45–60 | 13–18    | Borg, veteran solo, event boss       |
+
+Combat-relevant stat ranges by role archetype:
+- Solo/Enforcer: REF 7–8, DEX 6–8, BODY 6–8, WILL 6–7, COOL 6–8
+- Netrunner: REF 6–8, DEX 6–8, BODY 5–7, WILL 3–5, INT 5–7, TECH 5–7
+- Tech/Medtech: TECH 6–8, INT 6–8, REF 5–7, BODY 5–7
+- Fixer/Exec: COOL 6–8, INT 6–8, EMP 5–8, BODY 3–5
+- Nomad: DEX 6–8, REF 6–8, BODY 5–7, COOL 6–8
+- Lawman: WILL 7–8, REF 6–8, DEX 5–7, BODY 5–7
+
+Standard loadouts (use weapon tables in Ruleset §10 for exact stats):
+- Ganger/Mook: Med Pistol (2d6) or Heavy Pistol (3d6), Leathers/Kevlar (SP 4–7)
+- Corpo Security: Assault Rifle (5d6) or SMG (2d6), Light Armorjack (SP 11)
+- Solo/Elite: Assault Rifle + VH Pistol (4d6), Med/Heavy Armorjack (SP 12–13)
+- Borg/Boss: Assault Rifle (5d6) + Heavy Melee (3d6), Flak/Metalgear (SP 15–18)
 
 ENEMY TACTICS:
 Enemies act according to their type and motivation — do not apply a single template:
@@ -1310,7 +1333,7 @@ def build_cpred_combat_profile(character_states, combat, game_state=None):
             cd_weapons = combat_data.get("weapons", [])
             cd_stats = combat_data.get("stats", {})
 
-            sw_flag = " [SERIOUSLY WOUNDED]" if cd_hp_cur <= cd_hp_max // 2 and cd_hp_max > 0 else ""
+            sw_flag = " [SERIOUSLY WOUNDED]" if cd_hp_cur < (cd_hp_max + 1) // 2 and cd_hp_max > 0 else ""
             lines.append(f"  {name} ({char_type_label}):")
             lines.append(f"    HP: {cd_hp_cur}/{cd_hp_max}{sw_flag}")
             lines.append(f"    Armor: Head SP {cd_armor.get('head', 0)} | Body SP {cd_armor.get('body', 0)}")
@@ -1337,7 +1360,7 @@ def build_cpred_combat_profile(character_states, combat, game_state=None):
                 lines.append(f"    Voice: {voice}")
 
         else:
-            # Fallback — generic from character_states
+            # Fallback — NPC from normal mode, not yet bootstrapped with combat_data
             char_class = d.get("class", "")
             char_type = d.get("type", "npc")
             label = char_class if char_class else char_type.upper()
@@ -1353,6 +1376,9 @@ def build_cpred_combat_profile(character_states, combat, game_state=None):
             summary = d.get("summary", "")
             if summary:
                 lines.append(f"    {summary}")
+            voice = d.get("voice")
+            if voice:
+                lines.append(f"    Voice: {voice}")
 
     lines.append("[/COMBATANT ROSTER]")
     return "\n".join(lines)
@@ -1369,7 +1395,26 @@ def build_cpred_combat_injection(combat, pipeline_state):
     current_turn = combat.get("current_turn", "")
     initiative_order = combat.get("initiative_order", [])
 
-    lines = ["[COMBAT STATE]"]
+    lines = []
+
+    # Scene context — gives combat model the "why" and "where"
+    scene = pipeline_state.get("scene_state", {})
+    if scene:
+        lines.append("[SCENE CONTEXT]")
+        if scene.get("location"):
+            lines.append(f"Location: {scene['location']}")
+        if scene.get("atmosphere"):
+            lines.append(f"Atmosphere: {scene['atmosphere']}")
+        tensions = scene.get("active_tensions", [])
+        if tensions:
+            lines.append(f"Situation: {'; '.join(tensions)}")
+        details = scene.get("details", [])
+        if details:
+            lines.append(f"Details: {'; '.join(details)}")
+        lines.append("[/SCENE CONTEXT]")
+        lines.append("")
+
+    lines.append("[COMBAT STATE]")
     lines.append(f"Round: {combat.get('round', 1)}")
     lines.append("Initiative Order:")
 
@@ -1415,7 +1460,7 @@ def build_cpred_combat_injection(combat, pipeline_state):
                 if v.get("label") == "HP" and "current" in v:
                     cd_hp_cur = v["current"]
                     break
-            sw = " SW" if cd_hp_cur <= cd_hp_max // 2 and cd_hp_max > 0 else ""
+            sw = " SW" if cd_hp_cur < (cd_hp_max + 1) // 2 and cd_hp_max > 0 else ""
             cd_armor = combat_data.get("armor", {})
             parts.append(f"HP {cd_hp_cur}/{cd_hp_max}{sw}")
             parts.append(f"SP H:{cd_armor.get('head', 0)}/B:{cd_armor.get('body', 0)}")

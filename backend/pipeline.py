@@ -573,7 +573,7 @@ def _fresh_pipeline_state() -> dict:
 
 def migrate_pipeline_state(state: Optional[dict]) -> dict:
     """Migrate pipeline_state from any legacy format to the current nested structure."""
-    if state is None:
+    if state is None or not isinstance(state, dict):
         return _fresh_pipeline_state()
 
     # Old flat format: state IS the pacing dict (has keys like "episode", "beat" but no "pacing" key)
@@ -593,14 +593,31 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
 
     # New format — ensure all keys exist
     state.setdefault("pacing", {})
+    if not isinstance(state.get("pacing"), dict):
+        state["pacing"] = {}
     state.setdefault("callback_ledger", {"next_id": 1, "open": [], "recently_resolved": []})
     ledger = state["callback_ledger"]
+    if not isinstance(ledger, dict):
+        ledger = {"next_id": 1, "open": [], "recently_resolved": []}
+        state["callback_ledger"] = ledger
     ledger.setdefault("next_id", 1)
+    if not isinstance(ledger.get("next_id"), int):
+        ledger["next_id"] = 1
     ledger.setdefault("open", [])
+    if not isinstance(ledger.get("open"), list):
+        ledger["open"] = []
     ledger.setdefault("recently_resolved", [])
+    if not isinstance(ledger.get("recently_resolved"), list):
+        ledger["recently_resolved"] = []
     state.setdefault("npc_memories", {})
+    if not isinstance(state.get("npc_memories"), dict):
+        state["npc_memories"] = {}
     state.setdefault("scene_state", {})
+    if not isinstance(state.get("scene_state"), dict):
+        state["scene_state"] = {}
     state.setdefault("character_states", {})
+    if not isinstance(state.get("character_states"), dict):
+        state["character_states"] = {}
     # Migrate character_states to current format: {"data": {...}, "last_updated": N}
     cs = state["character_states"]
     for name, entry in cs.items():
@@ -617,11 +634,28 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         elif "data" not in entry:
             # Dict without "data" key — treat entire dict as the data
             cs[name] = {"data": entry, "last_updated": state.get("turn_counter", 0)}
+    # Re-normalize ledger after character_state migration in case of alias-corruption.
+    ledger = state.get("callback_ledger", {})
+    if not isinstance(ledger, dict):
+        ledger = {"next_id": 1, "open": [], "recently_resolved": []}
+        state["callback_ledger"] = ledger
+    if not isinstance(ledger.get("next_id"), int):
+        ledger["next_id"] = 1
+    if not isinstance(ledger.get("open"), list):
+        ledger["open"] = []
+    if not isinstance(ledger.get("recently_resolved"), list):
+        ledger["recently_resolved"] = []
     state.setdefault("game_state", {})
+    if not isinstance(state.get("game_state"), dict):
+        state["game_state"] = {}
     state.setdefault("hud_state", {})
+    if not isinstance(state.get("hud_state"), dict):
+        state["hud_state"] = {}
     state.setdefault("combat", None)
     state.setdefault("net_combat", None)
     state.setdefault("ship_combat", None)
+    if state.get("ship_combat") is not None and not isinstance(state.get("ship_combat"), dict):
+        state["ship_combat"] = None
     if isinstance(state.get("ship_combat"), dict):
         sc = state["ship_combat"]
         sc.setdefault("round", 1)
@@ -633,25 +667,48 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         sc.setdefault("ship_combat_handoff_source", None)
         sc.setdefault("bootstrap_messages", [])
     state.setdefault("turn_counter", 0)
+    if not isinstance(state.get("turn_counter"), int):
+        state["turn_counter"] = 0
     return state
 
 
 def apply_callback_ops(ledger: dict, ops: list, current_turn: int) -> dict:
     """Apply callback_ops to the ledger and prune old resolved entries."""
     open_list = ledger.get("open", [])
+    if not isinstance(open_list, list):
+        open_list = []
     resolved_list = ledger.get("recently_resolved", [])
+    if not isinstance(resolved_list, list):
+        resolved_list = []
     next_id = ledger.get("next_id", 1)
+    if not isinstance(next_id, int):
+        next_id = 1
 
     # Build index of open callbacks by ID for fast lookup
-    open_by_id = {cb["id"]: cb for cb in open_list}
+    open_by_id = {}
+    for cb in open_list:
+        if not isinstance(cb, dict):
+            continue
+        cb_id = cb.get("id")
+        try:
+            hash(cb_id)
+        except TypeError:
+            continue
+        open_by_id[cb_id] = cb
 
-    for op in (ops or []):
+    ops_iter = ops if isinstance(ops, (list, tuple)) else []
+    for op in ops_iter:
+        if not isinstance(op, dict):
+            continue
         action = op.get("action")
 
         if action == "add":
-            text = op.get("original_text", "")[:800]
-            resolutions = op.get("resolutions") or []
-            resolutions = [str(r)[:200] for r in resolutions[:3]]
+            text = str(op.get("original_text", "") or "")[:800]
+            resolutions_raw = op.get("resolutions")
+            if isinstance(resolutions_raw, (list, tuple)):
+                resolutions = [str(r)[:200] for r in list(resolutions_raw)[:3]]
+            else:
+                resolutions = []
             entry = {
                 "id": next_id,
                 "created_turn": current_turn,
@@ -678,13 +735,15 @@ def apply_callback_ops(ledger: dict, ops: list, current_turn: int) -> dict:
                 logger.warning(f"callback_ops update: ID {target_id} not found in open callbacks")
                 continue
             fields = op.get("fields", {})
+            if not isinstance(fields, dict):
+                continue
             for k, v in fields.items():
                 if k not in ("id", "created_turn"):  # Protect immutable fields
                     open_by_id[target_id][k] = v
 
     # Prune old resolved entries
     resolved_list = [
-        r for r in resolved_list
+        r for r in resolved_list if isinstance(r, dict)
         if current_turn - r.get("resolved_turn", current_turn) <= CALLBACK_RESOLVED_RETENTION
     ]
 
@@ -722,33 +781,41 @@ def filter_ops_by_scene_scope(parsed: dict, scene_state: dict) -> None:
     Skips filtering only when scene_state itself is empty/uninitialized (first-turn bootstrap).
     An initialized scene with npcs_present=[] is valid and means no NPC ops are allowed.
     """
-    if not scene_state:
+    if not isinstance(parsed, dict):
+        return
+    if not isinstance(scene_state, dict) or not scene_state:
         # No scene_state yet (first turn / bootstrap) — allow all ops through
         return
 
-    npcs_present = set(scene_state.get("npcs_present", []))
+    raw_npcs_present = scene_state.get("npcs_present", [])
+    if not isinstance(raw_npcs_present, list):
+        raw_npcs_present = []
+    npcs_present = {n for n in raw_npcs_present if isinstance(n, str) and n}
     skipped = 0
 
     # Filter npc_memory_ops
     mem_ops = parsed.get("npc_memory_ops")
-    if mem_ops:
-        filtered = [op for op in mem_ops if op.get("npc") in npcs_present]
+    if isinstance(mem_ops, list):
+        filtered = [op for op in mem_ops if isinstance(op, dict) and op.get("npc") in npcs_present]
         skipped += len(mem_ops) - len(filtered)
         parsed["npc_memory_ops"] = filtered
 
     # Filter relationship_ops — only rs/roms/npc_rs/npc_roms for NPCs not present
     # Allow: fr (factions aren't scene-scoped), set/npc_set (bootstrap)
     rel_ops = parsed.get("relationship_ops")
-    if rel_ops:
+    if isinstance(rel_ops, list):
         filtered_rel = []
         for op in rel_ops:
+            if not isinstance(op, dict):
+                skipped += 1
+                continue
             op_type = op.get("op")
             if op_type in ("set", "npc_set", "fr"):
                 # Always allow bootstrap and faction ops
                 filtered_rel.append(op)
             elif op_type in ("rs", "roms", "npc_rs", "npc_roms"):
                 target = op.get("target", "")
-                if target in npcs_present:
+                if isinstance(target, str) and target in npcs_present:
                     filtered_rel.append(op)
                 else:
                     skipped += 1
@@ -763,24 +830,40 @@ def filter_ops_by_scene_scope(parsed: dict, scene_state: dict) -> None:
 
 def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
     """Apply npc_memory_ops (add/drop) to the NPC memories dict."""
-    if not ops:
+    if not isinstance(memories, dict):
+        memories = {}
+    if not isinstance(ops, (list, tuple)) or not ops:
         return memories
 
     # Sort all NPC lists to match injection display order BEFORE processing drops,
     # so drop indices align with what the model saw in [NPC MEMORIES] blocks
-    for npc_name in memories:
-        memories[npc_name] = sorted(memories[npc_name], key=_memory_sort_key, reverse=True)
+    for npc_name in list(memories.keys()):
+        npc_entries = memories.get(npc_name)
+        if not isinstance(npc_entries, list):
+            memories[npc_name] = []
+            continue
+        memories[npc_name] = sorted(
+            [m for m in npc_entries if isinstance(m, dict)],
+            key=_memory_sort_key,
+            reverse=True
+        )
 
     # Process drops first (reverse index order to avoid shift issues)
+    def _coerce_index(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return -1
+
     drop_ops = sorted(
-        [op for op in ops if op.get("action") == "drop"],
-        key=lambda o: o.get("index", 0),
+        [op for op in ops if isinstance(op, dict) and op.get("action") == "drop"],
+        key=lambda o: _coerce_index(o.get("index")),
         reverse=True
     )
     for op in drop_ops:
         npc = op.get("npc")
-        idx = op.get("index")
-        if not npc or npc not in memories:
+        idx = _coerce_index(op.get("index"))
+        if not isinstance(npc, str) or not npc or npc not in memories:
             logger.warning(f"npc_memory_ops drop: NPC '{npc}' not found")
             continue
         npc_list = memories[npc]
@@ -792,10 +875,10 @@ def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
             del memories[npc]
 
     # Process adds
-    add_ops = [op for op in ops if op.get("action") == "add"]
+    add_ops = [op for op in ops if isinstance(op, dict) and op.get("action") == "add"]
     for op in add_ops:
         npc = op.get("npc")
-        if not npc:
+        if not isinstance(npc, str) or not npc:
             continue
         try:
             impact = int(op.get("impact", 1))
@@ -803,8 +886,8 @@ def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
             impact = 1
         tier = _memory_tier(impact)
         entry = {
-            "text": op.get("text", "")[:640],
-            "quote": (op.get("quote") or "")[:120] or None,
+            "text": str(op.get("text", "") or "")[:640],
+            "quote": str(op.get("quote") or "")[:120] or None,
             "date": op.get("date"),
             "impact": impact,
             "tier": tier,
@@ -849,7 +932,10 @@ def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
         "details": [],
         "pending_actions": []
     }
-    base = {k: (existing_scene or {}).get(k, default) for k, default in defaults.items()}
+    existing = existing_scene if isinstance(existing_scene, dict) else {}
+    base = {k: existing.get(k, default) for k, default in defaults.items()}
+    if not isinstance(new_scene, dict):
+        return base
     for key in defaults:
         if key in new_scene:
             base[key] = new_scene[key]
@@ -939,8 +1025,20 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
 def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) -> dict:
     """Return hud_state with funds filtered to scene-present characters.
     Non-character keys (ship, party) pass through. String funds unchanged."""
+    if not isinstance(hud_state, dict):
+        return {}
+    if not isinstance(scene_state, dict):
+        scene_state = {}
+    if not isinstance(character_states, dict):
+        character_states = {}
     funds = hud_state.get("funds")
-    present = set(scene_state.get("pcs_present") or []) | set(scene_state.get("npcs_present") or [])
+    pcs_present = scene_state.get("pcs_present")
+    if not isinstance(pcs_present, list):
+        pcs_present = []
+    npcs_present = scene_state.get("npcs_present")
+    if not isinstance(npcs_present, list):
+        npcs_present = []
+    present = {n for n in pcs_present + npcs_present if isinstance(n, str) and n}
     if not isinstance(funds, dict) or not present:
         return hud_state
     all_chars = set(character_states.keys())
@@ -952,7 +1050,14 @@ def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) 
 def derive_funds_from_ship_credits(hud_state: dict, game_state: dict) -> dict:
     """If game_state has ship.credits, derive hud_state.funds from it (single source of truth).
     Returns hud_state (possibly with replaced funds). Non-ship game systems are unaffected."""
-    ship_credits = (game_state or {}).get("ship", {}).get("credits")
+    if not isinstance(hud_state, dict):
+        return {}
+    if not isinstance(game_state, dict):
+        return hud_state
+    ship = game_state.get("ship", {})
+    if not isinstance(ship, dict):
+        return hud_state
+    ship_credits = ship.get("credits")
     if not isinstance(ship_credits, dict):
         return hud_state
     derived = {
@@ -1319,7 +1424,7 @@ def run_pipeline(
     current_turn = pipeline_state["turn_counter"]
 
     # Extract and apply state from Events output
-    if events_data.get("pacing"):
+    if isinstance(events_data.get("pacing"), dict):
         pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **events_data["pacing"]}
     pipeline_state["callback_ledger"] = apply_callback_ops(
         pipeline_state["callback_ledger"],
@@ -1374,7 +1479,7 @@ def run_pipeline(
     if events_route == "output":
         # Apply character_states from Events (needed for OOC turns like character creation
         # where Mechanics never runs and would otherwise not persist character state)
-        if events_data.get("character_states"):
+        if isinstance(events_data.get("character_states"), dict):
             new_pipeline_state["character_states"] = apply_character_states(
                 new_pipeline_state["character_states"],
                 events_data["character_states"],
@@ -1420,9 +1525,17 @@ def run_pipeline(
     mechanics_route = mechanics_data.get("route", "narration")
     new_pipeline_state["character_states"] = apply_character_states(
         new_pipeline_state["character_states"],
-        mechanics_data.get("character_states") or {},
+        mechanics_data.get("character_states") if isinstance(mechanics_data.get("character_states"), dict) else {},
         current_turn
     )
+    # Scene-scope filtering for Mechanics-emitted relationship ops
+    if mechanics_data.get("relationship_ops"):
+        filter_ops_by_scene_scope(mechanics_data, pipeline_state.get("scene_state", {}))
+    # Apply game-specific state ops from Mechanics (roll-dependent outcomes)
+    if gs.get("apply_game_state"):
+        if "game_state" not in pipeline_state:
+            pipeline_state["game_state"] = gs["init_game_state"]()
+        gs["apply_game_state"](pipeline_state["game_state"], mechanics_data, current_turn)
     stage_results.append(mechanics_result)
     if mechanics_result.usage.get('reasoning'):
         reasoning_summaries.append(f"[Mechanics] {mechanics_result.usage['reasoning']}")
@@ -2382,7 +2495,9 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
 
 def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int, game_system: dict = None) -> dict:
     """Apply parsed state updates to pipeline_state using existing apply_* functions."""
-    if parsed.get("pacing"):
+    if not isinstance(parsed, dict):
+        return pipeline_state
+    if isinstance(parsed.get("pacing"), dict):
         pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **parsed["pacing"]}
     if parsed.get("callback_ops"):
         pipeline_state["callback_ledger"] = apply_callback_ops(
@@ -2407,7 +2522,7 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         )
     pipeline_state["character_states"] = apply_character_states(
         pipeline_state["character_states"],
-        parsed.get("character_states") or {},
+        parsed.get("character_states") if isinstance(parsed.get("character_states"), dict) else {},
         current_turn
     )
     # Apply game-specific state ops (relationship_ops already filtered by scene scope)
@@ -2418,14 +2533,14 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist HUD state from tool report
     if "hud_state" in parsed:
         pipeline_state["hud_state"] = parsed["hud_state"]
-    # Derive hud_state.funds from ship.credits (single source of truth), then scene-scope
-    pipeline_state["hud_state"] = derive_funds_from_ship_credits(
-        pipeline_state.get("hud_state", {}),
-        pipeline_state.get("game_state"))
-    pipeline_state["hud_state"] = scope_hud_funds(
-        pipeline_state.get("hud_state", {}),
-        pipeline_state.get("scene_state", {}),
-        pipeline_state.get("character_states", {}))
+        # Match run_pipeline semantics: derive/scope only when HUD is emitted this turn.
+        pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+            pipeline_state.get("hud_state", {}),
+            pipeline_state.get("game_state"))
+        pipeline_state["hud_state"] = scope_hud_funds(
+            pipeline_state.get("hud_state", {}),
+            pipeline_state.get("scene_state", {}),
+            pipeline_state.get("character_states", {}))
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         pipeline_state["combat"] = parsed["combat"]

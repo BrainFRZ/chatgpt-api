@@ -69,7 +69,7 @@ def apply_game_state(game_state, agent_json, turn):
     for op_data in ops:
         inv_name = op_data.get("investigator")
         op = op_data.get("op")
-        if not inv_name or not op:
+        if not isinstance(inv_name, str) or not inv_name or not op:
             continue
 
         # Auto-create investigator stub if not yet tracked
@@ -300,6 +300,7 @@ Use "investigator_ops" to update this state. Operations:
   Use "set" to bootstrap investigator state on first turn or correct errors.
 
 IMPORTANT: SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. Luck is tracked via investigator_ops but mirrored in character_states resources for HUD display.
+- OPS SCOPE: Emit investigator_ops ONLY for state changes that are certain before dice rolls — voluntary Luck spends the player declared, Mythos% gains from reading a tome, Bond damage from narrative events. Do NOT emit ops for outcomes that depend on Mechanics rolls (e.g. SAN loss from a failed SAN check, skill marks from successful rolls). Mechanics will emit its own investigator_ops for roll-dependent outcomes.
 
 CHARACTER STATES (structured format):
 - "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
@@ -425,7 +426,7 @@ SCHEMA A - Route to Narration (default):
   ],
   "dramatic_notes": "<tone/pacing guidance — horror emphasis>",
   "hud": "<HUD line>",
-  "investigator_ops": <pass through from Events JSON unchanged>,
+  "investigator_ops": [<your investigator_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
   "current_player": <pass through from Events unchanged>,
@@ -505,7 +506,8 @@ HUD:
 
 IMPORTANT:
 - Output ONLY valid JSON
-- Pass through investigator_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
+- Emit investigator_ops for roll-dependent state changes from your adjudicated outcomes (e.g. SAN loss from failed SAN check, skill marks from successful rolls, Luck spent on pushed rolls). Use the same op format as Events. Events already emitted its own pre-roll ops — yours are additional.
+- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
 - DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
   - "_conditions_add": ["Temporary Insanity"] → appends conditions

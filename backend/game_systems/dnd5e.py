@@ -81,7 +81,7 @@ def apply_game_state(game_state, agent_json, turn):
     for op_data in ops:
         op = op_data.get("op")
         target = op_data.get("target")
-        if not op or not target:
+        if not isinstance(target, str) or not target or not op:
             continue
 
         try:
@@ -89,6 +89,8 @@ def apply_game_state(game_state, agent_json, turn):
                 # Full replacement for bootstrap/corrections
                 entity_type = op_data.get("type", "npc")
                 fields = copy.deepcopy(op_data.get("fields", {}))
+                if not isinstance(fields, dict):
+                    fields = {}
                 if entity_type == "faction":
                     factions[target] = fields
                 else:
@@ -116,7 +118,7 @@ def apply_game_state(game_state, agent_json, turn):
             elif op == "npc_rs":
                 other = op_data.get("other")
                 change = int(op_data.get("change", 0))
-                if target and other:
+                if target and isinstance(other, str) and other:
                     if target not in relationships:
                         relationships[target] = {"rs": 0, "roms": 0}
                     npc_rels = relationships[target].setdefault("npc_relationships", {})
@@ -127,7 +129,7 @@ def apply_game_state(game_state, agent_json, turn):
             elif op == "npc_roms":
                 other = op_data.get("other")
                 change = int(op_data.get("change", 0))
-                if target and other:
+                if target and isinstance(other, str) and other:
                     if target not in relationships:
                         relationships[target] = {"rs": 0, "roms": 0}
                     npc_rels = relationships[target].setdefault("npc_relationships", {})
@@ -138,7 +140,9 @@ def apply_game_state(game_state, agent_json, turn):
             elif op == "npc_set":
                 other = op_data.get("other")
                 fields = copy.deepcopy(op_data.get("fields", {}))
-                if target and other:
+                if not isinstance(fields, dict):
+                    fields = {}
+                if target and isinstance(other, str) and other:
                     if target not in relationships:
                         relationships[target] = {"rs": 0, "roms": 0}
                     npc_rels = relationships[target].setdefault("npc_relationships", {})
@@ -375,6 +379,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - Alliance cascades: When a relationship change should logically affect allied factions (e.g. helping a faction member raises that faction's FR), emit additional FR ops manually.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
+- OPS SCOPE: Emit relationship_ops ONLY for state changes that are certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls (e.g. skill checks that might impress or offend an NPC). Mechanics will emit its own relationship_ops for roll-dependent outcomes.
 
 TIME PASSED:
 - Estimate how much in-world time this turn covers based on the conversation context
@@ -537,7 +542,7 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   ],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
-  "relationship_ops": <pass through from Events JSON unchanged>,
+  "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events JSON unchanged>,
   "callbacks": <pass through from Events JSON unchanged>,
   "current_player": <pass through from Events JSON unchanged>,
@@ -625,13 +630,8 @@ IMPORTANT:
 - Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
 - When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
 - PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
-- The "relationship_ops" array from Events should be passed through to your output unchanged. Do not modify scores.
-- The "arc_label" field from Events should be passed through to your output unchanged.
-- The "callbacks" array from Events should be passed through to your output unchanged.
-- The "current_player" field from Events should be passed through to your output unchanged.
-- The "next_player" field from Events should be passed through to your output unchanged.
-- The "next_player_prompt" field from Events should be passed through to your output unchanged.
-- The "combat" field from Events should be passed through to your output unchanged (null or the full combat object).
+- Emit relationship_ops for roll-dependent state changes from your adjudicated outcomes (e.g. a CHA check that shifts an NPC's opinion). Use the same op format as Events. Events already emitted its own pre-roll ops — yours are additional.
+- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat from Events unchanged.
 - The "character_states" field is your updated version — do NOT pass through from Events unchanged. Apply all beat outcomes first."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG game master pipeline. You are the final stage.
@@ -1186,7 +1186,26 @@ def build_combat_injection(combat, pipeline_state):
     if not combat:
         return ""
 
-    lines = ["[COMBAT STATE]"]
+    lines = []
+
+    # Scene context — gives combat model the "why" and "where"
+    scene = pipeline_state.get("scene_state", {})
+    if scene:
+        lines.append("[SCENE CONTEXT]")
+        if scene.get("location"):
+            lines.append(f"Location: {scene['location']}")
+        if scene.get("atmosphere"):
+            lines.append(f"Atmosphere: {scene['atmosphere']}")
+        tensions = scene.get("active_tensions", [])
+        if tensions:
+            lines.append(f"Situation: {'; '.join(tensions)}")
+        details = scene.get("details", [])
+        if details:
+            lines.append(f"Details: {'; '.join(details)}")
+        lines.append("[/SCENE CONTEXT]")
+        lines.append("")
+
+    lines.append("[COMBAT STATE]")
     lines.append(f"Round: {combat.get('round', 1)}")
 
     current_turn = combat.get("current_turn", "")

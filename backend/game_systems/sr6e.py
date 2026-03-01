@@ -85,7 +85,7 @@ def apply_game_state(game_state, agent_json, turn):
     for op_data in ops:
         runner_name = op_data.get("runner")
         op = op_data.get("op")
-        if not runner_name or not op:
+        if not isinstance(runner_name, str) or not runner_name or not op:
             continue
 
         # Auto-create runner stub if not yet tracked
@@ -332,6 +332,7 @@ Use "runner_ops" to update this state. Operations:
   Use "set" to bootstrap runner state on first turn or correct errors.
 
 IMPORTANT: Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops. character_states uses structured format with vitals (Physical/Stun CM), resources (Edge), conditions, and summary (equipment, cyberware).
+- OPS SCOPE: Emit runner_ops ONLY for state changes that are certain before dice rolls — Edge resets at scene transitions, Nuyen transactions from purchases, Essence loss from cyberware installation, sustained spell toggles. Do NOT emit ops for outcomes that depend on Mechanics rolls (e.g. damage from combat, Edge spent on post-roll actions, Drain from spellcasting). Mechanics will emit its own runner_ops for roll-dependent outcomes.
 
 CHARACTER STATES:
 - "character_states" uses structured format: each character maps to {type, class, level, vitals, resources, conditions, summary}
@@ -454,7 +455,7 @@ SCHEMA A - Route to Narration (default):
   ],
   "dramatic_notes": "<tone/pacing guidance — noir cyberpunk>",
   "hud": "<HUD line>",
-  "runner_ops": <pass through from Events JSON unchanged>,
+  "runner_ops": [<your runner_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
   "current_player": <pass through from Events unchanged>,
@@ -498,7 +499,7 @@ EDGE ACTIONS:
 - Pre-roll: Add Edge rating to dice pool, 6s explode (reroll and add hits)
 - Post-roll: Reroll failures (dice that weren't hits), Second Chance, etc.
 - Spending Edge costs 1 Edge point per action
-- Edge cannot exceed max; record edge ops in runner_ops passthrough
+- Edge cannot exceed max; record edge ops in runner_ops
 
 DAMAGE & CONDITION MONITORS:
 - Physical damage fills Physical CM boxes (wound mod = -(filled // 3) to all pools)
@@ -540,7 +541,8 @@ CHARACTER STATES:
 
 IMPORTANT:
 - Output ONLY valid JSON
-- Pass through runner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
+- Emit runner_ops for roll-dependent state changes from your adjudicated outcomes (e.g. Physical/Stun damage, Edge spent on post-roll actions, Drain from spellcasting). Use the same op format as Events. Events already emitted its own pre-roll ops — yours are additional.
+- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version — apply beat outcomes
 
 ROLL ADJUDICATION:

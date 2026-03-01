@@ -53,6 +53,8 @@ def apply_game_state(game_state, agent_json, turn):
             if op == "set":
                 # Full replacement for bootstrap/corrections
                 fields = copy.deepcopy(op_data.get("fields", {}))
+                if not isinstance(fields, dict):
+                    fields = {}
                 # Normalize known keys to canonical lowercase
                 canonical = {"credits": "credits", "hull": "hull", "shields": "shields", "ammo": "ammo"}
                 for key, val in fields.items():
@@ -1718,6 +1720,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - Alliance cascades: When a relationship change should logically affect allied factions, emit additional FR ops manually.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
+- OPS SCOPE: Emit relationship_ops ONLY for state changes that are certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
 
 SHIP OPS:
 - You receive a [SHIP STATE] block with hull, shields, ammo, and credits. This is your authoritative source.
@@ -1736,6 +1739,7 @@ SHIP OPS:
     Bootstrap or correct the entire ship state. Use on first turn or when [SHIP STATE] is empty.
 - The "ship_ops" array should be empty [] if no changes occurred this turn.
 - Bootstrap: On first turn or when [SHIP STATE] is empty, use a "set" op to initialize from context.
+- OPS SCOPE: Emit ship_ops ONLY for state changes that are certain before dice rolls — credit transactions, shield regen at scene start, ammo load from docking. Do NOT emit ops for outcomes that depend on Mechanics rolls (e.g. hull damage from combat). Mechanics will emit its own ship_ops for roll-dependent outcomes.
 
 TIME PASSED:
 - Estimate how much in-world time this turn covers based on the conversation context
@@ -1844,8 +1848,8 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
   ],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
   "hud": "<the full HUD line to be appended verbatim>",
-  "relationship_ops": <pass through from Events JSON unchanged>,
-  "ship_ops": <pass through from Events JSON unchanged>,
+  "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
+  "ship_ops": [<your ship_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events JSON unchanged>,
   "callbacks": <pass through from Events JSON unchanged>,
   "current_player": <pass through from Events JSON unchanged>,
@@ -1916,7 +1920,8 @@ ROUTING, BEAT, ROLL, and HUD RULES:
 
 IMPORTANT:
 - Output ONLY valid JSON.
-- Pass through relationship_ops, ship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged.
+- Emit relationship_ops and ship_ops for roll-dependent state changes from your adjudicated outcomes. Use the same op format as Events. Events already emitted its own pre-roll ops — yours are additional.
+- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged.
 - character_states is YOUR updated version — apply all beat outcomes first.
 
 ROLL ADJUDICATION:

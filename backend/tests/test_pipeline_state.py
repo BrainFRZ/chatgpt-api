@@ -12,6 +12,7 @@ Tests for pipeline stateful Events features:
 
 import json
 import copy
+import random
 import sys
 import os
 import logging
@@ -37,6 +38,7 @@ from pipeline import (
     build_character_states_injection,
     apply_character_states,
     scope_hud_funds,
+    derive_funds_from_ship_credits,
     build_hud_state_injection,
     apply_single_agent_state_updates,
     build_events_messages,
@@ -56,6 +58,12 @@ from pipeline import (
     NPC_MEMORY_MAX_PER_NPC,
     CHARACTER_STATE_TTL,
 )
+from game_systems.coc7e import init_game_state as coc_init, apply_game_state as coc_apply
+from game_systems.cpred import init_game_state as cpred_init, apply_game_state as cpred_apply
+from game_systems.dnd5e import init_game_state as dnd_init, apply_game_state as dnd_apply
+from game_systems.dnd5e_cyber import init_game_state as cyber_init, apply_game_state as cyber_apply
+from game_systems.sr6e import init_game_state as sr_init, apply_game_state as sr_apply
+from game_systems import get_game_system
 
 
 # ============================================================
@@ -399,6 +407,18 @@ class TestApplyCallbackOps:
         open_count = len(populated_ledger["open"])
         result = apply_callback_ops(populated_ledger, [], current_turn=15)
         assert len(result["open"]) == open_count
+
+    def test_add_non_list_resolutions_ignored(self, empty_ledger):
+        ops = [{"action": "add", "original_text": "Hook", "resolutions": 5}]
+        result = apply_callback_ops(empty_ledger, ops, current_turn=1)
+        assert len(result["open"]) == 1
+        assert result["open"][0]["resolutions"] is None
+
+    def test_malformed_open_entries_ignored(self):
+        ledger = {"next_id": 2, "open": [1, {"id": 1, "created_turn": 1, "original_text": "x"}], "recently_resolved": []}
+        result = apply_callback_ops(ledger, [], current_turn=2)
+        assert len(result["open"]) == 1
+        assert result["open"][0]["id"] == 1
 
 
 class TestMemoryTier:
@@ -1047,7 +1067,7 @@ class TestRunPipelineE2E:
     """End-to-end tests for run_pipeline with mocked API calls."""
 
     def _run_pipeline_collect(self, events_data, mechanics_data=None, narration_text="The guard falls.",
-                              pipeline_state=None, n_history=5):
+                              pipeline_state=None, n_history=5, game_system="dnd5e"):
         """Helper to run pipeline and collect all yielded events."""
         provider = _make_mock_provider()
         client = MagicMock()
@@ -1091,6 +1111,7 @@ class TestRunPipelineE2E:
             agent_instructions={"events": "", "mechanics": "", "narration": ""},
             agent_files={"events": "", "mechanics": "", "narration": ""},
             pipeline_state=pipeline_state,
+            game_system=game_system,
         ))
         return events
 
@@ -2716,6 +2737,20 @@ class TestScopeHudFunds:
         assert "Vex" in hud["funds"]
         assert "Vex" not in result["funds"]
 
+    def test_unhashable_scene_entries_ignored(self):
+        hud = {"funds": {"Aedina": "32 gp", "Vex": "5 gp"}}
+        scene = {"pcs_present": [{"bad": 1}, "Aedina"], "npcs_present": [None]}
+        chars = {"Aedina": {}, "Vex": {}}
+        result = scope_hud_funds(hud, scene, chars)
+        assert result["funds"] == {"Aedina": "32 gp"}
+
+
+class TestDeriveFundsFromShipCredits:
+    def test_non_dict_ship_ignored(self):
+        hud = {"date": "Day 5"}
+        result = derive_funds_from_ship_credits(hud, {"ship": True})
+        assert result == hud
+
 
 class TestBuildHudStateInjection:
     """Test build_hud_state_injection rendering."""
@@ -2811,3 +2846,857 @@ class TestApplySingleAgentHudState:
         parsed = {"hud_state": {}}
         apply_single_agent_state_updates(ps, parsed, current_turn=2)
         assert ps["hud_state"] == {}
+
+
+class TestMalformedMechanicsHandoff:
+    """Deterministic malformed-input coverage for mechanics->state handoff."""
+
+    def _run_pipeline_collect(self, events_data, mechanics_data, game_system="dnd5e", pipeline_state=None):
+        provider = _make_mock_provider()
+        client = MagicMock()
+        branch_path = _make_branch_path(3)
+
+        events_json = json.dumps(events_data)
+        mechanics_json = json.dumps(mechanics_data)
+
+        call_count = [0]
+
+        def mock_non_streaming(cl, params):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"content": events_json, "reasoning": None, "input_tokens": 100, "cache_read_tokens": 0,
+                        "cache_creation_tokens": 0, "output_tokens": 100, "reasoning_tokens": 0}
+            return {"content": mechanics_json, "reasoning": None, "input_tokens": 100, "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0, "output_tokens": 100, "reasoning_tokens": 0}
+
+        provider.send_request_non_streaming = mock_non_streaming
+        provider.send_request_stream = lambda cl, params: iter([
+            StreamEvent(event_type="content_delta", content="narration"),
+            StreamEvent(event_type="done", usage={
+                "content": "narration", "input_tokens": 50, "cache_read_tokens": 0,
+                "cache_creation_tokens": 0, "output_tokens": 20, "reasoning_tokens": 0
+            }),
+        ])
+
+        return list(run_pipeline(
+            provider=provider,
+            client=client,
+            username="testuser",
+            project="testproject",
+            chat_name="testchat",
+            branch_path=branch_path,
+            agent_instructions={"events": "", "mechanics": "", "narration": ""},
+            agent_files={"events": "", "mechanics": "", "narration": ""},
+            pipeline_state=pipeline_state,
+            game_system=game_system,
+        ))
+
+    def test_mechanics_relationship_ops_filtered_to_scene(self):
+        events_data = _make_events_response(
+            scene_state={
+                "location": "Tavern",
+                "npcs_present": ["Kira"],
+                "active_tensions": [],
+                "scene_trigger": "Conversation starts",
+                "atmosphere": "Quiet",
+                "details": [],
+                "pending_actions": [],
+            }
+        )
+        mechanics_data = _make_mechanics_response()
+        mechanics_data["relationship_ops"] = [
+            {"op": "rs", "target": "Vex", "change": 10},
+            {"op": "rs", "target": "Kira", "change": 4},
+        ]
+
+        events = self._run_pipeline_collect(events_data, mechanics_data, game_system="dnd5e")
+        done = [e for e in events if e[0] == "pipeline_done"][0][1]
+        rels = done.pipeline_state["game_state"]["relationships"]
+
+        assert "Kira" in rels
+        assert rels["Kira"]["rs"] == 4
+        assert "Vex" not in rels
+
+    def test_mechanics_malformed_relationship_ops_do_not_break_pipeline(self):
+        events_data = _make_events_response(
+            scene_state={
+                "location": "Dock",
+                "npcs_present": ["Kira"],
+                "active_tensions": [],
+                "scene_trigger": "Arrival",
+                "atmosphere": "Rain",
+                "details": [],
+                "pending_actions": [],
+            }
+        )
+        mechanics_data = _make_mechanics_response()
+        mechanics_data["relationship_ops"] = [
+            {"op": "rs", "target": "Kira", "change": "bad-int"},
+            {"op": "npc_rs", "target": "Kira", "other": None, "change": 4},
+            {"op": "rs", "target": "Kira", "change": 3},
+        ]
+
+        events = self._run_pipeline_collect(events_data, mechanics_data, game_system="dnd5e")
+        done = [e for e in events if e[0] == "pipeline_done"][0][1]
+        rels = done.pipeline_state["game_state"]["relationships"]
+
+        assert rels["Kira"]["rs"] == 3
+
+
+def _malformed_dict_ops(rng: random.Random, target_key: str, count: int = 120):
+    """Generate deterministic dict-shaped malformed ops (no non-dicts)."""
+    options = [None, "", "bad", 0, 1, -3, 3.14, [], {}, {"x": 1}]
+    id_options = [None, "", "bad", "Kira", "Vex", 0, 1, -3, 3.14, True, False]
+    ops = []
+    for _ in range(count):
+        op = {
+            # Keep identity key hashable to avoid unhashable-key TypeErrors.
+            target_key: rng.choice(id_options),
+            "op": rng.choice(options),
+            "change": rng.choice(options),
+            "action": rng.choice(options),
+            "name": rng.choice(options),
+            "other": rng.choice(options),
+            "location": rng.choice(options),
+            "value": rng.choice(options),
+            "fields": rng.choice(options),
+        }
+        for _ in range(rng.randint(0, 3)):
+            keys = list(op.keys())
+            if keys:
+                op.pop(rng.choice(keys), None)
+        ops.append(op)
+    return ops
+
+
+class TestGameStateMalformedInputs:
+    """Deterministic malformed-input coverage for game-system apply_game_state handlers."""
+
+    @pytest.mark.parametrize(
+        "init_fn,apply_fn,ops_key,target_key,root_key",
+        [
+            pytest.param(dnd_init, dnd_apply, "relationship_ops", "target", "relationships", id="dnd5e"),
+            pytest.param(cyber_init, cyber_apply, "relationship_ops", "target", "relationships", id="dnd5e_cyber"),
+            pytest.param(coc_init, coc_apply, "investigator_ops", "investigator", "investigators", id="coc7e"),
+            pytest.param(cpred_init, cpred_apply, "edgerunner_ops", "edgerunner", "edgerunners", id="cpred"),
+            pytest.param(sr_init, sr_apply, "runner_ops", "runner", "runners", id="sr6e"),
+        ],
+    )
+    def test_apply_game_state_handles_malformed_op_corpus(self, init_fn, apply_fn, ops_key, target_key, root_key):
+        rng = random.Random(1337)
+        state = init_fn()
+
+        payload = {ops_key: _malformed_dict_ops(rng, target_key)}
+        result = apply_fn(state, payload, turn=1)
+
+        assert isinstance(result, dict)
+        assert root_key in result
+
+    @pytest.mark.parametrize(
+        "init_fn,apply_fn,ops_key,valid_op,assert_fn",
+        [
+            pytest.param(
+                dnd_init,
+                dnd_apply,
+                "relationship_ops",
+                {"op": "rs", "target": "Kira", "change": 5},
+                lambda s: s["relationships"]["Kira"]["rs"] == 5,
+                id="dnd5e",
+            ),
+            pytest.param(
+                coc_init,
+                coc_apply,
+                "investigator_ops",
+                {"investigator": "Harvey", "op": "luck", "change": 10},
+                lambda s: s["investigators"]["Harvey"]["luck"] == 10,
+                id="coc7e",
+            ),
+            pytest.param(
+                cpred_init,
+                cpred_apply,
+                "edgerunner_ops",
+                {
+                    "edgerunner": "V",
+                    "op": "set",
+                    "fields": {"luck": {"current": 3, "max": 7}, "hp": {"current": 25, "max": 40}},
+                },
+                lambda s: s["edgerunners"]["V"]["luck"]["current"] == 3,
+                id="cpred",
+            ),
+            pytest.param(
+                sr_init,
+                sr_apply,
+                "runner_ops",
+                {"runner": "Raven", "op": "nuyen", "change": 1000},
+                lambda s: s["runners"]["Raven"]["nuyen"] == 1000,
+                id="sr6e",
+            ),
+            pytest.param(
+                cyber_init,
+                cyber_apply,
+                "ship_ops",
+                {"op": "set", "fields": {"credits": {"party": 10}}},
+                lambda s: s["ship"]["credits"]["party"] == 10,
+                id="dnd5e_cyber_ship",
+            ),
+        ],
+    )
+    def test_apply_game_state_malformed_corpus_does_not_block_valid_op(
+        self, init_fn, apply_fn, ops_key, valid_op, assert_fn
+    ):
+        rng = random.Random(2026)
+        state = init_fn()
+
+        malformed = _malformed_dict_ops(rng, target_key="target", count=80)
+        payload = {ops_key: copy.deepcopy(malformed) + [valid_op]}
+        result = apply_fn(state, payload, turn=2)
+
+        assert assert_fn(result)
+
+    @pytest.mark.parametrize(
+        "init_fn,apply_fn,ops_key,bad_identity_key,valid_op,assert_fn",
+        [
+            pytest.param(
+                coc_init,
+                coc_apply,
+                "investigator_ops",
+                "investigator",
+                {"investigator": "Harvey", "op": "luck", "change": 5},
+                lambda s: s["investigators"]["Harvey"]["luck"] == 5,
+                id="coc7e_unhashable_identity",
+            ),
+            pytest.param(
+                cpred_init,
+                cpred_apply,
+                "edgerunner_ops",
+                "edgerunner",
+                {"edgerunner": "V", "op": "eurobucks", "change": 100},
+                lambda s: s["edgerunners"]["V"]["eurobucks"] == 100,
+                id="cpred_unhashable_identity",
+            ),
+            pytest.param(
+                sr_init,
+                sr_apply,
+                "runner_ops",
+                "runner",
+                {"runner": "Raven", "op": "nuyen", "change": 200},
+                lambda s: s["runners"]["Raven"]["nuyen"] == 200,
+                id="sr6e_unhashable_identity",
+            ),
+        ],
+    )
+    def test_unhashable_identity_op_is_ignored_and_valid_op_applies(
+        self, init_fn, apply_fn, ops_key, bad_identity_key, valid_op, assert_fn
+    ):
+        state = init_fn()
+        payload = {
+            ops_key: [
+                {bad_identity_key: {"not": "hashable as dict key"}, "op": "nuyen", "change": 999},
+                valid_op,
+            ]
+        }
+        result = apply_fn(state, payload, turn=3)
+        assert assert_fn(result)
+
+
+def _mutate_events_payload(rng: random.Random, base: dict, game_system: str) -> dict:
+    """Deterministically mutate non-critical fields while preserving top-level shape."""
+    payload = copy.deepcopy(base)
+
+    # Keep route stable so the pipeline follows Events -> Mechanics.
+    payload["route"] = "mechanics"
+
+    type_pool = [
+        None,
+        "",
+        0,
+        -1,
+        3.14,
+        True,
+        False,
+        [],
+        {},
+        {"nested": "x"},
+        ["x", 1, None],
+    ]
+    fields = [
+        "pacing", "time_passed", "beats", "player_action", "callbacks", "emotional_context",
+        "character_states", "score_changes", "arc_label", "current_player", "next_player",
+        "next_player_prompt", "hud_state", "combat", "scene_state",
+    ]
+    for key in fields:
+        if rng.random() < 0.35:
+            payload[key] = rng.choice(type_pool)
+
+    # Keep callback/memory ops as list[dict] so apply_* can process robustly.
+    if rng.random() < 0.7:
+        payload["callback_ops"] = [
+            {
+                "action": rng.choice(["add", "resolve", "update", "bad", None, 1]),
+                "id": rng.choice([None, 1, "1", -3]),
+                "original_text": rng.choice(["Hook", "", None, 7]),
+                "source_npc": rng.choice(["Kira", "Vex", None, 2]),
+                "fields": rng.choice([{}, {"original_text": "x"}, None, "bad"]),
+            }
+            for _ in range(rng.randint(0, 3))
+        ]
+    if rng.random() < 0.7:
+        payload["npc_memory_ops"] = [
+            {
+                "action": rng.choice(["add", "drop", "bad", None]),
+                "npc": rng.choice(["Kira", "Vex", None, 3]),
+                "index": rng.choice([None, 0, 1, -1, "bad"]),
+                "text": rng.choice(["Memory", "", None, 5]),
+                "impact": rng.choice([None, 1, 3, 5, "bad"]),
+                "date": rng.choice(["Day 1", None, 100]),
+            }
+            for _ in range(rng.randint(0, 3))
+        ]
+
+    # Game-system ops: keep as list[dict], deliberately including odd value types.
+    if game_system in ("dnd5e", "dnd5e_cyber") and rng.random() < 0.8:
+        payload["relationship_ops"] = [
+            {
+                "op": rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms", "set", "bad", None]),
+                "target": rng.choice(["Kira", "Vex", "", None, {"bad": "dict"}, 7]),
+                "other": rng.choice(["Ari", None, {"bad": "dict"}]),
+                "change": rng.choice([None, -5, 0, 5, "bad"]),
+                "type": rng.choice(["npc", "faction", None]),
+                "fields": rng.choice([{}, {"rs": 10}, None, "bad"]),
+            }
+            for _ in range(rng.randint(0, 4))
+        ]
+    if game_system == "dnd5e_cyber" and rng.random() < 0.8:
+        payload["ship_ops"] = [
+            {
+                "op": rng.choice(["set", "hull", "shields", "shield_regen", "ammo", "credits", None, "bad"]),
+                "change": rng.choice([None, -3, 0, 5, "bad"]),
+                "fields": rng.choice([{}, {"credits": {"party": 10}}, None, "bad"]),
+                "weapon": rng.choice([None, "railgun", 7]),
+                "account": rng.choice([None, "party", 3]),
+            }
+            for _ in range(rng.randint(0, 4))
+        ]
+
+    return payload
+
+
+def _mutate_mechanics_payload(rng: random.Random, base: dict, game_system: str) -> dict:
+    """Deterministically mutate mechanics payload while preserving required shape."""
+    payload = copy.deepcopy(base)
+    payload["route"] = "narration"
+    payload["character_states"] = payload.get("character_states") or {}
+
+    type_pool = [None, "", 0, -1, 3.14, True, False, [], {}, {"nested": "x"}, ["x", 1, None]]
+    for key in ["beats", "dramatic_notes", "hud", "score_changes", "arc_label", "callbacks", "combat"]:
+        if rng.random() < 0.35:
+            payload[key] = rng.choice(type_pool)
+
+    if game_system in ("dnd5e", "dnd5e_cyber") and rng.random() < 0.8:
+        payload["relationship_ops"] = [
+            {
+                "op": rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms", "set", "bad", None]),
+                "target": rng.choice(["Kira", "Vex", "", None, {"bad": "dict"}, 7]),
+                "other": rng.choice(["Ari", None, {"bad": "dict"}]),
+                "change": rng.choice([None, -5, 0, 5, "bad"]),
+                "type": rng.choice(["npc", "faction", None]),
+                "fields": rng.choice([{}, {"rs": 10}, None, "bad"]),
+            }
+            for _ in range(rng.randint(0, 4))
+        ]
+    if game_system == "dnd5e_cyber" and rng.random() < 0.8:
+        payload["ship_ops"] = [
+            {
+                "op": rng.choice(["set", "hull", "shields", "shield_regen", "ammo", "credits", None, "bad"]),
+                "change": rng.choice([None, -3, 0, 5, "bad"]),
+                "fields": rng.choice([{}, {"credits": {"party": 10}}, None, "bad"]),
+                "weapon": rng.choice([None, "railgun", 7]),
+                "account": rng.choice([None, "party", 3]),
+            }
+            for _ in range(rng.randint(0, 4))
+        ]
+
+    return payload
+
+
+class TestPipelineBoundaryStructureFuzz:
+    """Seeded structure fuzzing at Events/Mechanics JSON handoff boundaries."""
+
+    def _run_once(self, events_data: dict, mechanics_data: dict, game_system: str):
+        provider = _make_mock_provider()
+        client = MagicMock()
+        branch_path = _make_branch_path(3)
+
+        events_json = json.dumps(events_data)
+        mechanics_json = json.dumps(mechanics_data)
+        call_count = [0]
+
+        def mock_non_streaming(cl, params):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "content": events_json, "reasoning": None, "input_tokens": 100,
+                    "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_tokens": 100, "reasoning_tokens": 0,
+                }
+            return {
+                "content": mechanics_json, "reasoning": None, "input_tokens": 100,
+                "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_tokens": 100, "reasoning_tokens": 0,
+            }
+
+        provider.send_request_non_streaming = mock_non_streaming
+        provider.send_request_stream = lambda cl, params: iter([
+            StreamEvent(event_type="content_delta", content="narration"),
+            StreamEvent(event_type="done", usage={
+                "content": "narration", "input_tokens": 50, "cache_read_tokens": 0,
+                "cache_creation_tokens": 0, "output_tokens": 20, "reasoning_tokens": 0,
+            }),
+        ])
+
+        events = list(run_pipeline(
+            provider=provider,
+            client=client,
+            username="testuser",
+            project="testproject",
+            chat_name="testchat",
+            branch_path=branch_path,
+            agent_instructions={"events": "", "mechanics": "", "narration": ""},
+            agent_files={"events": "", "mechanics": "", "narration": ""},
+            pipeline_state=None,
+            game_system=game_system,
+        ))
+        assert any(e[0] == "pipeline_done" for e in events)
+
+    @pytest.mark.parametrize("game_system", ["dnd5e", "dnd5e_cyber"])
+    def test_seeded_structure_fuzz_handoff_does_not_throw(self, game_system):
+        rng = random.Random(6060)
+        base_events = _make_events_response(
+            scene_state={
+                "location": "Tavern",
+                "npcs_present": ["Kira", "Vex"],
+                "active_tensions": [],
+                "scene_trigger": "Talk",
+                "atmosphere": "Calm",
+                "details": [],
+                "pending_actions": [],
+            },
+            callback_ops=[],
+            npc_memory_ops=[],
+        )
+        base_mechanics = _make_mechanics_response(character_states={})
+
+        for _ in range(80):
+            e_payload = _mutate_events_payload(rng, base_events, game_system)
+            m_payload = _mutate_mechanics_payload(rng, base_mechanics, game_system)
+            self._run_once(e_payload, m_payload, game_system=game_system)
+
+
+class TestStatefulSequenceFuzz:
+    """Seeded multi-turn sequence fuzzing with invariants."""
+
+    def test_cpred_sequence_invariants(self):
+        rng = random.Random(7001)
+        state = cpred_init()
+        cpred_apply(state, {
+            "edgerunner_ops": [{
+                "edgerunner": "V",
+                "op": "set",
+                "fields": {
+                    "hp": {"current": 40, "max": 40},
+                    "humanity": {"current": 50, "max": 60},
+                    "luck": {"current": 7, "max": 7},
+                    "armor": {"head": 11, "body": 11},
+                    "eurobucks": 5000,
+                },
+            }]
+        }, turn=0)
+
+        for turn in range(1, 121):
+            ops = []
+            for _ in range(rng.randint(1, 4)):
+                op_type = rng.choice(["hp", "luck", "armor", "eurobucks", "humanity", "therapy", "critical_injury"])
+                if op_type == "armor":
+                    ops.append({
+                        "edgerunner": "V", "op": "armor", "location": rng.choice(["head", "body"]),
+                        "change": rng.randint(-2, 2),
+                    })
+                elif op_type == "critical_injury":
+                    ops.append({
+                        "edgerunner": "V", "op": "critical_injury", "action": "add",
+                        "name": f"Injury-{turn}-{rng.randint(1, 9)}", "effect": "test", "dv_mod": rng.randint(0, 3),
+                    })
+                else:
+                    ops.append({"edgerunner": "V", "op": op_type, "change": rng.randint(-5, 5)})
+            cpred_apply(state, {"edgerunner_ops": ops}, turn=turn)
+
+            er = state["edgerunners"]["V"]
+            assert 0 <= er["hp"]["current"] <= er["hp"]["max"]
+            assert 0 <= er["luck"]["current"] <= er["luck"]["max"]
+            assert er["armor"]["head"] >= 0 and er["armor"]["body"] >= 0
+            assert er["eurobucks"] >= 0
+            assert er["humanity"]["current"] >= 0
+
+    def test_sr6e_sequence_invariants(self):
+        rng = random.Random(7002)
+        state = sr_init()
+        sr_apply(state, {
+            "runner_ops": [{
+                "runner": "Raven",
+                "op": "set",
+                "fields": {
+                    "edge": {"current": 5, "max": 5},
+                    "physical_cm": {"filled": 0, "max": 11},
+                    "stun_cm": {"filled": 0, "max": 10},
+                    "overflow": 0,
+                    "essence": 6.0,
+                    "nuyen": 10000,
+                },
+            }]
+        }, turn=0)
+
+        for turn in range(1, 121):
+            ops = []
+            for _ in range(rng.randint(1, 4)):
+                op_type = rng.choice([
+                    "edge", "edge_reset", "physical", "stun", "heal_physical", "heal_stun", "essence", "nuyen"
+                ])
+                if op_type == "edge_reset":
+                    ops.append({"runner": "Raven", "op": "edge_reset"})
+                elif op_type == "essence":
+                    ops.append({"runner": "Raven", "op": "essence", "change": round(rng.uniform(-0.5, 0.2), 2)})
+                elif op_type in ("heal_physical", "heal_stun"):
+                    ops.append({"runner": "Raven", "op": op_type, "change": -rng.randint(0, 3)})
+                else:
+                    ops.append({"runner": "Raven", "op": op_type, "change": rng.randint(-3, 4)})
+            sr_apply(state, {"runner_ops": ops}, turn=turn)
+
+            r = state["runners"]["Raven"]
+            assert 0 <= r["edge"]["current"] <= r["edge"]["max"]
+            assert 0 <= r["physical_cm"]["filled"] <= r["physical_cm"]["max"]
+            assert 0 <= r["stun_cm"]["filled"] <= r["stun_cm"]["max"]
+            assert r["overflow"] >= 0
+            assert r["essence"] >= 0
+            assert r["nuyen"] >= 0
+
+    def test_dnd5e_relationship_sequence_invariants(self):
+        rng = random.Random(7003)
+        state = dnd_init()
+        for turn in range(1, 161):
+            ops = []
+            for _ in range(rng.randint(1, 5)):
+                op = rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms"])
+                entry = {
+                    "op": op,
+                    "target": rng.choice(["Kira", "Vex", "Ari"]),
+                    "change": rng.randint(-15, 15),
+                }
+                if op in ("npc_rs", "npc_roms"):
+                    entry["other"] = rng.choice(["Kira", "Vex", "Ari"])
+                ops.append(entry)
+            dnd_apply(state, {"relationship_ops": ops}, turn=turn)
+
+            for rel in state["relationships"].values():
+                assert -100 <= rel.get("rs", 0) <= 100
+                assert 0 <= rel.get("roms", 0) <= 100
+                for nrel in rel.get("npc_relationships", {}).values():
+                    assert -100 <= nrel.get("rs", 0) <= 100
+                    assert 0 <= nrel.get("roms", 0) <= 100
+            for faction in state["factions"].values():
+                assert -100 <= faction.get("fr", 0) <= 100
+
+
+class TestNestedMalformedStructureFuzz:
+    """Seeded malformed nested-structure fuzzing for migration and single-agent path."""
+
+    def test_migrate_pipeline_state_handles_malformed_nested_types(self):
+        rng = random.Random(8080)
+        weird_vals = [None, True, 7, "bad", [], [1, 2], {"x": 1}]
+
+        for _ in range(80):
+            state = {
+                "pacing": rng.choice(weird_vals),
+                "callback_ledger": rng.choice(weird_vals),
+                "npc_memories": rng.choice(weird_vals),
+                "scene_state": rng.choice(weird_vals),
+                "character_states": rng.choice(weird_vals),
+                "game_state": rng.choice(weird_vals),
+                "hud_state": rng.choice(weird_vals),
+                "combat": rng.choice(weird_vals),
+                "ship_combat": rng.choice(weird_vals),
+                "turn_counter": rng.choice(weird_vals),
+            }
+            migrated = migrate_pipeline_state(state)
+            assert isinstance(migrated, dict)
+            assert isinstance(migrated.get("callback_ledger"), dict)
+            assert isinstance(migrated["callback_ledger"].get("open"), list)
+            assert isinstance(migrated["callback_ledger"].get("recently_resolved"), list)
+            assert isinstance(migrated.get("character_states"), dict)
+            assert isinstance(migrated.get("scene_state"), dict)
+            assert isinstance(migrated.get("npc_memories"), dict)
+            assert isinstance(migrated.get("hud_state"), dict)
+            assert isinstance(migrated.get("pacing"), dict)
+            assert isinstance(migrated.get("game_state"), dict)
+            assert isinstance(migrated.get("turn_counter"), int)
+
+    def test_apply_single_agent_state_updates_handles_malformed_nested_types(self):
+        rng = random.Random(8081)
+        weird_vals = [None, True, 7, "bad", [], [1, 2], {"x": 1}]
+
+        for _ in range(80):
+            ps = migrate_pipeline_state({
+                "pacing": rng.choice(weird_vals),
+                "callback_ledger": rng.choice(weird_vals),
+                "npc_memories": rng.choice(weird_vals),
+                "scene_state": rng.choice(weird_vals),
+                "character_states": rng.choice(weird_vals),
+                "game_state": rng.choice(weird_vals),
+                "hud_state": rng.choice(weird_vals),
+                "turn_counter": rng.randint(0, 20),
+            })
+            parsed = {
+                "pacing": rng.choice(weird_vals),
+                "callback_ops": rng.choice(weird_vals),
+                "npc_memory_ops": rng.choice(weird_vals),
+                "scene_state": rng.choice(weird_vals),
+                "character_states": rng.choice(weird_vals),
+                "relationship_ops": rng.choice(weird_vals),
+                "hud_state": rng.choice(weird_vals),
+                "combat": rng.choice(weird_vals),
+            }
+            updated = apply_single_agent_state_updates(ps, parsed, current_turn=ps["turn_counter"] + 1)
+            assert isinstance(updated, dict)
+            assert isinstance(updated.get("callback_ledger"), dict)
+            assert isinstance(updated.get("npc_memories"), dict)
+            assert isinstance(updated.get("scene_state"), dict)
+            assert isinstance(updated.get("character_states"), dict)
+            assert isinstance(updated.get("hud_state"), dict)
+
+
+class TestPipelineSingleAgentDifferential:
+    """Differential checks: equivalent payloads should converge across apply paths."""
+
+    @staticmethod
+    def _build_provider_for_payloads(events_data: dict, mechanics_data: dict, narration_text: str = "Narration"):
+        provider = _make_mock_provider()
+        events_json = json.dumps(events_data)
+        mechanics_json = json.dumps(mechanics_data)
+        call_count = [0]
+
+        def mock_non_streaming(cl, params):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "content": events_json, "reasoning": None, "input_tokens": 1000, "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0, "output_tokens": 500, "reasoning_tokens": 100
+                }
+            return {
+                "content": mechanics_json, "reasoning": None, "input_tokens": 500, "cache_read_tokens": 0,
+                "cache_creation_tokens": 0, "output_tokens": 300, "reasoning_tokens": 50
+            }
+
+        provider.send_request_non_streaming = mock_non_streaming
+        provider.send_request_stream = lambda cl, params: iter([
+            StreamEvent(event_type="content_delta", content=narration_text),
+            StreamEvent(event_type="done", usage={
+                "content": narration_text, "input_tokens": 200, "cache_read_tokens": 0,
+                "cache_creation_tokens": 0, "output_tokens": 100, "reasoning_tokens": 0
+            }),
+        ])
+        return provider
+
+    def _run_pipeline_once(self, pipeline_state: dict, events_data: dict, mechanics_data: dict, game_system: str):
+        provider = self._build_provider_for_payloads(events_data, mechanics_data)
+        events = list(run_pipeline(
+            provider=provider,
+            client=MagicMock(),
+            username="testuser",
+            project="testproject",
+            chat_name="testchat",
+            branch_path=_make_branch_path(4),
+            agent_instructions={"events": "", "mechanics": "", "narration": ""},
+            agent_files={"events": "", "mechanics": "", "narration": ""},
+            pipeline_state=copy.deepcopy(pipeline_state),
+            game_system=game_system,
+        ))
+        done = [e for e in events if e[0] == "pipeline_done"][0][1]
+        return done.pipeline_state
+
+    @staticmethod
+    def _state_snapshot(ps: dict):
+        """Compare only stateful fields shared across both apply pathways."""
+        return {
+            "pacing": ps.get("pacing", {}),
+            "callback_ledger": ps.get("callback_ledger", {}),
+            "npc_memories": ps.get("npc_memories", {}),
+            "scene_state": ps.get("scene_state", {}),
+            "character_states": ps.get("character_states", {}),
+            "game_state": ps.get("game_state", {}),
+            "hud_state": ps.get("hud_state", {}),
+            "combat": ps.get("combat"),
+            "turn_counter": ps.get("turn_counter"),
+        }
+
+    @pytest.mark.parametrize("game_system", ["dnd5e", "dnd5e_cyber"])
+    def test_equivalent_payloads_converge_pipeline_vs_single_agent(self, game_system):
+        base = _fresh_pipeline_state()
+
+        events_data = _make_events_response(
+            pacing={"episode": "Ep4", "beat": "Crossroads", "beat_responses": 2, "notes": "rising tension"},
+            callback_ops=[
+                {"action": "add", "original_text": "Kira asks for help", "source_npc": "Kira"}
+            ],
+            npc_memory_ops=[
+                {"action": "add", "npc": "Kira", "text": "Agreed to help with smuggler issue", "date": "Day 6", "impact": 3}
+            ],
+            scene_state={
+                "location": "Tavern",
+                "npcs_present": ["Kira"],
+                "active_tensions": ["Debt collectors approaching"],
+                "scene_trigger": "Kira sits down",
+                "atmosphere": "Low, tense voices",
+                "details": ["Rain at windows"],
+                "pending_actions": ["Decide whether to help"]
+            },
+            extra_fields={
+                "relationship_ops": [{"op": "rs", "target": "Kira", "change": 2}],
+                "hud_state": {"date": "Day 6", "time": "2015", "location": "Tavern", "funds": {"Aedina": "95 gp"}},
+                # Pipeline ignores Events character_states on non-output turns.
+                "character_states": {}
+            }
+        )
+
+        mechanics_data = _make_mechanics_response(
+            character_states={
+                "Aedina": {"type": "pc", "class": "Rogue", "level": 4, "vitals": [], "resources": [], "conditions": [], "summary": "alert"}
+            }
+        )
+        mechanics_data["relationship_ops"] = [{"op": "rs", "target": "Kira", "change": 3}]
+
+        # Pipeline path
+        pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system=game_system)
+
+        # Single-agent equivalent path:
+        # 1) Apply events-like parsed payload (same turn).
+        single_state = migrate_pipeline_state(copy.deepcopy(base))
+        single_state["turn_counter"] += 1
+        current_turn = single_state["turn_counter"]
+        apply_single_agent_state_updates(
+            single_state,
+            copy.deepcopy(events_data),
+            current_turn,
+            game_system=__import__("game_systems", fromlist=["get_game_system"]).get_game_system(game_system),
+        )
+
+        # 2) Apply mechanics-like payload same turn.
+        mechanics_parsed = {
+            "character_states": copy.deepcopy(mechanics_data["character_states"]),
+            "relationship_ops": copy.deepcopy(mechanics_data.get("relationship_ops", [])),
+            "combat": mechanics_data.get("combat"),
+        }
+        apply_single_agent_state_updates(
+            single_state,
+            mechanics_parsed,
+            current_turn,
+            game_system=__import__("game_systems", fromlist=["get_game_system"]).get_game_system(game_system),
+        )
+
+        assert self._state_snapshot(single_state) == self._state_snapshot(pipeline_result)
+
+    def test_single_agent_and_pipeline_match_cpred_state_projection(self):
+        base = _fresh_pipeline_state()
+
+        events_data = _make_events_response(
+            scene_state={
+                "location": "Warehouse",
+                "npcs_present": ["Fixer Lux"],
+                "active_tensions": [],
+                "scene_trigger": "Briefing",
+                "atmosphere": "Neon hum",
+                "details": [],
+                "pending_actions": []
+            },
+            extra_fields={
+                "edgerunner_ops": [
+                    {"edgerunner": "V", "op": "set", "fields": {
+                        "hp": {"current": 35, "max": 40},
+                        "humanity": {"current": 48, "max": 60},
+                        "luck": {"current": 6, "max": 7},
+                        "armor": {"head": 11, "body": 11},
+                        "eurobucks": 2500
+                    }}
+                ],
+                # Pipeline ignores Events character_states on non-output turns.
+                "character_states": {}
+            }
+        )
+        mechanics_data = _make_mechanics_response(character_states={})
+        mechanics_data["edgerunner_ops"] = [
+            {"edgerunner": "V", "op": "hp", "change": -5, "reason": "incoming fire"},
+            {"edgerunner": "V", "op": "armor", "location": "body", "change": -1, "reason": "ablation"},
+        ]
+
+        pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system="cpred")
+
+        single_state = migrate_pipeline_state(copy.deepcopy(base))
+        single_state["turn_counter"] += 1
+        current_turn = single_state["turn_counter"]
+        gs_cpred = __import__("game_systems", fromlist=["get_game_system"]).get_game_system("cpred")
+        apply_single_agent_state_updates(single_state, copy.deepcopy(events_data), current_turn, game_system=gs_cpred)
+        apply_single_agent_state_updates(
+            single_state,
+            {"character_states": {}, "edgerunner_ops": copy.deepcopy(mechanics_data["edgerunner_ops"])},
+            current_turn,
+            game_system=gs_cpred,
+        )
+
+        assert self._state_snapshot(single_state) == self._state_snapshot(pipeline_result)
+
+
+class TestContractDriftGuards:
+    """Guard critical op-schema tokens from drifting away from apply_game_state behavior."""
+
+    @staticmethod
+    def _report_state_properties(system_id: str) -> dict:
+        return get_game_system(system_id)["state_report_tool"]["input_schema"]["properties"]
+
+    def test_dnd5e_relationship_ops_schema_covers_inter_npc_ops(self):
+        props = self._report_state_properties("dnd5e")
+        rel_items = props["relationship_ops"]["items"]["properties"]
+        op_enum = set(rel_items["op"]["enum"])
+        assert {"rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"} <= op_enum
+        assert "other" in rel_items
+        assert "fields" in rel_items
+
+    def test_dnd5e_cyber_ship_ops_schema_covers_apply_ops(self):
+        props = self._report_state_properties("dnd5e_cyber")
+        ship_items = props["ship_ops"]["items"]["properties"]
+        op_enum = set(ship_items["op"]["enum"])
+        assert {"hull", "shields", "shield_regen", "ammo", "credits", "set"} <= op_enum
+        assert "weapon" in ship_items
+        assert "account" in ship_items
+        assert "fields" in ship_items
+
+    def test_cpred_critical_injury_schema_includes_required_fields(self):
+        props = self._report_state_properties("cpred")
+        er_items = props["edgerunner_ops"]["items"]["properties"]
+        op_enum = set(er_items["op"]["enum"])
+        assert "critical_injury" in op_enum
+        assert set(er_items["action"]["enum"]) == {"add", "remove"}
+        assert "name" in er_items
+        assert "effect" in er_items
+        assert "dv_mod" in er_items
+
+    def test_coc7e_mania_phobia_schema_exposes_action_and_value(self):
+        props = self._report_state_properties("coc7e")
+        inv_items = props["investigator_ops"]["items"]["properties"]
+        op_enum = set(inv_items["op"]["enum"])
+        assert {"phobia", "mania"} <= op_enum
+        assert set(inv_items["action"]["enum"]) == {"add", "remove"}
+        assert "value" in inv_items
+
+    def test_sr6e_sustained_effect_schema_exposes_action_and_value(self):
+        props = self._report_state_properties("sr6e")
+        runner_items = props["runner_ops"]["items"]["properties"]
+        op_enum = set(runner_items["op"]["enum"])
+        assert {"sustained", "effect"} <= op_enum
+        assert set(runner_items["action"]["enum"]) == {"add", "remove"}
+        assert "value" in runner_items
