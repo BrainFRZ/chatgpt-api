@@ -9,11 +9,6 @@ Luck (session-spendable), Armor (head/body with ablation), eurobucks, critical i
 import copy
 import logging
 
-from .dnd5e import (
-    REPORT_COMBAT_STATE_TOOL,
-    build_combat_profile,
-    build_combat_injection,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +48,8 @@ def _default_edgerunner():
         "armor": {"head": 0, "body": 0},
         "eurobucks": 0,
         "critical_injuries": [],
-        "cyberware_effects": []
+        "cyberware_effects": [],
+        "weapons": []
     }
 
 
@@ -174,6 +170,34 @@ def apply_game_state(game_state, agent_json, turn):
                     elif action == "remove" and value in er["cyberware_effects"]:
                         er["cyberware_effects"].remove(value)
 
+            elif op == "weapon_set":
+                er["weapons"] = copy.deepcopy(op_data.get("weapons", []))
+
+            elif op == "weapon_add":
+                weapon = copy.deepcopy(op_data.get("weapon", {}))
+                if weapon.get("name"):
+                    er.setdefault("weapons", []).append(weapon)
+
+            elif op == "weapon_remove":
+                weapon_ref = op_data.get("weapon", "")
+                if isinstance(weapon_ref, dict):
+                    wname = weapon_ref.get("name", "")
+                else:
+                    wname = weapon_ref
+                er["weapons"] = [w for w in er.get("weapons", []) if w.get("name") != wname]
+
+            elif op == "weapon_ammo":
+                weapon_ref = op_data.get("weapon", "")
+                if isinstance(weapon_ref, dict):
+                    wname = weapon_ref.get("name", "")
+                else:
+                    wname = weapon_ref
+                current = int(op_data.get("current", 0))
+                for w in er.get("weapons", []):
+                    if w.get("name") == wname:
+                        w["current_ammo"] = max(0, current)
+                        break
+
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
             continue
@@ -210,6 +234,23 @@ def build_game_injection(game_state):
             dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
             injury_strs = [f"{ci['name']} ({ci['effect']}, Death Save +{ci['dv_mod']})" for ci in injuries]
             lines.append(f"  Critical injuries (Death Save DV +{dv_total}): {'; '.join(injury_strs)}")
+
+        weapons = er.get("weapons", [])
+        if weapons:
+            weapon_strs = []
+            for w in weapons:
+                wname = w.get("name", "?")
+                wdmg = w.get("damage", "?")
+                wtype = w.get("type", "ranged")
+                wskill = w.get("skill", "")
+                if wtype == "melee":
+                    weapon_strs.append(f"{wname} ({wdmg}, {wskill})" if wskill else f"{wname} ({wdmg}, Melee Weapon)")
+                else:
+                    cur = w.get("current_ammo", 0)
+                    mx = w.get("max_ammo", 0)
+                    skill_part = f", {wskill}" if wskill else ""
+                    weapon_strs.append(f"{wname} ({wdmg}, {cur}/{mx} ammo{skill_part})")
+            lines.append(f"  Weapons: {'; '.join(weapon_strs)}")
 
         if cyberware:
             lines.append(f"  Cyberware: {', '.join(cyberware)}")
@@ -327,10 +368,18 @@ Use "edgerunner_ops" to update this state. Operations:
   Remove a critical injury after treatment.
 - {"edgerunner": "<name>", "op": "cyberware", "action": "add|remove", "value": "<cyberware name>"}
   Install or remove cyberware (pair with humanity ops).
+- {"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}
+  Replace full weapons list (use during bootstrap or re-equip).
+- {"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}
+  Add a single weapon.
+- {"edgerunner": "<name>", "op": "weapon_remove", "weapon": "Knife"}
+  Remove a weapon by name.
+- {"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}
+  Set current ammo for a weapon (after firing, reloading, etc.).
 - {"edgerunner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
   Use "set" to bootstrap edgerunner state on first turn or correct errors.
 
-IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
+IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
 
 CHARACTER STATES (structured format):
 - "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
@@ -642,9 +691,13 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "eurobucks", "change": -500, "reason": "Bought ammo"}`
 - `{"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "Broken Ribs", "effect": "-2 movement", "dv_mod": 1}`
 - `{"edgerunner": "<name>", "op": "cyberware", "action": "add", "value": "Cybereye"}`
+- `{"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}`
+- `{"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}`
+- `{"edgerunner": "<name>", "op": "weapon_remove", "weapon": "Knife"}`
+- `{"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}`
 - `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
-HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, and Cyberware are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
+HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
 
 ### Dice Mechanics:
 - Skill checks: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29)
@@ -844,7 +897,7 @@ STATE_REPORT_TOOL = {
                     "required": ["edgerunner", "op"],
                     "properties": {
                         "edgerunner": {"type": "string"},
-                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set"]},
+                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo"]},
                         "change": {"type": "number"},
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},
@@ -853,7 +906,10 @@ STATE_REPORT_TOOL = {
                         "name": {"type": "string", "description": "Injury name (for critical_injury ops)"},
                         "effect": {"type": "string", "description": "Injury effect (for critical_injury add)"},
                         "dv_mod": {"type": "integer", "description": "Death Save DV modifier (for critical_injury add)"},
-                        "fields": {"type": "object", "description": "Full field replacement (for set ops)"}
+                        "fields": {"type": "object", "description": "Full field replacement (for set ops)"},
+                        "weapons": {"type": "array", "description": "Full weapons list (for weapon_set)", "items": {"type": "object"}},
+                        "weapon": {"type": ["object", "string"], "description": "Weapon object (weapon_add) or weapon name string/object-with-name (weapon_remove/weapon_ammo)"},
+                        "current": {"type": "integer", "description": "Current ammo count (for weapon_ammo)"}
                     }
                 }
             },
@@ -907,61 +963,874 @@ STATE_REPORT_TOOL = {
 # Combat Context Mode
 # ============================================================
 
+REPORT_CPRED_COMBAT_STATE_TOOL = {
+    "name": "report_combat_state",
+    "description": "Report combat state after each exchange. Call every combat turn, before your narrative.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "rolls", "character_updates", "cover_state", "combat", "combat_complete"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Full narrative of this combat exchange — what happened, who did what, what the dice mean in fiction."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "All dice rolls this exchange (attacks, damage, saves, checks).",
+                "items": {
+                    "type": "object",
+                    "required": ["description", "result"],
+                    "properties": {
+                        "description": {"type": "string"},
+                        "result": {"type": "string"}
+                    }
+                }
+            },
+            "character_updates": {
+                "type": "array",
+                "description": "State changes for every affected combatant this exchange.",
+                "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "set_combat_stats": {
+                            "type": "object",
+                            "description": "First-exchange enemy bootstrap ONLY. Sets full combat data for a new enemy.",
+                            "properties": {
+                                "hp_max": {"type": "integer"},
+                                "armor": {
+                                    "type": "object",
+                                    "properties": {
+                                        "head": {"type": "integer"},
+                                        "body": {"type": "integer"}
+                                    }
+                                },
+                                "weapons": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "damage": {"type": "string"},
+                                            "ammo": {"type": "integer"},
+                                            "magazine": {"type": "integer"},
+                                            "skill": {"type": "string"}
+                                        }
+                                    }
+                                },
+                                "stats": {
+                                    "type": "object",
+                                    "description": "Combat-relevant stats: REF, DEX, BODY, WILL, COOL, etc."
+                                }
+                            }
+                        },
+                        "hp_delta": {"type": "integer", "description": "HP change after armor. Negative = damage, positive = healing."},
+                        "armor_delta": {
+                            "type": "object",
+                            "description": "SP ablation per location. Negative values = SP lost.",
+                            "properties": {
+                                "head": {"type": "integer"},
+                                "body": {"type": "integer"}
+                            }
+                        },
+                        "luck_delta": {"type": "integer", "description": "Luck points spent (negative) or recovered (positive)."},
+                        "ammo": {
+                            "type": "array",
+                            "description": "Explicit current magazine count per weapon after this exchange.",
+                            "items": {
+                                "type": "object",
+                                "required": ["weapon", "current"],
+                                "properties": {
+                                    "weapon": {"type": "string"},
+                                    "current": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "critical_injury_add": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["name", "location", "effect"],
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "location": {"type": "string", "enum": ["body", "head"]},
+                                    "effect": {"type": "string"},
+                                    "dv_mod": {"type": "integer", "description": "Death Save DV modifier from this injury. Default 1."}
+                                }
+                            }
+                        },
+                        "critical_injury_remove": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Critical injury names to remove."
+                        },
+                        "conditions_add": {"type": "array", "items": {"type": "string"}},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}}
+                    }
+                }
+            },
+            "cover_state": {
+                "type": "array",
+                "description": "Cover status for ALL combatants. Report every exchange, not just changes.",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "in_cover"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "in_cover": {"type": "boolean"},
+                        "cover_type": {"type": ["string", "null"]},
+                        "cover_hp": {"type": ["integer", "null"]}
+                    }
+                }
+            },
+            "combat": {
+                "description": "Updated initiative state. Set to null when combat ends.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["round", "initiative_order", "current_turn"],
+                        "properties": {
+                            "round": {"type": "integer"},
+                            "initiative_order": {"type": "array", "items": {"type": "string"}},
+                            "current_turn": {"type": "string"}
+                        }
+                    },
+                    {"type": "null"}
+                ]
+            },
+            "combat_complete": {
+                "type": "boolean",
+                "description": "True when this exchange ends the combat encounter."
+            },
+            "narrative_summary": {
+                "type": "string",
+                "description": "ONLY include when combat_complete=true. 1–3 sentence summary of the ENTIRE fight."
+            },
+            "initiate_net_combat": {
+                "type": ["object", "null"],
+                "description": "Set when a netrunner declares NET actions during combat. Triggers NET-in-meatspace mode on next exchange.",
+                "properties": {
+                    "netrunner": {"type": "string", "description": "Name of the netrunner going into the NET"},
+                    "target": {"type": "string", "description": "What they're jacking into (architecture name, device, etc.)"}
+                }
+            }
+        }
+    }
+}
+
+
 CPRED_COMBAT_CONTRACT = """You are the COMBAT MASTER for a Cyberpunk RED session. A battle is underway.
 
 YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with visceral intensity. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
 
 Call report_combat_state every exchange, then write your narrative response.
 
-COMBAT RULES (Cyberpunk RED):
-- Dice: d10 + STAT + Skill vs DV (9/13/15/17/21/24/29). Exploding 10s: roll again and add (keep exploding). Fumble 1s: roll again and subtract.
-- Initiative: REF + 1d10; ties broken by REF stat.
-- Action Economy: Move Action + Action per turn.
-- Seriously Wounded: When HP ≤ half max → −2 to ALL actions. Add "Seriously Wounded" condition automatically when threshold is crossed.
-- Armor Ablation: Each penetrating hit (damage after armor > 0) reduces armor SP by 1. Track via character_updates using vital_label: "Armor" and hp_delta: −1 if Armor is tracked as a vital — otherwise note in narrative.
-- Critical Injuries: Triggered when a single hit deals 13+ damage after armor. Roll on critical injury table and add as a condition.
-- Death Saves: At 0 HP — BODY + WILL + d10 vs DV 10 (DV increases by 1 each subsequent round; +1 per critical injury). Fail = dead.
-- Luck: Spend Luck points to add to any roll (1 point = +1). Report spending via character_updates (vital_label: "Luck", hp_delta: −N).
+RULES REFERENCE:
+The Combat Ruleset document is your authoritative source for detailed tables and edge cases. Consult it for DV tables (§3), damage resolution (§12), critical injury tables (§15), cover HP (§16), vehicle combat (§18). The rules summarized below are for quick reference — defer to the Ruleset when in doubt.
 
-VITAL LABELS for character_updates:
-- HP damage/healing → vital_label: "HP" (default, can omit)
-- Armor ablation → vital_label: "Armor", hp_delta: −1 (only if Armor tracked as a vital)
-- Luck spent → vital_label: "Luck", hp_delta: −N
+KEY RULES:
+- Initiative: REF + d10; ties broken by REF stat. Highest goes first.
+- Action Economy: Move Action (up to MOVE×2 m/yds) + Action per turn.
+- Ranged Attack: d10 + REF + Weapon Skill vs DV (from range/DV table in Ruleset §3).
+- Melee Attack: d10 + DEX + Melee Weapon/Martial Arts vs defender's d10 + DEX + Evasion.
+- Crit Success: natural 10 on d10 → roll another d10 and ADD (keep exploding on 10s).
+- Crit Failure: natural 1 on d10 → roll another d10 and SUBTRACT from total.
+- Luck: spend Luck points to add to any roll (1 point = +1).
+- Seriously Wounded: when HP ≤ half max → −2 to ALL actions. Add condition automatically.
 
-DICE ROLLING:
-- Roll ALL dice yourself. Show results inline.
-- Attack example: "V attacks: d10[7] + REF 8 + Handgun 6 = 21 vs DV 15 → HIT → 3d6[4,3,5] = 12 damage → Body armor SP 11 → 12−11 = 1 net → SP ablates to 10, 1 HP damage"
-- Exploding 10s example: "d10[10] + d10[6] = 16 + STAT + Skill = total"
-- Fumble 1 example: "d10[1] − d10[4] = −3 + STAT + Skill = total"
+DAMAGE RESOLUTION:
+1. Roll weapon damage dice.
+2. Crit check: if TWO or more dice show 6 → critical injury + 5 bonus damage applied DIRECTLY to HP (bypasses armor).
+3. Determine hit location (body unless called shot to head).
+4. Subtract location SP from remaining damage total. If damage ≤ SP, no penetration — stop.
+5. Ablation: if damage penetrates (damage > SP), SP drops by 1. AP ammo: SP drops by 2.
+6. Melee weapons: halve SP before comparing (round down). Brawling does NOT halve SP.
+7. Remaining damage after SP → applied to HP.
+8. Critical injury: if a single hit deals 13+ damage after armor, roll on critical injury table (Ruleset §15). Add via critical_injury_add with location, effect, and dv_mod.
 
-ROLL ADJUDICATION:
-- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
-- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
-- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
-- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
-- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+DEATH SAVES:
+At 0 HP, character must make a Death Save each round:
+- Roll: d10 vs BODY stat. Succeed if roll is UNDER BODY. Fail if equal or over.
+- Natural 10: automatic failure regardless of BODY.
+- Cumulative: +1 to roll per Death Save already made this combat.
+- Critical injuries: add dv_mod from each active critical injury to the roll.
+- Fail = dead (for NPCs). For PCs, see PC death rules below.
+
+STATE TRACKING via report_combat_state:
+- hp_delta: HP change after armor (negative = damage). Applied to edgerunner state for PCs, character_states vitals for enemies.
+- armor_delta: {head: int, body: int} — SP ablation per location. Report only the location hit.
+- luck_delta: Luck points spent (negative) or recovered.
+- ammo: array of {weapon, current} — explicit current magazine count AFTER firing. Always report for weapons used this exchange.
+- set_combat_stats: first-exchange enemy bootstrap ONLY — sets hp_max, armor, weapons, stats for a new enemy.
+- critical_injury_add: [{name, location, effect, dv_mod}] — add critical injuries with Death Save modifier.
+- critical_injury_remove: [name] — remove healed/treated injuries.
+- conditions_add/remove: general conditions (Seriously Wounded auto-managed via HP).
+- cover_state: report ALL combatants every exchange — {name, in_cover, cover_type, cover_hp}.
+
+ENEMY BOOTSTRAP (first exchange):
+When enemies first appear, use set_combat_stats to define their mechanical identity:
+- hp_max: sets both current and max HP
+- armor: {head: SP, body: SP}
+- weapons: [{name, damage, ammo, magazine, skill}]
+- stats: {REF, DEX, BODY, WILL, COOL, ...} — combat-relevant stats
+After bootstrap, use hp_delta/armor_delta/ammo to track changes.
 
 ENEMY TACTICS:
-- Enemies focus wounded edgerunners, use cover, call reinforcements when outnumbered.
-- Netrunners stay back and attempt network control; solos engage directly; heavies suppress with autofire.
+Enemies act according to their type and motivation — do not apply a single template:
+- Solos engage directly, press advantages, use cover tactically.
+- Netrunners hack from cover, avoid direct fire, prioritize disabling cyberware.
+- Gangers break morale at ~50% casualties; survivors flee or surrender.
+- Corpo security holds position if ordered; retreats on command authority only.
+- Assess whether reinforcements actually exist before calling them. Only deploy what makes sense for the location and faction.
+
+NET-IN-MEATSPACE:
+When a netrunner declares NET actions during combat initiative:
+- Set initiate_net_combat with the netrunner's name and target architecture/device.
+- Do NOT resolve their NET actions — end the exchange. NET-in-meatspace mode handles the interleaved resolution.
+- Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner chooses 1 meat action OR N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10).
+
+VEHICLE COMBAT:
+Reference Combat Ruleset §18 for vehicle stats, ramming, mounted weapons, and chase mechanics.
+
+DICE POOL:
+A [DICE POOL] block is provided with pre-rolled random values. Use them in order (left to right). Do NOT generate your own random numbers. If a pool is exhausted, note this in your output.
+
+ROLL FORMAT (show in narrative):
+- Attack: 🎲 [V attacks Borg Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
+- Damage + ablation: 🎲 [Heavy Pistol damage]: 3d6[**4,3,5**] = 12 → Body SP 11 → 12−11 = 1 net damage, SP ablates to 10
+- Crit (two+ 6s): 🎲 [Assault Rifle damage]: 5d6[**6,6,3,2,4**] = 21 → CRIT! +5 bonus direct to HP → Body SP 11 → 21−11 = 10 net + 5 crit = 15 total HP damage
+- Death Save: 🎲 [Death Save]: d10[**8**] vs BODY 6 (+1 cumulative, +1 crit injury = effective 10) → FAIL
+
+ROLL ADJUDICATION:
+- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
+- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
+- Be transparent about dice results. Show the actual numbers, modifiers, and math.
+- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure.
+- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome.
+- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
 
 COMBAT FLOW:
 - Each exchange covers the current combatant's turn plus any immediate reactions.
 - Advance current_turn to the next combatant in initiative order after each turn.
 - When the last combatant acts, increment round and return to top.
-- End combat when all enemies are at 0 HP or fled. Set combat_complete=true.
+- End combat when all enemies are at 0 HP, fled, or surrendered. Set combat_complete=true.
 
 NARRATIVE STYLE:
 - Present tense, visceral, Night City grit. 2–5 sentences.
 - Name combatants. Chrome reflects neon. Armor breaks. Bullets are real and so is death.
 - End each exchange setting up what the next active combatant faces.
 
-REPORT REQUIREMENTS (report_combat_state):
-- narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.
-- Use vital_label: "HP" for health (default). vital_label: "Armor" for SP ablation. vital_label: "Luck" for Luck spent."""
+REPORT REQUIREMENTS:
+- character_updates for every combatant affected this exchange.
+- cover_state for ALL combatants every exchange (not just those who changed).
+- narrative_summary ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight."""
+
+
+def build_cpred_combat_profile(character_states, combat, game_state=None):
+    """Build CPRED-specific combatant roster from edgerunner state + character_states."""
+    if not character_states and not (game_state and game_state.get("edgerunners")):
+        return ""
+
+    initiative_order = combat.get("initiative_order", []) if combat else []
+    edgerunners = game_state.get("edgerunners", {}) if game_state else {}
+
+    # Collect all combatant names
+    all_names = set()
+    all_names.update(initiative_order)
+    all_names.update(character_states.keys() if character_states else [])
+    all_names.update(edgerunners.keys())
+
+    # Order by initiative, then remaining alphabetically
+    if initiative_order:
+        ordered_names = list(initiative_order)
+        remaining = sorted(n for n in all_names if n not in initiative_order)
+        ordered_names.extend(remaining)
+    else:
+        ordered_names = sorted(all_names)
+
+    lines = ["[COMBATANT ROSTER]"]
+
+    for name in ordered_names:
+        er = edgerunners.get(name)
+        cs_entry = (character_states or {}).get(name, {})
+        d = cs_entry.get("data", cs_entry)
+        combat_data = d.get("combat_data")
+
+        if er:
+            # PC — read from edgerunner state
+            hp = er.get("hp", {})
+            armor = er.get("armor", {})
+            luck = er.get("luck", {})
+            injuries = er.get("critical_injuries", [])
+            weapons = er.get("weapons", [])
+            cyberware = er.get("cyberware_effects", [])
+            char_class = d.get("class", "")
+            char_type = d.get("type", "pc")
+
+            label = f"{char_class}" if char_class else char_type.upper()
+            sw_flag = " [SERIOUSLY WOUNDED]" if hp.get("seriously_wounded") else ""
+            lines.append(f"  {name} ({label}):")
+            lines.append(f"    HP: {hp.get('current', 0)}/{hp.get('max', 40)}{sw_flag}")
+            lines.append(f"    Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
+            lines.append(f"    Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
+
+            if weapons:
+                weapon_strs = []
+                for w in weapons:
+                    wname = w.get("name", "?")
+                    wdmg = w.get("damage", "?")
+                    if w.get("type") == "melee":
+                        weapon_strs.append(f"{wname} ({wdmg}, {w.get('skill', 'Melee Weapon')})")
+                    else:
+                        weapon_strs.append(f"{wname} ({wdmg}, {w.get('current_ammo', 0)}/{w.get('max_ammo', 0)} ammo)")
+                lines.append(f"    Weapons: {'; '.join(weapon_strs)}")
+
+            if injuries:
+                dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
+                injury_strs = []
+                for ci in injuries:
+                    loc = ci.get("location", "body")
+                    injury_strs.append(f"{ci['name']} ({loc}: {ci.get('effect', '')}, DS+{ci.get('dv_mod', 0)})")
+                lines.append(f"    Critical Injuries (Death Save +{dv_total}): {'; '.join(injury_strs)}")
+
+            if cyberware:
+                lines.append(f"    Cyberware: {', '.join(cyberware)}")
+
+        elif combat_data:
+            # Enemy with structured combat_data
+            char_type_label = "Enemy" if d.get("type") == "enemy" else d.get("type", "npc").upper()
+            cd_hp_max = combat_data.get("hp_max", 0)
+            cd_hp_cur = 0
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v:
+                    cd_hp_cur = v["current"]
+                    break
+            cd_armor = combat_data.get("armor", {})
+            cd_weapons = combat_data.get("weapons", [])
+            cd_stats = combat_data.get("stats", {})
+
+            sw_flag = " [SERIOUSLY WOUNDED]" if cd_hp_cur <= cd_hp_max // 2 and cd_hp_max > 0 else ""
+            lines.append(f"  {name} ({char_type_label}):")
+            lines.append(f"    HP: {cd_hp_cur}/{cd_hp_max}{sw_flag}")
+            lines.append(f"    Armor: Head SP {cd_armor.get('head', 0)} | Body SP {cd_armor.get('body', 0)}")
+
+            if cd_weapons:
+                weapon_strs = []
+                for w in cd_weapons:
+                    wname = w.get("name", "?")
+                    wdmg = w.get("damage", "?")
+                    ammo = w.get("ammo")
+                    mag = w.get("magazine")
+                    if ammo is not None and mag is not None:
+                        weapon_strs.append(f"{wname} ({wdmg}, {ammo}/{mag} ammo)")
+                    else:
+                        weapon_strs.append(f"{wname} ({wdmg})")
+                lines.append(f"    Weapons: {'; '.join(weapon_strs)}")
+
+            if cd_stats:
+                stat_strs = [f"{k} {v}" for k, v in cd_stats.items()]
+                lines.append(f"    Stats: {', '.join(stat_strs)}")
+
+            voice = d.get("voice")
+            if voice:
+                lines.append(f"    Voice: {voice}")
+
+        else:
+            # Fallback — generic from character_states
+            char_class = d.get("class", "")
+            char_type = d.get("type", "npc")
+            label = char_class if char_class else char_type.upper()
+            parts = []
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v and "max" in v:
+                    parts.append(f"HP {v['current']}/{v['max']}")
+            conditions = d.get("conditions", [])
+            if conditions:
+                parts.append(f"[{', '.join(conditions)}]")
+            status = " | ".join(parts) if parts else ""
+            lines.append(f"  {name} ({label}): {status}")
+            summary = d.get("summary", "")
+            if summary:
+                lines.append(f"    {summary}")
+
+    lines.append("[/COMBATANT ROSTER]")
+    return "\n".join(lines)
+
+
+def build_cpred_combat_injection(combat, pipeline_state):
+    """Build [COMBAT STATE] injection for CPRED combat mode."""
+    if not combat:
+        return ""
+
+    edgerunners = pipeline_state.get("game_state", {}).get("edgerunners", {})
+    cs = pipeline_state.get("character_states", {})
+    cover = combat.get("cover", {})
+    current_turn = combat.get("current_turn", "")
+    initiative_order = combat.get("initiative_order", [])
+
+    lines = ["[COMBAT STATE]"]
+    lines.append(f"Round: {combat.get('round', 1)}")
+    lines.append("Initiative Order:")
+
+    for name in initiative_order:
+        marker = " <- ACTING" if name == current_turn else ""
+        parts = []
+
+        er = edgerunners.get(name)
+        entry = cs.get(name, {})
+        d = entry.get("data", entry)
+        combat_data = d.get("combat_data")
+
+        if er:
+            # PC — read from edgerunner state
+            hp = er.get("hp", {})
+            sw = " SW" if hp.get("seriously_wounded") else ""
+            armor = er.get("armor", {})
+            luck = er.get("luck", {})
+            injuries = er.get("critical_injuries", [])
+            weapons = er.get("weapons", [])
+
+            parts.append(f"HP {hp.get('current', 0)}/{hp.get('max', 40)}{sw}")
+            parts.append(f"SP H:{armor.get('head', 0)}/B:{armor.get('body', 0)}")
+            parts.append(f"Luck {luck.get('current', 0)}/{luck.get('max', 0)}")
+
+            if injuries:
+                dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
+                parts.append(f"Crits:{len(injuries)} DS+{dv_total}")
+
+            if weapons:
+                ammo_strs = []
+                for w in weapons:
+                    if w.get("type") != "melee":
+                        ammo_strs.append(f"{w.get('name', '?')}:{w.get('current_ammo', 0)}")
+                if ammo_strs:
+                    parts.append(f"Ammo [{', '.join(ammo_strs)}]")
+
+        elif combat_data:
+            # Enemy with combat_data
+            cd_hp_max = combat_data.get("hp_max", 0)
+            cd_hp_cur = 0
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v:
+                    cd_hp_cur = v["current"]
+                    break
+            sw = " SW" if cd_hp_cur <= cd_hp_max // 2 and cd_hp_max > 0 else ""
+            cd_armor = combat_data.get("armor", {})
+            parts.append(f"HP {cd_hp_cur}/{cd_hp_max}{sw}")
+            parts.append(f"SP H:{cd_armor.get('head', 0)}/B:{cd_armor.get('body', 0)}")
+
+        else:
+            # Fallback
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v and "max" in v:
+                    parts.append(f"HP {v['current']}/{v['max']}")
+                    break
+
+        # Cover info
+        cov = cover.get(name, {})
+        if cov.get("in_cover"):
+            cov_type = cov.get("cover_type", "cover")
+            cov_hp = cov.get("cover_hp")
+            cover_str = f"Cover: {cov_type}"
+            if cov_hp is not None:
+                cover_str += f" {cov_hp}HP"
+            parts.append(cover_str)
+
+        status = " | ".join(parts) if parts else ""
+        lines.append(f"  {name} ({status}){marker}")
+
+    lines.append("[/COMBAT STATE]")
+    return "\n".join(lines)
+
+
+def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None):
+    """Apply CPRED combat state updates from report_combat_state tool output.
+
+    Routes PC updates to edgerunner state, enemy updates to character_states.
+    """
+    if not isinstance(tool_input, dict):
+        logger.warning(
+            "CPRED apply_cpred_combat_state: tool_input must be an object, got %s",
+            type(tool_input).__name__
+        )
+        return
+
+    edgerunners = game_state.get("edgerunners", {}) if game_state else {}
+    cs = pipeline_state.get("character_states", {})
+
+    character_updates = tool_input.get("character_updates", [])
+    if not isinstance(character_updates, list):
+        logger.warning(
+            "CPRED apply_cpred_combat_state: character_updates must be a list, got %s",
+            type(character_updates).__name__
+        )
+        character_updates = []
+
+    for upd in character_updates:
+        if not isinstance(upd, dict):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: skipping non-object character_update: %r",
+                upd
+            )
+            continue
+        name = upd.get("name")
+        if not isinstance(name, str) or not name:
+            if name is not None:
+                logger.warning(
+                    "CPRED apply_cpred_combat_state: invalid character_update name: %r",
+                    name
+                )
+            continue
+
+        is_pc = name in edgerunners
+
+        # --- set_combat_stats (enemy bootstrap) ---
+        scs = upd.get("set_combat_stats")
+        if scs and not isinstance(scs, dict):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid set_combat_stats shape for %s: %r",
+                name, scs
+            )
+            scs = None
+        if scs and not is_pc:
+            # Bootstrap once. If combat_data already exists, ignore repeats.
+            if name not in cs:
+                cs[name] = {"data": {"type": "enemy", "class": "", "level": None, "vitals": [], "conditions": []}}
+            entry = cs[name]
+            d = entry.get("data", entry)
+            has_existing_combat_data = bool(d.get("combat_data"))
+            if has_existing_combat_data:
+                logger.debug(
+                    "CPRED apply_cpred_combat_state: ignoring repeated set_combat_stats for %s",
+                    name
+                )
+            else:
+                scs = copy.deepcopy(scs)
+                try:
+                    hp_max = int(scs.get("hp_max", 0))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "CPRED apply_cpred_combat_state: invalid set_combat_stats.hp_max for %s: %r",
+                        name, scs.get("hp_max")
+                    )
+                    hp_max = 0
+                hp_max = max(0, hp_max)
+                scs["hp_max"] = hp_max
+                d["combat_data"] = copy.deepcopy(scs)
+                # Seed HP vital on first bootstrap only.
+                hp_vitals = d.get("vitals", [])
+                hp_found = False
+                for v in hp_vitals:
+                    if v.get("label") == "HP":
+                        # Preserve existing current HP if present.
+                        if "current" not in v:
+                            v["current"] = hp_max
+                        v["max"] = hp_max
+                        hp_found = True
+                        break
+                if not hp_found:
+                    d.setdefault("vitals", []).append({"label": "HP", "current": hp_max, "max": hp_max})
+
+        # --- hp_delta ---
+        hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            try:
+                hp_delta = int(hp_delta)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "CPRED apply_cpred_combat_state: invalid hp_delta for %s: %r",
+                    name, upd.get("hp_delta")
+                )
+                hp_delta = None
+        if hp_delta is not None:
+            if is_pc:
+                er = edgerunners[name]
+                er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + hp_delta))
+                _update_seriously_wounded(er)
+                # Mirror to character_states
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = er["hp"]["current"]
+                        break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = max(0, v["current"] + hp_delta)
+                        break
+
+        # --- armor_delta ---
+        armor_delta = upd.get("armor_delta")
+        if armor_delta and not isinstance(armor_delta, dict):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid armor_delta shape for %s: %r",
+                name, armor_delta
+            )
+            armor_delta = None
+        if armor_delta:
+            if is_pc:
+                er = edgerunners[name]
+                for loc in ("head", "body"):
+                    raw_delta = armor_delta.get(loc, 0)
+                    try:
+                        delta = int(raw_delta)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "CPRED apply_cpred_combat_state: invalid armor_delta for %s %s: %r",
+                            name, loc, raw_delta
+                        )
+                        continue
+                    if delta:
+                        er["armor"][loc] = max(0, er["armor"].get(loc, 0) + delta)
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    cd_armor = cd.setdefault("armor", {})
+                    for loc in ("head", "body"):
+                        raw_delta = armor_delta.get(loc, 0)
+                        try:
+                            delta = int(raw_delta)
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "CPRED apply_cpred_combat_state: invalid armor_delta for %s %s: %r",
+                                name, loc, raw_delta
+                            )
+                            continue
+                        if delta:
+                            cd_armor[loc] = max(0, cd_armor.get(loc, 0) + delta)
+
+        # --- luck_delta ---
+        luck_delta = upd.get("luck_delta")
+        if luck_delta is not None and is_pc:
+            try:
+                luck_delta = int(luck_delta)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "CPRED apply_cpred_combat_state: invalid luck_delta for %s: %r",
+                    name, upd.get("luck_delta")
+                )
+                luck_delta = None
+        if luck_delta is not None and is_pc:
+            er = edgerunners[name]
+            er["luck"]["current"] = max(0, min(er["luck"]["max"], er["luck"]["current"] + luck_delta))
+
+        # --- ammo (explicit current count) ---
+        ammo_updates = upd.get("ammo")
+        if ammo_updates and not isinstance(ammo_updates, list):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid ammo shape for %s: %r",
+                name, ammo_updates
+            )
+            ammo_updates = None
+        if ammo_updates:
+            if is_pc:
+                er = edgerunners[name]
+                for au in ammo_updates:
+                    if not isinstance(au, dict):
+                        logger.warning(
+                            "CPRED apply_cpred_combat_state: skipping non-object ammo update for %s: %r",
+                            name, au
+                        )
+                        continue
+                    wname = au.get("weapon", "")
+                    try:
+                        cur = int(au.get("current", 0))
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "CPRED apply_cpred_combat_state: invalid ammo.current for %s weapon %s: %r",
+                            name, wname, au.get("current")
+                        )
+                        continue
+                    for w in er.get("weapons", []):
+                        if w.get("name") == wname:
+                            w["current_ammo"] = max(0, cur)
+                            break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    for au in ammo_updates:
+                        if not isinstance(au, dict):
+                            logger.warning(
+                                "CPRED apply_cpred_combat_state: skipping non-object ammo update for %s: %r",
+                                name, au
+                            )
+                            continue
+                        wname = au.get("weapon", "")
+                        try:
+                            cur = int(au.get("current", 0))
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "CPRED apply_cpred_combat_state: invalid ammo.current for %s weapon %s: %r",
+                                name, wname, au.get("current")
+                            )
+                            continue
+                        for w in cd.get("weapons", []):
+                            if w.get("name") == wname:
+                                w["ammo"] = max(0, cur)
+                                break
+
+        # --- critical_injury_add ---
+        critical_injury_add = upd.get("critical_injury_add", [])
+        if critical_injury_add and not isinstance(critical_injury_add, list):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid critical_injury_add shape for %s: %r",
+                name, critical_injury_add
+            )
+            critical_injury_add = []
+        for ci in critical_injury_add:
+            if not isinstance(ci, dict):
+                logger.warning(
+                    "CPRED apply_cpred_combat_state: skipping non-object critical_injury_add for %s: %r",
+                    name, ci
+                )
+                continue
+            try:
+                dv_mod = int(ci.get("dv_mod", 1))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "CPRED apply_cpred_combat_state: invalid critical injury dv_mod for %s: %r",
+                    name, ci.get("dv_mod")
+                )
+                dv_mod = 1
+            ci_entry = {
+                "name": ci.get("name", "Unknown Injury"),
+                "location": ci.get("location", "body"),
+                "effect": ci.get("effect", ""),
+                "dv_mod": dv_mod
+            }
+            if is_pc:
+                er = edgerunners[name]
+                er.setdefault("critical_injuries", []).append(ci_entry)
+                # Mirror as condition
+                cond_str = f"Critical Injury: {ci_entry['name']}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.setdefault("conditions", [])
+                if cond_str not in conds:
+                    conds.append(cond_str)
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cond_str = f"Critical Injury: {ci_entry['name']}"
+                conds = d.setdefault("conditions", [])
+                if cond_str not in conds:
+                    conds.append(cond_str)
+
+        # --- critical_injury_remove ---
+        critical_injury_remove = upd.get("critical_injury_remove", [])
+        if critical_injury_remove and not isinstance(critical_injury_remove, list):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid critical_injury_remove shape for %s: %r",
+                name, critical_injury_remove
+            )
+            critical_injury_remove = []
+        for ci_name in critical_injury_remove:
+            if is_pc:
+                er = edgerunners[name]
+                er["critical_injuries"] = [
+                    ci for ci in er.get("critical_injuries", []) if ci.get("name") != ci_name
+                ]
+                cond_str = f"Critical Injury: {ci_name}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.get("conditions", [])
+                if cond_str in conds:
+                    conds.remove(cond_str)
+            else:
+                cond_str = f"Critical Injury: {ci_name}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.get("conditions", [])
+                if cond_str in conds:
+                    conds.remove(cond_str)
+
+        # --- conditions_add / conditions_remove ---
+        entry = cs.get(name, {})
+        d = entry.get("data", entry)
+        conditions = d.setdefault("conditions", [])
+        conditions_add = upd.get("conditions_add", [])
+        if conditions_add and not isinstance(conditions_add, list):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid conditions_add shape for %s: %r",
+                name, conditions_add
+            )
+            conditions_add = []
+        for cond in conditions_add:
+            if cond not in conditions:
+                conditions.append(cond)
+        conditions_remove = upd.get("conditions_remove", [])
+        if conditions_remove and not isinstance(conditions_remove, list):
+            logger.warning(
+                "CPRED apply_cpred_combat_state: invalid conditions_remove shape for %s: %r",
+                name, conditions_remove
+            )
+            conditions_remove = []
+        for cond in conditions_remove:
+            if cond in conditions:
+                conditions.remove(cond)
+
+    # --- cover_state ---
+    cover_updates = tool_input.get("cover_state")
+    if cover_updates and not isinstance(cover_updates, list):
+        logger.warning(
+            "CPRED apply_cpred_combat_state: cover_state must be a list, got %s",
+            type(cover_updates).__name__
+        )
+        cover_updates = None
+    if cover_updates:
+        old_combat = pipeline_state.get("combat")
+        if isinstance(old_combat, dict):
+            cover_dict = old_combat.setdefault("cover", {})
+            for cov in cover_updates:
+                if not isinstance(cov, dict):
+                    logger.warning(
+                        "CPRED apply_cpred_combat_state: skipping non-object cover_state entry: %r",
+                        cov
+                    )
+                    continue
+                cov_name = cov.get("name")
+                if isinstance(cov_name, str) and cov_name:
+                    cover_dict[cov_name] = {
+                        "in_cover": cov.get("in_cover", False),
+                        "cover_type": cov.get("cover_type"),
+                        "cover_hp": cov.get("cover_hp")
+                    }
+                elif cov_name is not None:
+                    logger.warning(
+                        "CPRED apply_cpred_combat_state: invalid cover_state name: %r",
+                        cov_name
+                    )
+
+    # --- combat (initiative/round) ---
+    new_combat = tool_input.get("combat")
+    if tool_input.get("combat_complete") or new_combat is None:
+        pipeline_state["combat"] = None
+        pipeline_state["net_combat"] = None
+    elif isinstance(new_combat, dict):
+        old_start = (pipeline_state.get("combat") or {}).get("start_message_id")
+        old_cover = (pipeline_state.get("combat") or {}).get("cover", {})
+        pipeline_state["combat"] = new_combat
+        if old_start and "start_message_id" not in new_combat:
+            pipeline_state["combat"]["start_message_id"] = old_start
+        if old_cover and "cover" not in new_combat:
+            pipeline_state["combat"]["cover"] = old_cover
+
+    # --- initiate_net_combat ---
+    net_combat = tool_input.get("initiate_net_combat")
+    if net_combat and isinstance(net_combat, dict):
+        pipeline_state["net_combat"] = {
+            "netrunner": net_combat.get("netrunner", ""),
+            "target": net_combat.get("target", ""),
+            "initiated_from": "combat"
+        }
 
 
 # ============================================================
@@ -981,7 +1850,9 @@ GAME_SYSTEM = {
     "build_game_injection": build_game_injection,
     # Combat context mode
     "combat_contract": CPRED_COMBAT_CONTRACT,
-    "combat_tool": REPORT_COMBAT_STATE_TOOL,
-    "build_combat_profile": build_combat_profile,
-    "build_combat_injection": build_combat_injection,
+    "combat_tool": REPORT_CPRED_COMBAT_STATE_TOOL,
+    "build_combat_profile": build_cpred_combat_profile,
+    "build_combat_injection": build_cpred_combat_injection,
+    "apply_combat_state": apply_cpred_combat_state,
+    "combat_files": ["Combat Ruleset.md", "Character Sheets.md", "Character Sheets.yaml"],
 }

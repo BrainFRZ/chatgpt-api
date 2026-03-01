@@ -630,7 +630,20 @@ def init_hack_state(tier="full_sequence", target_system="Unknown", sr=3, process
 
 def apply_hack_state(hack_state, tool_input):
     """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
+    if not isinstance(tool_input, dict):
+        logger.warning(
+            "DND5E_CYBER apply_hack_state: tool_input must be an object, got %s",
+            type(tool_input).__name__
+        )
+        return hack_state
+
     hs = tool_input.get("hack_state", {})
+    if not isinstance(hs, dict):
+        logger.warning(
+            "DND5E_CYBER apply_hack_state: hack_state must be an object, got %s",
+            type(hs).__name__
+        )
+        hs = {}
 
     # Update tracked fields from model's state report
     for field in ["alert_level", "processes_remaining", "program_slots_used",
@@ -645,7 +658,13 @@ def apply_hack_state(hack_state, tool_input):
 
     # Available actions for HUD
     if tool_input.get("available_actions"):
-        hack_state["available_actions"] = tool_input["available_actions"]
+        if isinstance(tool_input["available_actions"], list):
+            hack_state["available_actions"] = tool_input["available_actions"]
+        else:
+            logger.warning(
+                "DND5E_CYBER apply_hack_state: available_actions must be a list, got %s",
+                type(tool_input["available_actions"]).__name__
+            )
 
     # Hack completion
     if tool_input.get("hack_complete"):
@@ -1263,6 +1282,12 @@ def apply_ship_combat_state(pipeline_state, tool_input):
     """Apply ship combat tool output to pipeline_state and return it."""
     ps = pipeline_state if isinstance(pipeline_state, dict) else {}
     cs = ps.setdefault("character_states", {})
+    if not isinstance(tool_input, dict):
+        logger.warning(
+            "DND5E_CYBER apply_ship_combat_state: tool_input must be an object, got %s",
+            type(tool_input).__name__
+        )
+        return ps
 
     def _ensure_ship_entry(name: str, upd: dict | None = None):
         entry = cs.get(name)
@@ -1307,9 +1332,27 @@ def apply_ship_combat_state(pipeline_state, tool_input):
         cs[name] = entry
         return entry
 
-    for upd in tool_input.get("ship_updates", []):
+    ship_updates = tool_input.get("ship_updates", [])
+    if not isinstance(ship_updates, list):
+        logger.warning(
+            "DND5E_CYBER apply_ship_combat_state: ship_updates must be a list, got %s",
+            type(ship_updates).__name__
+        )
+        ship_updates = []
+    for upd in ship_updates:
+        if not isinstance(upd, dict):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: skipping non-object ship_update: %r",
+                upd
+            )
+            continue
         ship_name = upd.get("ship_name")
-        if not ship_name:
+        if not isinstance(ship_name, str) or not ship_name:
+            if ship_name is not None:
+                logger.warning(
+                    "DND5E_CYBER apply_ship_combat_state: invalid ship_name in ship_update: %r",
+                    ship_name
+                )
             continue
         entry = _ensure_ship_entry(ship_name, upd)
         d = entry.get("data", entry)
@@ -1347,19 +1390,55 @@ def apply_ship_combat_state(pipeline_state, tool_input):
                 else:
                     v["current"] = max(0, v["current"] + shield_delta)
         # ammo/resources
-        for ammo_entry in upd.get("ammo_changes", []) or []:
+        ammo_changes = upd.get("ammo_changes", [])
+        if not isinstance(ammo_changes, list):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: ammo_changes for %s must be a list, got %s",
+                ship_name, type(ammo_changes).__name__
+            )
+            ammo_changes = []
+        for ammo_entry in ammo_changes:
+            if not isinstance(ammo_entry, dict):
+                logger.warning(
+                    "DND5E_CYBER apply_ship_combat_state: skipping non-object ammo_change for %s: %r",
+                    ship_name, ammo_entry
+                )
+                continue
             weapon = str(ammo_entry.get("weapon", "")).lower()
             amount = ammo_entry.get("amount", 0)
+            if not isinstance(amount, (int, float)):
+                try:
+                    amount = float(amount)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "DND5E_CYBER apply_ship_combat_state: invalid ammo amount for %s weapon %s: %r",
+                        ship_name, weapon, ammo_entry.get("amount")
+                    )
+                    continue
             for r in d.get("resources", []):
                 rlabel = str(r.get("label", "")).lower()
                 if weapon and weapon in rlabel and "current" in r:
                     r["current"] = max(0, r["current"] + amount)
         # conditions
         conds = d.setdefault("conditions", [])
-        for c in upd.get("conditions_add", []) or []:
+        conditions_add = upd.get("conditions_add", [])
+        if not isinstance(conditions_add, list):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: conditions_add for %s must be a list, got %s",
+                ship_name, type(conditions_add).__name__
+            )
+            conditions_add = []
+        for c in conditions_add:
             if c not in conds:
                 conds.append(c)
-        for c in upd.get("conditions_remove", []) or []:
+        conditions_remove = upd.get("conditions_remove", [])
+        if not isinstance(conditions_remove, list):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: conditions_remove for %s must be a list, got %s",
+                ship_name, type(conditions_remove).__name__
+            )
+            conditions_remove = []
+        for c in conditions_remove:
             if c in conds:
                 conds.remove(c)
         if isinstance(upd.get("crew_roles_present"), list):
@@ -1367,22 +1446,65 @@ def apply_ship_combat_state(pipeline_state, tool_input):
         if isinstance(upd.get("crew_manifest"), list):
             d["crew_manifest"] = copy.deepcopy(upd.get("crew_manifest"))
 
-    for upd in tool_input.get("character_updates", []):
+    character_updates = tool_input.get("character_updates", [])
+    if not isinstance(character_updates, list):
+        logger.warning(
+            "DND5E_CYBER apply_ship_combat_state: character_updates must be a list, got %s",
+            type(character_updates).__name__
+        )
+        character_updates = []
+    for upd in character_updates:
+        if not isinstance(upd, dict):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: skipping non-object character_update: %r",
+                upd
+            )
+            continue
         name = upd.get("name")
-        if not name or name not in cs:
+        if not isinstance(name, str) or not name:
+            if name is not None:
+                logger.warning(
+                    "DND5E_CYBER apply_ship_combat_state: invalid character_update name: %r",
+                    name
+                )
+            continue
+        if name not in cs:
             continue
         d = cs[name].get("data", cs[name])
         hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            try:
+                hp_delta = int(hp_delta)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "DND5E_CYBER apply_ship_combat_state: invalid hp_delta for %s: %r",
+                    name, upd.get("hp_delta")
+                )
+                hp_delta = None
         if hp_delta is not None:
             for v in d.get("vitals", []):
                 if v.get("label") == "HP" and "current" in v:
                     v["current"] = max(0, v["current"] + hp_delta)
                     break
         conds = d.setdefault("conditions", [])
-        for c in upd.get("conditions_add", []) or []:
+        conditions_add = upd.get("conditions_add", [])
+        if not isinstance(conditions_add, list):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: conditions_add for %s must be a list, got %s",
+                name, type(conditions_add).__name__
+            )
+            conditions_add = []
+        for c in conditions_add:
             if c not in conds:
                 conds.append(c)
-        for c in upd.get("conditions_remove", []) or []:
+        conditions_remove = upd.get("conditions_remove", [])
+        if not isinstance(conditions_remove, list):
+            logger.warning(
+                "DND5E_CYBER apply_ship_combat_state: conditions_remove for %s must be a list, got %s",
+                name, type(conditions_remove).__name__
+            )
+            conditions_remove = []
+        for c in conditions_remove:
             if c in conds:
                 conds.remove(c)
 

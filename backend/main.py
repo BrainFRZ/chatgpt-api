@@ -2587,10 +2587,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Flag the user message as a hack exchange
         user_msg_data["hack_mode"] = True
 
+    # NET-in-meatspace mode hook (future mode; currently does not change routing)
+    _ps_for_combat = data.get("pipeline_state", {})
+    _net_combat = _ps_for_combat.get("net_combat")
+    _combat = _ps_for_combat.get("combat")
+    use_net_combat_mode = False
+    if (not use_hack_mode) and _net_combat and _combat and gs and gs.get("net_combat_contract"):
+        use_net_combat_mode = True
+
     # Check if combat context mode is active
     use_combat_mode = False
-    _ps_for_combat = data.get("pipeline_state", {})
-    _combat = _ps_for_combat.get("combat")
     if (not use_hack_mode) and _combat and request.project and gs and gs.get("combat_contract"):
         use_combat_mode = True
 
@@ -2732,7 +2738,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         combat = combat_ps.get("combat", {})
 
         combat_contract = gs["combat_contract"]
-        combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat)
+        if gs.get("apply_combat_state"):
+            combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat, combat_ps.get("game_state", {}))
+        else:
+            combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat)
         combat_injection = gs["build_combat_injection"](combat, combat_ps)
 
         combat_system_content = combat_contract
@@ -2742,17 +2751,34 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Inject combat-specific project files if present
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
-            for fname in ["Core Conversion.md"]:
-                fpath = os.path.join(uploads_dir, fname)
-                if os.path.exists(fpath):
-                    with open(fpath, 'r', encoding='utf-8') as f:
-                        combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
-            for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
-                fpath = os.path.join(uploads_dir, fname)
-                if os.path.exists(fpath):
-                    with open(fpath, 'r', encoding='utf-8') as f:
-                        combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
-                    break
+            combat_files = gs.get("combat_files")
+            if combat_files:
+                # Game-system-aware file loading
+                char_sheet_loaded = False
+                for fname in combat_files:
+                    # Character Sheets: load first found (.md preferred over .yaml)
+                    is_char_sheet = fname.startswith("Character Sheets")
+                    if is_char_sheet and char_sheet_loaded:
+                        continue
+                    fpath = os.path.join(uploads_dir, fname)
+                    if os.path.exists(fpath):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                        if is_char_sheet:
+                            char_sheet_loaded = True
+            else:
+                # Default hardcoded file loading for other game systems
+                for fname in ["Core Conversion.md"]:
+                    fpath = os.path.join(uploads_dir, fname)
+                    if os.path.exists(fpath):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                    fpath = os.path.join(uploads_dir, fname)
+                    if os.path.exists(fpath):
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                        break
 
         system_msg = {"role": "system", "content": combat_system_content}
 
@@ -3723,42 +3749,45 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Apply character_updates to pipeline_state.character_states
                 combat_ps = data.get("pipeline_state", {})
-                for upd in combat_json.get("character_updates", []):
-                    name = upd.get("name")
-                    if not name:
-                        continue
-                    cs = combat_ps.get("character_states", {})
-                    entry = cs.get(name)
-                    if entry is None:
-                        continue
-                    d = entry.get("data", entry)
-                    # Apply HP delta
-                    hp_delta = upd.get("hp_delta")
-                    if hp_delta is not None:
-                        _vl = upd.get("vital_label", "HP")
-                        for v in d.get("vitals", []):
-                            if v.get("label") == _vl and "current" in v:
-                                v["current"] = max(0, v["current"] + hp_delta)
-                                break
-                    # Apply conditions
-                    conditions = d.setdefault("conditions", [])
-                    for cond in upd.get("conditions_add", []):
-                        if cond not in conditions:
-                            conditions.append(cond)
-                    for cond in upd.get("conditions_remove", []):
-                        if cond in conditions:
-                            conditions.remove(cond)
+                if gs and gs.get("apply_combat_state"):
+                    gs["apply_combat_state"](combat_ps, combat_json, combat_ps.get("game_state"))
+                else:
+                    for upd in combat_json.get("character_updates", []):
+                        name = upd.get("name")
+                        if not name:
+                            continue
+                        cs = combat_ps.get("character_states", {})
+                        entry = cs.get(name)
+                        if entry is None:
+                            continue
+                        d = entry.get("data", entry)
+                        # Apply HP delta
+                        hp_delta = upd.get("hp_delta")
+                        if hp_delta is not None:
+                            _vl = upd.get("vital_label", "HP")
+                            for v in d.get("vitals", []):
+                                if v.get("label") == _vl and "current" in v:
+                                    v["current"] = max(0, v["current"] + hp_delta)
+                                    break
+                        # Apply conditions
+                        conditions = d.setdefault("conditions", [])
+                        for cond in upd.get("conditions_add", []):
+                            if cond not in conditions:
+                                conditions.append(cond)
+                        for cond in upd.get("conditions_remove", []):
+                            if cond in conditions:
+                                conditions.remove(cond)
 
-                # Update pipeline_state.combat from tool output
-                new_combat = combat_json.get("combat")
-                if combat_json.get("combat_complete") or new_combat is None:
-                    combat_ps["combat"] = None
-                elif isinstance(new_combat, dict):
-                    # Preserve start_message_id across updates
-                    old_start = combat_ps.get("combat", {}).get("start_message_id")
-                    combat_ps["combat"] = new_combat
-                    if old_start and "start_message_id" not in new_combat:
-                        combat_ps["combat"]["start_message_id"] = old_start
+                    # Update pipeline_state.combat from tool output
+                    new_combat = combat_json.get("combat")
+                    if combat_json.get("combat_complete") or new_combat is None:
+                        combat_ps["combat"] = None
+                    elif isinstance(new_combat, dict):
+                        # Preserve start_message_id across updates
+                        old_start = combat_ps.get("combat", {}).get("start_message_id")
+                        combat_ps["combat"] = new_combat
+                        if old_start and "start_message_id" not in new_combat:
+                            combat_ps["combat"]["start_message_id"] = old_start
 
                 data["pipeline_state"] = combat_ps
 
@@ -4653,37 +4682,40 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 combat_tool_input = tool_input
                                 # Apply character_updates to pipeline_state.character_states
                                 _combat_ps = data.get("pipeline_state", {})
-                                for upd in tool_input.get("character_updates", []):
-                                    _name = upd.get("name")
-                                    if not _name:
-                                        continue
-                                    _entry = _combat_ps.get("character_states", {}).get(_name)
-                                    if _entry is None:
-                                        continue
-                                    _d = _entry.get("data", _entry)
-                                    _hp_delta = upd.get("hp_delta")
-                                    if _hp_delta is not None:
-                                        _vl = upd.get("vital_label", "HP")
-                                        for _v in _d.get("vitals", []):
-                                            if _v.get("label") == _vl and "current" in _v:
-                                                _v["current"] = max(0, _v["current"] + _hp_delta)
-                                                break
-                                    _conds = _d.setdefault("conditions", [])
-                                    for _c in upd.get("conditions_add", []):
-                                        if _c not in _conds:
-                                            _conds.append(_c)
-                                    for _c in upd.get("conditions_remove", []):
-                                        if _c in _conds:
-                                            _conds.remove(_c)
-                                # Update pipeline_state.combat
-                                _new_combat = tool_input.get("combat")
-                                if tool_input.get("combat_complete") or _new_combat is None:
-                                    _combat_ps["combat"] = None
-                                elif isinstance(_new_combat, dict):
-                                    _old_start = _combat_ps.get("combat", {}).get("start_message_id")
-                                    _combat_ps["combat"] = _new_combat
-                                    if _old_start and "start_message_id" not in _new_combat:
-                                        _combat_ps["combat"]["start_message_id"] = _old_start
+                                if gs and gs.get("apply_combat_state"):
+                                    gs["apply_combat_state"](_combat_ps, tool_input, _combat_ps.get("game_state"))
+                                else:
+                                    for upd in tool_input.get("character_updates", []):
+                                        _name = upd.get("name")
+                                        if not _name:
+                                            continue
+                                        _entry = _combat_ps.get("character_states", {}).get(_name)
+                                        if _entry is None:
+                                            continue
+                                        _d = _entry.get("data", _entry)
+                                        _hp_delta = upd.get("hp_delta")
+                                        if _hp_delta is not None:
+                                            _vl = upd.get("vital_label", "HP")
+                                            for _v in _d.get("vitals", []):
+                                                if _v.get("label") == _vl and "current" in _v:
+                                                    _v["current"] = max(0, _v["current"] + _hp_delta)
+                                                    break
+                                        _conds = _d.setdefault("conditions", [])
+                                        for _c in upd.get("conditions_add", []):
+                                            if _c not in _conds:
+                                                _conds.append(_c)
+                                        for _c in upd.get("conditions_remove", []):
+                                            if _c in _conds:
+                                                _conds.remove(_c)
+                                    # Update pipeline_state.combat
+                                    _new_combat = tool_input.get("combat")
+                                    if tool_input.get("combat_complete") or _new_combat is None:
+                                        _combat_ps["combat"] = None
+                                    elif isinstance(_new_combat, dict):
+                                        _old_start = _combat_ps.get("combat", {}).get("start_message_id")
+                                        _combat_ps["combat"] = _new_combat
+                                        if _old_start and "start_message_id" not in _new_combat:
+                                            _combat_ps["combat"]["start_message_id"] = _old_start
                                 data["pipeline_state"] = _combat_ps
                                 logger.info(f"Combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('combat_complete', False)}")
@@ -4707,36 +4739,39 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         combat_tool_input = retry_result
                                         # Apply state from retry result (mirrors initial tool path)
                                         _combat_ps = data.get("pipeline_state", {})
-                                        for upd in retry_result.get("character_updates", []):
-                                            _name = upd.get("name")
-                                            if not _name:
-                                                continue
-                                            _entry = _combat_ps.get("character_states", {}).get(_name)
-                                            if _entry is None:
-                                                continue
-                                            _d = _entry.get("data", _entry)
-                                            _hp_delta = upd.get("hp_delta")
-                                            if _hp_delta is not None:
-                                                _vl = upd.get("vital_label", "HP")
-                                                for _v in _d.get("vitals", []):
-                                                    if _v.get("label") == _vl and "current" in _v:
-                                                        _v["current"] = max(0, _v["current"] + _hp_delta)
-                                                        break
-                                            _conds = _d.setdefault("conditions", [])
-                                            for _c in upd.get("conditions_add", []):
-                                                if _c not in _conds:
-                                                    _conds.append(_c)
-                                            for _c in upd.get("conditions_remove", []):
-                                                if _c in _conds:
-                                                    _conds.remove(_c)
-                                        _new_combat = retry_result.get("combat")
-                                        if retry_result.get("combat_complete") or _new_combat is None:
-                                            _combat_ps["combat"] = None
-                                        elif isinstance(_new_combat, dict):
-                                            _old_start = _combat_ps.get("combat", {}).get("start_message_id")
-                                            _combat_ps["combat"] = _new_combat
-                                            if _old_start and "start_message_id" not in _new_combat:
-                                                _combat_ps["combat"]["start_message_id"] = _old_start
+                                        if gs and gs.get("apply_combat_state"):
+                                            gs["apply_combat_state"](_combat_ps, retry_result, _combat_ps.get("game_state"))
+                                        else:
+                                            for upd in retry_result.get("character_updates", []):
+                                                _name = upd.get("name")
+                                                if not _name:
+                                                    continue
+                                                _entry = _combat_ps.get("character_states", {}).get(_name)
+                                                if _entry is None:
+                                                    continue
+                                                _d = _entry.get("data", _entry)
+                                                _hp_delta = upd.get("hp_delta")
+                                                if _hp_delta is not None:
+                                                    _vl = upd.get("vital_label", "HP")
+                                                    for _v in _d.get("vitals", []):
+                                                        if _v.get("label") == _vl and "current" in _v:
+                                                            _v["current"] = max(0, _v["current"] + _hp_delta)
+                                                            break
+                                                _conds = _d.setdefault("conditions", [])
+                                                for _c in upd.get("conditions_add", []):
+                                                    if _c not in _conds:
+                                                        _conds.append(_c)
+                                                for _c in upd.get("conditions_remove", []):
+                                                    if _c in _conds:
+                                                        _conds.remove(_c)
+                                            _new_combat = retry_result.get("combat")
+                                            if retry_result.get("combat_complete") or _new_combat is None:
+                                                _combat_ps["combat"] = None
+                                            elif isinstance(_new_combat, dict):
+                                                _old_start = _combat_ps.get("combat", {}).get("start_message_id")
+                                                _combat_ps["combat"] = _new_combat
+                                                if _old_start and "start_message_id" not in _new_combat:
+                                                    _combat_ps["combat"]["start_message_id"] = _old_start
                                         data["pipeline_state"] = _combat_ps
                                         logger.info(f"Combat mode: retry succeeded for {username}")
                                     else:

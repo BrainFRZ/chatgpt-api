@@ -140,7 +140,7 @@ DICE_POOL_SPECS = {
     "dnd5e_cyber": [(20, 10), (12, 5), (10, 5), (8, 5), (6, 10), (4, 5)],
     "coc7e": [(100, 10), (10, 5), (8, 5), (6, 5), (4, 5)],
     "sr6e": [(6, 40), (20, 5)],
-    "cpred": [(10, 15), (6, 10)],
+    "cpred": [(10, 20), (6, 15)],
 }
 
 
@@ -620,6 +620,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("game_state", {})
     state.setdefault("hud_state", {})
     state.setdefault("combat", None)
+    state.setdefault("net_combat", None)
     state.setdefault("ship_combat", None)
     if isinstance(state.get("ship_combat"), dict):
         sc = state["ship_combat"]
