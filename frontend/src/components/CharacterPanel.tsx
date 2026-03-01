@@ -275,9 +275,17 @@ export default function CharacterPanel({
   // Hack mode HUD section
   const renderHackHud = (condensed?: boolean) => {
     if (!hackState?.active) return null;
+    const isCpred = hackState.cycles_remaining !== undefined;
     const [alertLabel, alertColor] = alertLevelInfo(hackState.alert_level || 0);
-    const procPct = hackState.processes_max > 0 ? Math.max(0, Math.min(100, (hackState.processes_remaining / hackState.processes_max) * 100)) : 0;
+    const resLabel = isCpred ? 'Cycles' : 'Processes';
+    const resCur = isCpred ? (hackState.cycles_remaining ?? 0) : (hackState.processes_remaining ?? 0);
+    const resMax = isCpred ? (hackState.cycles_max ?? 0) : (hackState.processes_max ?? 0);
+    const resPct = resMax > 0 ? Math.max(0, Math.min(100, (resCur / resMax) * 100)) : 0;
     const iceEntries = Object.entries(hackState.ice_status || {});
+
+    const categoryColor = (cat: string) => {
+      switch (cat) { case 'booster': return '#4ade80'; case 'defender': return '#38bdf8'; case 'attacker': return '#ef4444'; case 'black_ice': return '#a855f7'; default: return '#00ff41'; }
+    };
 
     return (
       <div style={{ padding: condensed ? '6px 8px' : '8px', borderBottom: '1px solid #0a3a0a', backgroundColor: '#0a1a0a' }}>
@@ -292,16 +300,23 @@ export default function CharacterPanel({
           </div>
         </div>
 
-        {/* Processes */}
+        {/* Resources (Cycles or Processes) */}
         <div style={{ marginBottom: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
-            <span>Processes</span>
-            <span>{hackState.processes_remaining}/{hackState.processes_max}</span>
+            <span>{resLabel}</span>
+            <span>{resCur}/{resMax}</span>
           </div>
           <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${procPct}%`, backgroundColor: '#00ff41', borderRadius: '2px', transition: 'width 0.3s' }} />
+            <div style={{ height: '100%', width: `${resPct}%`, backgroundColor: '#00ff41', borderRadius: '2px', transition: 'width 0.3s' }} />
           </div>
         </div>
+
+        {/* NET Actions (CPRED only) */}
+        {isCpred && hackState.net_actions_per_turn && (
+          <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
+            NET Actions: <span style={{ color: '#00ff41', fontWeight: 600 }}>{hackState.net_actions_per_turn}/turn</span>
+          </div>
+        )}
 
         {/* Current Node */}
         {hackState.current_node && (
@@ -318,8 +333,25 @@ export default function CharacterPanel({
 
         {!condensed && (
           <>
-            {/* Active Programs */}
-            {hackState.program_slots_used?.length > 0 && (
+            {/* Active Programs — CPRED structured */}
+            {hackState.active_programs && hackState.active_programs.length > 0 && (
+              <div style={{ marginBottom: '4px' }}>
+                <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
+                <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+                  {hackState.active_programs.map((p: { name: string; category: string; rez: number; status: string }, i: number) => {
+                    const dimmed = p.status !== 'active';
+                    return (
+                      <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: `${categoryColor(p.category)}18`, color: dimmed ? '#666' : categoryColor(p.category), fontWeight: 500, opacity: dimmed ? 0.6 : 1, textDecoration: dimmed ? 'line-through' : 'none' }}>
+                        {p.name} {p.rez > 0 ? `R${p.rez}` : ''}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Active Programs — dnd5e_cyber string list */}
+            {!hackState.active_programs?.length && hackState.program_slots_used?.length > 0 && (
               <div style={{ marginBottom: '4px' }}>
                 <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
                 <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
@@ -335,6 +367,25 @@ export default function CharacterPanel({
               <div style={{ marginBottom: '4px' }}>
                 <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>ICE</div>
                 {iceEntries.map(([node, status]: [string, any]) => {
+                  if (status && typeof status === 'object' && status.behavior) {
+                    // CPRED structured ICE
+                    const iceColor = status.status === 'active' ? '#ef4444' : status.status === 'bypassed' ? '#fbbf24' : '#666';
+                    const rezPct = status.rez_max > 0 ? Math.min(100, (status.rez_current / status.rez_max) * 100) : 0;
+                    return (
+                      <div key={node} style={{ marginBottom: '3px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', padding: '1px 0' }}>
+                          <span style={{ color: '#999' }}>{node}: <span style={{ color: iceColor }}>{status.name} ({status.behavior})</span></span>
+                          <span style={{ color: iceColor }}>{status.status === 'active' ? `${status.rez_current}/${status.rez_max}` : status.status}</span>
+                        </div>
+                        {status.status === 'active' && status.rez_max > 0 && (
+                          <div style={{ height: '2px', backgroundColor: '#1a2a1a', borderRadius: '1px', overflow: 'hidden', marginTop: '1px' }}>
+                            <div style={{ height: '100%', width: `${rezPct}%`, backgroundColor: iceColor, borderRadius: '1px', transition: 'width 0.3s' }} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  // dnd5e_cyber string ICE
                   const statusStr = String(status).toLowerCase();
                   const iceColor = statusStr.includes('destroyed') || statusStr.includes('defeated') ? '#666' : statusStr.includes('active') ? '#ef4444' : '#fb923c';
                   return (
@@ -350,7 +401,7 @@ export default function CharacterPanel({
             {/* Trace Progress */}
             {hackState.trace_progress != null && hackState.trace_progress > 0 && (
               <div style={{ marginBottom: '4px' }}>
-                {(() => { const traceMax = (hackState.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hackState.trace_progress / traceMax) * 100) : 0; return (<>
+                {(() => { const traceMax = isCpred ? Math.max(1, 6 - (hackState.sr || 3)) : (hackState.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hackState.trace_progress / traceMax) * 100) : 0; return (<>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
                   <span style={{ color: '#fbbf24' }}>{'\u26A0'} Trace</span>
                   <span style={{ color: '#fbbf24', fontWeight: 600 }}>{hackState.trace_progress}/{traceMax}</span>
@@ -364,8 +415,15 @@ export default function CharacterPanel({
 
             {/* Tar Stacks */}
             {hackState.tar_stacks > 0 && (
-              <div style={{ fontSize: '0.68rem', color: '#fb923c' }}>
+              <div style={{ fontSize: '0.68rem', color: '#fb923c', marginBottom: isCpred && (hackState.brain_damage ?? 0) > 0 ? '4px' : undefined }}>
                 Tar Stacks: {hackState.tar_stacks}
+              </div>
+            )}
+
+            {/* Brain Damage (CPRED only) */}
+            {isCpred && (hackState.brain_damage ?? 0) > 0 && (
+              <div style={{ fontSize: '0.68rem', color: '#ef4444' }}>
+                Brain Damage: {hackState.brain_damage}
               </div>
             )}
           </>
@@ -642,7 +700,7 @@ export default function CharacterPanel({
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
-              {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+              {hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
             {hackState?.active && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
@@ -762,7 +820,7 @@ export default function CharacterPanel({
           <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
           {hackState?.active && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
           {!hackState?.active && shipCombat && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `Matrix \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (

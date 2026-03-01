@@ -2343,6 +2343,129 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
     return tool_input, retry_usage
 
 
+def _init_hack_from_trigger(gs, ht, character_states):
+    """Initialize hack state from a hack trigger dict. Works for all game systems."""
+    def _guess_hacker_name(states):
+        """Best-effort picker for which PC is doing the hack."""
+        best_name = None
+        best_score = -1
+        first_pc = None
+        for name, entry in (states or {}).items():
+            d = entry.get("data", entry)
+            if d.get("type") != "pc":
+                continue
+            if first_pc is None:
+                first_pc = name
+            score = 0
+            cls = str(d.get("class", "")).lower()
+            if "netrunner" in cls:
+                score += 4
+            summary = str(d.get("summary", "")).lower()
+            if any(kw in summary for kw in ("cyberdeck", "interface", "neural", "net")):
+                score += 1
+            for r in d.get("resources", []):
+                label = str(r.get("label", "")).lower()
+                if any(kw in label for kw in ("cycle", "process", "interface", "program")):
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_name = name
+        return best_name or first_pc
+
+    hacker_name = (
+        ht.get("hacker_name")
+        or ht.get("hacker")
+        or ht.get("actor")
+        or ht.get("current_player")
+        or _guess_hacker_name(character_states)
+    )
+
+    # CPRED triggers include cycles/interface directly; others scan resources
+    cycles_max = ht.get("cycles_max")
+    if cycles_max is None:
+        cycles_max = 4
+        _candidate_entries = []
+        if hacker_name and hacker_name in (character_states or {}):
+            _candidate_entries.append((hacker_name, character_states[hacker_name]))
+        _candidate_entries.extend((character_states or {}).items())
+        _seen = set()
+        for _n, _e in _candidate_entries:
+            if _n in _seen:
+                continue
+            _seen.add(_n)
+            _d = _e.get("data", _e)
+            if _d.get("type") != "pc":
+                continue
+            _found_cycles = False
+            for _r in _d.get("resources", []):
+                _rlabel = _r.get("label", "").lower()
+                if "cycle" in _rlabel or "process" in _rlabel:
+                    cycles_max = _r.get("max", 4)
+                    _found_cycles = True
+                    break
+            if _found_cycles:
+                break
+    return gs["init_hack_state"](
+        tier=ht.get("tier", "full_run"),
+        target_system=ht.get("target_system", "Unknown"),
+        sr=ht.get("sr", 3),
+        cycles_max=cycles_max,
+        processes_max=cycles_max,
+        interface_rank=ht.get("interface_rank") or 4,
+        hacker_name=hacker_name,
+    )
+
+
+def _apply_combat_state(gs, pipeline_state, tool_input):
+    """Apply combat updates using game-system handler when available, else legacy fallback."""
+    apply_fn = gs.get("apply_combat_state") if gs else None
+    if apply_fn:
+        apply_fn(pipeline_state, tool_input, game_state=pipeline_state.get("game_state"))
+        return
+
+    # Legacy fallback used by systems that only expose contracts/tools.
+    for upd in tool_input.get("character_updates", []):
+        name = upd.get("name")
+        if not name:
+            continue
+        entry = pipeline_state.get("character_states", {}).get(name)
+        if entry is None:
+            continue
+        d = entry.get("data", entry)
+
+        hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            vl = upd.get("vital_label", "HP")
+            for v in d.get("vitals", []):
+                if v.get("label") == vl and "current" in v:
+                    v["current"] = max(0, v["current"] + hp_delta)
+                    break
+
+        conditions = d.setdefault("conditions", [])
+        for cond in upd.get("conditions_add", []):
+            if cond not in conditions:
+                conditions.append(cond)
+        for cond in upd.get("conditions_remove", []):
+            if cond in conditions:
+                conditions.remove(cond)
+
+    new_combat = tool_input.get("combat")
+    if tool_input.get("combat_complete") or new_combat is None:
+        pipeline_state["combat"] = None
+    elif isinstance(new_combat, dict):
+        old_start = pipeline_state.get("combat", {}).get("start_message_id")
+        pipeline_state["combat"] = new_combat
+        if old_start and "start_message_id" not in new_combat:
+            pipeline_state["combat"]["start_message_id"] = old_start
+
+
+def _combat_file_list(gs):
+    """Combat file order with backward-compatible fallback."""
+    if gs and gs.get("combat_files"):
+        return gs["combat_files"]
+    return ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"]
+
+
 @app.post("/api/send-message-stream")
 async def send_message_stream(request: SendMessageRequest, http_request: Request):
     """
@@ -2543,30 +2666,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         if hack_state.get("active") and gs and gs.get("hack_contract"):
             use_hack_mode = True
         elif not hack_state.get("active") and hack_state.get("narrative_summary"):
-            # Apply cumulative HP change back to persistent character_states
-            hp_change = hack_state.get("hp_change", 0)
-            if hp_change:
-                ps = data.get("pipeline_state", {})
-                for name, entry in ps.get("character_states", {}).items():
-                    d = entry.get("data", entry)
-                    if d.get("type") == "pc":
-                        for v in d.get("vitals", []):
-                            if v.get("label") == "HP" and "current" in v:
-                                v["current"] = max(0, v["current"] + hp_change)
-                                break
-                        break
-            # Apply process changes back to character_states
-            processes_remaining = hack_state.get("processes_remaining")
-            if processes_remaining is not None:
-                ps = data.get("pipeline_state", {})
-                for name, entry in ps.get("character_states", {}).items():
-                    d = entry.get("data", entry)
-                    if d.get("type") == "pc":
-                        for r in d.get("resources", []):
-                            if "process" in r.get("label", "").lower():
-                                r["current"] = processes_remaining
-                                break
-                        break
+            # Write back hack results to persistent state
+            if gs and gs.get("apply_hack_writeback"):
+                gs["apply_hack_writeback"](hack_state, data.get("pipeline_state", {}))
             data["hack_state"] = None
             logger.info(f"Hack: cleared completed hack_state for {username}")
 
@@ -2673,7 +2775,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # Build system prompt: hack contract + hacker profile
         hack_contract = gs["hack_contract"]
-        hacker_profile = gs["build_hacker_profile"](hack_ps.get("character_states", {}), conversion_doc=hack_conversion_doc)
+        hacker_profile = gs["build_hacker_profile"](
+            hack_ps.get("character_states", {}),
+            conversion_doc=hack_conversion_doc,
+            game_state=hack_ps.get("game_state"),
+            hack_state=hack_state,
+        )
         hack_injection = gs["build_hack_injection"](hack_state)
 
         hack_system_content = hack_contract
@@ -2738,10 +2845,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         combat = combat_ps.get("combat", {})
 
         combat_contract = gs["combat_contract"]
-        if gs.get("apply_combat_state"):
-            combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat, combat_ps.get("game_state", {}))
-        else:
-            combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat)
+        combat_profile = gs["build_combat_profile"](combat_ps.get("character_states", {}), combat, game_state=combat_ps.get("game_state", {}))
         combat_injection = gs["build_combat_injection"](combat, combat_ps)
 
         combat_system_content = combat_contract
@@ -2751,34 +2855,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Inject combat-specific project files if present
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
-            combat_files = gs.get("combat_files")
-            if combat_files:
-                # Game-system-aware file loading
-                char_sheet_loaded = False
-                for fname in combat_files:
-                    # Character Sheets: load first found (.md preferred over .yaml)
-                    is_char_sheet = fname.startswith("Character Sheets")
-                    if is_char_sheet and char_sheet_loaded:
-                        continue
-                    fpath = os.path.join(uploads_dir, fname)
-                    if os.path.exists(fpath):
-                        with open(fpath, 'r', encoding='utf-8') as f:
-                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
-                        if is_char_sheet:
-                            char_sheet_loaded = True
-            else:
-                # Default hardcoded file loading for other game systems
-                for fname in ["Core Conversion.md"]:
-                    fpath = os.path.join(uploads_dir, fname)
-                    if os.path.exists(fpath):
-                        with open(fpath, 'r', encoding='utf-8') as f:
-                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
-                for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
-                    fpath = os.path.join(uploads_dir, fname)
-                    if os.path.exists(fpath):
-                        with open(fpath, 'r', encoding='utf-8') as f:
-                            combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
-                        break
+            char_sheet_loaded = False
+            for fname in _combat_file_list(gs):
+                # Character Sheets: load first found (.md preferred over .yaml)
+                is_char_sheet = fname.startswith("Character Sheets")
+                if is_char_sheet and char_sheet_loaded:
+                    continue
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                    if is_char_sheet:
+                        char_sheet_loaded = True
 
         system_msg = {"role": "system", "content": combat_system_content}
 
@@ -3747,48 +3835,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if combat_reasoning:
                     accumulated_thinking = combat_reasoning
 
-                # Apply character_updates to pipeline_state.character_states
+                # Apply combat state updates
                 combat_ps = data.get("pipeline_state", {})
-                if gs and gs.get("apply_combat_state"):
-                    gs["apply_combat_state"](combat_ps, combat_json, combat_ps.get("game_state"))
-                else:
-                    for upd in combat_json.get("character_updates", []):
-                        name = upd.get("name")
-                        if not name:
-                            continue
-                        cs = combat_ps.get("character_states", {})
-                        entry = cs.get(name)
-                        if entry is None:
-                            continue
-                        d = entry.get("data", entry)
-                        # Apply HP delta
-                        hp_delta = upd.get("hp_delta")
-                        if hp_delta is not None:
-                            _vl = upd.get("vital_label", "HP")
-                            for v in d.get("vitals", []):
-                                if v.get("label") == _vl and "current" in v:
-                                    v["current"] = max(0, v["current"] + hp_delta)
-                                    break
-                        # Apply conditions
-                        conditions = d.setdefault("conditions", [])
-                        for cond in upd.get("conditions_add", []):
-                            if cond not in conditions:
-                                conditions.append(cond)
-                        for cond in upd.get("conditions_remove", []):
-                            if cond in conditions:
-                                conditions.remove(cond)
-
-                    # Update pipeline_state.combat from tool output
-                    new_combat = combat_json.get("combat")
-                    if combat_json.get("combat_complete") or new_combat is None:
-                        combat_ps["combat"] = None
-                    elif isinstance(new_combat, dict):
-                        # Preserve start_message_id across updates
-                        old_start = combat_ps.get("combat", {}).get("start_message_id")
-                        combat_ps["combat"] = new_combat
-                        if old_start and "start_message_id" not in new_combat:
-                            combat_ps["combat"]["start_message_id"] = old_start
-
+                _apply_combat_state(gs, combat_ps, combat_json)
                 data["pipeline_state"] = combat_ps
 
                 # Emit state_update SSE event with updated pipeline_state
@@ -4338,27 +4387,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     try:
                         _evts = json.loads(pipeline_result.events_json) if isinstance(pipeline_result.events_json, str) else pipeline_result.events_json
                         if _evts.get("hack_trigger"):
-                            ht = _evts["hack_trigger"]
-                            processes_max = 4
-                            _ps = data.get("pipeline_state", {})
-                            for _n, _e in _ps.get("character_states", {}).items():
-                                _d = _e.get("data", _e)
-                                if _d.get("type") == "pc":
-                                    for _r in _d.get("resources", []):
-                                        if "process" in _r.get("label", "").lower():
-                                            processes_max = _r.get("max", 4)
-                                            break
-                                    break
-                            data["hack_state"] = gs["init_hack_state"](
-                                tier=ht.get("tier", "full_sequence"),
-                                target_system=ht.get("target_system", "Unknown"),
-                                sr=ht.get("sr", 3),
-                                processes_max=processes_max,
-                            )
+                            _cs = data.get("pipeline_state", {}).get("character_states", {})
+                            data["hack_state"] = _init_hack_from_trigger(gs, _evts["hack_trigger"], _cs)
                             data["hack_state"]["start_message_id"] = assistant_msg_id
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
-                            logger.info(f"Pipeline hack trigger: {ht.get('tier')} on "
-                                        f"{ht.get('target_system')} SR{ht.get('sr')} for {username}")
+                            logger.info(f"Pipeline hack trigger: {_evts['hack_trigger'].get('tier')} on "
+                                        f"{_evts['hack_trigger'].get('target_system')} SR{_evts['hack_trigger'].get('sr')} for {username}")
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -4680,42 +4714,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             tool_input = usage.get('tool_use_input')
                             if tool_input:
                                 combat_tool_input = tool_input
-                                # Apply character_updates to pipeline_state.character_states
+                                # Apply combat state updates
                                 _combat_ps = data.get("pipeline_state", {})
-                                if gs and gs.get("apply_combat_state"):
-                                    gs["apply_combat_state"](_combat_ps, tool_input, _combat_ps.get("game_state"))
-                                else:
-                                    for upd in tool_input.get("character_updates", []):
-                                        _name = upd.get("name")
-                                        if not _name:
-                                            continue
-                                        _entry = _combat_ps.get("character_states", {}).get(_name)
-                                        if _entry is None:
-                                            continue
-                                        _d = _entry.get("data", _entry)
-                                        _hp_delta = upd.get("hp_delta")
-                                        if _hp_delta is not None:
-                                            _vl = upd.get("vital_label", "HP")
-                                            for _v in _d.get("vitals", []):
-                                                if _v.get("label") == _vl and "current" in _v:
-                                                    _v["current"] = max(0, _v["current"] + _hp_delta)
-                                                    break
-                                        _conds = _d.setdefault("conditions", [])
-                                        for _c in upd.get("conditions_add", []):
-                                            if _c not in _conds:
-                                                _conds.append(_c)
-                                        for _c in upd.get("conditions_remove", []):
-                                            if _c in _conds:
-                                                _conds.remove(_c)
-                                    # Update pipeline_state.combat
-                                    _new_combat = tool_input.get("combat")
-                                    if tool_input.get("combat_complete") or _new_combat is None:
-                                        _combat_ps["combat"] = None
-                                    elif isinstance(_new_combat, dict):
-                                        _old_start = _combat_ps.get("combat", {}).get("start_message_id")
-                                        _combat_ps["combat"] = _new_combat
-                                        if _old_start and "start_message_id" not in _new_combat:
-                                            _combat_ps["combat"]["start_message_id"] = _old_start
+                                _apply_combat_state(gs, _combat_ps, tool_input)
                                 data["pipeline_state"] = _combat_ps
                                 logger.info(f"Combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('combat_complete', False)}")
@@ -4737,41 +4738,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
                                         combat_tool_input = retry_result
-                                        # Apply state from retry result (mirrors initial tool path)
+                                        # Apply state from retry result
                                         _combat_ps = data.get("pipeline_state", {})
-                                        if gs and gs.get("apply_combat_state"):
-                                            gs["apply_combat_state"](_combat_ps, retry_result, _combat_ps.get("game_state"))
-                                        else:
-                                            for upd in retry_result.get("character_updates", []):
-                                                _name = upd.get("name")
-                                                if not _name:
-                                                    continue
-                                                _entry = _combat_ps.get("character_states", {}).get(_name)
-                                                if _entry is None:
-                                                    continue
-                                                _d = _entry.get("data", _entry)
-                                                _hp_delta = upd.get("hp_delta")
-                                                if _hp_delta is not None:
-                                                    _vl = upd.get("vital_label", "HP")
-                                                    for _v in _d.get("vitals", []):
-                                                        if _v.get("label") == _vl and "current" in _v:
-                                                            _v["current"] = max(0, _v["current"] + _hp_delta)
-                                                            break
-                                                _conds = _d.setdefault("conditions", [])
-                                                for _c in upd.get("conditions_add", []):
-                                                    if _c not in _conds:
-                                                        _conds.append(_c)
-                                                for _c in upd.get("conditions_remove", []):
-                                                    if _c in _conds:
-                                                        _conds.remove(_c)
-                                            _new_combat = retry_result.get("combat")
-                                            if retry_result.get("combat_complete") or _new_combat is None:
-                                                _combat_ps["combat"] = None
-                                            elif isinstance(_new_combat, dict):
-                                                _old_start = _combat_ps.get("combat", {}).get("start_message_id")
-                                                _combat_ps["combat"] = _new_combat
-                                                if _old_start and "start_message_id" not in _new_combat:
-                                                    _combat_ps["combat"]["start_message_id"] = _old_start
+                                        _apply_combat_state(gs, _combat_ps, retry_result)
                                         data["pipeline_state"] = _combat_ps
                                         logger.info(f"Combat mode: retry succeeded for {username}")
                                     else:
@@ -5148,25 +5117,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             and stateful_tool_input.get("hack_trigger")
                             and gs and gs.get("init_hack_state")):
                             ht = stateful_tool_input["hack_trigger"]
-                            # Extract processes_max from character_states
-                            processes_max = 4
-                            cs = (stateful_pipeline_state.get("character_states", {})
-                                  if stateful_pipeline_state else
-                                  data.get("pipeline_state", {}).get("character_states", {}))
-                            for _name, _entry in cs.items():
-                                _d = _entry.get("data", _entry)
-                                if _d.get("type") == "pc":
-                                    for _r in _d.get("resources", []):
-                                        if "process" in _r.get("label", "").lower():
-                                            processes_max = _r.get("max", 4)
-                                            break
-                                    break
-                            data["hack_state"] = gs["init_hack_state"](
-                                tier=ht.get("tier", "full_sequence"),
-                                target_system=ht.get("target_system", "Unknown"),
-                                sr=ht.get("sr", 3),
-                                processes_max=processes_max,
-                            )
+                            _cs = (stateful_pipeline_state.get("character_states", {})
+                                   if stateful_pipeline_state else
+                                   data.get("pipeline_state", {}).get("character_states", {}))
+                            data["hack_state"] = _init_hack_from_trigger(gs, ht, _cs)
                             data["hack_state"]["start_message_id"] = assistant_msg_id
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Hack trigger: {ht.get('tier')} on {ht.get('target_system')} "

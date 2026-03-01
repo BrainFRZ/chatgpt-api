@@ -1113,7 +1113,7 @@ REPORT_COMBAT_STATE_TOOL = {
 }
 
 
-def build_combat_profile(character_states, combat):
+def build_combat_profile(character_states, combat, **_kw):
     """Build compact combatant roster from character_states for combat mode context."""
     if not character_states:
         return ""
@@ -1233,6 +1233,44 @@ def build_combat_injection(combat, pipeline_state):
     return "\n".join(lines)
 
 
+def apply_combat_state(pipeline_state, tool_input, **_kw):
+    """Apply report_combat_state tool output to pipeline_state. Default for D&D-based systems."""
+    cs = pipeline_state.get("character_states", {})
+    for upd in tool_input.get("character_updates", []):
+        name = upd.get("name")
+        if not name:
+            continue
+        entry = cs.get(name)
+        if entry is None:
+            continue
+        d = entry.get("data", entry)
+        # Apply HP delta
+        hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            vl = upd.get("vital_label", "HP")
+            for v in d.get("vitals", []):
+                if v.get("label") == vl and "current" in v:
+                    v["current"] = max(0, v["current"] + hp_delta)
+                    break
+        # Apply conditions
+        conditions = d.setdefault("conditions", [])
+        for cond in upd.get("conditions_add", []):
+            if cond not in conditions:
+                conditions.append(cond)
+        for cond in upd.get("conditions_remove", []):
+            if cond in conditions:
+                conditions.remove(cond)
+    # Update pipeline_state.combat
+    new_combat = tool_input.get("combat")
+    if tool_input.get("combat_complete") or new_combat is None:
+        pipeline_state["combat"] = None
+    elif isinstance(new_combat, dict):
+        old_start = pipeline_state.get("combat", {}).get("start_message_id")
+        pipeline_state["combat"] = new_combat
+        if old_start and "start_message_id" not in new_combat:
+            pipeline_state["combat"]["start_message_id"] = old_start
+
+
 # ============================================================
 # Game System Definition
 # ============================================================
@@ -1253,4 +1291,6 @@ GAME_SYSTEM = {
     "combat_tool": REPORT_COMBAT_STATE_TOOL,
     "build_combat_profile": build_combat_profile,
     "build_combat_injection": build_combat_injection,
+    "apply_combat_state": apply_combat_state,
+    "combat_files": ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"],
 }

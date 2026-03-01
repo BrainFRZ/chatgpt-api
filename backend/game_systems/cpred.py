@@ -319,6 +319,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "callback_ops": [...],
   "npc_memory_ops": [...],
   "plot_ops": [],
+  "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
     "npcs_present": ["<NPC name>", ...],
@@ -458,6 +459,15 @@ SCENE STATE:
 - "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
 - "funds": Always use an object mapping names to funds (e.g. {"crew fund": "5,000 eb", "V": "2,350 eb", "Jackie": "1,800 eb"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize Night City: neon, chrome, smog, bass, danger
+
+HACK TRIGGER:
+- When a Netrunner jacks into a system for a standalone hack (outside combat), set "hack_trigger" in your output:
+  {"tier": "quick_hack" or "full_run", "target_system": "<name of target>", "sr": <1-5>, "interface_rank": <1-10>, "cycles_max": <int>}
+- Simple Checks (single Interface + d10 check) resolve normally via Mechanics — no hack_trigger needed.
+- Only trigger for Quick Hacks (3-6 exchanges) or Full Runs (5-10 exchanges) where the Netrunner jacks into a system.
+- "interface_rank": the Netrunner's Interface ability rank from their character sheet.
+- "cycles_max": total Cycles available for boosted actions this run (typically from Cyberdeck quality).
+- Set to null on all other turns (the vast majority).
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
@@ -748,6 +758,18 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 ### Character Creation:
 Character creation is handled externally via the web app. If [CHARACTER STATES] is empty AND [EDGERUNNER STATE] is empty AND no character sheets are found in the system prompt, inform the player that character sheets are required to begin the campaign. Do not attempt in-chat character creation.
 
+### Hack Mode Trigger
+When a Netrunner jacks into a system for a standalone hack (outside combat — Quick Hack or Full Run), set `hack_trigger` in your `report_state` call:
+- `tier`: "quick_hack" (3-6 exchanges, linear obstacles) or "full_run" (5-10 exchanges, node map)
+- `target_system`: Name/description of the target system (e.g. "Meridian Corp personnel database")
+- `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
+- `interface_rank`: The Netrunner's Interface ability rank from their character sheet
+- `cycles_max`: Total Cycles available for boosted actions this run (from Cyberdeck quality)
+
+Simple Checks (single Interface + d10 check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Runs where the Netrunner jacks into a system.
+
+Describe the moment of jacking in narratively (connecting the trodes, the NET materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges.
+
 ### Rules:
 - Call `report_state` every turn
 - Do NOT reference the state system in your narrative
@@ -954,6 +976,17 @@ STATE_REPORT_TOOL = {
                         }
                     }
                 }
+            },
+            "hack_trigger": {
+                "type": ["object", "null"],
+                "description": "Set when a Netrunner jacks into a system for a standalone hack (Quick Hack or Full Run). null on normal turns. Simple Checks resolve in the narrative — no trigger needed.",
+                "properties": {
+                    "tier": {"type": "string", "enum": ["quick_hack", "full_run"]},
+                    "target_system": {"type": "string", "description": "Name/description of the target system"},
+                    "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"},
+                    "interface_rank": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Netrunner's Interface ability rank"},
+                    "cycles_max": {"type": "integer", "minimum": 0, "description": "Total Cycles available for boosted actions"}
+                }
             }
         }
     }
@@ -1056,7 +1089,7 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
                                     "name": {"type": "string"},
                                     "location": {"type": "string", "enum": ["body", "head"]},
                                     "effect": {"type": "string"},
-                                    "dv_mod": {"type": "integer", "description": "Death Save DV modifier from this injury. Default 1."}
+                                    "dv_mod": {"type": "integer", "description": "Death Save modifier from this injury. 0 if injury has no Death Save effect, 1 for injuries that add Death Save +1."}
                                 }
                             }
                         },
@@ -1130,7 +1163,7 @@ RULES REFERENCE:
 The Combat Ruleset document is your authoritative source for detailed tables and edge cases. Consult it for DV tables (§3), damage resolution (§12), critical injury tables (§15), cover HP (§16), vehicle combat (§18). The rules summarized below are for quick reference — defer to the Ruleset when in doubt.
 
 KEY RULES:
-- Initiative: REF + d10; ties broken by REF stat. Highest goes first.
+- Initiative: REF + d10. Highest goes first. Ties reroll.
 - Action Economy: Move Action (up to MOVE×2 m/yds) + Action per turn.
 - Ranged Attack: d10 + REF + Weapon Skill vs DV (from range/DV table in Ruleset §3).
 - Melee Attack: d10 + DEX + Melee Weapon/Martial Arts vs defender's d10 + DEX + Evasion.
@@ -1138,6 +1171,7 @@ KEY RULES:
 - Crit Failure: natural 1 on d10 → roll another d10 and SUBTRACT. Does NOT chain on a second 1.
 - Luck: spend Luck points to add to roll (1 point = +1). CANNOT spend on damage rolls, Death Saves, or Initiative.
 - Seriously Wounded: when HP is below half max (rounded up) → −2 to ALL actions. Add condition automatically.
+- Mortally Wounded: at 0 HP → −4 to ALL actions, −6 to MOVE (min 1). Death Save each turn. Any damage taken triggers a Critical Injury. Character is conscious (not automatically unconscious).
 
 DAMAGE RESOLUTION:
 1. Roll weapon damage dice.
@@ -1250,7 +1284,7 @@ REPORT REQUIREMENTS:
 - narrative_summary ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight."""
 
 
-def build_cpred_combat_profile(character_states, combat, game_state=None):
+def build_cpred_combat_profile(character_states, combat, game_state=None, **_kw):
     """Build CPRED-specific combatant roster from edgerunner state + character_states."""
     if not character_states and not (game_state and game_state.get("edgerunners")):
         return ""
@@ -1489,7 +1523,7 @@ def build_cpred_combat_injection(combat, pipeline_state):
     return "\n".join(lines)
 
 
-def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None):
+def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
     """Apply CPRED combat state updates from report_combat_state tool output.
 
     Routes PC updates to edgerunner state, enemy updates to character_states.
@@ -1738,7 +1772,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None):
                 )
                 continue
             try:
-                dv_mod = int(ci.get("dv_mod", 1))
+                dv_mod = int(ci.get("dv_mod", 0))
             except (TypeError, ValueError):
                 logger.warning(
                     "CPRED apply_cpred_combat_state: invalid critical injury dv_mod for %s: %r",
@@ -1879,6 +1913,525 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None):
 
 
 # ============================================================
+# Hack Mode — NET Encounters (Standalone Netrunning)
+# ============================================================
+
+HACK_CONTRACT = """## Hack Mode — NET Encounter
+
+You are running a live netrunning encounter. A Netrunner has jacked into a target system over the NET.
+
+### Your Role
+- Adjudicate netrunning encounters using the Hacking Rulebook as your authoritative rules source
+- Describe the NET as an abstract digital landscape — data streams as light, ICE as presence/resistance, not literal rooms
+- Call `report_hack_state` after EVERY exchange
+- Set `hack_complete: true` when the hack ends (objective achieved, jacked out, or forced disconnect)
+
+### Rules Reference
+The Hacking Rulebook document is your authoritative source for all netrunning mechanics. Consult it for: Cyberdeck stats and Cycle counts (§2), Quick Hack structure (§3), Full Run architecture design (§4), ICE behavioral types and stat blocks (§5), Alert thresholds and escalation (§6), NET Actions, Interface Abilities, Boosted Actions, and Handling ICE options (§7). The operational summary below covers how to *run* hack mode in this app — defer to the Rulebook for rules details, DVs, and stat blocks.
+
+### Dice Mechanics (Quick Reference)
+- Flat check: Interface + d10 vs DV. Must BEAT the DV.
+- Opposed check: Interface + d10 vs ICE stat + d10
+- Critical: natural 10 → roll another d10 and ADD. Does NOT chain.
+- Fumble: natural 1 → roll another d10 and SUBTRACT. Does NOT chain.
+- Luck: spend points to add to Interface checks (1:1).
+- A [DICE POOL] block is provided with pre-rolled random values. Use them in order (left to right). Do NOT generate your own random numbers.
+
+### Roll Format
+Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
+Opposed: 🎲 [Description]: d10[**roll**] +Interface X = Total vs [ICE] d10[**roll**] +DEF Y = Z ✓/✗
+Exploding: 🎲 [Description]: d10[**10** + **roll2**] +Interface X = Total vs DV Z ✓/✗
+Fumble: 🎲 [Description]: d10[**1** - **roll2**] +Interface X = Total vs DV Z ✓/✗
+
+### Exchange Flow
+Each exchange = one Netrunner turn with multiple NET Actions (see Rulebook §7 for count by Interface Rank).
+1. Present current node state (ICE present, connections, contents visible)
+2. Player chooses action(s) for their NET Actions
+3. Resolve all NET Actions for the turn with dice rolls
+4. Report state via report_hack_state
+5. Present available actions for next exchange
+
+### Quick Hack Flow (Rulebook §3)
+3 linear nodes (entry → obstacle → objective). No system_map.
+- Exchange 1: Entry node + first obstacle. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
+- Exchanges 2-5: Navigate obstacle nodes, resolve ICE encounters and checks. One player decision + resolution per exchange.
+- Final exchange: Objective node + completion. Set hack_complete: true.
+- Target 3-6 exchanges total. NEVER compress multiple phases into one exchange. NEVER choose actions for the player.
+
+### Full Run Flow (Rulebook §4)
+4-6 node network with routing choices.
+- Exchange 1: Generate system architecture per Rulebook §4. Store in hack_state.system_map as JSON: {"sr": N, "nodes": {"NodeName": {"type": "gateway|data_node|control_node|password_gate|target", "ice": "patrol|tar|black|trace|null", "dv": N, "connections": [...], "contents": "..."}}}
+- Describe the Gateway node. The player does NOT see the map — reveal only through navigation and Probe/Pathfinder.
+- Subsequent exchanges: Player navigates, fights ICE, accesses objectives. Only reveal nodes the Netrunner can see.
+- Target 5-10 exchanges total.
+
+### State Tracking
+- **alert_level**: Track per Rulebook §6. Cannot decrease mid-run.
+- **cycles_remaining**: Spent on Boosted actions (§7) and Disable (§5). Refresh on Jack Out.
+- **active_programs**: Track each Program's name, category, REZ, and status. Attackers Deactivate after use.
+- **ice_status**: Track per node — name, behavioral type, REZ current/max, status (active/bypassed/disabled/derezzed).
+- **brain_damage**: Cumulative HP damage from Black ICE and effects. Applied directly to HP, ignores armor, no Critical Injuries.
+- **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. Completes at (6 − SR) rounds (min 1).
+- **tar_stacks**: Each Tar encounter adds a stack. Effects per Rulebook §5.
+
+### Completing the Hack
+Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
+- Target objective achieved
+- Netrunner voluntarily jacks out (partial success possible)
+- Forced disconnect (Convergence, Trace complete, or HP reaches 0 from brain damage)
+
+### Style
+Describe the NET as an abstract digital landscape overlaid through Virtuality. Data streams as rivers of light, ICE as hostile presence and resistance, firewalls as crystalline barriers. Keep it punchy — each exchange is a beat in a digital heist. The NET is hostile, alien, beautiful."""
+
+REPORT_HACK_STATE_TOOL = {
+    "name": "report_hack_state",
+    "description": "Report hack encounter state after each exchange. Call every exchange during hack mode.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "available_actions", "hack_state"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "NET description — what the Netrunner experiences this exchange."
+            },
+            "available_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Available actions the Netrunner can take next."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "Dice rolls made this exchange.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "d10": {"type": "integer"},
+                        "exploding": {"type": "integer", "description": "Extra d10 added on natural 10"},
+                        "fumble": {"type": "integer", "description": "d10 subtracted on natural 1"},
+                        "modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "total": {"type": "integer"},
+                        "opposed_d10": {"type": "integer"},
+                        "opposed_modifiers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "integer"}
+                                }
+                            }
+                        },
+                        "opposed_total": {"type": "integer"},
+                        "dv": {"type": "integer", "description": "DV for flat checks (null for opposed)"},
+                        "result": {"type": "string", "enum": ["success", "failure"]}
+                    }
+                }
+            },
+            "hack_state": {
+                "type": "object",
+                "description": "Current hack encounter state.",
+                "properties": {
+                    "alert_level": {"type": "integer", "minimum": 0},
+                    "cycles_remaining": {"type": "integer", "minimum": 0},
+                    "active_programs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]},
+                                "rez": {"type": "integer"},
+                                "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}
+                            }
+                        }
+                    },
+                    "current_node": {"type": "string"},
+                    "nodes_visited": {"type": "array", "items": {"type": "string"}},
+                    "ice_status": {
+                        "type": "object",
+                        "description": "Map of node name to ICE status object.",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]},
+                                "rez_current": {"type": "integer"},
+                                "rez_max": {"type": "integer"},
+                                "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}
+                            }
+                        }
+                    },
+                    "trace_progress": {
+                        "type": ["integer", "null"],
+                        "description": "Trace ICE progress counter. null if no Trace active."
+                    },
+                    "tar_stacks": {"type": "integer", "minimum": 0},
+                    "brain_damage": {
+                        "type": "integer",
+                        "description": "Cumulative brain damage during this hack (applied to HP, ignores armor)."
+                    },
+                    "system_map": {
+                        "type": ["object", "null"],
+                        "description": "Full Run only. Set on first exchange with complete system architecture. null for Quick Hacks."
+                    }
+                }
+            },
+            "hack_complete": {
+                "type": "boolean",
+                "description": "True when the hack encounter is over (objective achieved, jacked out, or forced disconnect)."
+            },
+            "narrative_summary": {
+                "type": ["string", "null"],
+                "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, Cycles spent, brain damage taken."
+            }
+        }
+    }
+}
+
+
+def _get_alert_name(level):
+    """Return alert level name for CPRED NET encounters."""
+    if level <= 0:
+        return "Dormant"
+    if level <= 2:
+        return "Elevated"
+    if level <= 4:
+        return "Active Search"
+    if level <= 6:
+        return "Lockdown"
+    return "Convergence"
+
+
+def init_hack_state(
+    tier="full_run",
+    target_system="Unknown",
+    sr=3,
+    cycles_max=3,
+    interface_rank=4,
+    hacker_name=None,
+    **_kw
+):
+    """Return initial hack_state structure for CPRED netrunning."""
+    net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
+    return {
+        "active": True,
+        "tier": tier,
+        "target_system": target_system,
+        "hacker_name": hacker_name,
+        "sr": sr,
+        "interface_rank": interface_rank,
+        "net_actions_per_turn": net_actions,
+        "start_message_id": None,
+        "system_map": None,
+        "alert_level": 0,
+        "cycles_remaining": cycles_max,
+        "cycles_max": cycles_max,
+        "active_programs": [],
+        "current_node": "Gateway",
+        "nodes_visited": ["Gateway"],
+        "ice_status": {},
+        "trace_progress": None,
+        "tar_stacks": 0,
+        "brain_damage": 0,
+        "narrative_summary": None,
+        "available_actions": [],
+    }
+
+
+def apply_hack_state(hack_state, tool_input):
+    """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
+    if not isinstance(tool_input, dict):
+        logger.warning(
+            "CPRED apply_hack_state: tool_input must be an object, got %s",
+            type(tool_input).__name__
+        )
+        return hack_state
+
+    hs = tool_input.get("hack_state", {})
+    if not isinstance(hs, dict):
+        logger.warning(
+            "CPRED apply_hack_state: hack_state must be an object, got %s",
+            type(hs).__name__
+        )
+        hs = {}
+
+    # Update tracked fields from model's state report
+    for field in ["alert_level", "cycles_remaining", "active_programs",
+                  "current_node", "nodes_visited", "ice_status",
+                  "trace_progress", "tar_stacks", "brain_damage"]:
+        if field in hs:
+            hack_state[field] = hs[field]
+
+    # System map (Full Run, first exchange only)
+    if hs.get("system_map") and not hack_state.get("system_map"):
+        hack_state["system_map"] = hs["system_map"]
+
+    # Available actions for HUD
+    if tool_input.get("available_actions"):
+        if isinstance(tool_input["available_actions"], list):
+            hack_state["available_actions"] = tool_input["available_actions"]
+        else:
+            logger.warning(
+                "CPRED apply_hack_state: available_actions must be a list, got %s",
+                type(tool_input["available_actions"]).__name__
+            )
+
+    # Hack completion
+    if tool_input.get("hack_complete"):
+        hack_state["active"] = False
+        hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
+
+    return hack_state
+
+
+def build_hack_injection(hack_state):
+    """Build state injection string for CPRED hack exchange user messages."""
+    import json as _json
+
+    alert_name = _get_alert_name(hack_state.get("alert_level", 0))
+    cycles_max = hack_state.get("cycles_max", 3)
+    interface_rank = hack_state.get("interface_rank", 4)
+    net_actions = hack_state.get("net_actions_per_turn", 3)
+
+    lines = [
+        "[HACK STATE]",
+        f"Target: {hack_state.get('target_system', 'Unknown')} (SR {hack_state.get('sr', 3)})",
+        f"Tier: {hack_state.get('tier', 'full_run').replace('_', ' ').title()}",
+        f"Interface Rank: {interface_rank} ({net_actions} NET Actions/turn)",
+        f"Alert Level: {hack_state.get('alert_level', 0)} ({alert_name})",
+        f"Cycles: {hack_state.get('cycles_remaining', 0)}/{cycles_max}",
+    ]
+
+    # Active programs
+    programs = hack_state.get("active_programs", [])
+    if programs:
+        prog_strs = []
+        for p in programs:
+            if isinstance(p, dict):
+                status_note = f", {p['status']}" if p.get("status") and p["status"] != "active" else ""
+                prog_strs.append(f"{p.get('name', '?')} ({p.get('category', '?')}, REZ {p.get('rez', 0)}{status_note})")
+            else:
+                prog_strs.append(str(p))
+        lines.append(f"Active Programs: {', '.join(prog_strs)}")
+    else:
+        lines.append("Active Programs: None")
+
+    lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
+    lines.append(f"Nodes Visited: {', '.join(hack_state.get('nodes_visited', ['Gateway']))}")
+
+    # ICE status
+    ice = hack_state.get("ice_status", {})
+    if ice:
+        lines.append("ICE Status:")
+        for node, ice_data in ice.items():
+            if isinstance(ice_data, dict):
+                name = ice_data.get("name", "Unknown")
+                behavior = ice_data.get("behavior", "?")
+                rez_cur = ice_data.get("rez_current", 0)
+                rez_max = ice_data.get("rez_max", 0)
+                status = ice_data.get("status", "active")
+                lines.append(f"  {node}: {name} ({behavior}) — REZ {rez_cur}/{rez_max}, {status}")
+            else:
+                lines.append(f"  {node}: {ice_data}")
+
+    # Trace progress
+    trace = hack_state.get("trace_progress")
+    if trace is not None:
+        sr = hack_state.get("sr", 3)
+        trace_max = max(1, 6 - sr)
+        lines.append(f"Trace Progress: {trace}/{trace_max}")
+
+    # Tar stacks
+    tar = hack_state.get("tar_stacks", 0)
+    if tar:
+        lines.append(f"Tar Stacks: {tar} (-{tar * 2} to next check or 1 Cycle to ignore)")
+
+    # Brain damage
+    brain_dmg = hack_state.get("brain_damage", 0)
+    if brain_dmg:
+        lines.append(f"Brain Damage This Hack: {brain_dmg}")
+
+    lines.append("[/HACK STATE]")
+
+    parts = ["\n".join(lines)]
+
+    # System map (Full Run — model reference, NOT shown to player)
+    system_map = hack_state.get("system_map")
+    if system_map:
+        parts.append(f"[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+
+    return "\n\n".join(parts)
+
+
+def _resolve_netrunner_name(character_states, preferred_name=None):
+    """Resolve which PC should be treated as the active netrunner."""
+    if preferred_name and preferred_name in (character_states or {}):
+        entry = character_states[preferred_name]
+        data = entry.get("data", entry)
+        if data.get("type") == "pc":
+            return preferred_name
+
+    first_pc = None
+    best_name = None
+    best_score = -1
+    for name, entry in (character_states or {}).items():
+        data = entry.get("data", entry)
+        if data.get("type") != "pc":
+            continue
+        if first_pc is None:
+            first_pc = name
+        score = 0
+        if "netrunner" in str(data.get("class", "")).lower():
+            score += 4
+        for r in data.get("resources", []):
+            label = str(r.get("label", "")).lower()
+            if "cycle" in label or "interface" in label or "program" in label:
+                score += 2
+        if "cyberdeck" in str(data.get("summary", "")).lower():
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_name = name
+    return best_name or first_pc
+
+
+def build_netrunner_profile(character_states, game_state=None, **_kw):
+    """Build compact netrunner profile from character_states + edgerunner state for hack mode context."""
+    hack_state = _kw.get("hack_state") or {}
+    pc_name = _resolve_netrunner_name(character_states, preferred_name=hack_state.get("hacker_name"))
+    pc_data = None
+    if pc_name:
+        entry = (character_states or {}).get(pc_name, {})
+        pc_data = entry.get("data", entry)
+
+    if not pc_data:
+        return ""
+
+    lines = ["[NETRUNNER PROFILE]"]
+    lines.append(f"Name: {pc_name}")
+
+    # Role
+    cls = pc_data.get("class", "Unknown")
+    lines.append(f"Role: {cls}")
+
+    # Vitals (HP, Humanity)
+    vitals_parts = []
+    for v in pc_data.get("vitals", []):
+        vlabel = v.get("label", "")
+        if "current" in v and "max" in v:
+            vitals_parts.append(f"{vlabel}: {v['current']}/{v['max']}")
+        elif "value" in v:
+            vitals_parts.append(f"{vlabel}: {v['value']}")
+    if vitals_parts:
+        lines.append(" | ".join(vitals_parts))
+
+    # Edgerunner state (HP, Luck, cyberware) if available
+    edgerunners = game_state.get("edgerunners", {}) if game_state else {}
+    er = edgerunners.get(pc_name, {})
+    if er:
+        hp = er.get("hp", {})
+        luck = er.get("luck", {})
+        if hp.get("max"):
+            sw_flag = " [SERIOUSLY WOUNDED]" if hp.get("seriously_wounded") else ""
+            lines.append(f"HP: {hp.get('current', 0)}/{hp.get('max', 40)}{sw_flag}")
+        if luck.get("max"):
+            lines.append(f"Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
+        cyberware = er.get("cyberware_effects", [])
+        # Filter to NET-relevant cyberware
+        net_relevant = [cw for cw in cyberware if any(
+            kw in cw.lower() for kw in ["neural", "interface", "virtuality", "cyberdeck", "chipware"]
+        )]
+        if net_relevant:
+            lines.append(f"Relevant Cyberware: {', '.join(net_relevant)}")
+
+    # Hacking-relevant resources (Cycles, Interface, etc.)
+    for r in pc_data.get("resources", []):
+        rlabel = r.get("label", "")
+        if any(kw in rlabel.lower() for kw in ["cycle", "interface", "program", "cyberdeck"]):
+            lines.append(f"{rlabel}: {r.get('current', 0)}/{r.get('max', 0)}")
+
+    # Conditions
+    conditions = pc_data.get("conditions", [])
+    if conditions:
+        lines.append(f"Conditions: {', '.join(conditions)}")
+
+    # Summary (may contain cyberdeck info, installed programs, etc.)
+    summary = pc_data.get("summary", "")
+    if summary:
+        lines.append(f"Equipment: {summary}")
+
+    lines.append("[/NETRUNNER PROFILE]")
+    return "\n".join(lines)
+
+
+def apply_hack_writeback(hack_state, pipeline_state):
+    """Write back hack results to persistent state after hack completes."""
+    hacker_name = hack_state.get("hacker_name")
+    brain_damage = hack_state.get("brain_damage", 0)
+    if brain_damage:
+        # Update edgerunner HP (brain damage reduces HP, ignores armor)
+        game_state = pipeline_state.get("game_state", {})
+        er_items = []
+        if hacker_name and hacker_name in game_state.get("edgerunners", {}):
+            er_items.append((hacker_name, game_state["edgerunners"][hacker_name]))
+        er_items.extend(game_state.get("edgerunners", {}).items())
+        seen = set()
+        for name, er in er_items:
+            if name in seen:
+                continue
+            seen.add(name)
+            if er.get("hp"):
+                er["hp"]["current"] = max(0, er["hp"]["current"] - brain_damage)
+                er["hp"]["seriously_wounded"] = er["hp"]["current"] < (er["hp"].get("max", 40) + 1) // 2
+                break
+        # Update character_states vitals
+        cs_items = []
+        if hacker_name and hacker_name in pipeline_state.get("character_states", {}):
+            cs_items.append((hacker_name, pipeline_state["character_states"][hacker_name]))
+        cs_items.extend(pipeline_state.get("character_states", {}).items())
+        seen = set()
+        for name, entry in cs_items:
+            if name in seen:
+                continue
+            seen.add(name)
+            d = entry.get("data", entry)
+            if d.get("type") == "pc":
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = max(0, v["current"] - brain_damage)
+                        break
+                break
+    cycles_remaining = hack_state.get("cycles_remaining")
+    if cycles_remaining is not None:
+        cs_items = []
+        if hacker_name and hacker_name in pipeline_state.get("character_states", {}):
+            cs_items.append((hacker_name, pipeline_state["character_states"][hacker_name]))
+        cs_items.extend(pipeline_state.get("character_states", {}).items())
+        seen = set()
+        for name, entry in cs_items:
+            if name in seen:
+                continue
+            seen.add(name)
+            d = entry.get("data", entry)
+            if d.get("type") == "pc":
+                for r in d.get("resources", []):
+                    if "cycle" in r.get("label", "").lower():
+                        r["current"] = cycles_remaining
+                        break
+                break
+
+
+# ============================================================
 # Game System Definition
 # ============================================================
 
@@ -1900,4 +2453,12 @@ GAME_SYSTEM = {
     "build_combat_injection": build_cpred_combat_injection,
     "apply_combat_state": apply_cpred_combat_state,
     "combat_files": ["Combat Ruleset.md", "Character Sheets.md", "Character Sheets.yaml"],
+    # Hack mode (NET encounters)
+    "hack_contract": HACK_CONTRACT,
+    "hack_tool": REPORT_HACK_STATE_TOOL,
+    "init_hack_state": init_hack_state,
+    "apply_hack_state": apply_hack_state,
+    "build_hack_injection": build_hack_injection,
+    "build_hacker_profile": build_netrunner_profile,
+    "apply_hack_writeback": apply_hack_writeback,
 }

@@ -56,19 +56,33 @@ export interface ChatMessage {
 
 export interface HackState {
   active: boolean;
-  tier: 'quick_hack' | 'full_sequence';
+  tier: 'quick_hack' | 'full_sequence' | 'full_run';
   target_system: string;
   sr: number;
   alert_level: number;
-  processes_remaining: number;
-  processes_max: number;
-  program_slots_used: string[];
+  // dnd5e_cyber fields
+  processes_remaining?: number;
+  processes_max?: number;
+  program_slots_used?: string[];
+  hp_change?: number;
+  // CPRED fields
+  cycles_remaining?: number;
+  cycles_max?: number;
+  interface_rank?: number;
+  net_actions_per_turn?: number;
+  active_programs?: Array<{
+    name: string;
+    category: 'booster' | 'defender' | 'attacker' | 'black_ice';
+    rez: number;
+    status: 'active' | 'deactivated' | 'derezzed' | 'destroyed';
+  }>;
+  brain_damage?: number;
+  // Shared fields
   current_node: string;
   nodes_visited: string[];
-  ice_status: Record<string, string>;
+  ice_status: Record<string, any>;
   trace_progress: number | null;
   tar_stacks: number;
-  hp_change: number;
   narrative_summary: string | null;
   available_actions: string[];
   system_map: any | null;

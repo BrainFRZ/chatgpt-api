@@ -17,6 +17,7 @@ from .dnd5e import (
     REPORT_COMBAT_STATE_TOOL,
     build_combat_profile,
     build_combat_injection,
+    apply_combat_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -606,12 +607,20 @@ REPORT_HACK_STATE_TOOL = {
 }
 
 
-def init_hack_state(tier="full_sequence", target_system="Unknown", sr=3, processes_max=4):
+def init_hack_state(
+    tier="full_sequence",
+    target_system="Unknown",
+    sr=3,
+    processes_max=4,
+    hacker_name=None,
+    **_kw
+):
     """Return initial hack_state structure."""
     return {
         "active": True,
         "tier": tier,
         "target_system": target_system,
+        "hacker_name": hacker_name,
         "sr": sr,
         "start_message_id": None,
         "system_map": None,
@@ -726,18 +735,91 @@ def build_hack_injection(hack_state):
     return "\n\n".join(parts)
 
 
-def build_hacker_profile(character_states, conversion_doc=None):
+def _resolve_hacker_name(character_states, preferred_name=None):
+    """Resolve which PC should be treated as the active hacker."""
+    if preferred_name and preferred_name in (character_states or {}):
+        entry = character_states[preferred_name]
+        d = entry.get("data", entry)
+        if d.get("type") == "pc":
+            return preferred_name
+
+    first_pc = None
+    best_name = None
+    best_score = -1
+    for name, entry in (character_states or {}).items():
+        d = entry.get("data", entry)
+        if d.get("type") != "pc":
+            continue
+        if first_pc is None:
+            first_pc = name
+        score = 0
+        cls = str(d.get("class", "")).lower()
+        if "netrunner" in cls:
+            score += 4
+        summary = str(d.get("summary", "")).lower()
+        if any(kw in summary for kw in ("cyberdeck", "hack", "interface", "matrix")):
+            score += 1
+        for r in d.get("resources", []):
+            label = str(r.get("label", "")).lower()
+            if any(kw in label for kw in ("process", "program", "hack", "cyberdeck")):
+                score += 2
+        if score > best_score:
+            best_score = score
+            best_name = name
+    return best_name or first_pc
+
+
+def apply_hack_writeback(hack_state, pipeline_state):
+    """Write back hack results to persistent state after hack completes."""
+    cs = pipeline_state.get("character_states", {})
+    hacker_name = _resolve_hacker_name(cs, preferred_name=hack_state.get("hacker_name"))
+    hp_change = hack_state.get("hp_change", 0)
+    if hp_change:
+        candidates = []
+        if hacker_name and hacker_name in cs:
+            candidates.append((hacker_name, cs[hacker_name]))
+        candidates.extend(cs.items())
+        seen = set()
+        for name, entry in candidates:
+            if name in seen:
+                continue
+            seen.add(name)
+            d = entry.get("data", entry)
+            if d.get("type") == "pc":
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = max(0, v["current"] + hp_change)  # hp_change is negative
+                        break
+                break
+    processes_remaining = hack_state.get("processes_remaining")
+    if processes_remaining is not None:
+        candidates = []
+        if hacker_name and hacker_name in cs:
+            candidates.append((hacker_name, cs[hacker_name]))
+        candidates.extend(cs.items())
+        seen = set()
+        for name, entry in candidates:
+            if name in seen:
+                continue
+            seen.add(name)
+            d = entry.get("data", entry)
+            if d.get("type") == "pc":
+                for r in d.get("resources", []):
+                    if "process" in r.get("label", "").lower():
+                        r["current"] = processes_remaining
+                        break
+                break
+
+
+def build_hacker_profile(character_states, conversion_doc=None, **_kw):
     """Build compact hacker profile from character_states for hack mode context.
     Extracts PC stats relevant to hacking (HP, AC, class features, cyberdeck, programs)."""
-    # Find the PC
-    pc_name = None
+    hack_state = _kw.get("hack_state") or {}
+    pc_name = _resolve_hacker_name(character_states, preferred_name=hack_state.get("hacker_name"))
     pc_data = None
-    for name, entry in character_states.items():
-        data = entry.get("data", entry)  # handle both wrapped and unwrapped formats
-        if data.get("type") == "pc":
-            pc_name = name
-            pc_data = data
-            break
+    if pc_name:
+        entry = character_states.get(pc_name, {})
+        pc_data = entry.get("data", entry)
 
     if not pc_data:
         return ""
@@ -2380,11 +2462,14 @@ GAME_SYSTEM = {
     "apply_hack_state": apply_hack_state,
     "build_hack_injection": build_hack_injection,
     "build_hacker_profile": build_hacker_profile,
+    "apply_hack_writeback": apply_hack_writeback,
     # Combat context mode (inherits from dnd5e)
     "combat_contract": COMBAT_CONTRACT,
     "combat_tool": REPORT_COMBAT_STATE_TOOL,
     "build_combat_profile": build_combat_profile,
     "build_combat_injection": build_combat_injection,
+    "apply_combat_state": apply_combat_state,
+    "combat_files": ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"],
     # Ship combat mode (space battles)
     "ship_combat_contract": SHIP_COMBAT_CONTRACT,
     "ship_combat_tool": REPORT_SHIP_COMBAT_STATE_TOOL,
