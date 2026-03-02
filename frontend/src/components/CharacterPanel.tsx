@@ -273,15 +273,16 @@ export default function CharacterPanel({
   };
 
   // Hack mode HUD section
-  const renderHackHud = (condensed?: boolean) => {
-    if (!hackState?.active) return null;
-    const isCpred = hackState.cycles_remaining !== undefined;
-    const [alertLabel, alertColor] = alertLevelInfo(hackState.alert_level || 0);
+  const renderHackHud = (condensed?: boolean, hackStateOverride?: any) => {
+    const hs = hackStateOverride || hackState;
+    if (!hs?.active && !hackStateOverride) return null;
+    const isCpred = hs.cycles_remaining !== undefined;
+    const [alertLabel, alertColor] = alertLevelInfo(hs.alert_level || 0);
     const resLabel = isCpred ? 'Cycles' : 'Processes';
-    const resCur = isCpred ? (hackState.cycles_remaining ?? 0) : (hackState.processes_remaining ?? 0);
-    const resMax = isCpred ? (hackState.cycles_max ?? 0) : (hackState.processes_max ?? 0);
+    const resCur = isCpred ? (hs.cycles_remaining ?? 0) : (hs.processes_remaining ?? 0);
+    const resMax = isCpred ? (hs.cycles_max ?? 0) : (hs.processes_max ?? 0);
     const resPct = resMax > 0 ? Math.max(0, Math.min(100, (resCur / resMax) * 100)) : 0;
-    const iceEntries = Object.entries(hackState.ice_status || {});
+    const iceEntries = Object.entries(hs.ice_status || {});
 
     const categoryColor = (cat: string) => {
       switch (cat) { case 'booster': return '#4ade80'; case 'defender': return '#38bdf8'; case 'attacker': return '#ef4444'; case 'black_ice': return '#a855f7'; default: return '#00ff41'; }
@@ -293,10 +294,10 @@ export default function CharacterPanel({
         <div style={{ marginBottom: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
             <span>Alert Level</span>
-            <span style={{ color: alertColor, fontWeight: 600 }}>{hackState.alert_level} — {alertLabel}</span>
+            <span style={{ color: alertColor, fontWeight: 600 }}>{hs.alert_level} — {alertLabel}</span>
           </div>
           <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: `${Math.min(100, ((hackState.alert_level || 0) / 7) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
+            <div style={{ height: '100%', width: `${Math.min(100, ((hs.alert_level || 0) / 7) * 100)}%`, backgroundColor: alertColor, borderRadius: '2px', transition: 'width 0.3s, background-color 0.3s' }} />
           </div>
         </div>
 
@@ -312,20 +313,20 @@ export default function CharacterPanel({
         </div>
 
         {/* NET Actions (CPRED only) */}
-        {isCpred && hackState.net_actions_per_turn && (
+        {isCpred && hs.net_actions_per_turn && (
           <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
-            NET Actions: <span style={{ color: '#00ff41', fontWeight: 600 }}>{hackState.net_actions_per_turn}/turn</span>
+            NET Actions: <span style={{ color: '#00ff41', fontWeight: 600 }}>{hs.net_actions_per_turn}/turn</span>
           </div>
         )}
 
         {/* Current Node */}
-        {hackState.current_node && (
+        {hs.current_node && (
           <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
             <span>Node: </span>
-            <span style={{ color: '#00ff41', fontWeight: 600 }}>{hackState.current_node}</span>
-            {hackState.nodes_visited?.length > 0 && (
+            <span style={{ color: '#00ff41', fontWeight: 600 }}>{hs.current_node}</span>
+            {hs.nodes_visited?.length > 0 && (
               <span style={{ color: '#555', marginLeft: '6px' }}>
-                ({(() => { const prior = hackState.nodes_visited.filter((n: string) => n !== hackState.current_node); return prior.length > 0 ? prior.join(' \u2192 ') + ' \u2192 ' + hackState.current_node : hackState.current_node; })()})
+                ({(() => { const prior = hs.nodes_visited.filter((n: string) => n !== hs.current_node); return prior.length > 0 ? prior.join(' \u2192 ') + ' \u2192 ' + hs.current_node : hs.current_node; })()})
               </span>
             )}
           </div>
@@ -334,11 +335,11 @@ export default function CharacterPanel({
         {!condensed && (
           <>
             {/* Active Programs — CPRED structured */}
-            {hackState.active_programs && hackState.active_programs.length > 0 && (
+            {hs.active_programs && hs.active_programs.length > 0 && (
               <div style={{ marginBottom: '4px' }}>
                 <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
                 <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
-                  {hackState.active_programs.map((p: { name: string; category: string; rez: number; status: string }, i: number) => {
+                  {hs.active_programs.map((p: { name: string; category: string; rez: number; status: string }, i: number) => {
                     const dimmed = p.status !== 'active';
                     return (
                       <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: `${categoryColor(p.category)}18`, color: dimmed ? '#666' : categoryColor(p.category), fontWeight: 500, opacity: dimmed ? 0.6 : 1, textDecoration: dimmed ? 'line-through' : 'none' }}>
@@ -351,11 +352,11 @@ export default function CharacterPanel({
             )}
 
             {/* Active Programs — dnd5e_cyber string list */}
-            {!hackState.active_programs?.length && hackState.program_slots_used?.length > 0 && (
+            {!hs.active_programs?.length && hs.program_slots_used?.length > 0 && (
               <div style={{ marginBottom: '4px' }}>
                 <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
                 <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
-                  {hackState.program_slots_used.map((p: string, i: number) => (
+                  {hs.program_slots_used.map((p: string, i: number) => (
                     <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: '#00ff4118', color: '#00ff41', fontWeight: 500 }}>{p}</span>
                   ))}
                 </div>
@@ -399,12 +400,12 @@ export default function CharacterPanel({
             )}
 
             {/* Trace Progress */}
-            {hackState.trace_progress != null && hackState.trace_progress > 0 && (
+            {hs.trace_progress != null && hs.trace_progress > 0 && (
               <div style={{ marginBottom: '4px' }}>
-                {(() => { const traceMax = isCpred ? Math.max(1, 6 - (hackState.sr || 3)) : (hackState.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hackState.trace_progress / traceMax) * 100) : 0; return (<>
+                {(() => { const traceMax = isCpred ? Math.max(1, 6 - (hs.sr || 3)) : (hs.sr || 3) * 2; const tracePct = traceMax > 0 ? Math.min(100, (hs.trace_progress / traceMax) * 100) : 0; return (<>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#999', marginBottom: '2px' }}>
                   <span style={{ color: '#fbbf24' }}>{'\u26A0'} Trace</span>
-                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{hackState.trace_progress}/{traceMax}</span>
+                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{hs.trace_progress}/{traceMax}</span>
                 </div>
                 <div style={{ height: '4px', backgroundColor: '#1a2a1a', borderRadius: '2px', overflow: 'hidden' }}>
                   <div style={{ height: '100%', width: `${tracePct}%`, backgroundColor: tracePct >= 75 ? '#ef4444' : '#fbbf24', borderRadius: '2px', transition: 'width 0.3s' }} />
@@ -414,16 +415,16 @@ export default function CharacterPanel({
             )}
 
             {/* Tar Stacks */}
-            {hackState.tar_stacks > 0 && (
-              <div style={{ fontSize: '0.68rem', color: '#fb923c', marginBottom: isCpred && (hackState.brain_damage ?? 0) > 0 ? '4px' : undefined }}>
-                Tar Stacks: {hackState.tar_stacks}
+            {hs.tar_stacks > 0 && (
+              <div style={{ fontSize: '0.68rem', color: '#fb923c', marginBottom: isCpred && (hs.brain_damage ?? 0) > 0 ? '4px' : undefined }}>
+                Tar Stacks: {hs.tar_stacks}
               </div>
             )}
 
             {/* Brain Damage (CPRED only) */}
-            {isCpred && (hackState.brain_damage ?? 0) > 0 && (
+            {isCpred && (hs.brain_damage ?? 0) > 0 && (
               <div style={{ fontSize: '0.68rem', color: '#ef4444' }}>
-                Brain Damage: {hackState.brain_damage}
+                Brain Damage: {hs.brain_damage}
               </div>
             )}
           </>
@@ -643,6 +644,8 @@ export default function CharacterPanel({
     const scene = state.scene_state || {};
     const combat = state.combat;
     const shipCombat = state.ship_combat;
+    const netCombat = state.net_combat;
+    const isNetCombat = netCombat?.active;
     const ledger = state.callback_ledger;
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
@@ -660,13 +663,16 @@ export default function CharacterPanel({
             style={{ background: 'none', border: 'none', fontSize: '1.2rem', color: '#888', cursor: 'pointer', padding: '4px 8px' }}
             title="Open character panel (Ctrl+])"
           >{'\u00AB'}</button>
-          {hackState?.active && (
+          {isNetCombat && (
+            <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', marginTop: '8px', backgroundColor: '#f59e0b18', borderRadius: '8px', padding: '1px 5px' }}>NC</span>
+          )}
+          {hackState?.active && !isNetCombat && (
             <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#00ff41', marginTop: '8px', backgroundColor: '#00ff4118', borderRadius: '8px', padding: '1px 5px' }}>H</span>
           )}
-          {shipCombat && !hackState?.active && (
+          {shipCombat && !hackState?.active && !isNetCombat && (
             <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', marginTop: '8px', backgroundColor: '#38bdf818', borderRadius: '8px', padding: '1px 5px' }}>SC</span>
           )}
-          {charCount > 0 && !hackState?.active && !shipCombat && (
+          {charCount > 0 && !hackState?.active && !isNetCombat && !shipCombat && (
             <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
           )}
         </div>
@@ -694,21 +700,24 @@ export default function CharacterPanel({
         )}
         {/* Panel header */}
         <div style={{
-          padding: '12px 12px 8px', borderBottom: `1px solid ${hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
+          padding: '12px 12px 8px', borderBottom: `1px solid ${isNetCombat ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
           justifyContent: 'space-between', alignItems: 'center',
-          backgroundColor: hackState?.active ? '#0a1f0a' : shipCombat ? '#0a0a2a' : combat ? '#2a1a1a' : 'transparent',
+          backgroundColor: isNetCombat ? '#1a1a0a' : hackState?.active ? '#0a1f0a' : shipCombat ? '#0a0a2a' : combat ? '#2a1a1a' : 'transparent',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
-              {hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: isNetCombat ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
+              {isNetCombat ? `NET Combat \u2014 Round ${combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
-            {hackState?.active && (
+            {isNetCombat && (
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', backgroundColor: '#f59e0b18', padding: '1px 5px', borderRadius: '3px' }}>NET COMBAT</span>
+            )}
+            {hackState?.active && !isNetCombat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
             )}
-            {!hackState?.active && !combat && shipCombat && (
+            {!hackState?.active && !isNetCombat && !combat && shipCombat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px' }}>SHIP COMBAT</span>
             )}
-            {!hackState?.active && combat && (
+            {!hackState?.active && !isNetCombat && combat && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
             )}
           </div>
@@ -719,13 +728,27 @@ export default function CharacterPanel({
           >{'\u00BB'}</button>
         </div>
 
-        {/* Hack HUD */}
-        {renderHackHud()}
-        {renderShipCombatHud()}
+        {/* Hack HUD / Net Combat HUD */}
+        {isNetCombat && !netCombat.net_complete ? renderHackHud(false, netCombat) : !isNetCombat ? renderHackHud() : null}
+        {!isNetCombat && renderShipCombatHud()}
 
         {/* Panel body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px', scrollbarWidth: 'thin' as any }}>
-          {shipCombat ? (
+          {isNetCombat ? (
+            // Net combat: show initiative order when combat theater still active
+            !netCombat.combat_complete && combat ? (
+              <>
+                {(combat.initiative_order || []).map((name: string) => renderCard(name, combat.current_turn === name))}
+                {(combat.initiative_order || []).length === 0 && (
+                  <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>No initiative order set</div>
+                )}
+              </>
+            ) : netCombat.combat_complete && !netCombat.net_complete ? (
+              <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>Meatspace combat resolved — NET operations continue</div>
+            ) : (
+              <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>NET resolved — meatspace combat continues</div>
+            )
+          ) : shipCombat ? (
             <>
               {(shipCombat.initiative_order || []).map((entry: any, i: number) => {
                 const shipName = typeof entry === 'string' ? entry : entry.ship_name;
@@ -791,7 +814,9 @@ export default function CharacterPanel({
     const npcsPresent = scene.npcs_present || [];
     const allPresent = pcsPresent.concat(npcsPresent).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
     const shipCombat = state.ship_combat;
-    if (allPresent.length === 0 && !hackState?.active && !shipCombat) return null;
+    const netCombatM = state.net_combat;
+    const isNetCombatM = netCombatM?.active;
+    if (allPresent.length === 0 && !hackState?.active && !isNetCombatM && !shipCombat) return null;
 
     return (
       <>
@@ -808,27 +833,38 @@ export default function CharacterPanel({
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
-        backgroundColor: hackState?.active ? '#0a1a0a' : shipCombat ? '#0a0a2a' : '#16162a', borderTop: `1px solid ${hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}`,
+        backgroundColor: isNetCombatM ? '#1a1a0a' : hackState?.active ? '#0a1a0a' : shipCombat ? '#0a0a2a' : '#16162a', borderTop: `1px solid ${isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}`,
         zIndex: 1500, transition: 'height 0.25s ease',
         display: 'flex', flexDirection: 'column' as const,
       }}>
         {/* Tab handle */}
         <div
           onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}` : 'none' }}
+          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}` : 'none' }}
         >
-          <div style={{ width: '32px', height: '3px', backgroundColor: hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
-          {hackState?.active && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
-          {!hackState?.active && shipCombat && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
+          <div style={{ width: '32px', height: '3px', backgroundColor: isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
+          {isNetCombatM && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', backgroundColor: '#f59e0b18', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>NET COMBAT</span>}
+          {hackState?.active && !isNetCombatM && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
+          {!hackState?.active && !isNetCombatM && shipCombat && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {isNetCombatM ? `NET Combat \u2014 Round ${state.combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
           <>
-            {renderHackHud(true)}
-            {renderShipCombatHud(true)}
+            {isNetCombatM && !netCombatM.net_complete ? renderHackHud(true, netCombatM) : !isNetCombatM ? renderHackHud(true) : null}
+            {!isNetCombatM && renderShipCombatHud(true)}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
-              {shipCombat ? (
+              {isNetCombatM ? (
+                !netCombatM.combat_complete && state.combat ? (
+                  (state.combat.initiative_order || []).map((name: string) => renderCard(name, state.combat.current_turn === name))
+                ) : (
+                  <div style={{ fontSize: '0.75rem', color: '#666', textAlign: 'center', padding: '20px 0' }}>
+                    {netCombatM.combat_complete && !netCombatM.net_complete
+                      ? 'Meatspace combat resolved — NET operations continue'
+                      : 'NET resolved — meatspace combat continues'}
+                  </div>
+                )
+              ) : shipCombat ? (
                 (shipCombat.initiative_order || []).map((entry: any, i: number) => {
                   const shipName = typeof entry === 'string' ? entry : entry.ship_name;
                   return shipName ? renderCard(shipName, shipName === shipCombat.current_ship) : <div key={`mship-${i}`} />;

@@ -275,6 +275,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               attached_files: originalMessage.attached_files
             };
             if (data.ship_combat_mode) (newUserMessage as any).ship_combat_mode = true;
+            if (data.net_combat_mode) (newUserMessage as any).net_combat_mode = true;
 
             const assistantMessage: ChatMessage = {
               id: data.assistant_message_id,
@@ -291,6 +292,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               service_tier: data.service_tier
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
@@ -310,7 +312,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               deps.setStats(data.stats);
               deps.setContextStartIndex(data.context_start_index || 1);
               // Update model dropdown to reflect what actually ran
-              if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete)) {
+              if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete)) {
                   deps.setSelectedModel(data.original_model);
               } else if (data.model) {
                   deps.setSelectedModel(data.model);
@@ -604,6 +606,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               ...(data.hack_mode ? { hack_mode: true } : {})
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
+            if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') {
@@ -614,6 +617,9 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             if (data.ship_combat_mode) {
               (userMsgWithId as any).ship_combat_mode = true;
+            }
+            if (data.net_combat_mode) {
+              (userMsgWithId as any).net_combat_mode = true;
             }
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
               ? (data.ship_combat_init_message as ChatMessage)
@@ -637,7 +643,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setStats(data.stats);
             deps.setContextStartIndex(data.context_start_index || 1);
             // Update model dropdown to reflect what actually ran
-            if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete)) {
+            if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete)) {
                 // Auto-switched mode just ended — restore to original model
                 deps.setSelectedModel(data.original_model);
             } else if (data.model) {

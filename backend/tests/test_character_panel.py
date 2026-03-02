@@ -746,6 +746,10 @@ class TestFrontendIntegration:
         assert "width: '32px', height: '3px'" in self.content
         # Check for card rendering in mobile
         assert 'mobileBottomSheetOpen' in self.content
+        # Net combat mobile path should use initiative order/current turn, not scene fallback.
+        assert 'isNetCombatM ?' in self.content
+        assert 'state.combat.initiative_order' in self.content
+        assert 'state.combat.current_turn' in self.content
 
     def test_funds_display(self):
         """Character sheet should display funds from hud_state."""

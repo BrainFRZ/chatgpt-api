@@ -41,6 +41,7 @@ from pipeline import (
     collapse_hack_messages,
     collapse_combat_messages,
     collapse_ship_combat_messages,
+    collapse_net_combat_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -961,7 +962,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
     return is_new
 
 HACK_ONLY_FILES = {"Hacking Rulebook.md"}
-COMBAT_ONLY_FILES = set()
+COMBAT_ONLY_FILES = {"Combat Ruleset.md"}
 
 def load_project_files(username: str, project: str) -> str:
     """Load all staged project files from project's uploads folder.
@@ -2413,6 +2414,7 @@ def _init_hack_from_trigger(gs, ht, character_states):
         processes_max=cycles_max,
         interface_rank=ht.get("interface_rank") or 4,
         hacker_name=hacker_name,
+        context=ht.get("context"),
     )
 
 
@@ -2660,11 +2662,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # Check if hack mode (matrix encounter) is active or just completed
     use_hack_mode = False
+    _hack_to_net_combat = False
     hack_state = data.get("hack_state")
 
     if hack_state:
         if hack_state.get("active") and gs and gs.get("hack_contract"):
-            use_hack_mode = True
+            if hack_state.get("_initiate_combat") and gs.get("init_net_combat_from_hack"):
+                _hack_to_net_combat = True
+            else:
+                use_hack_mode = True
         elif not hack_state.get("active") and hack_state.get("narrative_summary"):
             # Write back hack results to persistent state
             if gs and gs.get("apply_hack_writeback"):
@@ -2689,17 +2695,90 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Flag the user message as a hack exchange
         user_msg_data["hack_mode"] = True
 
-    # NET-in-meatspace mode hook (future mode; currently does not change routing)
+    # Hack → NET combat transition: combat breaks out during standalone hack
+    if _hack_to_net_combat and hack_state:
+        _ps = data.get("pipeline_state", {})
+        _combat_info = hack_state.get("_initiate_combat", {})
+        # Write back brain damage from hack before transitioning
+        if gs.get("apply_hack_writeback") and hack_state.get("brain_damage", 0) > 0:
+            gs["apply_hack_writeback"](hack_state, _ps)
+        # Create net_combat state with carried-over NET state
+        _nc_from_hack = gs["init_net_combat_from_hack"](hack_state, _combat_info)
+        _ps["net_combat"] = _nc_from_hack
+        # Preserve hack start_message_id for context history
+        if hack_state.get("start_message_id"):
+            _ps["_hack_start_message_id"] = hack_state["start_message_id"]
+        # Clear hack_state — NET state now lives in net_combat
+        data["hack_state"] = None
+        hack_state = None
+        logger.info(f"Hack->NetCombat transition for {username}")
+
+    # NET-in-meatspace combined combat mode
     _ps_for_combat = data.get("pipeline_state", {})
     _net_combat = _ps_for_combat.get("net_combat")
     _combat = _ps_for_combat.get("combat")
     use_net_combat_mode = False
-    if (not use_hack_mode) and _net_combat and _combat and gs and gs.get("net_combat_contract"):
+    if (not use_hack_mode) and _net_combat and _net_combat.get("active") and gs and gs.get("net_combat_contract"):
         use_net_combat_mode = True
+    elif (not use_hack_mode) and _net_combat and not _net_combat.get("active") and _net_combat.get("narrative_summary"):
+        # Net combat completed — write back and clear
+        if gs and gs.get("apply_net_combat_writeback"):
+            gs["apply_net_combat_writeback"](_net_combat, _ps_for_combat)
+        _ps_for_combat["net_combat"] = None
+        _ps_for_combat.pop("_hack_start_message_id", None)
+        logger.info(f"Net combat: cleared completed net_combat for {username}")
 
-    # Check if combat context mode is active
+    # First-exchange initialization: expand trigger fields into full state
+    if use_net_combat_mode and _net_combat and "interface_rank" not in _net_combat and gs.get("init_net_combat_state"):
+        # net_combat was set by initiate_net_combat from combat mode (just trigger fields)
+        nr_name = _net_combat.get("netrunner", "")
+        nr_target = _net_combat.get("target", "")
+        # Look up interface_rank and cycles from character state
+        _nr_cs = _ps_for_combat.get("character_states", {}).get(nr_name, {})
+        _nr_d = _nr_cs.get("data", _nr_cs)
+        _nr_iface = 4
+        _nr_cycles = 3
+        for r in _nr_d.get("resources", []):
+            rlabel = r.get("label", "").lower()
+            if "interface" in rlabel:
+                _nr_iface = r.get("current", 4)
+            if "cycle" in rlabel:
+                _nr_cycles = r.get("current", 3)
+        _expanded = gs["init_net_combat_state"](
+            netrunner_name=nr_name,
+            target=nr_target,
+            interface_rank=_nr_iface,
+            cycles_max=_nr_cycles,
+            initiated_from=_net_combat.get("initiated_from", "combat"),
+        )
+        # Carry over context from trigger for first-exchange injection
+        if _net_combat.get("context"):
+            _expanded["context"] = _net_combat["context"]
+        # Carry over combat's start_message_id so prior combat context is preserved
+        _combat_start = (_combat or {}).get("start_message_id")
+        if _combat_start:
+            _expanded["start_message_id"] = _combat_start
+        _ps_for_combat["net_combat"] = _expanded
+        _net_combat = _expanded
+
+    # Auto-switch Claude to GPT-5.2 for net_combat mode
+    if use_net_combat_mode and model_id.startswith("claude"):
+        _original_model = model_id
+        model_id = DEFAULT_MODEL
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+
+    if use_net_combat_mode:
+        user_msg_data["net_combat_mode"] = True
+
+    # Check if combat context mode is active (not when net_combat supersedes)
     use_combat_mode = False
-    if (not use_hack_mode) and _combat and request.project and gs and gs.get("combat_contract"):
+    if (not use_hack_mode) and (not use_net_combat_mode) and _combat and request.project and gs and gs.get("combat_contract"):
         use_combat_mode = True
 
     # Auto-switch Claude to GPT-5.2 for combat mode (preserves Anthropic prompt cache)
@@ -2722,7 +2801,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     use_ship_combat_mode = False
     _ps_for_ship_combat = data.get("pipeline_state", {})
     _ship_combat = _ps_for_ship_combat.get("ship_combat")
-    if (not use_hack_mode) and (not use_combat_mode) and _ship_combat and request.project and gs and gs.get("ship_combat_contract"):
+    if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and _ship_combat and request.project and gs and gs.get("ship_combat_contract"):
         use_ship_combat_mode = True
 
     # Auto-switch Claude to GPT-5.2 for ship combat mode
@@ -2745,7 +2824,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_ship_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
@@ -2755,6 +2834,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # GPT-5.2 combat request params (non-streaming JSON call, built separately)
     combat_gpt_request_params = None
+    # GPT-5.2 net_combat request params (non-streaming JSON call, built separately)
+    net_combat_gpt_request_params = None
     # GPT-5.2 ship combat request params (non-streaming JSON call, built separately)
     ship_combat_gpt_request_params = None
     ship_combat_init_hidden_message_prebuilt = None
@@ -2781,7 +2862,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             game_state=hack_ps.get("game_state"),
             hack_state=hack_state,
         )
-        hack_injection = gs["build_hack_injection"](hack_state)
+        hack_injection = gs["build_hack_injection"](hack_state, pipeline_state=hack_ps)
 
         hack_system_content = hack_contract
         if hacker_profile:
@@ -2908,6 +2989,94 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 json_mode=True,
             )
 
+    elif use_net_combat_mode:
+        # ============================================================
+        # NET-in-meatspace combined combat mode
+        # ============================================================
+        nc_ps = data.get("pipeline_state", {})
+        nc_combat = nc_ps.get("combat", {})
+        nc_state = nc_ps.get("net_combat", {})
+
+        nc_contract = gs["net_combat_contract"]
+        nc_profile = gs["build_net_combat_profile"](
+            nc_ps.get("character_states", {}), nc_combat, nc_state,
+            game_state=nc_ps.get("game_state", {}))
+        nc_injection = gs["build_net_combat_injection"](nc_combat, nc_state, nc_ps)
+
+        nc_system_content = nc_contract
+        if nc_profile:
+            nc_system_content += "\n\n" + nc_profile
+
+        # Inject project files: Combat Ruleset, Hacking Rulebook, Character Sheets
+        if request.project:
+            uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            char_sheet_loaded = False
+            for fname in (gs.get("net_combat_files") or []):
+                is_char_sheet = fname.startswith("Character Sheets")
+                if is_char_sheet and char_sheet_loaded:
+                    continue
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        nc_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                    if is_char_sheet:
+                        char_sheet_loaded = True
+
+        system_msg = {"role": "system", "content": nc_system_content}
+
+        # Include combat_mode, hack_mode, AND net_combat_mode messages from start
+        # Preserve all prior context from whichever mode transitioned into net_combat
+        _hack_st = data.get("hack_state") or {}
+        _hack_start_fallback = nc_ps.get("_hack_start_message_id")
+        nc_start_candidates = [
+            nc_state.get("start_message_id"),
+            nc_combat.get("start_message_id") if nc_combat else None,
+            _hack_st.get("start_message_id"),
+            _hack_start_fallback,
+        ]
+        # Use earliest available start_message_id — find the one that appears first in branch_path
+        _msg_id_order = {msg.get("id"): idx for idx, msg in enumerate(branch_path) if msg.get("id")}
+        nc_start_id = None
+        _earliest_idx = len(branch_path)
+        for cand in nc_start_candidates:
+            if cand and cand in _msg_id_order and _msg_id_order[cand] < _earliest_idx:
+                _earliest_idx = _msg_id_order[cand]
+                nc_start_id = cand
+        nc_history = []
+        found_start = not nc_start_id
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == nc_start_id:
+                found_start = True
+            if found_start and (msg.get("combat_mode") or msg.get("net_combat_mode") or msg.get("hack_mode")):
+                nc_history.append({"role": msg["role"], "content": msg["content"]})
+
+        user_content = build_message_content(branch_path[-1])
+        nc_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        user_content = nc_injection + "\n\n" + (nc_dice_pool + "\n\n" if nc_dice_pool else "") + user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + nc_history + [new_user_msg]
+        context_start_index = max(1, len(branch_path) - len(nc_history) - 1)
+
+        logger.info(f"Net combat mode: round {nc_combat.get('round', 1)} for {username}, "
+                    f"netrunner={nc_state.get('netrunner', '?')}, {len(nc_history)} prior exchanges")
+
+        if model_id == "gpt-5.2":
+            gpt_nc_messages = [
+                {"role": "system", "content": nc_system_content
+                 + "\n\nYou MUST output valid JSON matching the report_net_combat_state schema:\n"
+                 + json.dumps(gs["net_combat_tool"]["input_schema"], indent=2)},
+            ] + nc_history + [new_user_msg]
+            net_combat_gpt_request_params = provider.build_pipeline_request(
+                messages=gpt_nc_messages,
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="net_combat",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
     elif use_ship_combat_mode:
         # ============================================================
         # Ship combat mode: stripped context with ship combat contract + roster
@@ -3002,7 +3171,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         trim_anchor_id = data.get("_trim_anchor_id")
         # Collapse hack and combat messages into summary pairs before context trimming
-        branch_path_for_context = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
+        branch_path_for_context = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
             branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
         )
@@ -3060,7 +3229,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         # Collapse hack and combat messages in non-stateful path too
-        bp_filtered = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
+        bp_filtered = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
 
@@ -3084,6 +3253,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         request_params["tool_choice"] = {"type": "auto"}
     elif use_hack_mode:
         # GPT-5.2 hack mode: request_params not used (hack_gpt_request_params used instead)
+        request_params = {}
+    elif use_net_combat_mode and model_id.startswith("claude"):
+        # Claude net_combat mode: use standard build_request with net_combat tool
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
+        request_params["tools"] = [gs["net_combat_tool"]]
+        request_params["tool_choice"] = {"type": "auto"}
+    elif use_net_combat_mode:
+        # GPT-5.2 net_combat mode: request_params not used
         request_params = {}
     elif use_combat_mode and model_id.startswith("claude"):
         # Claude combat mode: use standard build_request with combat tool
@@ -3585,7 +3769,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
-            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode and not use_ship_combat_mode
+            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode
             # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
 
             if use_hack_mode and model_id == "gpt-5.2":
@@ -4009,6 +4193,187 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 logger.info(f"Combat mode (GPT-5.2): completed for {username}, "
                             f"combat_complete={combat_json.get('combat_complete', False)}")
+
+            elif use_net_combat_mode and model_id == "gpt-5.2":
+                # ============================================================
+                # GPT-5.2 NET Combat mode: non-streaming JSON call
+                # ============================================================
+                logger.info(f"Net combat mode (GPT-5.2): starting for {username}")
+
+                if data.get("pipeline_state"):
+                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+
+                nc_response = await asyncio.to_thread(
+                    provider.send_request_non_streaming,
+                    client, net_combat_gpt_request_params, 60.0
+                )
+
+                nc_content = nc_response.get('content', '')
+                nc_reasoning = nc_response.get('reasoning')
+
+                try:
+                    nc_json = json.loads(nc_content)
+                except json.JSONDecodeError:
+                    logger.error(f"Net combat mode: failed to parse JSON: {nc_content[:200]}")
+                    nc_json = {}
+
+                narrative = nc_json.get("narrative", nc_content)
+                accumulated_content = narrative
+                if narrative:
+                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
+                    )
+
+                if nc_reasoning:
+                    accumulated_thinking = nc_reasoning
+
+                # Apply net_combat state updates
+                nc_ps = data.get("pipeline_state", {})
+                gs["apply_net_combat_state"](nc_ps, nc_json, game_state=nc_ps.get("game_state"))
+                data["pipeline_state"] = nc_ps
+
+                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                )
+
+                usage = {
+                    'input_tokens': nc_response.get('input_tokens', 0),
+                    'cache_read_tokens': nc_response.get('cache_read_tokens', 0),
+                    'cache_creation_tokens': nc_response.get('cache_creation_tokens', 0),
+                    'output_tokens': nc_response.get('output_tokens', 0),
+                    'reasoning_tokens': nc_response.get('reasoning_tokens', 0),
+                    'content': narrative,
+                    'reasoning': nc_reasoning,
+                    'service_tier': nc_response.get('service_tier'),
+                }
+
+                assistant_message = narrative
+                reasoning_summary = nc_reasoning
+                service_tier = nc_response.get('service_tier')
+
+                from providers import ParsedResponse
+                parsed = ParsedResponse(
+                    content=assistant_message,
+                    reasoning=reasoning_summary,
+                    input_tokens=usage['input_tokens'],
+                    cache_read_tokens=usage['cache_read_tokens'],
+                    cache_creation_tokens=usage['cache_creation_tokens'],
+                    output_tokens=usage['output_tokens'],
+                    reasoning_tokens=usage['reasoning_tokens']
+                )
+
+                new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                if service_tier:
+                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                else:
+                    total_cost = provider.calculate_cost(parsed)
+                tokens_str = provider.format_token_string(parsed)
+
+                actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+                stats = data.get("stats", create_empty_stats())
+                stats["total_input_tokens"] += new_input_tokens
+                stats["total_cached_tokens"] += parsed.cache_read_tokens
+                stats["total_output_tokens"] += parsed.output_tokens
+                stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                stats["total_cost"] += actual_cost
+                stats["total_prompts"] += 1
+                stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
+                data["stats"] = stats
+
+                assistant_msg_id = generate_message_id()
+                assistant_parent_id = user_msg_id
+                assistant_msg_data = {
+                    "id": assistant_msg_id,
+                    "parent_id": assistant_parent_id,
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                    "tokens": tokens_str,
+                    "cost": cost_str,
+                    "total_tokens": usage['output_tokens'],
+                    "total_gpt_tokens": usage['output_tokens'],
+                    "model": model_id,
+                    "net_combat_mode": True,
+                    "net_combat_tool_input": nc_json,
+                }
+                if reasoning_summary:
+                    assistant_msg_data["reasoning"] = reasoning_summary
+                if service_tier:
+                    assistant_msg_data["service_tier"] = service_tier
+                if data.get("pipeline_state"):
+                    assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
+
+                # Track net_combat start_message_id
+                active_nc = data.get("pipeline_state", {}).get("net_combat")
+                if active_nc and "start_message_id" not in active_nc:
+                    active_nc["start_message_id"] = assistant_msg_id
+                # Also track combat start_message_id if not set
+                active_combat = data.get("pipeline_state", {}).get("combat")
+                if active_combat and "start_message_id" not in active_combat:
+                    active_combat["start_message_id"] = assistant_msg_id
+
+                data["messages"].append(assistant_msg_data)
+                data["current_leaf_id"] = assistant_msg_id
+                save_chat(username, request.chat_name, data, request.project)
+
+                if pending_usage is not None:
+                    save_daily_usage(username, pending_usage)
+
+                update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens,
+                                        parsed.output_tokens, parsed.reasoning_tokens, actual_cost,
+                                        model=model_id, context_tokens=0)
+
+                branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                _nc_both_done = nc_json.get("combat_complete") and nc_json.get("net_complete")
+                done_data = {
+                    'assistant_message': assistant_message,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': reasoning_summary,
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': len(branch_path_final),
+                    'model': model_id,
+                    'net_combat_mode': True,
+                }
+                if service_tier:
+                    done_data['service_tier'] = service_tier
+                if _original_model:
+                    done_data['original_model'] = _original_model
+                if _nc_both_done:
+                    done_data['net_combat_complete'] = True
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": len(branch_path_final),
+                            "stats": stats,
+                            "context_start_index": context_start_index,
+                            "pipeline_state": data.get("pipeline_state")
+                        }
+                    )
+                )
+
+                logger.info(f"Net combat mode (GPT-5.2): completed for {username}, "
+                            f"combat_complete={nc_json.get('combat_complete', False)}, "
+                            f"net_complete={nc_json.get('net_complete', False)}")
 
             elif use_ship_combat_mode and model_id == "gpt-5.2":
                 # ============================================================
@@ -4707,6 +5072,45 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 except Exception as retry_err:
                                     logger.error(f"Hack mode: retry error for {username}: {retry_err}")
 
+                        # Handle net_combat mode tool output (Claude net_combat mode)
+                        net_combat_tool_input = None
+                        if use_net_combat_mode and model_id.startswith("claude"):
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input:
+                                net_combat_tool_input = tool_input
+                                _nc_ps = data.get("pipeline_state", {})
+                                gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"))
+                                data["pipeline_state"] = _nc_ps
+                                logger.info(f"Net combat mode: applied state for {username}, "
+                                            f"combat_complete={tool_input.get('combat_complete', False)}, "
+                                            f"net_complete={tool_input.get('net_complete', False)}")
+                            else:
+                                logger.warning(f"Net combat mode: no tool_use_input for {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        gs["net_combat_tool"],
+                                        gs.get("net_combat_contract", "")
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        net_combat_tool_input = retry_result
+                                        _nc_ps = data.get("pipeline_state", {})
+                                        gs["apply_net_combat_state"](_nc_ps, retry_result, game_state=_nc_ps.get("game_state"))
+                                        data["pipeline_state"] = _nc_ps
+                                        logger.info(f"Net combat mode: retry succeeded for {username}")
+                                    else:
+                                        logger.warning(f"Net combat mode: retry also failed for {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Net combat mode: retry error for {username}: {retry_err}")
+
                         # Handle combat mode tool output (Claude combat mode)
                         combat_tool_input = None
                         ship_combat_tool_input = None
@@ -4861,6 +5265,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Send state_update SSE event for right panel (single-agent path)
                         if use_stateful and data.get("pipeline_state"):
+                            yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+                            )
+
+                        # Emit state_update for Claude net_combat mode
+                        if use_net_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
                             yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -5075,6 +5487,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if data.get("hack_state"):
                                 assistant_msg_data["hack_state_after"] = copy.deepcopy(data["hack_state"])
 
+                        # Flag net_combat mode messages (Claude path)
+                        if use_net_combat_mode:
+                            assistant_msg_data["net_combat_mode"] = True
+                            if net_combat_tool_input:
+                                assistant_msg_data["net_combat_tool_input"] = net_combat_tool_input
+
                         # Flag combat mode messages (Claude path)
                         if use_combat_mode:
                             assistant_msg_data["combat_mode"] = True
@@ -5108,6 +5526,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _active_combat = data.get("pipeline_state", {}).get("combat")
                         if _active_combat and "start_message_id" not in _active_combat:
                             _active_combat["start_message_id"] = assistant_msg_id
+                        _active_nc = data.get("pipeline_state", {}).get("net_combat")
+                        if _active_nc and "start_message_id" not in _active_nc:
+                            _active_nc["start_message_id"] = assistant_msg_id
                         _active_ship_combat = data.get("pipeline_state", {}).get("ship_combat")
                         if _active_ship_combat and "start_message_id" not in _active_ship_combat:
                             _active_ship_combat["start_message_id"] = assistant_msg_id
@@ -5236,6 +5657,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['service_tier'] = service_tier
                         if use_hack_mode:
                             done_data['hack_mode'] = True
+                        if use_net_combat_mode:
+                            done_data['net_combat_mode'] = True
                         if use_combat_mode:
                             done_data['combat_mode'] = True
                         if use_ship_combat_mode:
@@ -5254,6 +5677,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['original_model'] = _original_model
                         if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
                             done_data['hack_complete'] = True
+                        if use_net_combat_mode and net_combat_tool_input:
+                            if net_combat_tool_input.get("combat_complete") and net_combat_tool_input.get("net_complete"):
+                                done_data['net_combat_complete'] = True
                         if use_combat_mode and combat_tool_input:
                             if combat_tool_input.get("combat_complete") or combat_tool_input.get("combat") is None:
                                 done_data['combat_complete'] = True

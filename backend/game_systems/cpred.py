@@ -691,7 +691,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (role, e.g. "Solo" or "Netrunner"), `level` (null — CPRED does not use levels), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
-- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat.
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat. On the FIRST combat report, include `context`: 1-2 sentence summary of who is present, where, and why combat erupted (e.g. "Three Maelstrom gangers ambush the crew at the warehouse loading dock — retaliation for the stolen tech.").
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -765,6 +765,7 @@ When a Netrunner jacks into a system for a standalone hack (outside combat — Q
 - `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
 - `interface_rank`: The Netrunner's Interface ability rank from their character sheet
 - `cycles_max`: Total Cycles available for boosted actions this run (from Cyberdeck quality)
+- `context`: 1-2 sentence summary of who is present, where, and why the Netrunner is jacking in (e.g. "Nova plugs into the clinic's back-office terminal while Raze watches the door — she needs patient records to find the missing ripperdoc.")
 
 Simple Checks (single Interface + d10 check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Runs where the Netrunner jacks into a system.
 
@@ -871,7 +872,7 @@ STATE_REPORT_TOOL = {
                 }
             },
             "combat": {
-                "description": "Initiative tracker. null when not in combat. When active: {round: number, initiative_order: [list of names in initiative order], current_turn: 'name of character currently acting'}.",
+                "description": "Initiative tracker. null when not in combat. When active: {round, initiative_order, current_turn, context}. context (string, first report only): 1-2 sentence summary — who is present, where, and why combat erupted.",
                 "type": ["object", "null"]
             },
             "callback_ops": {
@@ -985,7 +986,8 @@ STATE_REPORT_TOOL = {
                     "target_system": {"type": "string", "description": "Name/description of the target system"},
                     "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"},
                     "interface_rank": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Netrunner's Interface ability rank"},
-                    "cycles_max": {"type": "integer", "minimum": 0, "description": "Total Cycles available for boosted actions"}
+                    "cycles_max": {"type": "integer", "minimum": 0, "description": "Total Cycles available for boosted actions"},
+                    "context": {"type": "string", "description": "1-2 sentence summary: who is present, where, and why the Netrunner is jacking in."}
                 }
             }
         }
@@ -1145,7 +1147,8 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
                 "description": "Set when a netrunner declares NET actions during combat. Triggers NET-in-meatspace mode on next exchange.",
                 "properties": {
                     "netrunner": {"type": "string", "description": "Name of the netrunner going into the NET"},
-                    "target": {"type": "string", "description": "What they're jacking into (architecture name, device, etc.)"}
+                    "target": {"type": "string", "description": "What they're jacking into (architecture name, device, etc.)"},
+                    "context": {"type": "string", "description": "1-2 sentence summary: current combat situation and why the netrunner is jacking in."}
                 }
             }
         }
@@ -1243,7 +1246,7 @@ Enemies act according to their type and motivation — do not apply a single tem
 
 NET-IN-MEATSPACE:
 When a netrunner declares NET actions during combat initiative:
-- Set initiate_net_combat with the netrunner's name and target architecture/device.
+- Set initiate_net_combat with the netrunner's name, target architecture/device, and context (1-2 sentence summary of the current combat situation and why they're jacking in).
 - Do NOT resolve their NET actions — end the exchange. NET-in-meatspace mode handles the interleaved resolution.
 - Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner chooses 1 meat action OR N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10).
 
@@ -1431,21 +1434,10 @@ def build_cpred_combat_injection(combat, pipeline_state):
 
     lines = []
 
-    # Scene context — gives combat model the "why" and "where"
-    scene = pipeline_state.get("scene_state", {})
-    if scene:
-        lines.append("[SCENE CONTEXT]")
-        if scene.get("location"):
-            lines.append(f"Location: {scene['location']}")
-        if scene.get("atmosphere"):
-            lines.append(f"Atmosphere: {scene['atmosphere']}")
-        tensions = scene.get("active_tensions", [])
-        if tensions:
-            lines.append(f"Situation: {'; '.join(tensions)}")
-        details = scene.get("details", [])
-        if details:
-            lines.append(f"Details: {'; '.join(details)}")
-        lines.append("[/SCENE CONTEXT]")
+    # Transition context — the triggering model's summary of who/what/why
+    _combat_context = combat.get("context")
+    if _combat_context:
+        lines.append(f"[TRANSITION] {_combat_context} [/TRANSITION]")
         lines.append("")
 
     lines.append("[COMBAT STATE]")
@@ -1896,20 +1888,27 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
     elif isinstance(new_combat, dict):
         old_start = (pipeline_state.get("combat") or {}).get("start_message_id")
         old_cover = (pipeline_state.get("combat") or {}).get("cover", {})
+        old_context = (pipeline_state.get("combat") or {}).get("context")
         pipeline_state["combat"] = new_combat
         if old_start and "start_message_id" not in new_combat:
             pipeline_state["combat"]["start_message_id"] = old_start
         if old_cover and "cover" not in new_combat:
             pipeline_state["combat"]["cover"] = old_cover
+        if old_context and "context" not in new_combat:
+            pipeline_state["combat"]["context"] = old_context
 
     # --- initiate_net_combat ---
     net_combat = tool_input.get("initiate_net_combat")
     if net_combat and isinstance(net_combat, dict):
-        pipeline_state["net_combat"] = {
+        _nc_trigger = {
+            "active": True,
             "netrunner": net_combat.get("netrunner", ""),
             "target": net_combat.get("target", ""),
             "initiated_from": "combat"
         }
+        if net_combat.get("context"):
+            _nc_trigger["context"] = net_combat["context"]
+        pipeline_state["net_combat"] = _nc_trigger
 
 
 # ============================================================
@@ -1974,6 +1973,9 @@ Each exchange = one Netrunner turn with multiple NET Actions (see Rulebook §7 f
 - **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. Completes at (6 − SR) rounds (min 1).
 - **tar_stacks**: Each Tar encounter adds a stack. Effects per Rulebook §5.
 
+### Combat Breakout
+If meatspace combat breaks out during the hack — Convergence dispatches physical security, the body is discovered, ambush, alarm — set `initiate_combat` with the reason and enemy names. Do NOT set `hack_complete` — the hack continues in combined NET+combat mode. Do NOT resolve the combat; end the exchange after setting the trigger.
+
 ### Completing the Hack
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
 - Target objective achieved
@@ -1988,7 +1990,7 @@ REPORT_HACK_STATE_TOOL = {
     "description": "Report hack encounter state after each exchange. Call every exchange during hack mode.",
     "input_schema": {
         "type": "object",
-        "required": ["narrative", "available_actions", "hack_state"],
+        "required": ["narrative", "rolls", "available_actions", "hack_state", "hack_complete"],
         "properties": {
             "narrative": {
                 "type": "string",
@@ -2093,6 +2095,14 @@ REPORT_HACK_STATE_TOOL = {
             "narrative_summary": {
                 "type": ["string", "null"],
                 "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, Cycles spent, brain damage taken."
+            },
+            "initiate_combat": {
+                "type": ["object", "null"],
+                "description": "Set when meatspace combat breaks out during the hack. Triggers NET+combat mode. Do NOT set alongside hack_complete.",
+                "properties": {
+                    "reason": {"type": "string"},
+                    "enemies": {"type": "array", "items": {"type": "string"}}
+                }
             }
         }
     }
@@ -2119,11 +2129,12 @@ def init_hack_state(
     cycles_max=3,
     interface_rank=4,
     hacker_name=None,
+    context=None,
     **_kw
 ):
     """Return initial hack_state structure for CPRED netrunning."""
     net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
-    return {
+    state = {
         "active": True,
         "tier": tier,
         "target_system": target_system,
@@ -2146,6 +2157,9 @@ def init_hack_state(
         "narrative_summary": None,
         "available_actions": [],
     }
+    if context:
+        state["context"] = context
+    return state
 
 
 def apply_hack_state(hack_state, tool_input):
@@ -2191,12 +2205,25 @@ def apply_hack_state(hack_state, tool_input):
         hack_state["active"] = False
         hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
 
+    # Combat breakout — flag for dispatch to transition to net_combat mode
+    initiate_combat = tool_input.get("initiate_combat")
+    if initiate_combat and isinstance(initiate_combat, dict) and not tool_input.get("hack_complete"):
+        hack_state["_initiate_combat"] = initiate_combat
+
     return hack_state
 
 
-def build_hack_injection(hack_state):
+def build_hack_injection(hack_state, pipeline_state=None):
     """Build state injection string for CPRED hack exchange user messages."""
     import json as _json
+
+    preamble_lines = []
+
+    # Transition context — the triggering model's summary of who/what/why
+    _hack_context = hack_state.get("context")
+    if _hack_context:
+        preamble_lines.append(f"[TRANSITION] {_hack_context} [/TRANSITION]")
+        preamble_lines.append("")
 
     alert_name = _get_alert_name(hack_state.get("alert_level", 0))
     cycles_max = hack_state.get("cycles_max", 3)
@@ -2263,7 +2290,10 @@ def build_hack_injection(hack_state):
 
     lines.append("[/HACK STATE]")
 
-    parts = ["\n".join(lines)]
+    parts = []
+    if preamble_lines:
+        parts.append("\n".join(preamble_lines))
+    parts.append("\n".join(lines))
 
     # System map (Full Run — model reference, NOT shown to player)
     system_map = hack_state.get("system_map")
@@ -2432,6 +2462,818 @@ def apply_hack_writeback(hack_state, pipeline_state):
 
 
 # ============================================================
+# NET-in-Meatspace Combined Combat Mode
+# ============================================================
+
+NET_COMBAT_CONTRACT = """You are the COMBINED COMBAT + NET MASTER for a Cyberpunk RED session. A Netrunner is jacked into a system AND meatspace combat is active (or about to begin).
+
+YOUR ROLE: Adjudicate both meatspace combat and NET actions simultaneously, each exchange covering one combatant's turn. Call report_net_combat_state every exchange, then write your narrative.
+
+### Dual-Theater Structure
+Each exchange narrates the current combatant's turn:
+- **Non-Netrunner turns**: Meatspace only. NET section can be brief or omitted.
+- **Netrunner's turn**: Their combat Action is spent on NET Actions (N actions per Interface Rank: 2/3/4/5 for ranks 1-3/4-6/7-9/10). They still get a Move Action in meatspace (requires Virtuality Goggles — without them, the Netrunner is Unconscious and cannot move or dodge). Narrate meatspace first (movement, reactions), then NET actions after a `---` separator.
+
+### Narrative Format
+```
+[Meatspace narration — combat action, movement, reactions]
+[Roll breakdowns for meatspace]
+
+---
+
+[NET narration — what the Netrunner experiences in the architecture]
+[Roll breakdowns for NET actions]
+```
+On non-Netrunner turns where nothing happens in the NET, omit the separator and NET section entirely.
+
+### Hack-Originated Transition
+If initiated_from is "hack", the NET encounter was already in progress when combat broke out. The injection shows current NET state (mid-hack) but no meatspace initiative. Your FIRST exchange must:
+1. Bootstrap enemies with set_combat_stats in character_updates
+2. Roll initiative for all combatants
+3. Begin Round 1
+4. Report existing NET state unchanged (no NET actions this exchange — combat setup only)
+
+### Meatspace Rules (Quick Reference — see Combat Ruleset for tables/edge cases)
+- Initiative: REF + d10. Highest first. Ties reroll.
+- Action Economy: Move Action (MOVE×2 m/yds) + Action per turn.
+- Ranged Attack: d10 + REF + Weapon Skill vs DV (§3 range/DV table).
+- Melee Attack: d10 + DEX + Melee Weapon/Martial Arts vs defender's d10 + DEX + Evasion.
+- Crit Success: natural 10 → roll another d10 and ADD. Does NOT chain.
+- Crit Failure: natural 1 → roll another d10 and SUBTRACT. Does NOT chain.
+- Luck: spend before the roll (1:1). NOT on damage, Death Saves, or Initiative.
+- Seriously Wounded: HP < half max → −2 to ALL actions.
+- Mortally Wounded: 0 HP → −4 to ALL actions, −6 MOVE (min 1). Death Save each round.
+- Opposed check ties go to the Defender.
+
+### Damage Resolution
+1. Roll weapon damage dice.
+2. Crit check: 2+ dice show 6 → crit injury. +5 bonus direct to HP (ignores SP). Roll on table (§15).
+3. Subtract location SP. If damage ≤ SP, no penetration (crit bonus still applies).
+4. Ablation: penetrating hit → SP −1. AP ammo: SP −2.
+5. Melee: halve SP (round up). Brawling: full SP.
+6. Remaining after SP → HP.
+
+### NET Rules (Quick Reference — see Hacking Rulebook for full rules)
+- Flat check: Interface + d10 vs DV. Must BEAT DV (equal fails).
+- Opposed check (Zap, no Program): Interface + d10 vs ICE stat + d10. Deals 1d6 REZ damage.
+- Program attack: Interface + Program ATK + d10 vs ICE DEF + d10. Damage per program listing.
+- Attack Programs Deactivate after use (1 use, then must Deactivate + Reactivate = 2 NET Actions).
+- Slide (flee): Interface + d10 vs ICE PER + d10. Escape to adjacent node. Once per turn. Cannot Slide preemptively.
+- Crits/Fumbles: same as meatspace (d10 explodes on 10, subtracts on 1).
+- Luck: spend before the roll on Interface checks (1:1).
+- Opposed check ties go to the Defender (ICE).
+- NET Actions per turn = Netrunner's allocation by Interface Rank.
+- Boosted actions cost 1 NET Action + 1 Cycle. Track cycles_remaining.
+- Alert Level: escalates per Hacking Rulebook §6. Cannot decrease mid-run.
+
+### Cross-Theater Interactions
+- **Netrunner's body is in meatspace**: can be shot, hit, caught in AoE. Track via character_updates. With Virtuality Goggles the Netrunner can still see and move in meatspace; without them the Netrunner is **Unconscious** in meatspace (no Move Action, no dodge).
+- **Brain damage**: Black ICE and NET effects deal brain damage (HP loss ignoring armor, no crit injuries). Track cumulatively in hack_state.brain_damage — the system auto-applies the delta to the Netrunner's HP. Do NOT also report brain damage as character_updates.hp_delta (that would double-count).
+- **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
+- **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
+- **Mortally Wounded (0 HP)**: Netrunner gets ONE final NET turn (emergency jack-out or last-ditch action), then forced disconnect. Set net_complete=true on forced disconnect.
+- **Flatlined**: immediate forced disconnect. Set net_complete=true.
+
+### State Tracking
+- **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
+- **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, ice_status, trace_progress, tar_stacks, brain_damage, system_map).
+- **cover_state**: meatspace cover for ALL combatants.
+- **combat**: initiative tracker (round, initiative_order, current_turn).
+
+### Completion
+- `combat_complete` and `net_complete` are independent booleans.
+- When one theater resolves, continue the other. Injection shows "resolved" for the done theater.
+- When BOTH are true: set narrative_summary (1-3 sentences covering the whole engagement).
+- Mode ends when both theaters complete.
+
+### Enemy/NPC Bootstrap
+Same as standalone combat: use set_combat_stats on first exchange for new enemies. Combat number system for threat tiers.
+
+### Dice Pool
+A [DICE POOL] block is provided. Use values in order (left to right). Do NOT generate your own.
+
+### Roll Format
+Attack: 🎲 [V attacks Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
+Damage: 🎲 [Heavy Pistol]: 3d6[**4,3,5**] = 12 → Body SP 11 → 1 net, SP→10
+NET flat: 🎲 [Backdoor]: d10[**8**] +Interface 7 = 15 vs DV 12 ✓
+NET opposed: 🎲 [Zap vs Patrol]: d10[**6**] +Interface 7 = 13 vs d10[**4**] +DEF 6 = 10 ✓
+
+### Roll Adjudication
+- RAW. If unsure, closest to RAW.
+- Roll when outcome is uncertain. If auto-success, say why.
+- Transparent dice. Show numbers, modifiers, math.
+- No fudging. Fail-forward when failure would break the campaign.
+- PC death only at Death Risk points.
+
+### Narrative Style
+Present tense, visceral, Night City grit. 2-5 sentences per theater. Chrome reflects neon. The NET is hostile, alien, beautiful."""
+
+REPORT_NET_COMBAT_STATE_TOOL = {
+    "name": "report_net_combat_state",
+    "description": "Report combined meatspace + NET combat state after each exchange.",
+    "input_schema": {
+        "type": "object",
+        "required": ["narrative", "rolls", "character_updates", "cover_state", "combat",
+                      "hack_state", "available_actions", "combat_complete", "net_complete"],
+        "properties": {
+            "narrative": {
+                "type": "string",
+                "description": "Full narrative of this exchange — meatspace and NET actions."
+            },
+            "rolls": {
+                "type": "array",
+                "description": "All dice rolls this exchange.",
+                "items": {
+                    "type": "object",
+                    "required": ["description", "result"],
+                    "properties": {
+                        "description": {"type": "string"},
+                        "result": {"type": "string"},
+                        "theater": {"type": "string", "enum": ["meatspace", "net"]}
+                    }
+                }
+            },
+            "character_updates": {
+                "type": "array",
+                "description": "State changes for affected combatants (meatspace). Do NOT include brain damage here — it's tracked in hack_state.",
+                "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "set_combat_stats": {
+                            "type": "object",
+                            "description": "First-exchange enemy bootstrap ONLY.",
+                            "properties": {
+                                "hp_max": {"type": "integer"},
+                                "armor": {"type": "object", "properties": {"head": {"type": "integer"}, "body": {"type": "integer"}}},
+                                "weapons": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "damage": {"type": "string"}, "ammo": {"type": "integer"}, "magazine": {"type": "integer"}, "skill": {"type": "string"}}}},
+                                "stats": {"type": "object"}
+                            }
+                        },
+                        "hp_delta": {"type": "integer"},
+                        "armor_delta": {"type": "object", "properties": {"head": {"type": "integer"}, "body": {"type": "integer"}}},
+                        "luck_delta": {"type": "integer"},
+                        "ammo": {"type": "array", "items": {"type": "object", "required": ["weapon", "current"], "properties": {"weapon": {"type": "string"}, "current": {"type": "integer"}}}},
+                        "critical_injury_add": {"type": "array", "items": {"type": "object", "required": ["name", "location", "effect"], "properties": {"name": {"type": "string"}, "location": {"type": "string", "enum": ["body", "head"]}, "effect": {"type": "string"}, "dv_mod": {"type": "integer"}}}},
+                        "critical_injury_remove": {"type": "array", "items": {"type": "string"}},
+                        "conditions_add": {"type": "array", "items": {"type": "string"}},
+                        "conditions_remove": {"type": "array", "items": {"type": "string"}}
+                    }
+                }
+            },
+            "cover_state": {
+                "type": "array",
+                "description": "Cover status for ALL combatants. Report every exchange.",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "in_cover"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "in_cover": {"type": "boolean"},
+                        "cover_type": {"type": ["string", "null"]},
+                        "cover_hp": {"type": ["integer", "null"]}
+                    }
+                }
+            },
+            "combat": {
+                "description": "Updated initiative state. null when meatspace combat ends.",
+                "oneOf": [
+                    {"type": "object", "required": ["round", "initiative_order", "current_turn"], "properties": {"round": {"type": "integer"}, "initiative_order": {"type": "array", "items": {"type": "string"}}, "current_turn": {"type": "string"}}},
+                    {"type": "null"}
+                ]
+            },
+            "hack_state": {
+                "type": "object",
+                "description": "Current NET encounter state.",
+                "properties": {
+                    "alert_level": {"type": "integer", "minimum": 0},
+                    "cycles_remaining": {"type": "integer", "minimum": 0},
+                    "active_programs": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]}, "rez": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}}}},
+                    "current_node": {"type": "string"},
+                    "nodes_visited": {"type": "array", "items": {"type": "string"}},
+                    "ice_status": {"type": "object", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
+                    "trace_progress": {"type": ["integer", "null"]},
+                    "tar_stacks": {"type": "integer", "minimum": 0},
+                    "brain_damage": {"type": "integer"},
+                    "system_map": {"type": ["object", "null"]}
+                }
+            },
+            "combat_complete": {
+                "type": "boolean",
+                "description": "True when meatspace combat is over."
+            },
+            "net_complete": {
+                "type": "boolean",
+                "description": "True when NET encounter is over (objective achieved, jacked out, or forced disconnect)."
+            },
+            "narrative_summary": {
+                "type": "string",
+                "description": "ONLY when BOTH combat_complete AND net_complete are true. 1-3 sentence summary of the entire engagement."
+            },
+            "available_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Available NET actions for next exchange (optional)."
+            }
+        }
+    }
+}
+
+
+def init_net_combat_state(
+    netrunner_name="",
+    target="",
+    interface_rank=4,
+    cycles_max=3,
+    initiated_from="combat",
+    **_kw
+):
+    """Return initial net_combat state for combined meatspace+NET mode."""
+    net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
+    return {
+        "active": True,
+        "netrunner": netrunner_name,
+        "target": target,
+        "initiated_from": initiated_from,
+        "interface_rank": interface_rank,
+        "net_actions_per_turn": net_actions,
+        "start_message_id": None,
+        # NET state fields (same as standalone hack)
+        "alert_level": 0,
+        "cycles_remaining": cycles_max,
+        "cycles_max": cycles_max,
+        "active_programs": [],
+        "current_node": "Gateway",
+        "nodes_visited": ["Gateway"],
+        "ice_status": {},
+        "trace_progress": None,
+        "tar_stacks": 0,
+        "brain_damage": 0,
+        "system_map": None,
+        "available_actions": [],
+        # Completion flags
+        "combat_complete": False,
+        "net_complete": False,
+        "narrative_summary": None,
+        # Internal tracking for brain damage delta
+        "_prev_brain_damage": 0,
+    }
+
+
+def init_net_combat_from_hack(hack_state, combat_info=None):
+    """Create net_combat state by carrying over in-progress NET fields from hack_state.
+
+    Unlike init_net_combat_state (fresh defaults), this preserves the mid-hack
+    NET encounter — current node, alert level, ICE, programs, etc.
+    """
+    combat_info = combat_info or {}
+    # Build combined context: original hack context + combat breakout reason
+    _parts = []
+    if hack_state.get("context"):
+        _parts.append(hack_state["context"])
+    if combat_info.get("reason"):
+        _parts.append(f"Combat breakout: {combat_info['reason']}")
+    if combat_info.get("enemies"):
+        _parts.append(f"Hostiles: {', '.join(combat_info['enemies'])}")
+    _combined_context = " ".join(_parts) if _parts else None
+
+    interface_rank = hack_state.get("interface_rank", 4)
+    net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
+    nc = {
+        "active": True,
+        "netrunner": hack_state.get("hacker_name", ""),
+        # Standalone hack mode stores this field as target_system.
+        "target": hack_state.get("target_system") or hack_state.get("target", ""),
+        "initiated_from": "hack",
+        "interface_rank": interface_rank,
+        "net_actions_per_turn": net_actions,
+        "start_message_id": hack_state.get("start_message_id"),
+        # NET state carried over from hack (NOT reset to defaults)
+        "alert_level": hack_state.get("alert_level", 0),
+        "cycles_remaining": hack_state.get("cycles_remaining", 3),
+        "cycles_max": hack_state.get("cycles_max", 3),
+        "active_programs": copy.deepcopy(hack_state.get("active_programs", [])),
+        "current_node": hack_state.get("current_node", "Gateway"),
+        "nodes_visited": list(hack_state.get("nodes_visited", ["Gateway"])),
+        "ice_status": copy.deepcopy(hack_state.get("ice_status", {})),
+        "trace_progress": hack_state.get("trace_progress"),
+        "tar_stacks": hack_state.get("tar_stacks", 0),
+        "brain_damage": hack_state.get("brain_damage", 0),
+        "system_map": copy.deepcopy(hack_state.get("system_map")),
+        "available_actions": list(hack_state.get("available_actions", [])),
+        # Hack-specific fields to carry over
+        "sr": hack_state.get("sr"),
+        "tier": hack_state.get("tier"),
+        # Completion flags
+        "combat_complete": False,
+        "net_complete": False,
+        "narrative_summary": None,
+        # Brain damage delta tracking starts clean from current value
+        "_prev_brain_damage": hack_state.get("brain_damage", 0),
+        # Combat breakout context for first-exchange injection
+        "_combat_breakout": combat_info,
+    }
+    if _combined_context:
+        nc["context"] = _combined_context
+    return nc
+
+
+def _apply_character_updates_shared(pipeline_state, character_updates, game_state=None):
+    """Shared logic for applying character_updates from combat/net_combat tool output.
+
+    Handles hp_delta, armor_delta, luck_delta, ammo, critical_injury_add/remove,
+    conditions_add/remove, set_combat_stats — routing PCs to edgerunner state
+    and enemies to character_states.
+    """
+    if not isinstance(character_updates, list):
+        logger.warning("_apply_character_updates_shared: character_updates must be a list, got %s",
+                       type(character_updates).__name__)
+        return
+
+    edgerunners = game_state.get("edgerunners", {}) if game_state else {}
+    cs = pipeline_state.get("character_states", {})
+
+    for upd in character_updates:
+        if not isinstance(upd, dict):
+            continue
+        name = upd.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+
+        is_pc = name in edgerunners
+
+        # --- set_combat_stats (enemy bootstrap) ---
+        scs = upd.get("set_combat_stats")
+        if scs and isinstance(scs, dict) and not is_pc:
+            if name not in cs:
+                cs[name] = {"data": {"type": "enemy", "class": "", "level": None, "vitals": [], "conditions": []}}
+            entry = cs[name]
+            d = entry.get("data", entry)
+            if not d.get("combat_data"):
+                scs = copy.deepcopy(scs)
+                try:
+                    hp_max = max(0, int(scs.get("hp_max", 0)))
+                except (TypeError, ValueError):
+                    hp_max = 0
+                scs["hp_max"] = hp_max
+                d["combat_data"] = copy.deepcopy(scs)
+                hp_vitals = d.get("vitals", [])
+                hp_found = False
+                for v in hp_vitals:
+                    if v.get("label") == "HP":
+                        if "current" not in v:
+                            v["current"] = hp_max
+                        v["max"] = hp_max
+                        hp_found = True
+                        break
+                if not hp_found:
+                    d.setdefault("vitals", []).append({"label": "HP", "current": hp_max, "max": hp_max})
+
+        # --- hp_delta ---
+        hp_delta = upd.get("hp_delta")
+        if hp_delta is not None:
+            try:
+                hp_delta = int(hp_delta)
+            except (TypeError, ValueError):
+                hp_delta = None
+        if hp_delta is not None:
+            if is_pc:
+                er = edgerunners[name]
+                er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + hp_delta))
+                _update_seriously_wounded(er)
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = er["hp"]["current"]
+                        break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        v["current"] = max(0, v["current"] + hp_delta)
+                        break
+
+        # --- armor_delta ---
+        armor_delta = upd.get("armor_delta")
+        if armor_delta and isinstance(armor_delta, dict):
+            if is_pc:
+                er = edgerunners[name]
+                for loc in ("head", "body"):
+                    try:
+                        delta = int(armor_delta.get(loc, 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if delta:
+                        er["armor"][loc] = max(0, er["armor"].get(loc, 0) + delta)
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    cd_armor = cd.setdefault("armor", {})
+                    for loc in ("head", "body"):
+                        try:
+                            delta = int(armor_delta.get(loc, 0))
+                        except (TypeError, ValueError):
+                            continue
+                        if delta:
+                            cd_armor[loc] = max(0, cd_armor.get(loc, 0) + delta)
+
+        # --- luck_delta ---
+        luck_delta = upd.get("luck_delta")
+        if luck_delta is not None and is_pc:
+            try:
+                luck_delta = int(luck_delta)
+            except (TypeError, ValueError):
+                luck_delta = None
+        if luck_delta is not None and is_pc:
+            er = edgerunners[name]
+            er["luck"]["current"] = max(0, min(er["luck"]["max"], er["luck"]["current"] + luck_delta))
+
+        # --- ammo ---
+        ammo_updates = upd.get("ammo")
+        if ammo_updates and isinstance(ammo_updates, list):
+            if is_pc:
+                er = edgerunners[name]
+                for au in ammo_updates:
+                    if not isinstance(au, dict):
+                        continue
+                    wname = au.get("weapon", "")
+                    try:
+                        cur = int(au.get("current", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    for w in er.get("weapons", []):
+                        if w.get("name") == wname:
+                            w["current_ammo"] = max(0, cur)
+                            break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    for au in ammo_updates:
+                        if not isinstance(au, dict):
+                            continue
+                        wname = au.get("weapon", "")
+                        try:
+                            cur = int(au.get("current", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        for w in cd.get("weapons", []):
+                            if w.get("name") == wname:
+                                w["ammo"] = max(0, cur)
+                                break
+
+        # --- critical_injury_add ---
+        for ci in (upd.get("critical_injury_add") or []):
+            if not isinstance(ci, dict):
+                continue
+            try:
+                dv_mod = int(ci.get("dv_mod", 0))
+            except (TypeError, ValueError):
+                dv_mod = 1
+            ci_entry = {
+                "name": ci.get("name", "Unknown Injury"),
+                "location": ci.get("location", "body"),
+                "effect": ci.get("effect", ""),
+                "dv_mod": dv_mod
+            }
+            if is_pc:
+                er = edgerunners[name]
+                er.setdefault("critical_injuries", []).append(ci_entry)
+                cond_str = f"Critical Injury: {ci_entry['name']}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.setdefault("conditions", [])
+                if cond_str not in conds:
+                    conds.append(cond_str)
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cond_str = f"Critical Injury: {ci_entry['name']}"
+                conds = d.setdefault("conditions", [])
+                if cond_str not in conds:
+                    conds.append(cond_str)
+
+        # --- critical_injury_remove ---
+        for ci_name in (upd.get("critical_injury_remove") or []):
+            if is_pc:
+                er = edgerunners[name]
+                er["critical_injuries"] = [
+                    ci for ci in er.get("critical_injuries", []) if ci.get("name") != ci_name
+                ]
+                cond_str = f"Critical Injury: {ci_name}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.get("conditions", [])
+                if cond_str in conds:
+                    conds.remove(cond_str)
+            else:
+                cond_str = f"Critical Injury: {ci_name}"
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                conds = d.get("conditions", [])
+                if cond_str in conds:
+                    conds.remove(cond_str)
+
+        # --- conditions_add / conditions_remove ---
+        entry = cs.get(name, {})
+        d = entry.get("data", entry)
+        conditions = d.setdefault("conditions", [])
+        for cond in (upd.get("conditions_add") or []):
+            if cond not in conditions:
+                conditions.append(cond)
+        for cond in (upd.get("conditions_remove") or []):
+            if cond in conditions:
+                conditions.remove(cond)
+
+
+def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
+    """Apply combined net_combat state updates from report_net_combat_state tool output."""
+    if not isinstance(tool_input, dict):
+        logger.warning("apply_net_combat_state: tool_input must be an object, got %s",
+                       type(tool_input).__name__)
+        return
+
+    # --- Meatspace: character_updates, cover, combat initiative ---
+    _apply_character_updates_shared(
+        pipeline_state,
+        tool_input.get("character_updates", []),
+        game_state=game_state
+    )
+
+    # Cover state
+    cover_updates = tool_input.get("cover_state")
+    if cover_updates and isinstance(cover_updates, list):
+        old_combat = pipeline_state.get("combat")
+        if isinstance(old_combat, dict):
+            cover_dict = old_combat.setdefault("cover", {})
+            for cov in cover_updates:
+                if isinstance(cov, dict):
+                    cov_name = cov.get("name")
+                    if isinstance(cov_name, str) and cov_name:
+                        cover_dict[cov_name] = {
+                            "in_cover": cov.get("in_cover", False),
+                            "cover_type": cov.get("cover_type"),
+                            "cover_hp": cov.get("cover_hp")
+                        }
+
+    # Combat initiative
+    new_combat = tool_input.get("combat")
+    combat_complete = tool_input.get("combat_complete", False)
+    if combat_complete or new_combat is None:
+        # Meatspace combat done — clear initiative but keep net_combat active
+        pipeline_state["combat"] = None
+    elif isinstance(new_combat, dict):
+        old_start = (pipeline_state.get("combat") or {}).get("start_message_id")
+        old_cover = (pipeline_state.get("combat") or {}).get("cover", {})
+        old_context = (pipeline_state.get("combat") or {}).get("context")
+        pipeline_state["combat"] = new_combat
+        if old_start and "start_message_id" not in new_combat:
+            pipeline_state["combat"]["start_message_id"] = old_start
+        if old_cover and "cover" not in new_combat:
+            pipeline_state["combat"]["cover"] = old_cover
+        if old_context and "context" not in new_combat:
+            pipeline_state["combat"]["context"] = old_context
+
+    # --- NET: update hack fields in net_combat ---
+    nc = pipeline_state.get("net_combat", {})
+    hs = tool_input.get("hack_state", {})
+    if isinstance(hs, dict):
+        for field in ["alert_level", "cycles_remaining", "active_programs",
+                      "current_node", "nodes_visited", "ice_status",
+                      "trace_progress", "tar_stacks", "brain_damage"]:
+            if field in hs:
+                nc[field] = hs[field]
+        # System map (first exchange only)
+        if hs.get("system_map") and not nc.get("system_map"):
+            nc["system_map"] = hs["system_map"]
+
+    # Available actions
+    if tool_input.get("available_actions") and isinstance(tool_input["available_actions"], list):
+        nc["available_actions"] = tool_input["available_actions"]
+
+    # --- Brain damage delta → apply to Netrunner's HP ---
+    current_bd = nc.get("brain_damage", 0)
+    prev_bd = nc.get("_prev_brain_damage", 0)
+    bd_delta = current_bd - prev_bd
+    if bd_delta > 0:
+        nc["_prev_brain_damage"] = current_bd
+        netrunner_name = nc.get("netrunner", "")
+        edgerunners = game_state.get("edgerunners", {}) if game_state else {}
+        if netrunner_name and netrunner_name in edgerunners:
+            er = edgerunners[netrunner_name]
+            er["hp"]["current"] = max(0, er["hp"]["current"] - bd_delta)
+            _update_seriously_wounded(er)
+            # Mirror to character_states
+            cs = pipeline_state.get("character_states", {})
+            entry = cs.get(netrunner_name, {})
+            d = entry.get("data", entry)
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v:
+                    v["current"] = er["hp"]["current"]
+                    break
+
+    # --- Completion flags ---
+    nc["combat_complete"] = tool_input.get("combat_complete", nc.get("combat_complete", False))
+    nc["net_complete"] = tool_input.get("net_complete", nc.get("net_complete", False))
+
+    if nc["combat_complete"] and nc["net_complete"]:
+        nc["active"] = False
+        nc["narrative_summary"] = tool_input.get("narrative_summary", "Combined engagement concluded.")
+
+    pipeline_state["net_combat"] = nc
+
+
+def build_net_combat_injection(combat, net_combat, pipeline_state):
+    """Build injection string for combined net_combat exchange user messages."""
+    import json as _json
+
+    lines = []
+
+    # Transition context — the triggering model's summary of who/what/why
+    nc = net_combat or {}
+    _nc_context = nc.get("context")
+    if _nc_context:
+        lines.append(f"[TRANSITION] {_nc_context} [/TRANSITION]")
+        lines.append("")
+
+    # Meatspace combat state
+    if nc.get("combat_complete"):
+        lines.append("[MEATSPACE COMBAT STATE]")
+        lines.append("Meatspace combat resolved.")
+        lines.append("[/MEATSPACE COMBAT STATE]")
+    elif combat:
+        edgerunners = pipeline_state.get("game_state", {}).get("edgerunners", {})
+        cs = pipeline_state.get("character_states", {})
+        cover = combat.get("cover", {})
+        initiative_order = combat.get("initiative_order", [])
+        current_turn = combat.get("current_turn", "")
+
+        lines.append("[MEATSPACE COMBAT STATE]")
+        lines.append(f"Round: {combat.get('round', 1)}")
+        lines.append("Initiative Order:")
+        for name in initiative_order:
+            marker = " <- ACTING" if name == current_turn else ""
+            parts = []
+            er = edgerunners.get(name)
+            entry = cs.get(name, {})
+            d = entry.get("data", entry)
+            combat_data = d.get("combat_data")
+
+            if er:
+                hp = er.get("hp", {})
+                sw = " SW" if hp.get("seriously_wounded") else ""
+                armor = er.get("armor", {})
+                luck = er.get("luck", {})
+                parts.append(f"HP {hp.get('current', 0)}/{hp.get('max', 40)}{sw}")
+                parts.append(f"SP H:{armor.get('head', 0)}/B:{armor.get('body', 0)}")
+                parts.append(f"Luck {luck.get('current', 0)}/{luck.get('max', 0)}")
+            elif combat_data:
+                cd_hp_max = combat_data.get("hp_max", 0)
+                cd_hp_cur = 0
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v:
+                        cd_hp_cur = v["current"]
+                        break
+                sw = " SW" if cd_hp_cur < (cd_hp_max + 1) // 2 and cd_hp_max > 0 else ""
+                cd_armor = combat_data.get("armor", {})
+                parts.append(f"HP {cd_hp_cur}/{cd_hp_max}{sw}")
+                parts.append(f"SP H:{cd_armor.get('head', 0)}/B:{cd_armor.get('body', 0)}")
+            else:
+                for v in d.get("vitals", []):
+                    if v.get("label") == "HP" and "current" in v and "max" in v:
+                        parts.append(f"HP {v['current']}/{v['max']}")
+                        break
+
+            cov = cover.get(name, {})
+            if cov.get("in_cover"):
+                cov_str = f"Cover: {cov.get('cover_type', 'cover')}"
+                if cov.get("cover_hp") is not None:
+                    cov_str += f" {cov['cover_hp']}HP"
+                parts.append(cov_str)
+
+            status = " | ".join(parts) if parts else ""
+            lines.append(f"  {name} ({status}){marker}")
+        lines.append("[/MEATSPACE COMBAT STATE]")
+    else:
+        # Hack-originated transition: no combat state yet, agent must bootstrap
+        lines.append("[MEATSPACE COMBAT STATE]")
+        lines.append("No initiative set. Bootstrap enemies and roll initiative this exchange.")
+        breakout = nc.get("_combat_breakout")
+        if breakout:
+            if breakout.get("reason"):
+                lines.append(f"Trigger: {breakout['reason']}")
+            if breakout.get("enemies"):
+                lines.append(f"Hostiles: {', '.join(breakout['enemies'])}")
+        lines.append("[/MEATSPACE COMBAT STATE]")
+    lines.append("")
+
+    # NET state
+    if nc.get("net_complete"):
+        lines.append("[NET STATE]")
+        lines.append("NET encounter resolved.")
+        lines.append("[/NET STATE]")
+    else:
+        alert_name = _get_alert_name(nc.get("alert_level", 0))
+        lines.append("[NET STATE]")
+        lines.append(f"Netrunner: {nc.get('netrunner', '?')}")
+        lines.append(f"Target: {nc.get('target', 'Unknown')}")
+        lines.append(f"Interface Rank: {nc.get('interface_rank', 4)} ({nc.get('net_actions_per_turn', 3)} NET Actions/turn)")
+        lines.append(f"Alert Level: {nc.get('alert_level', 0)} ({alert_name})")
+        lines.append(f"Cycles: {nc.get('cycles_remaining', 0)}/{nc.get('cycles_max', 3)}")
+        lines.append(f"Current Node: {nc.get('current_node', 'Gateway')}")
+        lines.append(f"Nodes Visited: {', '.join(nc.get('nodes_visited', ['Gateway']))}")
+
+        programs = nc.get("active_programs", [])
+        if programs:
+            prog_strs = []
+            for p in programs:
+                if isinstance(p, dict):
+                    status_note = f", {p['status']}" if p.get("status") and p["status"] != "active" else ""
+                    prog_strs.append(f"{p.get('name', '?')} ({p.get('category', '?')}, REZ {p.get('rez', 0)}{status_note})")
+                else:
+                    prog_strs.append(str(p))
+            lines.append(f"Active Programs: {', '.join(prog_strs)}")
+
+        ice = nc.get("ice_status", {})
+        if ice:
+            lines.append("ICE Status:")
+            for node, ice_data in ice.items():
+                if isinstance(ice_data, dict):
+                    lines.append(f"  {node}: {ice_data.get('name', '?')} ({ice_data.get('behavior', '?')}) — "
+                                 f"REZ {ice_data.get('rez_current', 0)}/{ice_data.get('rez_max', 0)}, {ice_data.get('status', 'active')}")
+
+        trace = nc.get("trace_progress")
+        if trace is not None:
+            sr = nc.get("sr", 3)
+            trace_max = max(1, 6 - sr)
+            lines.append(f"Trace Progress: {trace}/{trace_max}")
+
+        tar = nc.get("tar_stacks", 0)
+        if tar:
+            lines.append(f"Tar Stacks: {tar}")
+
+        bd = nc.get("brain_damage", 0)
+        if bd:
+            lines.append(f"Brain Damage This Run: {bd}")
+
+        lines.append("[/NET STATE]")
+
+        # System map for Full Runs
+        system_map = nc.get("system_map")
+        if system_map:
+            lines.append(f"\n[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+
+    return "\n".join(lines)
+
+
+def build_net_combat_profile(character_states, combat, net_combat, game_state=None, **_kw):
+    """Build combined profile: combatant roster + netrunner profile."""
+    parts = []
+    roster = build_cpred_combat_profile(character_states, combat, game_state=game_state)
+    if roster:
+        parts.append(roster)
+    nr_profile = build_netrunner_profile(
+        character_states,
+        game_state=game_state,
+        hack_state=net_combat
+    )
+    if nr_profile:
+        parts.append(nr_profile)
+    return "\n\n".join(parts)
+
+
+def apply_net_combat_writeback(net_combat_state, pipeline_state):
+    """Write back net_combat results to persistent state after both theaters complete."""
+    # Brain damage is already applied incrementally via _prev_brain_damage tracking,
+    # so we only need to write back cycles_remaining.
+    netrunner_name = net_combat_state.get("netrunner")
+    cycles_remaining = net_combat_state.get("cycles_remaining")
+    if cycles_remaining is not None:
+        cs_items = []
+        if netrunner_name and netrunner_name in pipeline_state.get("character_states", {}):
+            cs_items.append((netrunner_name, pipeline_state["character_states"][netrunner_name]))
+        cs_items.extend(pipeline_state.get("character_states", {}).items())
+        seen = set()
+        for name, entry in cs_items:
+            if name in seen:
+                continue
+            seen.add(name)
+            d = entry.get("data", entry)
+            if d.get("type") == "pc":
+                for r in d.get("resources", []):
+                    if "cycle" in r.get("label", "").lower():
+                        r["current"] = cycles_remaining
+                        break
+                break
+
+
+# ============================================================
 # Game System Definition
 # ============================================================
 
@@ -2461,4 +3303,14 @@ GAME_SYSTEM = {
     "build_hack_injection": build_hack_injection,
     "build_hacker_profile": build_netrunner_profile,
     "apply_hack_writeback": apply_hack_writeback,
+    # NET-in-meatspace combined combat mode
+    "net_combat_contract": NET_COMBAT_CONTRACT,
+    "net_combat_tool": REPORT_NET_COMBAT_STATE_TOOL,
+    "init_net_combat_state": init_net_combat_state,
+    "init_net_combat_from_hack": init_net_combat_from_hack,
+    "apply_net_combat_state": apply_net_combat_state,
+    "build_net_combat_injection": build_net_combat_injection,
+    "build_net_combat_profile": build_net_combat_profile,
+    "apply_net_combat_writeback": apply_net_combat_writeback,
+    "net_combat_files": ["Combat Ruleset.md", "Hacking Rulebook.md", "Character Sheets.md", "Character Sheets.yaml"],
 }

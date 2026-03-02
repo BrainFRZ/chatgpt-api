@@ -494,6 +494,53 @@ def collapse_ship_combat_messages(branch_path: list[dict]) -> list[dict]:
     return result
 
 
+def collapse_net_combat_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse net_combat_mode messages into synthetic summary pairs for normal context.
+
+    Same pattern as collapse_combat_messages / collapse_hack_messages — scans for runs of
+    net_combat_mode=true messages and replaces each run with a [NET COMBAT RESULT] summary.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    history = branch_path[1:-1]
+    if not any(msg.get("net_combat_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("net_combat_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found start of net_combat run — scan to end
+        nc_summary = None
+        j = i
+        while j < len(history) and history[j].get("net_combat_mode"):
+            tool_input = history[j].get("net_combat_tool_input", {})
+            if tool_input and tool_input.get("narrative_summary"):
+                nc_summary = tool_input["narrative_summary"]
+            j += 1
+
+        if nc_summary:
+            result.append({
+                "role": "user",
+                "content": "[A combined meatspace + NET combat encounter took place.]"
+            })
+            result.append({
+                "role": "assistant",
+                "content": f"[NET COMBAT RESULT]\n{nc_summary}\n[/NET COMBAT RESULT]"
+            })
+
+        i = j
+
+    result.append(branch_path[-1])
+    return result
+
+
 def get_context_pairs(
     branch_path: list[dict],
     threshold_pairs: int,
@@ -1401,7 +1448,7 @@ def run_pipeline(
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
     # Collapse hack and combat messages into summary pairs before context trimming
-    branch_path_for_events = collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))
+    branch_path_for_events = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
     recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
         branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
