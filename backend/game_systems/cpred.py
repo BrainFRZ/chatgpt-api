@@ -74,10 +74,13 @@ def _fr_tier(score):
 #             "luck": {"current": 6, "max": 7},
 #             "armor": {"head": 11, "body": 11},
 #             "eurobucks": 2350,
+#             "death_save_count": 0,
 #             "critical_injuries": [
-#                 {"name": "Broken Arm", "effect": "-2 to actions with that arm", "dv_mod": 1}
+#                 {"name": "Broken Arm", "effect": "-2 to actions with that arm", "dv_mod": 1, "status": "active"}
 #             ],
-#             "cyberware_effects": ["Cybereye (Low-Light)", "Neural Link"]
+#             "cyberware_effects": ["Cybereye (Low-Light)", "Neural Link"],
+#             "lifestyle": null,
+#             "housing": null
 #         }
 #     }
 # }
@@ -96,9 +99,12 @@ def _default_edgerunner():
         "luck": {"current": 0, "max": 0},
         "armor": {"head": 0, "body": 0},
         "eurobucks": 0,
+        "death_save_count": 0,
         "critical_injuries": [],
         "cyberware_effects": [],
-        "weapons": []
+        "weapons": [],
+        "lifestyle": None,
+        "housing": None
     }
 
 
@@ -157,6 +163,9 @@ def apply_game_state(game_state, agent_json, turn):
                     change = int(op_data.get("change", 0))
                     er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + change))
                     _update_seriously_wounded(er)
+                    # Auto-reset death save counter when HP rises above 0
+                    if er["hp"]["current"] > 0:
+                        er["death_save_count"] = 0
 
                 elif op == "humanity":
                     change = int(op_data.get("change", 0))
@@ -204,12 +213,18 @@ def apply_game_state(game_state, agent_json, turn):
                         er["critical_injuries"].append({
                             "name": name,
                             "effect": op_data.get("effect", ""),
-                            "dv_mod": int(op_data.get("dv_mod", 0))
+                            "dv_mod": int(op_data.get("dv_mod", 0)),
+                            "status": "active"
                         })
                     elif action == "remove" and name:
                         er["critical_injuries"] = [
                             ci for ci in er["critical_injuries"] if ci["name"] != name
                         ]
+                    elif action == "quick_fix" and name:
+                        for ci in er["critical_injuries"]:
+                            if ci["name"] == name:
+                                ci["status"] = "quick_fixed"
+                                break
 
                 elif op == "cyberware":
                     action = op_data.get("action", "add")
@@ -247,6 +262,18 @@ def apply_game_state(game_state, agent_json, turn):
                         if w.get("name") == wname:
                             w["current_ammo"] = max(0, current)
                             break
+
+                elif op == "death_save":
+                    er["death_save_count"] = er.get("death_save_count", 0) + 1
+
+                elif op == "death_save_reset":
+                    er["death_save_count"] = 0
+
+                elif op == "lifestyle":
+                    er["lifestyle"] = op_data.get("value")
+
+                elif op == "housing":
+                    er["housing"] = op_data.get("value")
 
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
@@ -572,10 +599,27 @@ def build_game_injection(game_state):
             lines.append(f"  Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
             lines.append(f"  Eurobucks: {eb:,}")
 
+            lifestyle = er.get("lifestyle")
+            housing = er.get("housing")
+            if lifestyle or housing:
+                parts = []
+                if lifestyle:
+                    parts.append(f"Lifestyle: {lifestyle}")
+                if housing:
+                    parts.append(f"Housing: {housing}")
+                lines.append(f"  {' | '.join(parts)}")
+
             if injuries:
                 dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
-                injury_strs = [f"{ci['name']} ({ci['effect']}, Death Save +{ci['dv_mod']})" for ci in injuries]
+                injury_strs = []
+                for ci in injuries:
+                    qf_tag = " [QF]" if ci.get("status") == "quick_fixed" else ""
+                    injury_strs.append(f"{ci['name']}{qf_tag} ({ci['effect']}, Death Save +{ci['dv_mod']})")
                 lines.append(f"  Critical injuries (Death Save DV +{dv_total}): {'; '.join(injury_strs)}")
+
+            death_saves = er.get("death_save_count", 0)
+            if death_saves > 0:
+                lines.append(f"  Death Saves: {death_saves} (cumulative +{death_saves})")
 
             weapons = er.get("weapons", [])
             if weapons:
@@ -839,7 +883,17 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "<injury>", "effect": "<penalty>", "dv_mod": <int>}
   Add a critical injury. dv_mod increases Death Save DV.
 - {"edgerunner": "<name>", "op": "critical_injury", "action": "remove", "name": "<injury>", "reason": "<surgery/treatment>"}
-  Remove a critical injury after treatment.
+  Remove a critical injury permanently (full treatment — 4 hrs, can't self-treat).
+- {"edgerunner": "<name>", "op": "critical_injury", "action": "quick_fix", "name": "<injury>", "reason": "<field first aid>"}
+  Quick Fix a critical injury (temporary — 1 minute, expires end of day). Injury stays tracked but marked [QF].
+- {"edgerunner": "<name>", "op": "death_save", "reason": "<Death Save round N>"}
+  Increment cumulative Death Save counter (+1 per save made). Auto-resets when HP rises above 0.
+- {"edgerunner": "<name>", "op": "death_save_reset", "reason": "<Stabilized>"}
+  Manually reset Death Save counter to 0.
+- {"edgerunner": "<name>", "op": "lifestyle", "value": "<lifestyle tier>", "reason": "<why>"}
+  Set lifestyle (e.g. "Generic Prepak", "Good Prepak"). Affects Social Ceiling.
+- {"edgerunner": "<name>", "op": "housing", "value": "<housing type>", "reason": "<why>"}
+  Set housing (e.g. "Cargo Container", "Apartment"). Affects monthly costs.
 - {"edgerunner": "<name>", "op": "cyberware", "action": "add|remove", "value": "<cyberware name>"}
   Install or remove cyberware (pair with humanity ops).
 - {"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}
@@ -886,7 +940,11 @@ RELATIONSHIP OPS (RS / RomS / FR):
   1. Append the new tier name to the reason field (e.g. "Saved her crew → T4: Good")
   2. Narration should narratively acknowledge the relationship shift
   3. Narration displays: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
-- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 or -90, the faction escalates (bounty hunters, assassination attempts) — emit callbacks.
+- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
+  * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
+  * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
+  * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
+- Presence requirements: RS/RomS combat and mechanical bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 - OPS SCOPE: Emit relationship_ops ONLY for state changes certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
@@ -925,6 +983,7 @@ DICE MECHANICS (quick reference — teach to Mechanics via beats):
 - Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
 - Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Flag social encounters so Mechanics applies these correctly.
+- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs: deduct eurobucks at session boundaries per Core Rulebook §10.
 
 PACING:
 - Gigs are job-based: Contact → Legwork → Action → Payoff
@@ -1138,6 +1197,8 @@ DAMAGE RESOLUTION:
 DEATH SAVES (at 0 HP):
 - Roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails.
 - Cumulative +1 per save already made. Critical injuries add their dv_mod to the roll.
+- Emit {"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round N"} after each save to track the cumulative counter. Read the [EDGERUNNER STATE] death_save_count for the current cumulative modifier.
+- Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
 
 SOCIAL MECHANICS:
 - Social Ceiling (§11A): lifestyle/presentation tier caps social check totals. Style Over Substance overrides at high skill.
@@ -1161,7 +1222,7 @@ HUD:
 
 IMPORTANT:
 - Output ONLY valid JSON
-- Emit edgerunner_ops for state changes from your adjudicated rolls: HP damage (op: "hp"), armor ablation (op: "armor", location: "head|body"), Luck spent (op: "luck"), critical injuries (op: "critical_injury"). Same format as Events. Events handles pre-roll ops — do not duplicate.
+- Emit edgerunner_ops for state changes from your adjudicated rolls: HP damage (op: "hp"), armor ablation (op: "armor", location: "head|body"), Luck spent (op: "luck"), critical injuries (op: "critical_injury"), death saves (op: "death_save"). Same format as Events. Events handles pre-roll ops — do not duplicate.
 - Emit relationship_ops for roll-dependent RS/RomS/FR changes (e.g. a COOL+Persuasion check that impresses an NPC). Same op format as Events. Events already emitted pre-roll ops — yours are additional. Maximum combined relationship bonus: +5.
 - Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
@@ -1275,6 +1336,12 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "armor_repair", "location": "body", "value": 11, "reason": "Repaired"}`
 - `{"edgerunner": "<name>", "op": "eurobucks", "change": -500, "reason": "Bought ammo"}`
 - `{"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "Broken Ribs", "effect": "-2 movement", "dv_mod": 1}`
+- `{"edgerunner": "<name>", "op": "critical_injury", "action": "remove", "name": "Broken Ribs", "reason": "Surgery"}` (permanent treatment — 4 hrs, can't self-treat)
+- `{"edgerunner": "<name>", "op": "critical_injury", "action": "quick_fix", "name": "Broken Ribs", "reason": "Field first aid"}` (temporary — 1 min, expires end of day)
+- `{"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round 2"}` (increments cumulative counter; auto-resets when HP > 0)
+- `{"edgerunner": "<name>", "op": "death_save_reset", "reason": "Stabilized"}` (manual reset)
+- `{"edgerunner": "<name>", "op": "lifestyle", "value": "Generic Prepak", "reason": "Monthly upkeep"}`
+- `{"edgerunner": "<name>", "op": "housing", "value": "Cargo Container", "reason": "Rented in Watson"}`
 - `{"edgerunner": "<name>", "op": "cyberware", "action": "add", "value": "Cybereye"}`
 - `{"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}`
 - `{"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}`
@@ -1296,7 +1363,11 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
 - Maximum combined relationship bonus: +5 to any single check (d10 calibration).
 - Tier boundary checking: When new_total crosses a tier boundary, note the new tier in reason and show: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
-- Alliance cascades: When FR hits -70 or -90, emit callbacks for faction escalation (bounty hunters, assassination attempts).
+- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
+  * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
+  * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
+  * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
+- Presence requirements: RS/RomS combat and mechanical bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
 - Bootstrap: When [RELATIONSHIP STATE] is empty, use "set" ops to initialize NPCs and factions from context.
 
 ### Dice Mechanics (relationship modifiers):
@@ -1350,8 +1421,10 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 - Armor ablation: SP -1 per penetrating hit. AP ammo ablates by 2.
 - Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
 - Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
-- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
+- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save (tracked via death_save op). Critical injuries add dv_mod.
+- Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
 - Social Ceiling (§11A): lifestyle/presentation caps social check totals. Degree of Success scales social outcomes by margin.
+- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs: deduct eurobucks at session boundaries per Core Rulebook §10.
 - Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 
 ### HUD Line
@@ -1534,12 +1607,12 @@ STATE_REPORT_TOOL = {
                     "required": ["edgerunner", "op"],
                     "properties": {
                         "edgerunner": {"type": "string"},
-                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo"]},
+                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing"]},
                         "change": {"type": "number"},
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},
-                        "value": {"type": ["string", "integer"], "description": "Cyberware name or armor repair value"},
-                        "action": {"type": "string", "enum": ["add", "remove"], "description": "For critical_injury/cyberware ops"},
+                        "value": {"type": ["string", "integer"], "description": "Cyberware name, armor repair value, or lifestyle/housing string"},
+                        "action": {"type": "string", "enum": ["add", "remove", "quick_fix"], "description": "For critical_injury/cyberware ops"},
                         "name": {"type": "string", "description": "Injury name (for critical_injury ops)"},
                         "effect": {"type": "string", "description": "Injury effect (for critical_injury add)"},
                         "dv_mod": {"type": "integer", "description": "Death Save DV modifier (for critical_injury add)"},
@@ -1853,9 +1926,10 @@ DEATH SAVES:
 At 0 HP, character must make a Death Save each round:
 - Roll: d10 vs BODY stat. Succeed if roll is UNDER BODY. Fail if equal or over.
 - Natural 10: automatic failure regardless of BODY.
-- Cumulative: +1 to roll per Death Save already made this combat.
+- Cumulative: +1 to roll per Death Save already made this combat. Read [EDGERUNNER STATE] death_save_count for the current cumulative modifier. Emit death_save edgerunner_op after each save.
 - Critical injuries: add dv_mod from each active critical injury to the roll.
 - Fail = dead (for NPCs). For PCs, see PC death rules below.
+- Quick Fix vs Treatment: critical_injury_add records new injuries. For Quick Fix (temporary, 1 min, expires end of day), set status to "quick_fixed" via edgerunner_ops. critical_injury_remove is permanent treatment (4 hrs, can't self-treat).
 
 STATE TRACKING via report_combat_state:
 - hp_delta: HP change after armor (negative = damage). Applied to edgerunner state for PCs, character_states vitals for enemies.
@@ -2016,8 +2090,13 @@ def build_cpred_combat_profile(character_states, combat, game_state=None, **_kw)
                 injury_strs = []
                 for ci in injuries:
                     loc = ci.get("location", "body")
-                    injury_strs.append(f"{ci['name']} ({loc}: {ci.get('effect', '')}, DS+{ci.get('dv_mod', 0)})")
+                    qf_tag = " [QF]" if ci.get("status") == "quick_fixed" else ""
+                    injury_strs.append(f"{ci['name']}{qf_tag} ({loc}: {ci.get('effect', '')}, DS+{ci.get('dv_mod', 0)})")
                 lines.append(f"    Critical Injuries (Death Save +{dv_total}): {'; '.join(injury_strs)}")
+
+            death_saves = er.get("death_save_count", 0)
+            if death_saves > 0:
+                lines.append(f"    Death Saves: {death_saves} (cumulative +{death_saves})")
 
             if cyberware:
                 lines.append(f"    Cyberware: {', '.join(cyberware)}")
@@ -3041,6 +3120,49 @@ def build_netrunner_profile(character_states, game_state=None, **_kw):
             lines.append(f"HP: {hp.get('current', 0)}/{hp.get('max', 40)}{sw_flag}")
         if luck.get("max"):
             lines.append(f"Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
+        # Armor
+        armor = er.get("armor", {})
+        if armor.get("head") or armor.get("body"):
+            lines.append(f"Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
+        # Eurobucks
+        eb = er.get("eurobucks", 0)
+        if eb:
+            lines.append(f"Eurobucks: {eb:,}")
+        # Lifestyle / Housing
+        lifestyle = er.get("lifestyle")
+        housing = er.get("housing")
+        if lifestyle or housing:
+            lh_parts = []
+            if lifestyle:
+                lh_parts.append(f"Lifestyle: {lifestyle}")
+            if housing:
+                lh_parts.append(f"Housing: {housing}")
+            lines.append(" | ".join(lh_parts))
+        # Critical Injuries
+        injuries = er.get("critical_injuries", [])
+        if injuries:
+            dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
+            injury_strs = []
+            for ci in injuries:
+                qf_tag = " [QF]" if ci.get("status") == "quick_fixed" else ""
+                injury_strs.append(f"{ci['name']}{qf_tag} ({ci['effect']}, Death Save +{ci['dv_mod']})")
+            lines.append(f"Critical Injuries (Death Save DV +{dv_total}): {'; '.join(injury_strs)}")
+        # Death Save count
+        death_saves = er.get("death_save_count", 0)
+        if death_saves > 0:
+            lines.append(f"Death Saves: {death_saves} (cumulative +{death_saves})")
+        # Weapons
+        weapons = er.get("weapons", [])
+        if weapons:
+            weapon_strs = []
+            for w in weapons:
+                wname = w.get("name", "?")
+                wdmg = w.get("damage", "?")
+                if w.get("type") == "melee":
+                    weapon_strs.append(f"{wname} ({wdmg}, {w.get('skill', 'Melee Weapon')})")
+                else:
+                    weapon_strs.append(f"{wname} ({wdmg}, {w.get('current_ammo', 0)}/{w.get('max_ammo', 0)} ammo)")
+            lines.append(f"Weapons: {'; '.join(weapon_strs)}")
         cyberware = er.get("cyberware_effects", [])
         # Filter to NET-relevant cyberware
         net_relevant = [cw for cw in cyberware if any(
