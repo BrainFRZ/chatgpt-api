@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 def init_game_state():
     """Return empty edgerunners dict — populated via 'set' ops on first turn."""
-    return {"edgerunners": {}}
+    return {"edgerunners": {}, "ip_tracker": {"session_scores": {"group": 0}, "awards": [], "balances": {}}}
 
 
 def _default_edgerunner():
@@ -79,128 +79,263 @@ def apply_game_state(game_state, agent_json, turn):
       {"edgerunner": "V", "op": "set", "fields": {"hp": {"current": 35, "max": 40}, ...}}
     """
     ops = agent_json.get("edgerunner_ops")
-    if not ops:
-        return game_state
 
-    edgerunners = game_state.setdefault("edgerunners", {})
+    if ops:
+        edgerunners = game_state.setdefault("edgerunners", {})
 
-    for op_data in ops:
-        er_name = op_data.get("edgerunner")
-        op = op_data.get("op")
-        if not isinstance(er_name, str) or not er_name or not op:
-            continue
+        for op_data in ops:
+            if not isinstance(op_data, dict):
+                continue
+            er_name = op_data.get("edgerunner")
+            op = op_data.get("op")
+            if not isinstance(er_name, str) or not er_name or not op:
+                continue
 
-        # Auto-create edgerunner stub if not yet tracked
-        if er_name not in edgerunners:
-            edgerunners[er_name] = _default_edgerunner()
-        er = edgerunners[er_name]
+            # Auto-create edgerunner stub if not yet tracked
+            if er_name not in edgerunners:
+                edgerunners[er_name] = _default_edgerunner()
+            er = edgerunners[er_name]
 
-        try:
-            if op == "set":
-                fields = copy.deepcopy(op_data.get("fields", {}))
-                for key, val in fields.items():
-                    if key in er:
-                        er[key] = val
-                _update_seriously_wounded(er)
+            try:
+                if op == "set":
+                    fields = copy.deepcopy(op_data.get("fields", {}))
+                    for key, val in fields.items():
+                        if key in er:
+                            er[key] = val
+                    _update_seriously_wounded(er)
 
-            elif op == "hp":
-                change = int(op_data.get("change", 0))
-                er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + change))
-                _update_seriously_wounded(er)
+                elif op == "hp":
+                    change = int(op_data.get("change", 0))
+                    er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + change))
+                    _update_seriously_wounded(er)
 
-            elif op == "humanity":
-                change = int(op_data.get("change", 0))
-                if change < 0:  # Humanity loss from cyberware
-                    er["humanity"]["current"] = max(0, er["humanity"]["current"] + change)
+                elif op == "humanity":
+                    change = int(op_data.get("change", 0))
+                    if change < 0:  # Humanity loss from cyberware
+                        er["humanity"]["current"] = max(0, er["humanity"]["current"] + change)
 
-            elif op == "therapy":
-                change = int(op_data.get("change", 0))
-                if change > 0:  # Partial recovery via therapy
-                    er["humanity"]["current"] = min(
-                        er["humanity"]["max"],
-                        er["humanity"]["current"] + change
-                    )
+                elif op == "therapy":
+                    change = int(op_data.get("change", 0))
+                    if change > 0:  # Partial recovery via therapy
+                        er["humanity"]["current"] = min(
+                            er["humanity"]["max"],
+                            er["humanity"]["current"] + change
+                        )
 
-            elif op == "luck":
-                change = int(op_data.get("change", 0))
-                er["luck"]["current"] = max(0, min(
-                    er["luck"]["max"],
-                    er["luck"]["current"] + change
-                ))
+                elif op == "luck":
+                    change = int(op_data.get("change", 0))
+                    er["luck"]["current"] = max(0, min(
+                        er["luck"]["max"],
+                        er["luck"]["current"] + change
+                    ))
 
-            elif op == "luck_reset":
-                er["luck"]["current"] = er["luck"]["max"]
+                elif op == "luck_reset":
+                    er["luck"]["current"] = er["luck"]["max"]
 
-            elif op == "armor":
-                location = op_data.get("location", "body")
-                change = int(op_data.get("change", 0))
-                if location in er["armor"]:
-                    er["armor"][location] = max(0, er["armor"][location] + change)
+                elif op == "armor":
+                    location = op_data.get("location", "body")
+                    change = int(op_data.get("change", 0))
+                    if location in er["armor"]:
+                        er["armor"][location] = max(0, er["armor"][location] + change)
 
-            elif op == "armor_repair":
-                location = op_data.get("location", "body")
-                value = int(op_data.get("value", 0))
-                if location in er["armor"]:
-                    er["armor"][location] = value
+                elif op == "armor_repair":
+                    location = op_data.get("location", "body")
+                    value = int(op_data.get("value", 0))
+                    if location in er["armor"]:
+                        er["armor"][location] = value
 
-            elif op == "eurobucks":
-                change = int(op_data.get("change", 0))
-                er["eurobucks"] = max(0, er["eurobucks"] + change)
+                elif op == "eurobucks":
+                    change = int(op_data.get("change", 0))
+                    er["eurobucks"] = max(0, er["eurobucks"] + change)
 
-            elif op == "critical_injury":
-                action = op_data.get("action", "add")
-                name = op_data.get("name")
-                if action == "add" and name:
-                    er["critical_injuries"].append({
-                        "name": name,
-                        "effect": op_data.get("effect", ""),
-                        "dv_mod": int(op_data.get("dv_mod", 0))
-                    })
-                elif action == "remove" and name:
-                    er["critical_injuries"] = [
-                        ci for ci in er["critical_injuries"] if ci["name"] != name
-                    ]
+                elif op == "critical_injury":
+                    action = op_data.get("action", "add")
+                    name = op_data.get("name")
+                    if action == "add" and name:
+                        er["critical_injuries"].append({
+                            "name": name,
+                            "effect": op_data.get("effect", ""),
+                            "dv_mod": int(op_data.get("dv_mod", 0))
+                        })
+                    elif action == "remove" and name:
+                        er["critical_injuries"] = [
+                            ci for ci in er["critical_injuries"] if ci["name"] != name
+                        ]
 
-            elif op == "cyberware":
-                action = op_data.get("action", "add")
-                value = op_data.get("value")
-                if value:
-                    if action == "add" and value not in er["cyberware_effects"]:
-                        er["cyberware_effects"].append(value)
-                    elif action == "remove" and value in er["cyberware_effects"]:
-                        er["cyberware_effects"].remove(value)
+                elif op == "cyberware":
+                    action = op_data.get("action", "add")
+                    value = op_data.get("value")
+                    if value:
+                        if action == "add" and value not in er["cyberware_effects"]:
+                            er["cyberware_effects"].append(value)
+                        elif action == "remove" and value in er["cyberware_effects"]:
+                            er["cyberware_effects"].remove(value)
 
-            elif op == "weapon_set":
-                er["weapons"] = copy.deepcopy(op_data.get("weapons", []))
+                elif op == "weapon_set":
+                    er["weapons"] = copy.deepcopy(op_data.get("weapons", []))
 
-            elif op == "weapon_add":
-                weapon = copy.deepcopy(op_data.get("weapon", {}))
-                if weapon.get("name"):
-                    er.setdefault("weapons", []).append(weapon)
+                elif op == "weapon_add":
+                    weapon = copy.deepcopy(op_data.get("weapon", {}))
+                    if weapon.get("name"):
+                        er.setdefault("weapons", []).append(weapon)
 
-            elif op == "weapon_remove":
-                weapon_ref = op_data.get("weapon", "")
-                if isinstance(weapon_ref, dict):
-                    wname = weapon_ref.get("name", "")
-                else:
-                    wname = weapon_ref
-                er["weapons"] = [w for w in er.get("weapons", []) if w.get("name") != wname]
+                elif op == "weapon_remove":
+                    weapon_ref = op_data.get("weapon", "")
+                    if isinstance(weapon_ref, dict):
+                        wname = weapon_ref.get("name", "")
+                    else:
+                        wname = weapon_ref
+                    er["weapons"] = [w for w in er.get("weapons", []) if w.get("name") != wname]
 
-            elif op == "weapon_ammo":
-                weapon_ref = op_data.get("weapon", "")
-                if isinstance(weapon_ref, dict):
-                    wname = weapon_ref.get("name", "")
-                else:
-                    wname = weapon_ref
-                current = int(op_data.get("current", 0))
-                for w in er.get("weapons", []):
-                    if w.get("name") == wname:
-                        w["current_ammo"] = max(0, current)
-                        break
+                elif op == "weapon_ammo":
+                    weapon_ref = op_data.get("weapon", "")
+                    if isinstance(weapon_ref, dict):
+                        wname = weapon_ref.get("name", "")
+                    else:
+                        wname = weapon_ref
+                    current = int(op_data.get("current", 0))
+                    for w in er.get("weapons", []):
+                        if w.get("name") == wname:
+                            w["current_ammo"] = max(0, current)
+                            break
 
-        except (ValueError, TypeError, KeyError) as e:
-            logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
-            continue
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
+                continue
+
+    # --- IP tracking ops ---
+    ip_ops = agent_json.get("ip_ops")
+    if ip_ops:
+        tracker = game_state.setdefault("ip_tracker", {"session_scores": {"group": 0}, "awards": [], "balances": {}})
+        # Migrate old format if needed
+        if "observations" in tracker:
+            tracker.pop("observations", None)
+            tracker.setdefault("session_scores", {"group": 0})
+            tracker.setdefault("awards", [])
+            tracker.setdefault("balances", {})
+        valid_tiers = {10, 20, 30, 40, 50, 60, 70, 80}
+        scores = tracker.setdefault("session_scores", {"group": 0})
+        balances = tracker.setdefault("balances", {})
+        for op_data in ip_ops:
+            if not isinstance(op_data, dict):
+                continue
+            op = op_data.get("op")
+            if not op:
+                continue
+            try:
+                if op == "score":
+                    value = int(op_data.get("value", 0))
+                    if value not in valid_tiers:
+                        continue
+                    reason = op_data.get("reason", "")
+                    category = op_data.get("category", "")
+                    player = op_data.get("player")
+                    if category == "group":
+                        # Group score
+                        cur = scores.get("group", 0) if isinstance(scores.get("group"), int) else scores.get("group", {}).get("value", 0)
+                        if value >= cur:
+                            scores["group"] = {"value": value, "reason": reason}
+                    else:
+                        if not isinstance(player, str) or not player:
+                            continue
+                        if not isinstance(category, str) or not category:
+                            continue
+                        # Individual player score
+                        if player not in scores or not isinstance(scores[player], dict):
+                            scores[player] = {}
+                        player_scores = scores[player]
+                        cur_entry = player_scores.get(category, {})
+                        cur_val = cur_entry.get("value", 0) if isinstance(cur_entry, dict) else 0
+                        if value >= cur_val:
+                            player_scores[category] = {"value": value, "reason": reason}
+                elif op == "award":
+                    group_ip = int(op_data.get("group_ip", 0))
+                    group_reason = op_data.get("group_reason", "")
+                    individual = op_data.get("individual", [])
+                    if not isinstance(individual, list):
+                        individual = []
+                    # Enforce group_ip from running group score (0 = job ongoing, respect that)
+                    if group_ip > 0:
+                        group_entry = scores.get("group", 0)
+                        running_group = group_entry.get("value", 0) if isinstance(group_entry, dict) else (group_entry if isinstance(group_entry, int) else 0)
+                        if running_group > 0:
+                            group_ip = running_group
+                    # Snapshot current scores
+                    final_scores = copy.deepcopy(scores)
+                    # Enforce: derive style_ip/style_category from running scores
+                    enforced_individual = []
+                    for ind in individual:
+                        if not isinstance(ind, dict):
+                            continue
+                        pname = ind.get("player", "")
+                        if not isinstance(pname, str) or not pname:
+                            continue
+                        player_scores = scores.get(pname, {})
+                        if isinstance(player_scores, dict) and player_scores:
+                            best_cat = max(
+                                ((c, e.get("value", 0)) for c, e in player_scores.items() if isinstance(e, dict)),
+                                key=lambda x: x[1],
+                                default=(ind.get("style_category", ""), 0)
+                            )
+                            enforced_individual.append({
+                                "player": pname,
+                                "style_ip": best_cat[1],
+                                "style_category": best_cat[0],
+                                "reason": ind.get("reason", "")
+                            })
+                        else:
+                            # No scores tracked for this player — use model's values
+                            enforced_individual.append(ind)
+                    # Sanitize fallback/model-provided entries so award apply is atomic
+                    # even if style_ip/style_category are malformed.
+                    normalized_individual = []
+                    for ind in enforced_individual:
+                        if not isinstance(ind, dict):
+                            continue
+                        pname = ind.get("player", "")
+                        if not isinstance(pname, str) or not pname:
+                            continue
+                        try:
+                            style_ip = int(ind.get("style_ip", 0))
+                        except (TypeError, ValueError):
+                            style_ip = 0
+                        style_cat = ind.get("style_category", "")
+                        if not isinstance(style_cat, str):
+                            style_cat = _safe_text(style_cat)
+                        reason = ind.get("reason", "")
+                        if not isinstance(reason, str):
+                            reason = _safe_text(reason)
+                        normalized_individual.append({
+                            "player": pname,
+                            "style_ip": max(0, style_ip),
+                            "style_category": style_cat,
+                            "reason": reason,
+                        })
+                    award = {
+                        "session": len(tracker["awards"]) + 1,
+                        "group_ip": group_ip,
+                        "group_reason": group_reason,
+                        "individual": normalized_individual,
+                        "final_scores": final_scores
+                    }
+                    tracker["awards"].append(award)
+                    # Update balances
+                    for ind in normalized_individual:
+                        pname = ind.get("player", "")
+                        style_ip = ind.get("style_ip", 0)
+                        total = group_ip + style_ip
+                        balances[pname] = balances.get(pname, 0) + total
+                    # Reset session scores
+                    tracker["session_scores"] = {"group": 0}
+                    scores = tracker["session_scores"]
+                elif op == "spend":
+                    player = op_data.get("player", "")
+                    amount = int(op_data.get("amount", 0))
+                    if isinstance(player, str) and player and amount > 0:
+                        balances[player] = max(0, balances.get(player, 0) - amount)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning(f"CPRED apply_game_state: error processing ip_op {op_data}: {e}")
+                continue
 
     return game_state
 
@@ -209,53 +344,175 @@ def build_game_injection(game_state):
     """Build [EDGERUNNER STATE] injection block from structured state."""
     edgerunners = game_state.get("edgerunners", {})
     if not edgerunners:
-        return "[EDGERUNNER STATE]\n(empty — bootstrap from character sheets, or initialize via character creation)\n[/EDGERUNNER STATE]"
+        result = "[EDGERUNNER STATE]\n(empty — bootstrap from character sheets, or initialize via character creation)\n[/EDGERUNNER STATE]"
+    else:
+        lines = ["[EDGERUNNER STATE]"]
+        for name, er in sorted(edgerunners.items()):
+            hp = er.get("hp", {})
+            humanity = er.get("humanity", {})
+            luck = er.get("luck", {})
+            armor = er.get("armor", {})
+            eb = er.get("eurobucks", 0)
+            injuries = er.get("critical_injuries", [])
+            cyberware = er.get("cyberware_effects", [])
 
-    lines = ["[EDGERUNNER STATE]"]
-    for name, er in sorted(edgerunners.items()):
-        hp = er.get("hp", {})
-        humanity = er.get("humanity", {})
-        luck = er.get("luck", {})
-        armor = er.get("armor", {})
-        eb = er.get("eurobucks", 0)
-        injuries = er.get("critical_injuries", [])
-        cyberware = er.get("cyberware_effects", [])
+            sw_flag = " [SERIOUSLY WOUNDED: -2 all actions]" if hp.get("seriously_wounded") else ""
 
-        sw_flag = " [SERIOUSLY WOUNDED: -2 all actions]" if hp.get("seriously_wounded") else ""
+            lines.append(f"{name}:")
+            lines.append(f"  HP: {hp.get('current', 0)}/{hp.get('max', 40)}{sw_flag}")
+            lines.append(f"  Humanity: {humanity.get('current', 0)}/{humanity.get('max', 0)}")
+            lines.append(f"  Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
+            lines.append(f"  Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
+            lines.append(f"  Eurobucks: {eb:,}")
 
-        lines.append(f"{name}:")
-        lines.append(f"  HP: {hp.get('current', 0)}/{hp.get('max', 40)}{sw_flag}")
-        lines.append(f"  Humanity: {humanity.get('current', 0)}/{humanity.get('max', 0)}")
-        lines.append(f"  Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
-        lines.append(f"  Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
-        lines.append(f"  Eurobucks: {eb:,}")
+            if injuries:
+                dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
+                injury_strs = [f"{ci['name']} ({ci['effect']}, Death Save +{ci['dv_mod']})" for ci in injuries]
+                lines.append(f"  Critical injuries (Death Save DV +{dv_total}): {'; '.join(injury_strs)}")
 
-        if injuries:
-            dv_total = sum(ci.get("dv_mod", 0) for ci in injuries)
-            injury_strs = [f"{ci['name']} ({ci['effect']}, Death Save +{ci['dv_mod']})" for ci in injuries]
-            lines.append(f"  Critical injuries (Death Save DV +{dv_total}): {'; '.join(injury_strs)}")
+            weapons = er.get("weapons", [])
+            if weapons:
+                weapon_strs = []
+                for w in weapons:
+                    wname = w.get("name", "?")
+                    wdmg = w.get("damage", "?")
+                    wtype = w.get("type", "ranged")
+                    wskill = w.get("skill", "")
+                    if wtype == "melee":
+                        weapon_strs.append(f"{wname} ({wdmg}, {wskill})" if wskill else f"{wname} ({wdmg}, Melee Weapon)")
+                    else:
+                        cur = w.get("current_ammo", 0)
+                        mx = w.get("max_ammo", 0)
+                        skill_part = f", {wskill}" if wskill else ""
+                        weapon_strs.append(f"{wname} ({wdmg}, {cur}/{mx} ammo{skill_part})")
+                lines.append(f"  Weapons: {'; '.join(weapon_strs)}")
 
-        weapons = er.get("weapons", [])
-        if weapons:
-            weapon_strs = []
-            for w in weapons:
-                wname = w.get("name", "?")
-                wdmg = w.get("damage", "?")
-                wtype = w.get("type", "ranged")
-                wskill = w.get("skill", "")
-                if wtype == "melee":
-                    weapon_strs.append(f"{wname} ({wdmg}, {wskill})" if wskill else f"{wname} ({wdmg}, Melee Weapon)")
-                else:
-                    cur = w.get("current_ammo", 0)
-                    mx = w.get("max_ammo", 0)
-                    skill_part = f", {wskill}" if wskill else ""
-                    weapon_strs.append(f"{wname} ({wdmg}, {cur}/{mx} ammo{skill_part})")
-            lines.append(f"  Weapons: {'; '.join(weapon_strs)}")
+            if cyberware:
+                lines.append(f"  Cyberware: {', '.join(cyberware)}")
 
-        if cyberware:
-            lines.append(f"  Cyberware: {', '.join(cyberware)}")
+        lines.append("[/EDGERUNNER STATE]")
+        result = "\n".join(lines)
 
-    lines.append("[/EDGERUNNER STATE]")
+    # Append IP tracker if present
+    ip_block = _build_ip_tracker_injection(game_state)
+    if ip_block:
+        result += "\n\n" + ip_block
+
+    return result
+
+
+_CATEGORY_ABBREV = {"warrior": "WAR", "socializer": "SOC", "explorer": "EXP", "roleplayer": "ROL"}
+
+
+def _safe_text(value):
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _category_abbrev(category):
+    cat = _safe_text(category)
+    if not cat:
+        return "?"
+    return _CATEGORY_ABBREV.get(cat, cat[:3].upper())
+
+
+def _build_ip_tracker_injection(game_state):
+    """Build [IP TRACKER] injection block from running scores and awards."""
+    tracker = game_state.get("ip_tracker", {})
+    if not isinstance(tracker, dict):
+        return ""
+    scores = tracker.get("session_scores", {})
+    awards = tracker.get("awards", [])
+    balances = tracker.get("balances", {})
+    if not isinstance(scores, dict):
+        scores = {}
+    if not isinstance(awards, list):
+        awards = []
+    if not isinstance(balances, dict):
+        balances = {}
+
+    # Check if there's anything to show
+    has_scores = False
+    group_entry = scores.get("group", 0)
+    group_val = group_entry.get("value", 0) if isinstance(group_entry, dict) else (group_entry if isinstance(group_entry, int) else 0)
+    if group_val > 0:
+        has_scores = True
+    if not has_scores:
+        for k, v in scores.items():
+            if k == "group":
+                continue
+            if isinstance(v, dict) and any(isinstance(cv, dict) and cv.get("value", 0) > 0 for cv in v.values()):
+                has_scores = True
+                break
+    has_balance = any(v > 0 for v in balances.values()) if balances else False
+    if not has_scores and not awards and not has_balance:
+        return ""
+
+    lines = ["[IP TRACKER]"]
+
+    # Group score
+    if group_val > 0:
+        group_reason = group_entry.get("reason", "") if isinstance(group_entry, dict) else ""
+        reason_part = f" — {group_reason}" if group_reason else ""
+        lines.append(f"Group: {group_val}{reason_part}")
+
+    # Per-player scores
+    for player_name in sorted(scores.keys(), key=lambda x: _safe_text(x)):
+        if player_name == "group":
+            continue
+        player_cats = scores[player_name]
+        if not isinstance(player_cats, dict):
+            continue
+        # Collect active categories sorted by score descending
+        cat_parts = []
+        for cat_name, entry in sorted(player_cats.items(), key=lambda x: -(x[1].get("value", 0) if isinstance(x[1], dict) else 0)):
+            if not isinstance(entry, dict):
+                continue
+            val = entry.get("value", 0)
+            if val <= 0:
+                continue
+            abbrev = _category_abbrev(cat_name)
+            reason = _safe_text(entry.get("reason", ""))
+            reason_part = f" ({reason[:60]})" if reason else ""
+            cat_parts.append(f"{abbrev} {val}{reason_part}")
+        if cat_parts:
+            lines.append(f"  {_safe_text(player_name)}: {' | '.join(cat_parts)}")
+
+    # Balances (only show players with IP > 0)
+    if has_balance:
+        bal_parts = [
+            f"{_safe_text(name)}: {ip} IP"
+            for name, ip in sorted(balances.items(), key=lambda kv: _safe_text(kv[0]))
+            if isinstance(ip, int) and ip > 0
+        ]
+        lines.append(f"Balances: {' | '.join(bal_parts)}")
+
+    # Prior awards
+    if awards:
+        lines.append("Prior awards:")
+        for aw in awards:
+            if not isinstance(aw, dict):
+                continue
+            parts = [f"Group {aw.get('group_ip', 0)}"]
+            if aw.get("group_reason"):
+                parts[0] += f" ({_safe_text(aw['group_reason'])[:40]})"
+            individuals = aw.get("individual", [])
+            if not isinstance(individuals, list):
+                individuals = []
+            for ind in individuals:
+                if not isinstance(ind, dict):
+                    continue
+                name = _safe_text(ind.get("player", "?")) or "?"
+                style_ip_raw = ind.get("style_ip", 0)
+                style_ip = style_ip_raw if isinstance(style_ip_raw, int) else 0
+                cat = ind.get("style_category", "?")
+                abbrev = _category_abbrev(cat)
+                total = aw.get("group_ip", 0) + style_ip
+                parts.append(f"{name} +{style_ip} {abbrev} (={total})")
+            lines.append(f"  S{aw.get('session', '?')}: {' | '.join(parts)}")
+
+    lines.append("[/IP TRACKER]")
     return "\n".join(lines)
 
 
@@ -319,6 +576,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "callback_ops": [...],
   "npc_memory_ops": [...],
   "plot_ops": [],
+  "ip_ops": [],
   "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
@@ -332,7 +590,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   }
 }
 
-SCHEMA B - Route to Output (ONLY for pure OOC questions):
+SCHEMA B - Route to Output (ONLY for pure OOC questions, IP awards, or IP spending):
 {
   "route": "output",
   "pacing": {...},
@@ -340,6 +598,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions):
   "content": "<your conversational OOC response>",
   "callback_ops": [],
   "npc_memory_ops": [],
+  "ip_ops": [],
   "scene_state": {<maintain current scene state unchanged>}
 }
 
@@ -436,6 +695,40 @@ PLOT OPS (save-state notifications):
 - "divergence": the player went off-script but can be steered back to a defined path — report the departure and continue normally. Do NOT route to output or halt.
 - Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, and creative choices do NOT qualify unless the plot documents specifically track them.
 
+IP SCORING (Improvement Points — §7):
+You maintain running numerical scores for IP awards via "ip_ops". The [IP TRACKER] injection shows current session scores and prior awards — it persists across context trims and is your authoritative memory of session performance.
+
+IP AWARD MASTER TABLE (§7) — score against this rubric:
+  GROUP:  10: Tried but didn't succeed | 20: Barely accomplished goals | 30: Accomplished most goals, good teamwork | 40: Most goals, strong cooperation | 50: Most goals extremely well, stellar moments | 60: All goals accomplished | 70: All goals + side goals | 80: Legendary, all goals + extras
+  WARRIOR:  10: Used combat skills often | 20: Effective combat, defeated important opponents | 30: Frequent effective combat, most dangerous opponents | 40: Out-of-the-ordinary combat | 50: Very clever combat, defeated several unexpectedly | 60: Combat critical, defeated major opponent solo | 70: Combat critical to entire party | 80: Incredible combat moment
+  SOCIALIZER:  10: Supportive and helpful | 20: Actions maintained party unity | 30: Frequent effective support | 40: Out-of-the-ordinary support | 50: Very clever/effective group support | 60: Support very important to success | 70: Support critical to party success | 80: Incredible support action
+  EXPLORER:  10: Attempted investigation often | 20: Effective exploration/learning | 30: Frequent effective investigation | 40: Discovered something exceptional | 50: Very clever investigation, important clue | 60: Uncovered critical person/place/thing | 70: Investigation critical to entire party | 80: Incredible discovery
+  ROLEPLAYER:  10: Attempted to RP often | 20: In-character RP, often effective | 30: Frequent effective RP toward a goal | 40: Out-of-the-ordinary RP moment | 50: Very clever/moving RP moment | 60: RP actions critical to outcome | 70: RP critical to entire party outcome | 80: Incredible RP moment
+
+Ops (in "ip_ops" array):
+- SCORE — update a running session assessment (ratchet-up only):
+  {"op": "score", "category": "group", "value": 30, "reason": "Strong cooperation during legwork phase"}
+  {"op": "score", "player": "V", "category": "warrior", "value": 40, "reason": "Clutch grenade into ventilation shaft"}
+  Values: 10/20/30/40/50/60/70/80. New value must be >= current score (lower values are silently ignored).
+  Scores are cumulative session assessments — "40 warrior" means "across everything this session, combat performance is at tier 40."
+  Update scores when player performance changes your assessment for a category. Most turns: 0 score ops.
+
+- AWARD — finalize session IP (route to "output"):
+  {"op": "award", "group_ip": 40, "group_reason": "Completed the Heywood gig", "individual": [
+    {"player": "V", "style_ip": 40, "style_category": "warrior", "reason": "Out-of-the-ordinary combat tactics"}
+  ]}
+  Each player's style_ip = their highest individual category score; style_category = which one.
+  group_ip = 0 if the job is still ongoing. Only award group IP when a gig/job completes.
+  Total per player = group_ip + style_ip → added to their IP balance.
+  Resets session_scores for the next session. Preserves awards history and balances.
+
+- SPEND — deduct IP (route to "output"):
+  {"op": "spend", "player": "V", "amount": 100, "reason": "Handgun 4 → 5"}
+  Deducts from the player's IP balance (clamped >= 0). Reference §7 cost tables.
+
+Session end: Award IP at the end of each session as defined by the plot documents. If no plot documents define session boundaries, use natural gig/beat boundaries. Route to "output" with an OOC announcement of awards and current IP balances. Offer the player time to spend IP on improvements (§7 cost tables).
+IP spending: Handle spend requests via "output" (OOC bookkeeping). When the player is done spending, resume IC gameplay through the pipeline — narrate the inter-session downtime (Night City moves on, time passes, characters decompress) before the next session begins.
+
 IRRECONCILABLE PLOT BREAK:
 - If the player makes a decision so far from the plot documents' planned paths that no defined branch can accommodate it (e.g. killing a central NPC, switching sides entirely), route to "output" and tell the player OOC that the plot doc needs updating before continuing. This is distinct from "divergence" — divergence means recoverable; an irreconcilable break means the plot doc literally has no path forward.
 
@@ -471,7 +764,7 @@ HACK TRIGGER:
 
 ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
-- Route to "output" ONLY for pure OOC questions
+- Route to "output" for pure OOC questions, IP awards, or IP spending
 
 CHARACTER CREATION:
 - Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
@@ -481,6 +774,7 @@ IMPORTANT:
 - "beats" array: discrete narrative events
 - "character_states": structured per-character objects with type, vitals, resources, conditions, summary (Luck mirrored for HUD)
 - "edgerunner_ops": HP, Humanity, Luck, Armor, Eurobucks, critical injuries, cyberware
+- "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
 - Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets"""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the second stage.
@@ -685,6 +979,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions, equipment)
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware per edgerunner
+- **[IP TRACKER]**: Running session scores per category, IP balances, and prior session awards
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
@@ -703,6 +998,7 @@ Optional arrays:
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
 - **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **edgerunner_ops**: HP/Humanity/Luck/Armor/EB/injury/cyberware changes
+- **ip_ops**: IP scoring ops (see IP Scoring below)
 
 ### Edgerunner Ops (in report_state):
 Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
@@ -723,6 +1019,37 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
 HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
+
+### IP Scoring (Improvement Points — §7):
+Use the "ip_ops" array to maintain running numerical scores for IP awards. The [IP TRACKER] injection shows current session scores and prior awards — it persists across context trims and is your authoritative memory of session performance.
+
+IP AWARD MASTER TABLE (§7) — score against this rubric:
+  GROUP:  10: Tried but didn't succeed | 20: Barely accomplished goals | 30: Accomplished most goals, good teamwork | 40: Most goals, strong cooperation | 50: Most goals extremely well, stellar moments | 60: All goals accomplished | 70: All goals + side goals | 80: Legendary, all goals + extras
+  WARRIOR:  10: Used combat skills often | 20: Effective combat, defeated important opponents | 30: Frequent effective combat, most dangerous opponents | 40: Out-of-the-ordinary combat | 50: Very clever combat, defeated several unexpectedly | 60: Combat critical, defeated major opponent solo | 70: Combat critical to entire party | 80: Incredible combat moment
+  SOCIALIZER:  10: Supportive and helpful | 20: Actions maintained party unity | 30: Frequent effective support | 40: Out-of-the-ordinary support | 50: Very clever/effective group support | 60: Support very important to success | 70: Support critical to party success | 80: Incredible support action
+  EXPLORER:  10: Attempted investigation often | 20: Effective exploration/learning | 30: Frequent effective investigation | 40: Discovered something exceptional | 50: Very clever investigation, important clue | 60: Uncovered critical person/place/thing | 70: Investigation critical to entire party | 80: Incredible discovery
+  ROLEPLAYER:  10: Attempted to RP often | 20: In-character RP, often effective | 30: Frequent effective RP toward a goal | 40: Out-of-the-ordinary RP moment | 50: Very clever/moving RP moment | 60: RP actions critical to outcome | 70: RP critical to entire party outcome | 80: Incredible RP moment
+
+Ops:
+- SCORE — update a running session assessment (ratchet-up only):
+  `{"op": "score", "category": "group", "value": 30, "reason": "Strong cooperation during legwork phase"}`
+  `{"op": "score", "player": "V", "category": "warrior", "value": 40, "reason": "Clutch grenade into ventilation shaft"}`
+  Values: 10/20/30/40/50/60/70/80. New value must be >= current score (lower values are silently ignored).
+  Scores are cumulative session assessments — "40 warrior" means combat performance across the whole session is at tier 40.
+  Update scores when player performance changes your assessment for a category. Most turns: 0 ip_ops.
+
+- AWARD — finalize session IP:
+  `{"op": "award", "group_ip": 40, "group_reason": "Completed the Heywood gig", "individual": [{"player": "V", "style_ip": 40, "style_category": "warrior", "reason": "Out-of-the-ordinary combat tactics"}]}`
+  Each player's style_ip = their highest individual category score; style_category = which one.
+  group_ip = 0 if the job is still ongoing. Only award group IP when a gig/job completes.
+  Total per player = group_ip + style_ip → added to their IP balance. Resets session_scores.
+
+- SPEND — deduct IP:
+  `{"op": "spend", "player": "V", "amount": 100, "reason": "Handgun 4 → 5"}`
+  Deducts from the player's IP balance (clamped >= 0). Reference §7 cost tables.
+
+Session end: Award IP at the end of each session as defined by the plot documents. If no plot documents define session boundaries, use natural gig/beat boundaries. Announce awards and current IP balances OOC. Offer the player time to spend IP on improvements (§7 cost tables).
+IP spending: Handle spend requests as OOC bookkeeping. When the player is done spending, resume IC gameplay — narrate the inter-session downtime (Night City moves on, time passes, characters decompress) before the next session begins.
 
 ### Rules Reference:
 The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you use most often — defer to the Core Rulebook for edge cases and detailed tables.
@@ -975,6 +1302,38 @@ STATE_REPORT_TOOL = {
                             "type": "string",
                             "description": "Current episode/session from pacing context."
                         }
+                    }
+                }
+            },
+            "ip_ops": {
+                "type": "array",
+                "description": "IP scoring: update running scores during play, award IP at session end, spend IP during downtime (§7)",
+                "items": {
+                    "type": "object",
+                    "required": ["op"],
+                    "properties": {
+                        "op": {"type": "string", "enum": ["score", "award", "spend"]},
+                        "player": {"type": ["string", "null"], "description": "Player name (for score/spend). Omit or null for group score."},
+                        "category": {"type": "string", "enum": ["group", "warrior", "socializer", "explorer", "roleplayer"], "description": "Performance category (for score op)"},
+                        "value": {"type": "integer", "enum": [10, 20, 30, 40, 50, 60, 70, 80], "description": "Score tier (for score op). Must be >= current score."},
+                        "reason": {"type": "string", "description": "Why this score/award/spend"},
+                        "group_ip": {"type": "integer", "minimum": 0, "maximum": 80, "description": "Group IP award; 0 if job ongoing (for award op)"},
+                        "group_reason": {"type": "string", "description": "Why this group IP level (for award op)"},
+                        "individual": {
+                            "type": "array",
+                            "description": "Per-player style IP awards (for award op)",
+                            "items": {
+                                "type": "object",
+                                "required": ["player", "style_ip", "style_category"],
+                                "properties": {
+                                    "player": {"type": "string"},
+                                    "style_ip": {"type": "integer", "minimum": 10, "maximum": 80},
+                                    "style_category": {"type": "string", "enum": ["warrior", "socializer", "explorer", "roleplayer"]},
+                                    "reason": {"type": "string"}
+                                }
+                            }
+                        },
+                        "amount": {"type": "integer", "minimum": 1, "description": "IP to deduct (for spend op)"}
                     }
                 }
             },
@@ -2727,18 +3086,59 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
     Unlike init_net_combat_state (fresh defaults), this preserves the mid-hack
     NET encounter — current node, alert level, ICE, programs, etc.
     """
-    combat_info = combat_info or {}
+    if not isinstance(hack_state, dict):
+        hack_state = {}
+    combat_info = combat_info if isinstance(combat_info, dict) else {}
     # Build combined context: original hack context + combat breakout reason
     _parts = []
     if hack_state.get("context"):
-        _parts.append(hack_state["context"])
+        _parts.append(str(hack_state["context"]))
     if combat_info.get("reason"):
         _parts.append(f"Combat breakout: {combat_info['reason']}")
-    if combat_info.get("enemies"):
-        _parts.append(f"Hostiles: {', '.join(combat_info['enemies'])}")
+    enemies = combat_info.get("enemies")
+    if isinstance(enemies, list):
+        enemy_names = [str(e) for e in enemies if e is not None and str(e)]
+        if enemy_names:
+            _parts.append(f"Hostiles: {', '.join(enemy_names)}")
     _combined_context = " ".join(_parts) if _parts else None
 
-    interface_rank = hack_state.get("interface_rank", 4)
+    try:
+        interface_rank = int(hack_state.get("interface_rank", 4))
+    except (TypeError, ValueError):
+        interface_rank = 4
+    try:
+        cycles_remaining = int(hack_state.get("cycles_remaining", 3))
+    except (TypeError, ValueError):
+        cycles_remaining = 3
+    try:
+        cycles_max = int(hack_state.get("cycles_max", 3))
+    except (TypeError, ValueError):
+        cycles_max = 3
+    try:
+        alert_level = int(hack_state.get("alert_level", 0))
+    except (TypeError, ValueError):
+        alert_level = 0
+    try:
+        tar_stacks = int(hack_state.get("tar_stacks", 0))
+    except (TypeError, ValueError):
+        tar_stacks = 0
+    try:
+        brain_damage = int(hack_state.get("brain_damage", 0))
+    except (TypeError, ValueError):
+        brain_damage = 0
+    nodes_visited = hack_state.get("nodes_visited", ["Gateway"])
+    if not isinstance(nodes_visited, list):
+        nodes_visited = ["Gateway"]
+    active_programs = hack_state.get("active_programs", [])
+    if not isinstance(active_programs, list):
+        active_programs = []
+    available_actions = hack_state.get("available_actions", [])
+    if not isinstance(available_actions, list):
+        available_actions = []
+    ice_status = hack_state.get("ice_status", {})
+    if not isinstance(ice_status, dict):
+        ice_status = {}
+
     net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
     nc = {
         "active": True,
@@ -2750,18 +3150,18 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "net_actions_per_turn": net_actions,
         "start_message_id": hack_state.get("start_message_id"),
         # NET state carried over from hack (NOT reset to defaults)
-        "alert_level": hack_state.get("alert_level", 0),
-        "cycles_remaining": hack_state.get("cycles_remaining", 3),
-        "cycles_max": hack_state.get("cycles_max", 3),
-        "active_programs": copy.deepcopy(hack_state.get("active_programs", [])),
+        "alert_level": alert_level,
+        "cycles_remaining": cycles_remaining,
+        "cycles_max": cycles_max,
+        "active_programs": copy.deepcopy(active_programs),
         "current_node": hack_state.get("current_node", "Gateway"),
-        "nodes_visited": list(hack_state.get("nodes_visited", ["Gateway"])),
-        "ice_status": copy.deepcopy(hack_state.get("ice_status", {})),
+        "nodes_visited": list(nodes_visited),
+        "ice_status": copy.deepcopy(ice_status),
         "trace_progress": hack_state.get("trace_progress"),
-        "tar_stacks": hack_state.get("tar_stacks", 0),
-        "brain_damage": hack_state.get("brain_damage", 0),
+        "tar_stacks": tar_stacks,
+        "brain_damage": brain_damage,
         "system_map": copy.deepcopy(hack_state.get("system_map")),
-        "available_actions": list(hack_state.get("available_actions", [])),
+        "available_actions": list(available_actions),
         # Hack-specific fields to carry over
         "sr": hack_state.get("sr"),
         "tier": hack_state.get("tier"),
@@ -2770,7 +3170,7 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "net_complete": False,
         "narrative_summary": None,
         # Brain damage delta tracking starts clean from current value
-        "_prev_brain_damage": hack_state.get("brain_damage", 0),
+        "_prev_brain_damage": brain_damage,
         # Combat breakout context for first-exchange injection
         "_combat_breakout": combat_info,
     }
@@ -3042,6 +3442,8 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
 
     # --- NET: update hack fields in net_combat ---
     nc = pipeline_state.get("net_combat", {})
+    if not isinstance(nc, dict):
+        nc = {}
     hs = tool_input.get("hack_state", {})
     if isinstance(hs, dict):
         for field in ["alert_level", "cycles_remaining", "active_programs",
@@ -3058,8 +3460,14 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
         nc["available_actions"] = tool_input["available_actions"]
 
     # --- Brain damage delta → apply to Netrunner's HP ---
-    current_bd = nc.get("brain_damage", 0)
-    prev_bd = nc.get("_prev_brain_damage", 0)
+    try:
+        current_bd = int(nc.get("brain_damage", 0))
+    except (TypeError, ValueError):
+        current_bd = 0
+    try:
+        prev_bd = int(nc.get("_prev_brain_damage", 0))
+    except (TypeError, ValueError):
+        prev_bd = 0
     bd_delta = current_bd - prev_bd
     if bd_delta > 0:
         nc["_prev_brain_damage"] = current_bd
