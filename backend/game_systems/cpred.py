@@ -13,6 +13,55 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ============================================================
+# Tier Derivation Helpers
+# ============================================================
+
+def _rs_tier(score):
+    """Return (tier_label, bonus_text) for a CPRED Relationship Score."""
+    if score >= 95:  return ("T7: Ride/Die", "+3 all social; fight together; share all intel")
+    if score >= 85:  return ("T6: Ally", "+3 social; auto-success Persuasion DV 9-13; armed backup")
+    if score >= 70:  return ("T5: Close", "+2 social; +3 Persuasion and Acting")
+    if score >= 55:  return ("T4: Good", "+2 social; +3 Persuasion")
+    if score >= 40:  return ("T3: Friend", "+1 Persuasion and Human Perception; favors no roll")
+    if score >= 25:  return ("T2: Friendly", "+1 Persuasion")
+    if score >= 10:  return ("T1: Acquaintance", "no social penalties")
+    if score >= -9:  return ("Neutral", "")
+    if score >= -24: return ("-T1: Annoyed", "-3 Persuasion")
+    if score >= -39: return ("-T2: Disliked", "-1 all social")
+    if score >= -54: return ("-T3: Enemy", "-2 all social; -3 w/ contacts; passive sabotage")
+    if score >= -69: return ("-T4: Adversary", "-2 all checks; 1 obstacle/session")
+    if score >= -84: return ("-T5: Nemesis", "-3 all checks; 2 complications/session")
+    if score >= -94: return ("-T6: Sworn", "-3 all checks; ambushes; poisons mutual contacts")
+    return ("-T7: Hatred", "-4 all checks; attacks regardless of odds")
+
+
+def _roms_tier(score):
+    """Return (tier_label, bonus_text) for a CPRED Romance Score."""
+    if score >= 95: return ("T6: Unbreakable", "+3 all checks; redirect 10 dmg 1/session; free comms implant")
+    if score >= 85: return ("T5: Married", "+3 all checks; take damage for partner 1/session; +3 vs Interrogation/intimidation")
+    if score >= 65: return ("T4: Engaged", "+2 all checks; gain 1 NPC skill at half rank; +1 LUCK/session")
+    if score >= 45: return ("T3: Partner", "+2 social; fight together +1 attacks adjacent; +1 LUCK/session")
+    if score >= 25: return ("T2: Dating", "+1 social; +1 Human Perception; -1 Death Save rolls")
+    if score >= 10: return ("T1: Flirting", "+1 Persuasion; receptive to advances")
+    return ("None", "")
+
+
+def _fr_tier(score):
+    """Return (tier_label, bonus_text) for a CPRED Faction Reputation."""
+    if score >= 90:  return ("T5: Champion", "+3 social; 40% discount; Solo rank 6+ backup; protected")
+    if score >= 70:  return ("T4: Honored", "+2 social; 30% discount; 3-6 armed backup; cover minor crimes")
+    if score >= 50:  return ("T3: Valued", "+2 social; 20% discount; 2-4 backup; advance warnings")
+    if score >= 30:  return ("T2: Accepted", "+1 social; 10% discount; basic assistance")
+    if score >= 10:  return ("T1: Known", "5% discount; non-hostile")
+    if score >= -9:  return ("Neutral", "")
+    if score >= -29: return ("-T1: Suspicious", "-1 social; prices +10%")
+    if score >= -49: return ("-T2: Unwelcome", "-1 social; escorted out")
+    if score >= -69: return ("-T3: Hostile", "-2 social; obstacles; 25% harassment/session")
+    if score >= -89: return ("-T4: Enemy", "-2 social; bounty hunters 50%/week; allies grow suspicious")
+    return ("-T5: KOS", "-3 social; assassination attempts every 3 days; allies turn hostile")
+
+
+# ============================================================
 # Structured Game State
 # ============================================================
 #
@@ -35,8 +84,8 @@ logger = logging.getLogger(__name__)
 
 
 def init_game_state():
-    """Return empty edgerunners dict — populated via 'set' ops on first turn."""
-    return {"edgerunners": {}, "ip_tracker": {"session_scores": {"group": 0}, "awards": [], "balances": {}}}
+    """Return initial game state — edgerunners, IP tracker, relationships, factions."""
+    return {"edgerunners": {}, "ip_tracker": {"session_scores": {"group": 0}, "awards": [], "balances": {}}, "relationships": {}, "factions": {}}
 
 
 def _default_edgerunner():
@@ -337,7 +386,165 @@ def apply_game_state(game_state, agent_json, turn):
                 logger.warning(f"CPRED apply_game_state: error processing ip_op {op_data}: {e}")
                 continue
 
+    # --- Relationship ops ---
+    rel_ops = agent_json.get("relationship_ops")
+    if rel_ops:
+        relationships = game_state.setdefault("relationships", {})
+        factions = game_state.setdefault("factions", {})
+
+        for op_data in rel_ops:
+            if not isinstance(op_data, dict):
+                continue
+            op = op_data.get("op")
+            target = op_data.get("target")
+            if not isinstance(target, str) or not target or not op:
+                continue
+
+            try:
+                if op == "set":
+                    entity_type = op_data.get("type", "npc")
+                    fields = copy.deepcopy(op_data.get("fields", {}))
+                    if not isinstance(fields, dict):
+                        fields = {}
+                    if entity_type == "faction":
+                        factions[target] = fields
+                    else:
+                        relationships[target] = fields
+
+                elif op == "rs":
+                    change = int(op_data.get("change", 0))
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0}
+                    relationships[target]["rs"] = max(-100, min(100, relationships[target].get("rs", 0) + change))
+
+                elif op == "roms":
+                    change = int(op_data.get("change", 0))
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0}
+                    relationships[target]["roms"] = max(0, min(100, relationships[target].get("roms", 0) + change))
+
+                elif op == "fr":
+                    change = int(op_data.get("change", 0))
+                    if target not in factions:
+                        factions[target] = {"fr": 0}
+                    factions[target]["fr"] = max(-100, min(100, factions[target].get("fr", 0) + change))
+
+                elif op == "npc_rs":
+                    other = op_data.get("other")
+                    change = int(op_data.get("change", 0))
+                    if target and isinstance(other, str) and other:
+                        if target not in relationships:
+                            relationships[target] = {"rs": 0, "roms": 0}
+                        npc_rels = relationships[target].setdefault("npc_relationships", {})
+                        if other not in npc_rels:
+                            npc_rels[other] = {"rs": 0, "roms": 0}
+                        npc_rels[other]["rs"] = max(-100, min(100, npc_rels[other].get("rs", 0) + change))
+
+                elif op == "npc_roms":
+                    other = op_data.get("other")
+                    change = int(op_data.get("change", 0))
+                    if target and isinstance(other, str) and other:
+                        if target not in relationships:
+                            relationships[target] = {"rs": 0, "roms": 0}
+                        npc_rels = relationships[target].setdefault("npc_relationships", {})
+                        if other not in npc_rels:
+                            npc_rels[other] = {"rs": 0, "roms": 0}
+                        npc_rels[other]["roms"] = max(0, min(100, npc_rels[other].get("roms", 0) + change))
+
+                elif op == "npc_set":
+                    other = op_data.get("other")
+                    fields = copy.deepcopy(op_data.get("fields", {}))
+                    if not isinstance(fields, dict):
+                        fields = {}
+                    if target and isinstance(other, str) and other:
+                        if target not in relationships:
+                            relationships[target] = {"rs": 0, "roms": 0}
+                        npc_rels = relationships[target].setdefault("npc_relationships", {})
+                        npc_rels[other] = fields
+
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
+                logger.warning(f"CPRED apply_game_state: error processing rel op {op_data}: {e}")
+                continue
+
     return game_state
+
+
+def _format_npc_line(name, data):
+    """Format a single NPC line for relationship injection."""
+    rs = data.get("rs", 0)
+    roms = data.get("roms", 0)
+    rs_label, rs_bonus = _rs_tier(rs)
+    parts = []
+    if rs_bonus:
+        parts.append(f"RS {rs} ({rs_label} \u2014 {rs_bonus})")
+    else:
+        parts.append(f"RS {rs} ({rs_label})")
+    if roms > 0:
+        roms_label, roms_bonus = _roms_tier(roms)
+        if roms_bonus:
+            parts.append(f"RomS {roms} ({roms_label} \u2014 {roms_bonus})")
+        else:
+            parts.append(f"RomS {roms} ({roms_label})")
+    line = f"  {name}: {' | '.join(parts)}"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
+
+    npc_rels = data.get("npc_relationships", {})
+    if npc_rels:
+        for other in sorted(npc_rels):
+            nr = npc_rels[other]
+            nr_rs = nr.get("rs", 0)
+            nr_roms = nr.get("roms", 0)
+            nr_parts = []
+            nr_label, nr_bonus = _rs_tier(nr_rs)
+            if nr_bonus:
+                nr_parts.append(f"RS {nr_rs} ({nr_label} \u2014 {nr_bonus})")
+            else:
+                nr_parts.append(f"RS {nr_rs} ({nr_label})")
+            if nr_roms > 0:
+                r_label, r_bonus = _roms_tier(nr_roms)
+                if r_bonus:
+                    nr_parts.append(f"RomS {nr_roms} ({r_label} \u2014 {r_bonus})")
+                else:
+                    nr_parts.append(f"RomS {nr_roms} ({r_label})")
+            line += f"\n    \u2192 {other}: {' | '.join(nr_parts)}"
+
+    return line
+
+
+def _format_faction_line(name, data):
+    """Format a single faction line for relationship injection."""
+    fr = data.get("fr", 0)
+    fr_label, fr_bonus = _fr_tier(fr)
+    if fr_bonus:
+        line = f"  {name}: FR {fr} ({fr_label} \u2014 {fr_bonus})"
+    else:
+        line = f"  {name}: FR {fr} ({fr_label})"
+    notes = data.get("notes")
+    if notes:
+        line += f"\n    notes: {notes}"
+    return line
+
+
+def _build_relationship_injection(game_state):
+    """Build [RELATIONSHIP STATE] injection block from game_state."""
+    relationships = game_state.get("relationships", {})
+    factions = game_state.get("factions", {})
+    if not relationships and not factions:
+        return "[RELATIONSHIP STATE]\n(empty \u2014 bootstrap with relationship_ops \"set\" after character creation is complete)\n[/RELATIONSHIP STATE]"
+
+    lines = ["[RELATIONSHIP STATE]"]
+    if relationships:
+        lines.append("NPCs:")
+        for name in sorted(relationships):
+            lines.append(_format_npc_line(name, relationships[name]))
+    if factions:
+        lines.append("Factions:")
+        for name in sorted(factions):
+            lines.append(_format_faction_line(name, factions[name]))
+    lines.append("[/RELATIONSHIP STATE]")
+    return "\n".join(lines)
 
 
 def build_game_injection(game_state):
@@ -397,6 +604,10 @@ def build_game_injection(game_state):
     ip_block = _build_ip_tracker_injection(game_state)
     if ip_block:
         result += "\n\n" + ip_block
+
+    # Append relationship state
+    rel_block = _build_relationship_injection(game_state)
+    result += "\n\n" + rel_block
 
     return result
 
@@ -561,6 +772,9 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "edgerunner_ops": [
     {"edgerunner": "<name>", "op": "hp|humanity|therapy|luck|luck_reset|armor|armor_repair|eurobucks|critical_injury|cyberware|set", ...}
   ],
+  "relationship_ops": [
+    {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
+  ],
   "arc_label": "<string or null>",
   "current_player": "<name of the edgerunner whose turn this is>",
   "next_player": "<name of the edgerunner whose turn is NEXT>",
@@ -643,6 +857,40 @@ IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, a
 
 OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Do NOT emit HP, armor, critical injury, or Luck-spent ops for outcomes that depend on Mechanics — Mechanics emits those after adjudication.
 
+RELATIONSHIP OPS (RS / RomS / FR):
+- You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
+- Use "relationship_ops" to update scores. Operations:
+  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Relationship Score change (PC → NPC). Clamped -100 to +100.
+  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Romance Score change (PC → NPC). Clamped 0 to 100.
+  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Faction Reputation change. Clamped -100 to +100.
+  * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context. Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+    Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
+  * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
+    Bootstrap inter-NPC relationship.
+- Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (crew bonds, rivalries, romances).
+- "new_total" is for Narration display only — the system uses "change" to compute the actual score.
+- Scoring guidelines:
+  * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
+  * Opposition: -3 to -10, Betrayals: -15 to -30
+  * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
+- Most turns have NO score changes — only award when the narrative clearly justifies it.
+- Maximum combined bonus from relationship systems: +5 to any single check (d10 calibration).
+- Tier boundary checking: After computing new_total, compare against tier boundaries. If the score crosses into a new tier:
+  1. Append the new tier name to the reason field (e.g. "Saved her crew → T4: Good")
+  2. Narration should narratively acknowledge the relationship shift
+  3. Narration displays: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
+- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 or -90, the faction escalates (bounty hunters, assassination attempts) — emit callbacks.
+- Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
+- The "relationship_ops" array should be empty [] if no changes occurred this turn.
+- OPS SCOPE: Emit relationship_ops ONLY for state changes certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
+
 CHARACTER STATES (structured format):
 - "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
 - "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
@@ -664,6 +912,7 @@ COMBAT (Cyberpunk RED):
 
 RULES REFERENCE:
 The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you reference most often — defer to the Core Rulebook for edge cases and detailed tables.
+Consult Character Descs for canonical physical descriptions, personality, and NPC behavior. Override training data if details conflict.
 
 DICE MECHANICS (quick reference — teach to Mechanics via beats):
 - Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
@@ -774,14 +1023,15 @@ IMPORTANT:
 - "beats" array: discrete narrative events
 - "character_states": structured per-character objects with type, vitals, resources, conditions, summary (Luck mirrored for HUD)
 - "edgerunner_ops": HP, Humanity, Luck, Armor, Eurobucks, critical injuries, cyberware
+- "relationship_ops": RS/RomS/FR changes (most turns: empty array). Pre-roll only — do not emit for roll-dependent outcomes.
 - "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
-- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets"""
+- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the second stage.
 
 YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics using Cyberpunk RED rules. Resolve skill checks, combat, armor ablation, critical injuries, and death saves. Determine what ACTUALLY happens.
 
-YOU RECEIVE: JSON from Events containing beats, player_action, callbacks, emotional_context, character_states, edgerunner_ops, hud_state, and combat.
+YOU RECEIVE: JSON from Events containing beats, player_action, callbacks, emotional_context, character_states, edgerunner_ops, relationship_ops, hud_state, and combat.
 
 CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens.
 
@@ -805,6 +1055,7 @@ SCHEMA A - Route to Narration (default):
           "exploding": [<additional d10s if 10 rolled>],
           "fumble": <subtracted d10 if 1 rolled>,
           "luck_spent": <0 or Luck points added>,
+          "rs_modifier": <0 or RS/RomS/FR bonus applied>,
           "total": <final total>,
           "dv": <difficulty value>,
           "result": "<success/failure>"
@@ -832,6 +1083,7 @@ SCHEMA A - Route to Narration (default):
     {"edgerunner": "<name>", "op": "luck", "change": <int>, "reason": "<why>"},
     {"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "<injury>", "effect": "<effect>", "dv_mod": <int>}
   ],
+  "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
   "current_player": <pass through from Events unchanged>,
@@ -872,6 +1124,8 @@ SKILL CHECK RULES (Cyberpunk RED):
 - Critical failure: natural 1 → roll another d10 and subtract. Does NOT chain on a second 1.
 - Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
 - Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
+- RS/RomS/FR modifiers: Apply relationship tier bonuses to social checks involving tracked NPCs/factions. Read the [RELATIONSHIP STATE] injection for current tiers and bonuses. Maximum combined relationship bonus: +5 to any single check.
+- RomS mechanical bonuses: T2 Dating = -1 Death Save rolls; T3-T4 = +1 LUCK/session; T5 = take damage for partner 1/session; T6 = redirect 10 dmg 1/session. Apply when conditions are met.
 
 DAMAGE RESOLUTION:
 1. Roll weapon damage dice.
@@ -899,6 +1153,7 @@ ROLL FORMAT (for display by Narration):
 Exploding: 🎲 [Description]: d10[**10** + **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 Fumble: 🎲 [Description]: d10[**1** - **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 With Luck: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +Luck N = Total vs DV Z ✓/✗
+With RS/RomS/FR: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +RS N = Total vs DV Z ✓/✗
 
 HUD:
 - Format: [Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]
@@ -907,6 +1162,7 @@ HUD:
 IMPORTANT:
 - Output ONLY valid JSON
 - Emit edgerunner_ops for state changes from your adjudicated rolls: HP damage (op: "hp"), armor ablation (op: "armor", location: "head|body"), Luck spent (op: "luck"), critical injuries (op: "critical_injury"). Same format as Events. Events handles pre-roll ops — do not duplicate.
+- Emit relationship_ops for roll-dependent RS/RomS/FR changes (e.g. a COOL+Persuasion check that impresses an NPC). Same op format as Events. Events already emitted pre-roll ops — yours are additional. Maximum combined relationship bonus: +5.
 - Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
 - character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
 - DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
@@ -929,7 +1185,7 @@ NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pi
 
 YOUR ROLE: Take the mechanical outcomes from Mechanics and produce the narrative prose the player reads. You own the character voices, tone, and literary quality — which for Cyberpunk RED means high-octane action, style over substance, and Night City as a character in its own right.
 
-YOU RECEIVE: JSON from Mechanics containing beats (with rolls, damage, state_changes), dramatic_notes, hud, edgerunner_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
+YOU RECEIVE: JSON from Mechanics containing beats (with rolls, damage, state_changes), dramatic_notes, hud, edgerunner_ops, relationship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON).
 
@@ -945,6 +1201,11 @@ OUTPUT STRUCTURE:
    📊 **HP** V -8 (27/40) · Shotgun blast | **Armor** V Body SP -1 (10) · Ablation
    📊 **Humanity** V -4 (44/70) · Cyberarm | **EB** Crew -500 (1,850) · Ammo buy
    📊 **Critical** V +Broken Ribs (-2 movement, Death Save +1)
+   If "relationship_ops" contains changes, format them on a line just above the HUD:
+   📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew | **FR** Tyger Claws -10 (20) · Refused their job
+   - Pipe-separate multiple changes on one line
+   - If a tier boundary was crossed, include the new tier
+   - Omit this line entirely if relationship_ops is empty
 4. HUD appended verbatim at the end
 5. current_player attribution and next_player closing hook per standard pipeline
 6. Combat: reference initiative order if in combat
@@ -960,6 +1221,7 @@ TONE:
 
 RULES REFERENCE:
 Consult the Core Rulebook for any mechanical details referenced in the Mechanics output.
+Consult Character Descs for canonical physical descriptions, personality, and intimacy narration. Override training data if details conflict.
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
@@ -980,6 +1242,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware per edgerunner
 - **[IP TRACKER]**: Running session scores per category, IP balances, and prior session awards
+- **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior organically — an NPC at T5: Close acts warmer than one at T2: Friendly.
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
@@ -998,6 +1261,7 @@ Optional arrays:
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
 - **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **edgerunner_ops**: HP/Humanity/Luck/Armor/EB/injury/cyberware changes
+- **relationship_ops**: Track RS/RomS/FR changes (see Relationship Ops below)
 - **ip_ops**: IP scoring ops (see IP Scoring below)
 
 ### Edgerunner Ops (in report_state):
@@ -1019,6 +1283,27 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
 
 HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
+
+### Relationship Ops (in report_state):
+Use the "relationship_ops" array to track RS/RomS/FR changes:
+- `{"op": "rs", "target": "<NPC>", "change": 5, "new_total": 45, "reason": "Defended her honor"}`
+- `{"op": "roms", "target": "<NPC>", "change": 3, "new_total": 28, "reason": "Intimate conversation"}`
+- `{"op": "fr", "target": "<Faction>", "change": -10, "new_total": 20, "reason": "Refused their job"}`
+- `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {"rs": 50, "roms": 0, "notes": "Crew fixer"}}`
+- `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": 3, "new_total": 33, "reason": "Fought together"}`
+- `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": 5, "new_total": 15, "reason": "Flirting"}`
+- `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": 40, "roms": 0}}`
+- Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
+- Maximum combined relationship bonus: +5 to any single check (d10 calibration).
+- Tier boundary checking: When new_total crosses a tier boundary, note the new tier in reason and show: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
+- Alliance cascades: When FR hits -70 or -90, emit callbacks for faction escalation (bounty hunters, assassination attempts).
+- Bootstrap: When [RELATIONSHIP STATE] is empty, use "set" ops to initialize NPCs and factions from context.
+
+### Dice Mechanics (relationship modifiers):
+- Apply RS/RomS/FR tier bonuses to social checks involving tracked NPCs/factions. Read [RELATIONSHIP STATE] for current tiers.
+- Maximum combined relationship bonus: +5 to any single check.
+- RomS mechanical bonuses: T2 = -1 Death Save rolls; T3-T4 = +1 LUCK/session; T5 = take damage for partner 1/session; T6 = redirect 10 dmg 1/session.
+- Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y +RS N = Total vs DV Z ✓/✗
 
 ### IP Scoring (Improvement Points — §7):
 Use the "ip_ops" array to maintain running numerical scores for IP awards. The [IP TRACKER] injection shows current session scores and prior awards — it persists across context trims and is your authoritative memory of session performance.
@@ -1053,6 +1338,7 @@ IP spending: Handle spend requests as OOC bookkeeping. When the player is done s
 
 ### Rules Reference:
 The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you use most often — defer to the Core Rulebook for edge cases and detailed tables.
+Consult Character Descs for canonical physical descriptions, personality, and intimacy narration. Override training data if details conflict.
 
 ### Dice Mechanics:
 - Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
@@ -1080,6 +1366,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Build scene_state from current location
 - Set character_states from known character sheets (structured format with type, vitals, resources, conditions, summary)
 - Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets
+- Use relationship_ops "set" to initialize tracked NPCs and factions from context
 - Add callback_ops for open gig threads, Fixer contacts
 
 ### Character Creation:
@@ -1260,6 +1547,24 @@ STATE_REPORT_TOOL = {
                         "weapons": {"type": "array", "description": "Full weapons list (for weapon_set)", "items": {"type": "object"}},
                         "weapon": {"type": ["object", "string"], "description": "Weapon object (weapon_add) or weapon name string/object-with-name (weapon_remove/weapon_ammo)"},
                         "current": {"type": "integer", "description": "Current ammo count (for weapon_ammo)"}
+                    }
+                }
+            },
+            "relationship_ops": {
+                "type": "array",
+                "description": "RS/RomS/FR changes: relationship scores, romance scores, faction reputation, inter-NPC relationships",
+                "items": {
+                    "type": "object",
+                    "required": ["op", "target"],
+                    "properties": {
+                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"]},
+                        "target": {"type": "string", "description": "NPC or faction name"},
+                        "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
+                        "change": {"type": "integer", "description": "Signed change amount"},
+                        "new_total": {"type": "integer", "description": "Display-only total after change"},
+                        "reason": {"type": "string", "description": "Why the change occurred"},
+                        "type": {"type": "string", "enum": ["npc", "faction"], "description": "Entity type (for set ops)"},
+                        "fields": {"type": "object", "description": "Full replacement fields (for set/npc_set ops)"}
                     }
                 }
             },
@@ -1564,7 +1869,8 @@ STATE TRACKING via report_combat_state:
 - cover_state: report ALL combatants every exchange — {name, in_cover, cover_type, cover_hp}.
 
 ENEMY BOOTSTRAP (first exchange):
-When enemies first appear, use set_combat_stats to define their mechanical identity:
+When enemies first appear, check project files for named enemy stat blocks before generating from the tier table below. Use exact values from project files when available.
+Use set_combat_stats to define their mechanical identity:
 - hp_max: sets both current and max HP (derive from BODY+WILL via HP table in Ruleset §13)
 - armor: {head: SP, body: SP} (see armor table in Ruleset §11)
 - weapons: [{name, damage, ammo, magazine, skill}] (see weapon tables in Ruleset §10)
@@ -2906,7 +3212,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - Mode ends when both theaters complete.
 
 ### Enemy/NPC Bootstrap
-Same as standalone combat: use set_combat_stats on first exchange for new enemies. Combat number system for threat tiers.
+Same as standalone combat: check project files for named enemy stat blocks before generating from tier tables. Use set_combat_stats on first exchange for new enemies. Combat number system for threat tiers.
 
 ### Dice Pool
 A [DICE POOL] block is provided. Use values in order (left to right). Do NOT generate your own.

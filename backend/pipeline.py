@@ -244,15 +244,19 @@ def build_mechanics_messages(
     system_prompt: str,
     events_json: dict,
     dice_pool: str = "",
+    game_injection: str = "",
 ) -> list[dict]:
     """
     Build the message list for the Mechanics agent.
 
-    Mechanics is stateless: only system prompt + Events JSON output.
-    Dice pool is appended after the Events JSON for external RNG.
+    Mechanics receives the Events JSON output, an optional dice pool for
+    external RNG, and the game-specific state injection (e.g.
+    [RELATIONSHIP STATE]) so it can look up tier bonuses when resolving checks.
     """
     messages = [{"role": "system", "content": system_prompt}]
     user_content = json.dumps(events_json, indent=2)
+    if game_injection:
+        user_content += "\n\n" + game_injection
     if dice_pool:
         user_content += "\n\n" + dice_pool
     messages.append({"role": "user", "content": user_content})
@@ -504,14 +508,14 @@ def collapse_net_combat_messages(branch_path: list[dict]) -> list[dict]:
         return branch_path
 
     history = branch_path[1:-1]
-    if not any(msg.get("net_combat_mode") for msg in history):
+    if not any(isinstance(msg, dict) and msg.get("net_combat_mode") for msg in history):
         return branch_path
 
     result = [branch_path[0]]
     i = 0
     while i < len(history):
         msg = history[i]
-        if not msg.get("net_combat_mode"):
+        if not isinstance(msg, dict) or not msg.get("net_combat_mode"):
             result.append(msg)
             i += 1
             continue
@@ -519,9 +523,12 @@ def collapse_net_combat_messages(branch_path: list[dict]) -> list[dict]:
         # Found start of net_combat run — scan to end
         nc_summary = None
         j = i
-        while j < len(history) and history[j].get("net_combat_mode"):
-            tool_input = history[j].get("net_combat_tool_input", {})
-            if tool_input and tool_input.get("narrative_summary"):
+        while j < len(history):
+            hmsg = history[j]
+            if not isinstance(hmsg, dict) or not hmsg.get("net_combat_mode"):
+                break
+            tool_input = hmsg.get("net_combat_tool_input", {})
+            if isinstance(tool_input, dict) and tool_input.get("narrative_summary"):
                 nc_summary = tool_input["narrative_summary"]
             j += 1
 
@@ -1559,7 +1566,11 @@ def run_pipeline(
 
     dice_pool = generate_dice_pool(game_system)
     mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
-    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool)
+    # Build game injection for Mechanics (relationship tiers, game-specific state)
+    mechanics_game_injection = ""
+    if gs.get("build_game_injection"):
+        mechanics_game_injection = gs["build_game_injection"](new_pipeline_state.get("game_state", {})) or ""
+    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool, game_injection=mechanics_game_injection)
 
     mechanics_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["mechanics"],

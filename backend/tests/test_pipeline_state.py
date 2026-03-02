@@ -42,6 +42,7 @@ from pipeline import (
     build_hud_state_injection,
     apply_single_agent_state_updates,
     build_events_messages,
+    build_mechanics_messages,
     build_narration_messages,
     build_agent_system_prompt,
     get_context_pairs,
@@ -59,11 +60,18 @@ from pipeline import (
     CHARACTER_STATE_TTL,
 )
 from game_systems.coc7e import init_game_state as coc_init, apply_game_state as coc_apply
-from game_systems.cpred import init_game_state as cpred_init, apply_game_state as cpred_apply
+from game_systems.cpred import (
+    init_game_state as cpred_init,
+    apply_game_state as cpred_apply,
+    build_game_injection as cpred_build_injection,
+    apply_net_combat_state as cpred_apply_net_combat_state,
+    init_net_combat_from_hack as cpred_init_net_combat_from_hack,
+)
 from game_systems.dnd5e import init_game_state as dnd_init, apply_game_state as dnd_apply
 from game_systems.dnd5e_cyber import init_game_state as cyber_init, apply_game_state as cyber_apply
 from game_systems.sr6e import init_game_state as sr_init, apply_game_state as sr_apply
 from game_systems import get_game_system
+from pipeline import collapse_net_combat_messages
 
 
 # ============================================================
@@ -930,6 +938,69 @@ class TestBuildEventsMessages:
         assert "[NPC MEMORIES: Kira]" in user_content
         # Vex has memories but is NOT in the scene
         assert "[NPC MEMORIES: Vex]" not in user_content
+
+
+class TestBuildMechanicsMessages:
+    """Coverage for mechanics message construction, including game injection."""
+
+    def test_build_mechanics_messages_includes_game_injection_before_dice_pool(self):
+        events_json = {"route": "narration", "beats": [{"beat": "x"}]}
+        game_injection = "[RELATIONSHIP STATE]\nRogue: RS 55\n[/RELATIONSHIP STATE]"
+        dice_pool = "[DICE POOL]\n1,2,3\n[/DICE POOL]"
+
+        messages = build_mechanics_messages(
+            system_prompt="sys",
+            events_json=events_json,
+            dice_pool=dice_pool,
+            game_injection=game_injection,
+        )
+
+        assert isinstance(messages, list)
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+        content = messages[1]["content"]
+        assert json.dumps(events_json, indent=2) in content
+        assert game_injection in content
+        assert dice_pool in content
+        assert content.index(game_injection) < content.index(dice_pool)
+
+    def test_build_mechanics_messages_seeded_fuzz_keeps_structure_and_order(self):
+        rng = random.Random(9201)
+        alphabet = "abcdef0123456789 []:_-/\n"
+        events_json = {
+            "route": "narration",
+            "beats": [{"beat": "probe", "rolls": []}],
+            "character_states": {"V": {"state": "ok"}},
+        }
+        base_json = json.dumps(events_json, indent=2)
+
+        for _ in range(300):
+            game_injection = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 140))).strip()
+            dice_pool = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 100))).strip()
+            messages = build_mechanics_messages(
+                system_prompt="sys",
+                events_json=events_json,
+                dice_pool=dice_pool,
+                game_injection=game_injection,
+            )
+
+            assert isinstance(messages, list)
+            assert len(messages) == 2
+            assert messages[0]["role"] == "system"
+            assert messages[1]["role"] == "user"
+            content = messages[1]["content"]
+            expected = base_json
+            if game_injection:
+                expected += "\n\n" + game_injection
+            if dice_pool:
+                expected += "\n\n" + dice_pool
+            assert content == expected
+
+            if game_injection:
+                assert game_injection in content
+            if dice_pool:
+                assert dice_pool in content
 
 
 # ============================================================
@@ -2969,6 +3040,84 @@ def _malformed_dict_ops(rng: random.Random, target_key: str, count: int = 120):
     return ops
 
 
+def _malformed_cpred_ip_ops(rng: random.Random, count: int = 120):
+    """Generate deterministic dict-shaped malformed ip_ops payload items."""
+    options = [None, "", "bad", 0, 1, -3, 3.14, [], {}, {"x": 1}]
+    score_values = [None, "", "bad", -10, 0, 1, 7, 10, 20, 30, 40, 50, 60, 70, 80, 120]
+    categories = ["group", "warrior", "socializer", "explorer", "roleplayer", None, "", 7, True, {"bad": "dict"}]
+    players = [None, "", "V", "Judy", "Panam", 0, -1, 3.14, True, {"bad": "dict"}]
+    individuals_pool = [
+        [],
+        [{"player": "V", "style_ip": 20, "style_category": "warrior", "reason": "clean"}],
+        [{"player": "Judy", "style_ip": 40, "style_category": 7, "reason": "odd-category"}],
+        [{"player": {"bad": "dict"}, "style_ip": "bad", "style_category": "socializer"}],
+        options,
+    ]
+
+    ops = []
+    for _ in range(count):
+        op = {
+            "op": rng.choice(["score", "award", "spend", None, "", "bad", 1]),
+            "player": rng.choice(players),
+            "category": rng.choice(categories),
+            "value": rng.choice(score_values),
+            "reason": rng.choice(options),
+            "group_ip": rng.choice(score_values),
+            "group_reason": rng.choice(options),
+            "individual": rng.choice(individuals_pool),
+            "amount": rng.choice(score_values),
+        }
+        for _ in range(rng.randint(0, 3)):
+            keys = list(op.keys())
+            if keys:
+                op.pop(rng.choice(keys), None)
+        ops.append(op)
+    return ops
+
+
+def _net_combat_pipeline_state():
+    return {
+        "character_states": {
+            "V": {
+                "data": {
+                    "type": "pc",
+                    "vitals": [{"label": "HP", "current": 35, "max": 40}],
+                    "resources": [{"label": "Cycles", "current": 3, "max": 3}],
+                    "conditions": [],
+                }
+            },
+            "Drone-1": {
+                "data": {
+                    "type": "enemy",
+                    "vitals": [{"label": "HP", "current": 20, "max": 20}],
+                    "resources": [],
+                    "conditions": [],
+                    "combat_data": {"armor": {"head": 4, "body": 4}, "weapons": [{"name": "SMG", "ammo": 30}]},
+                }
+            },
+        },
+        "combat": {"round": 1, "initiative_order": ["V", "Drone-1"], "current_turn": "V"},
+        "net_combat": {"active": True, "netrunner": "V", "brain_damage": 0, "_prev_brain_damage": 0},
+    }
+
+
+def _net_game_state():
+    return {
+        "edgerunners": {
+            "V": {
+                "hp": {"current": 35, "max": 40, "seriously_wounded": False},
+                "humanity": {"current": 50, "max": 60},
+                "luck": {"current": 5, "max": 7},
+                "armor": {"head": 11, "body": 11},
+                "eurobucks": 1000,
+                "critical_injuries": [],
+                "cyberware_effects": [],
+                "weapons": [{"name": "Heavy Pistol", "current_ammo": 8, "max_ammo": 8}],
+            }
+        }
+    }
+
+
 class TestGameStateMalformedInputs:
     """Deterministic malformed-input coverage for game-system apply_game_state handlers."""
 
@@ -2979,6 +3128,7 @@ class TestGameStateMalformedInputs:
             pytest.param(cyber_init, cyber_apply, "relationship_ops", "target", "relationships", id="dnd5e_cyber"),
             pytest.param(coc_init, coc_apply, "investigator_ops", "investigator", "investigators", id="coc7e"),
             pytest.param(cpred_init, cpred_apply, "edgerunner_ops", "edgerunner", "edgerunners", id="cpred"),
+            pytest.param(cpred_init, cpred_apply, "relationship_ops", "target", "relationships", id="cpred_rel"),
             pytest.param(sr_init, sr_apply, "runner_ops", "runner", "runners", id="sr6e"),
         ],
     )
@@ -3022,6 +3172,14 @@ class TestGameStateMalformedInputs:
                 },
                 lambda s: s["edgerunners"]["V"]["luck"]["current"] == 3,
                 id="cpred",
+            ),
+            pytest.param(
+                cpred_init,
+                cpred_apply,
+                "relationship_ops",
+                {"op": "rs", "target": "Rogue", "change": 5},
+                lambda s: s["relationships"]["Rogue"]["rs"] == 5,
+                id="cpred_rel",
             ),
             pytest.param(
                 sr_init,
@@ -3154,7 +3312,7 @@ def _mutate_events_payload(rng: random.Random, base: dict, game_system: str) -> 
         ]
 
     # Game-system ops: keep as list[dict], deliberately including odd value types.
-    if game_system in ("dnd5e", "dnd5e_cyber") and rng.random() < 0.8:
+    if game_system in ("dnd5e", "dnd5e_cyber", "cpred") and rng.random() < 0.8:
         payload["relationship_ops"] = [
             {
                 "op": rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms", "set", "bad", None]),
@@ -3192,7 +3350,7 @@ def _mutate_mechanics_payload(rng: random.Random, base: dict, game_system: str) 
         if rng.random() < 0.35:
             payload[key] = rng.choice(type_pool)
 
-    if game_system in ("dnd5e", "dnd5e_cyber") and rng.random() < 0.8:
+    if game_system in ("dnd5e", "dnd5e_cyber", "cpred") and rng.random() < 0.8:
         payload["relationship_ops"] = [
             {
                 "op": rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms", "set", "bad", None]),
@@ -3402,6 +3560,234 @@ class TestStatefulSequenceFuzz:
                     assert 0 <= nrel.get("roms", 0) <= 100
             for faction in state["factions"].values():
                 assert -100 <= faction.get("fr", 0) <= 100
+
+
+class TestCpredIpTrackerFuzz:
+    """Seeded malformed-input coverage for CPRED IP tracker ops and rendering."""
+
+    def test_cpred_ip_ops_malformed_corpus_keeps_tracker_shape(self):
+        rng = random.Random(9001)
+        state = cpred_init()
+
+        for turn in range(1, 61):
+            cpred_apply(state, {"ip_ops": _malformed_cpred_ip_ops(rng, count=25)}, turn=turn)
+            tracker = state.get("ip_tracker")
+            assert isinstance(tracker, dict)
+            assert isinstance(tracker.get("session_scores"), dict)
+            assert isinstance(tracker.get("awards"), list)
+            assert isinstance(tracker.get("balances"), dict)
+            assert all(isinstance(v, int) and v >= 0 for v in tracker["balances"].values())
+
+    def test_cpred_ip_ops_malformed_noise_does_not_block_valid_awards(self):
+        rng = random.Random(9002)
+        state = cpred_init()
+
+        for turn in range(1, 26):
+            malformed = _malformed_cpred_ip_ops(rng, count=20)
+            valid = [
+                {"op": "score", "category": "group", "value": 30, "reason": f"group-{turn}"},
+                {"op": "score", "player": "V", "category": "warrior", "value": 40, "reason": f"warrior-{turn}"},
+                {"op": "award", "group_ip": 10, "group_reason": f"award-{turn}", "individual": [{"player": "V", "style_ip": 10, "style_category": "warrior", "reason": "clean"}]},
+                {"op": "spend", "player": "V", "amount": 5, "reason": "downtime spend"},
+            ]
+            cpred_apply(state, {"ip_ops": malformed + valid}, turn=turn)
+
+        tracker = state["ip_tracker"]
+        assert isinstance(tracker["awards"], list)
+        assert len(tracker["awards"]) >= 1
+        assert tracker["balances"].get("V", 0) > 0
+        assert tracker["session_scores"] == {"group": 0}
+
+    def test_cpred_ip_tracker_rendering_survives_seeded_malformed_sequence(self):
+        rng = random.Random(9003)
+        state = cpred_init()
+
+        cpred_apply(state, {"edgerunner_ops": [{"edgerunner": "V", "op": "set", "fields": {"hp": {"current": 35, "max": 40}}}]}, turn=0)
+
+        for turn in range(1, 41):
+            cpred_apply(state, {"ip_ops": _malformed_cpred_ip_ops(rng, count=18)}, turn=turn)
+
+        # Ensure IP tracker has content so rendering path is exercised.
+        cpred_apply(state, {"ip_ops": [{"op": "score", "category": "group", "value": 30, "reason": "crew teamwork"}]}, turn=99)
+
+        rendered = cpred_build_injection(state)
+        assert isinstance(rendered, str)
+        assert "[EDGERUNNER STATE]" in rendered
+        assert "[IP TRACKER]" in rendered
+        assert "[/IP TRACKER]" in rendered
+
+    def test_cpred_invalid_individual_score_not_reclassified_as_group(self):
+        state = cpred_init()
+        cpred_apply(
+            state,
+            {"ip_ops": [{"op": "score", "category": "warrior", "value": 40, "reason": "missing player"}]},
+            turn=1,
+        )
+        assert state["ip_tracker"]["session_scores"] == {"group": 0}
+
+    def test_cpred_ip_tracker_renders_even_when_edgerunners_empty(self):
+        state = cpred_init()
+        cpred_apply(
+            state,
+            {"ip_ops": [{"op": "score", "category": "group", "value": 30, "reason": "crew teamwork"}]},
+            turn=1,
+        )
+        rendered = cpred_build_injection(state)
+        assert "[EDGERUNNER STATE]" in rendered
+        assert "[IP TRACKER]" in rendered
+        assert "Group: 30" in rendered
+
+    def test_cpred_award_with_malformed_style_ip_still_resets_and_updates(self):
+        state = cpred_init()
+        cpred_apply(
+            state,
+            {
+                "ip_ops": [
+                    {"op": "score", "category": "group", "value": 30, "reason": "group"},
+                    {"op": "award", "group_ip": 10, "group_reason": "award", "individual": [
+                        {"player": "V", "style_ip": "bad", "style_category": "warrior", "reason": "bad style"},
+                        {"player": "Judy", "style_ip": 20, "style_category": "socializer", "reason": "good style"},
+                    ]},
+                ]
+            },
+            turn=2,
+        )
+        tracker = state["ip_tracker"]
+        assert tracker["session_scores"] == {"group": 0}
+        assert tracker["balances"]["V"] == 30
+        assert tracker["balances"]["Judy"] == 50
+        assert tracker["awards"][-1]["individual"][0]["style_ip"] == 0
+
+
+class TestCpredNetCombatMalformedFuzz:
+    """Seeded malformed-input coverage for CPRED NET combat helpers from latest commit."""
+
+    def test_init_net_combat_from_hack_handles_non_string_enemies(self):
+        hack_state = {"hacker_name": "Raven", "target_system": "Node-77", "context": "Infiltration underway"}
+        net = cpred_init_net_combat_from_hack(
+            hack_state,
+            combat_info={"reason": "Alarm tripped", "enemies": [1, {"x": 2}, "Guard"]},
+        )
+        assert isinstance(net, dict)
+        assert net.get("target") == "Node-77"
+        assert net.get("context")
+
+    def test_apply_net_combat_state_handles_none_net_combat(self):
+        pipeline_state = _net_combat_pipeline_state()
+        pipeline_state["net_combat"] = None
+        cpred_apply_net_combat_state(
+            pipeline_state,
+            {"hack_state": {"brain_damage": 1}, "available_actions": ["Backdoor"]},
+            game_state=_net_game_state(),
+        )
+        assert isinstance(pipeline_state.get("net_combat"), dict)
+        assert pipeline_state["net_combat"].get("brain_damage") == 1
+
+    def test_collapse_net_combat_messages_handles_non_dict_tool_input(self):
+        branch = [
+            {"id": "sys", "role": "system", "content": "System"},
+            {"id": "u1", "role": "user", "content": "Start", "net_combat_mode": True},
+            {
+                "id": "a1",
+                "role": "assistant",
+                "content": "Exchange 1",
+                "net_combat_mode": True,
+                "net_combat_tool_input": [1, 2, 3],
+            },
+            {"id": "u2", "role": "user", "content": "After"},
+        ]
+        collapsed = collapse_net_combat_messages(branch)
+        assert collapsed[-1]["content"] == "After"
+
+    def test_seeded_malformed_apply_net_combat_state_does_not_throw(self):
+        rng = random.Random(9101)
+        atoms = [None, 0, 1, -1, 3.2, "x", "", True, False, [], [1], ["x"], {}, {"a": 1}]
+
+        def rand(depth=0):
+            if depth > 2 or rng.random() < 0.5:
+                return rng.choice(atoms)
+            if rng.choice(["list", "dict"]) == "list":
+                return [rand(depth + 1) for _ in range(rng.randint(0, 3))]
+            d = {}
+            keys = [
+                "character_updates", "cover_state", "combat", "combat_complete",
+                "hack_state", "available_actions", "net_complete", "narrative_summary",
+            ]
+            for _ in range(rng.randint(0, 7)):
+                d[rng.choice(keys)] = rand(depth + 1)
+            return d
+
+        for _ in range(1200):
+            cpred_apply_net_combat_state(
+                _net_combat_pipeline_state(),
+                rand(),
+                game_state=_net_game_state(),
+            )
+
+    def test_seeded_malformed_collapse_net_combat_does_not_throw(self):
+        rng = random.Random(9102)
+        atoms = [None, 0, 1, "", "txt", True, False, [], [1], {}, {"x": 1}]
+
+        def rand(depth=0):
+            if depth > 2 or rng.random() < 0.5:
+                return rng.choice(atoms)
+            if rng.choice(["list", "dict"]) == "list":
+                return [rand(depth + 1) for _ in range(rng.randint(0, 3))]
+            d = {}
+            keys = ["narrative_summary", "net_complete", "combat_complete", "hack_state", "available_actions"]
+            for _ in range(rng.randint(0, 5)):
+                d[rng.choice(keys)] = rand(depth + 1)
+            return d
+
+        for _ in range(1000):
+            history = []
+            for i in range(rng.randint(1, 8)):
+                in_nc = rng.random() < 0.5
+                msg = {"id": f"m{i}", "role": "assistant" if i % 2 else "user", "content": f"msg{i}"}
+                if in_nc:
+                    msg["net_combat_mode"] = True
+                    msg["net_combat_tool_input"] = rand()
+                history.append(msg)
+
+            branch = [{"id": "sys", "role": "system", "content": "sys"}] + history + [
+                {"id": "last", "role": "user", "content": "last"}
+            ]
+            collapsed = collapse_net_combat_messages(branch)
+            assert collapsed[0]["content"] == "sys"
+            assert collapsed[-1]["content"] == "last"
+
+    def test_seeded_mixed_type_history_collapse_net_combat_does_not_throw(self):
+        rng = random.Random(9103)
+        atoms = [None, 0, 1, "", "txt", True, False, [], [1], {"x": 1}]
+
+        for _ in range(600):
+            history = []
+            for i in range(rng.randint(1, 10)):
+                # Mix dict and non-dict entries; collapse should never assume dict.
+                if rng.random() < 0.35:
+                    history.append(rng.choice(atoms))
+                    continue
+
+                msg = {"id": f"m{i}", "role": "assistant" if i % 2 else "user", "content": f"msg{i}"}
+                if rng.random() < 0.5:
+                    msg["net_combat_mode"] = True
+                    msg["net_combat_tool_input"] = rng.choice([
+                        {"narrative_summary": "NET clash resolved"},
+                        {"narrative_summary": ""},
+                        {"other": "x"},
+                        [1, 2, 3],
+                        "bad",
+                        None,
+                    ])
+                history.append(msg)
+
+            branch = [{"id": "sys", "role": "system", "content": "sys"}] + history + [
+                {"id": "last", "role": "user", "content": "last"}
+            ]
+            collapsed = collapse_net_combat_messages(branch)
+            assert isinstance(collapsed, list)
+            assert collapsed[0]["content"] == "sys"
+            assert collapsed[-1]["content"] == "last"
 
 
 class TestNestedMalformedStructureFuzz:
@@ -3700,3 +4086,217 @@ class TestContractDriftGuards:
         assert {"sustained", "effect"} <= op_enum
         assert set(runner_items["action"]["enum"]) == {"add", "remove"}
         assert "value" in runner_items
+
+    def test_cpred_relationship_ops_schema_covers_inter_npc_ops(self):
+        props = self._report_state_properties("cpred")
+        rel_items = props["relationship_ops"]["items"]["properties"]
+        op_enum = set(rel_items["op"]["enum"])
+        assert {"rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"} <= op_enum
+        assert "other" in rel_items
+        assert "fields" in rel_items
+
+
+class TestCpredRelationshipOps:
+    """Test CPRED relationship_ops apply, clamping, and injection rendering."""
+
+    def test_cpred_rs_basic(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "rs", "target": "Rogue", "change": 10}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["rs"] == 10
+        assert state["relationships"]["Rogue"]["roms"] == 0
+
+    def test_cpred_roms_basic(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "roms", "target": "Judy", "change": 30}
+        ]}, turn=1)
+        assert state["relationships"]["Judy"]["roms"] == 30
+
+    def test_cpred_fr_basic(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "fr", "target": "Tyger Claws", "change": -15}
+        ]}, turn=1)
+        assert state["factions"]["Tyger Claws"]["fr"] == -15
+
+    def test_cpred_rs_clamp_positive(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "rs", "target": "Rogue", "change": 200}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["rs"] == 100
+
+    def test_cpred_rs_clamp_negative(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "rs", "target": "Rogue", "change": -200}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["rs"] == -100
+
+    def test_cpred_roms_clamp_zero(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "roms", "target": "Judy", "change": -50}
+        ]}, turn=1)
+        assert state["relationships"]["Judy"]["roms"] == 0
+
+    def test_cpred_roms_clamp_hundred(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "roms", "target": "Judy", "change": 200}
+        ]}, turn=1)
+        assert state["relationships"]["Judy"]["roms"] == 100
+
+    def test_cpred_fr_clamp(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "fr", "target": "TC", "change": 200}
+        ]}, turn=1)
+        assert state["factions"]["TC"]["fr"] == 100
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "fr", "target": "TC", "change": -300}
+        ]}, turn=2)
+        assert state["factions"]["TC"]["fr"] == -100
+
+    def test_cpred_set_npc(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "set", "target": "Rogue", "type": "npc", "fields": {"rs": 50, "roms": 0, "notes": "Crew fixer"}}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["rs"] == 50
+        assert state["relationships"]["Rogue"]["notes"] == "Crew fixer"
+
+    def test_cpred_set_faction(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "set", "target": "Tyger Claws", "type": "faction", "fields": {"fr": -30}}
+        ]}, turn=1)
+        assert state["factions"]["Tyger Claws"]["fr"] == -30
+
+    def test_cpred_npc_rs(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "npc_rs", "target": "Rogue", "other": "Judy", "change": 15}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["npc_relationships"]["Judy"]["rs"] == 15
+
+    def test_cpred_npc_roms(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "npc_roms", "target": "Rogue", "other": "Judy", "change": 20}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["npc_relationships"]["Judy"]["roms"] == 20
+
+    def test_cpred_npc_set(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "npc_set", "target": "Rogue", "other": "Judy", "fields": {"rs": 60, "roms": 10}}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["npc_relationships"]["Judy"]["rs"] == 60
+        assert state["relationships"]["Rogue"]["npc_relationships"]["Judy"]["roms"] == 10
+
+    def test_cpred_npc_rs_clamp(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "npc_rs", "target": "A", "other": "B", "change": 200}
+        ]}, turn=1)
+        assert state["relationships"]["A"]["npc_relationships"]["B"]["rs"] == 100
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "npc_roms", "target": "A", "other": "B", "change": -50}
+        ]}, turn=2)
+        assert state["relationships"]["A"]["npc_relationships"]["B"]["roms"] == 0
+
+    def test_cpred_relationship_injection_empty(self):
+        state = cpred_init()
+        injection = cpred_build_injection(state)
+        assert "[RELATIONSHIP STATE]" in injection
+        assert "bootstrap" in injection
+
+    def test_cpred_relationship_injection_populated(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "set", "target": "Rogue", "type": "npc", "fields": {"rs": 55, "roms": 0}},
+            {"op": "set", "target": "Tyger Claws", "type": "faction", "fields": {"fr": 30}},
+        ]}, turn=1)
+        injection = cpred_build_injection(state)
+        assert "Rogue" in injection
+        assert "T4: Good" in injection
+        assert "Tyger Claws" in injection
+        assert "T2: Accepted" in injection
+
+    def test_cpred_relationship_injection_with_inter_npc(self):
+        state = cpred_init()
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "set", "target": "Rogue", "type": "npc", "fields": {"rs": 40, "roms": 0}},
+            {"op": "npc_rs", "target": "Rogue", "other": "Judy", "change": 50},
+        ]}, turn=1)
+        injection = cpred_build_injection(state)
+        assert "\u2192 Judy" in injection
+
+    def test_cpred_backward_compat_no_relationships(self):
+        """Existing campaigns with no relationships key still work."""
+        state = {"edgerunners": {}, "ip_tracker": {"session_scores": {"group": 0}, "awards": [], "balances": {}}}
+        # apply_game_state should not crash
+        cpred_apply(state, {"relationship_ops": [
+            {"op": "rs", "target": "Rogue", "change": 5}
+        ]}, turn=1)
+        assert state["relationships"]["Rogue"]["rs"] == 5
+
+    def test_cpred_mixed_edgerunner_and_relationship_ops(self):
+        """Both edgerunner_ops and relationship_ops in same turn."""
+        state = cpred_init()
+        cpred_apply(state, {
+            "edgerunner_ops": [
+                {"edgerunner": "V", "op": "set", "fields": {"hp": {"current": 35, "max": 40}}}
+            ],
+            "relationship_ops": [
+                {"op": "rs", "target": "Rogue", "change": 10}
+            ]
+        }, turn=1)
+        assert state["edgerunners"]["V"]["hp"]["current"] == 35
+        assert state["relationships"]["Rogue"]["rs"] == 10
+
+    def test_cpred_relationship_ops_non_dict_entries_are_ignored(self):
+        state = cpred_init()
+        cpred_apply(
+            state,
+            {
+                "relationship_ops": [
+                    "bad-op",
+                    42,
+                    None,
+                    {"op": "rs", "target": "Rogue", "change": 5},
+                ]
+            },
+            turn=1,
+        )
+        assert state["relationships"]["Rogue"]["rs"] == 5
+
+    def test_cpred_relationship_sequence_invariants(self):
+        """160-turn fuzz: all scores stay in valid ranges."""
+        rng = random.Random(7004)
+        state = cpred_init()
+        for turn in range(1, 161):
+            ops = []
+            for _ in range(rng.randint(1, 5)):
+                op = rng.choice(["rs", "roms", "fr", "npc_rs", "npc_roms"])
+                entry = {
+                    "op": op,
+                    "target": rng.choice(["Rogue", "Judy", "Jackie"]),
+                    "change": rng.randint(-15, 15),
+                }
+                if op in ("npc_rs", "npc_roms"):
+                    entry["other"] = rng.choice(["Rogue", "Judy", "Jackie"])
+                ops.append(entry)
+            cpred_apply(state, {"relationship_ops": ops}, turn=turn)
+
+            for rel in state["relationships"].values():
+                assert -100 <= rel.get("rs", 0) <= 100
+                assert 0 <= rel.get("roms", 0) <= 100
+                for nrel in rel.get("npc_relationships", {}).values():
+                    assert -100 <= nrel.get("rs", 0) <= 100
+                    assert 0 <= nrel.get("roms", 0) <= 100
+            for faction in state["factions"].values():
+                assert -100 <= faction.get("fr", 0) <= 100
