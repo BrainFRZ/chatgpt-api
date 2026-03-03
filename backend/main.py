@@ -2305,6 +2305,16 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+def _tool_input_valid(tool_input: dict, tool_def: dict) -> bool:
+    """Check that all required top-level fields from the tool schema are present."""
+    schema = tool_def.get("input_schema") or {}
+    required = schema.get("required", [])
+    for field in required:
+        if field not in tool_input:
+            return False
+    return True
+
+
 def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str, tool_def: dict, state_contract: str = ""):
     """Non-streaming follow-up to force report_state when tool_choice: auto didn't produce it.
     Returns (tool_input_dict_or_None, retry_usage_dict).
@@ -5038,7 +5048,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         hack_tool_input = None
                         if use_hack_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
-                            if tool_input:
+                            if tool_input and _tool_input_valid(tool_input, gs["hack_tool"]):
                                 gs["apply_hack_state"](hack_state, tool_input)
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
@@ -5047,7 +5057,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             f"node={hack_state.get('current_node')}, "
                                             f"complete={tool_input.get('hack_complete', False)}")
                             else:
-                                logger.warning(f"Hack mode: no tool_use_input, attempting retry for {username}")
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Hack mode: {_reason}, attempting retry for {username}")
                                 try:
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
@@ -5076,7 +5087,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         net_combat_tool_input = None
                         if use_net_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
-                            if tool_input:
+                            if tool_input and _tool_input_valid(tool_input, gs["net_combat_tool"]):
                                 net_combat_tool_input = tool_input
                                 _nc_ps = data.get("pipeline_state", {})
                                 gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"))
@@ -5085,7 +5096,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             f"combat_complete={tool_input.get('combat_complete', False)}, "
                                             f"net_complete={tool_input.get('net_complete', False)}")
                             else:
-                                logger.warning(f"Net combat mode: no tool_use_input for {username}")
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Net combat mode: {_reason}, attempting retry for {username}")
                                 try:
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
@@ -5116,7 +5128,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         ship_combat_tool_input = None
                         if use_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
-                            if tool_input:
+                            if tool_input and _tool_input_valid(tool_input, gs["combat_tool"]):
                                 combat_tool_input = tool_input
                                 # Apply combat state updates
                                 _combat_ps = data.get("pipeline_state", {})
@@ -5125,7 +5137,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 logger.info(f"Combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('combat_complete', False)}")
                             else:
-                                logger.warning(f"Combat mode: no tool_use_input for {username}")
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Combat mode: {_reason}, attempting retry for {username}")
                                 try:
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
@@ -5155,7 +5168,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Handle ship combat mode tool output (Claude ship combat mode)
                         if use_ship_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
-                            if tool_input:
+                            if tool_input and _tool_input_valid(tool_input, gs["ship_combat_tool"]):
                                 ship_combat_tool_input = tool_input
                                 _ship_combat_ps = data.get("pipeline_state", {})
                                 if ship_combat_started_this_turn:
@@ -5167,7 +5180,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 logger.info(f"Ship combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('ship_combat_complete', False)}")
                             else:
-                                logger.warning(f"Ship combat mode: no tool_use_input for {username}")
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Ship combat mode: {_reason}, attempting retry for {username}")
                                 try:
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,
@@ -5208,7 +5222,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 for name, entry in stateful_pipeline_state.get("character_states", {}).items()
                             }
                             tool_input = usage.get('tool_use_input')
-                            if tool_input:
+                            if tool_input and _tool_input_valid(tool_input, gs["state_report_tool"]):
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
                                     stateful_pipeline_state["turn_counter"] += 1
@@ -5223,7 +5237,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 else:
                                     logger.info(f"Stateful: applied tool state updates for user {username}, turn {current_turn}")
                             else:
-                                logger.warning(f"Stateful: no tool_use_input, attempting retry for user {username}")
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Stateful: {_reason}, attempting retry for user {username}")
                                 try:
                                     retry_result, retry_usage = await asyncio.to_thread(
                                         _stateful_tool_retry,

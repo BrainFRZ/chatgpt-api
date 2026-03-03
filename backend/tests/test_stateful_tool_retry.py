@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from unittest.mock import MagicMock
 
-from main import _stateful_tool_retry
+from main import _stateful_tool_retry, _tool_input_valid
 from pipeline import (
     STATE_REPORT_TOOL,
     apply_single_agent_state_updates,
@@ -1236,3 +1236,111 @@ class TestRetryEdgeCases:
         # Minimal retry ignores the prior history and sends one user message.
         assert len(msgs) == 1
         assert result == tool_input
+
+
+# ============================================================
+# _tool_input_valid tests
+# ============================================================
+
+class TestToolInputValid:
+    """Tests for the _tool_input_valid validation helper."""
+
+    TOOL_DEF = {
+        "name": "report_state",
+        "input_schema": {
+            "type": "object",
+            "required": ["is_ooc", "pacing", "scene_state", "character_states"],
+            "properties": {}
+        }
+    }
+
+    def test_complete_input_is_valid(self):
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Ep1", "beat": "Intro", "responses": 1},
+            "scene_state": {"location": "Tavern", "npcs_present": [], "active_tensions": [], "atmosphere": "calm"},
+            "character_states": {}
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is True
+
+    def test_missing_required_field(self):
+        """Missing 'character_states' should fail."""
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Ep1", "beat": "Intro", "responses": 1},
+            "scene_state": {"location": "Tavern"},
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is False
+
+    def test_none_value_for_required_field_passes(self):
+        """Required field present but None should pass (some schemas allow null)."""
+        tool_input = {
+            "is_ooc": False,
+            "pacing": None,
+            "scene_state": {"location": "Tavern"},
+            "character_states": {}
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is True
+
+    def test_empty_schema_no_required(self):
+        """Tool with no required fields should pass any input."""
+        tool_def = {"name": "test", "input_schema": {"type": "object", "properties": {}}}
+        assert _tool_input_valid({"random": "data"}, tool_def) is True
+
+    def test_missing_input_schema(self):
+        """Tool def without input_schema should pass (no required fields to check)."""
+        tool_def = {"name": "test"}
+        assert _tool_input_valid({"anything": True}, tool_def) is True
+
+    def test_extra_fields_are_fine(self):
+        """Extra fields beyond required should not cause failure."""
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {"episode": "Ep1", "beat": "Intro", "responses": 1},
+            "scene_state": {"location": "Tavern"},
+            "character_states": {},
+            "callback_ops": [],
+            "npc_memory_ops": [],
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is True
+
+    def test_false_boolean_is_valid(self):
+        """False is a legitimate value, not the same as None/missing."""
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {},
+            "scene_state": {},
+            "character_states": {}
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is True
+
+    def test_empty_dict_value_is_valid(self):
+        """Empty dict for a required field is valid (present and not None)."""
+        tool_input = {
+            "is_ooc": False,
+            "pacing": {},
+            "scene_state": {},
+            "character_states": {}
+        }
+        assert _tool_input_valid(tool_input, self.TOOL_DEF) is True
+
+    def test_combat_tool_validation(self):
+        """Validates against a combat-style tool schema with different required fields."""
+        combat_tool = {
+            "name": "report_combat_state",
+            "input_schema": {
+                "type": "object",
+                "required": ["narrative", "rolls", "character_updates", "combat", "combat_complete"],
+                "properties": {}
+            }
+        }
+        # Complete
+        assert _tool_input_valid({
+            "narrative": "Attack!", "rolls": [], "character_updates": [],
+            "combat": {"round": 1}, "combat_complete": False
+        }, combat_tool) is True
+        # Missing combat_complete
+        assert _tool_input_valid({
+            "narrative": "Attack!", "rolls": [], "character_updates": [],
+            "combat": {"round": 1}
+        }, combat_tool) is False
