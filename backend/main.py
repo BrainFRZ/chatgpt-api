@@ -7390,7 +7390,7 @@ def get_character_sheet(username: str, project: str):
     # Find files matching *character*sheet* (case-insensitive)
     import fnmatch
     matches = [f for f in os.listdir(uploads_dir)
-               if fnmatch.fnmatch(f.lower(), "*character*sheet*") or fnmatch.fnmatch(f.lower(), "*character*")]
+               if fnmatch.fnmatch(f.lower(), "*character*sheet*")]
     if not matches:
         return {"files": []}
 

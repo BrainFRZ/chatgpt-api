@@ -1164,7 +1164,7 @@ export default function CharacterPanel({
                   ))}
                 </div>
               )}
-              {er.eurobucks != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>Eurobucks: \u20AC${er.eurobucks}</div>}
+              {er.eurobucks != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>Eurobucks: €${er.eurobucks}</div>}
               {er.critical_injuries && er.critical_injuries.length > 0 && (
                 <div style={{ marginTop: '4px' }}>
                   {er.critical_injuries.map((ci: string, i: number) => (
