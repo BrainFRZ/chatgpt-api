@@ -670,7 +670,13 @@ When triggered, guide the player through CoC 7E investigator creation **one step
 - When combat begins, report `combat` in report_state: `{"round": 1, "initiative_order": ["name1", ...], "current_turn": "name"}`
 - DEX-order initiative (highest DEX acts first, no roll)
 - Update round number, current_turn each turn. Set combat to null when combat ends.
-- CoC combat is fast and deadly — most fights should resolve in 1-3 rounds."""
+- CoC combat is fast and deadly — most fights should resolve in 1-3 rounds.
+
+### Intimate Scenes
+When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
+- `npcs`: list of NPC names involved
+- `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
+Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -853,6 +859,21 @@ STATE_REPORT_TOOL = {
                             "type": "string",
                             "description": "Current episode/session from pacing context."
                         }
+                    }
+                }
+            },
+            "sex_scene": {
+                "type": ["object", "null"],
+                "description": "Set when an intimate/sexual scene begins between the PC and NPCs. null on all other turns. Only trigger when the narrative has clearly reached an intimate encounter, not just flirting or suggestive dialogue.",
+                "properties": {
+                    "npcs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of NPCs involved in the intimate scene"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
                     }
                 }
             }

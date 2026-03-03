@@ -548,6 +548,58 @@ def collapse_net_combat_messages(branch_path: list[dict]) -> list[dict]:
     return result
 
 
+def collapse_sex_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse sex_mode messages into a discreet summary pair for normal context.
+
+    Scans for consecutive runs of sex_mode=true messages and replaces each run
+    with a FADE TO BLACK summary pair.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    history = branch_path[1:-1]
+    if not any(msg.get("sex_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not msg.get("sex_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        # Found start of sex mode run — scan to end
+        sex_summary = None
+        j = i
+        while j < len(history) and history[j].get("sex_mode"):
+            if history[j].get("sex_scene_summary"):
+                sex_summary = history[j]["sex_scene_summary"]
+            j += 1
+
+        # Replace entire sex mode run with discreet summary pair
+        result.append({
+            "role": "user",
+            "content": "[An intimate scene took place.]"
+        })
+        if sex_summary:
+            result.append({
+                "role": "assistant",
+                "content": f"[FADE TO BLACK]\n{sex_summary}\n[/FADE TO BLACK]"
+            })
+        else:
+            result.append({
+                "role": "assistant",
+                "content": "[FADE TO BLACK]"
+            })
+
+        i = j
+
+    result.append(branch_path[-1])
+    return result
+
+
 def get_context_pairs(
     branch_path: list[dict],
     threshold_pairs: int,
@@ -1455,7 +1507,7 @@ def run_pipeline(
 
     events_system = build_agent_system_prompt(gs["events_contract"], agent_instructions["events"], agent_files["events"])
     # Collapse hack and combat messages into summary pairs before context trimming
-    branch_path_for_events = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
+    branch_path_for_events = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
     recent_events_pairs, new_trim_anchor_id, _did_trim = get_context_pairs(
         branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
@@ -2602,6 +2654,9 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         pipeline_state["combat"] = parsed["combat"]
+    # Persist sex_scene state from tool report
+    if "sex_scene" in parsed:
+        pipeline_state["sex_scene"] = parsed["sex_scene"]
     return pipeline_state
 
 

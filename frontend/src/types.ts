@@ -52,6 +52,7 @@ export interface ChatMessage {
   service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
   bookmark?: string;  // User-defined bookmark annotation
   hack_mode?: boolean;  // True for messages during a hack mode encounter
+  sex_mode?: boolean;  // True for messages during an intimate scene
 }
 
 export interface HackState {

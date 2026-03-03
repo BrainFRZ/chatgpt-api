@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import asyncio
 import os
 import json
+import re
 import shutil
 from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
@@ -42,6 +43,7 @@ from pipeline import (
     collapse_combat_messages,
     collapse_ship_combat_messages,
     collapse_net_combat_messages,
+    collapse_sex_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
@@ -2478,6 +2480,156 @@ def _combat_file_list(gs):
     return ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"]
 
 
+# ============================================================
+# Sex Mode
+# ============================================================
+
+SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG campaign. Write with the quality and sensibility of literary erotica.
+
+## Voice & Style
+- Use character voice profiles from the project files. Each character should sound and react distinctly.
+- Vary pacing: build tension, use meaningful pauses, let moments breathe. Not every beat needs to escalate.
+- Ground the scene in sensory detail: environment, sounds, textures, temperature, scent.
+- Character emotions and internal reactions matter as much as physical description.
+
+## Character Fidelity
+- Reference character sheets for relevant physical descriptions, cybernetics, mutations, scars, magical features, skills, or spells.
+- Respect relationship dynamics from the injected state. Characters at different relationship tiers behave differently.
+- NPCs act according to their personality profiles and memories. A guarded character doesn't suddenly become uninhibited without narrative justification.
+
+## NPC Agency
+- NPCs are active participants. They should take initiative — suggesting, repositioning, escalating, teasing, leading, reacting with authentic desire and personality.
+- NPC actions, dialogue, and body language should feel driven by their character, not passive.
+- Different NPCs bring different energy: a confident NPC leads differently than a nervous one.
+
+## Player Agency
+- The PC's actions, dialogue, and explicit decisions are controlled by the player.
+- Narrate the PC's physical sensations and involuntary reactions, but not their choices.
+- Don't skip ahead or assume consent to escalation — wait for player input at decision points.
+- If the player's message is brief, match that pacing. If they write at length, reciprocate.
+
+## Scene Ending
+- When the scene reaches a natural conclusion (characters fall asleep, are interrupted, get dressed, etc.), include the tag [SCENE COMPLETE] at the very end of your response, after your narrative.
+- Also include a 1-2 sentence [SCENE SUMMARY: ...] tag capturing what happened for the campaign record.
+- Example: [SCENE COMPLETE]
+[SCENE SUMMARY: PC and Kira shared an intimate night at the safehouse after the mission. Kira revealed her fear of losing the crew.]
+
+## Boundaries
+- Follow the tone established by the campaign. Do not introduce content that clashes with the established setting.
+"""
+
+
+def _sex_file_list(uploads_dir: str) -> list[str]:
+    """Select project files relevant to sex mode scenes.
+
+    Matches by filename substring (case-insensitive):
+    - Character Sheets (.md or .yaml)
+    - Character Descs
+    - NPCs and Factions / NPCs and Relationships / Campaign Bible
+    """
+    if not os.path.exists(uploads_dir):
+        return []
+
+    all_files = sorted(os.listdir(uploads_dir))
+    selected = []
+
+    for fname in all_files:
+        lower = fname.lower()
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in ALLOWED_FILE_EXTENSIONS:
+            continue
+
+        if "character sheet" in lower:
+            selected.append(fname)
+            continue
+
+        if "character desc" in lower:
+            selected.append(fname)
+            continue
+
+        # NPC documents: NPCs and Factions, NPCs and Relationships, Campaign Bible
+        if any(kw in lower for kw in ("npc", "campaign bible")):
+            selected.append(fname)
+            continue
+
+    return selected
+
+
+def _build_sex_injection(pipeline_state: dict, sex_scene: dict) -> str:
+    """Build injection string for sex mode user messages.
+
+    Includes: scene context, NPC memories, relationship state, callback ledger.
+    Excludes: pacing, HUD, dice pool, full character mechanical states.
+    """
+    parts = []
+    npcs = sex_scene.get("npcs", [])
+    summary = sex_scene.get("summary", "")
+
+    # Scene context
+    if summary or npcs:
+        scene_lines = ["[SCENE CONTEXT]"]
+        if npcs:
+            scene_lines.append(f"NPCs present: {', '.join(npcs)}")
+        if summary:
+            scene_lines.append(f"What led here: {summary}")
+        scene_lines.append("[/SCENE CONTEXT]")
+        parts.append("\n".join(scene_lines))
+
+    # NPC memories (only for NPCs in the scene)
+    npc_memories = pipeline_state.get("npc_memories", {})
+    for npc_name in npcs:
+        memories = npc_memories.get(npc_name, [])
+        if memories:
+            mem_lines = [f"[NPC MEMORIES: {npc_name}]"]
+            for idx, m in enumerate(memories):
+                mem_lines.append(f"  [{idx}] (impact {m.get('impact', '?')}) {m.get('text', '')}")
+                if m.get("quote"):
+                    mem_lines.append(f"       \"{m['quote']}\"")
+            mem_lines.append(f"[/NPC MEMORIES: {npc_name}]")
+            parts.append("\n".join(mem_lines))
+
+    # Relationship state (for involved NPCs)
+    game_state = pipeline_state.get("game_state", {})
+    relationships = game_state.get("relationships", {})
+    rel_parts = []
+    for npc_name in npcs:
+        rel = relationships.get(npc_name)
+        if rel:
+            rs = rel.get("rs", 0)
+            roms = rel.get("roms", 0)
+            tier = rel.get("tier", "")
+            line = f"  {npc_name}: RS {rs}"
+            if roms:
+                line += f", RomS {roms}"
+            if tier:
+                line += f" ({tier})"
+            rel_parts.append(line)
+    if rel_parts:
+        parts.append("[RELATIONSHIP STATE]\n" + "\n".join(rel_parts) + "\n[/RELATIONSHIP STATE]")
+
+    # Callback ledger (plot threads may be relevant)
+    callback_ledger = pipeline_state.get("callback_ledger")
+    callbacks = []
+    if isinstance(callback_ledger, dict):
+        callbacks = callback_ledger.get("open") or []
+    elif isinstance(callback_ledger, list):
+        # Backward compatibility for any legacy list-shaped callback state
+        callbacks = callback_ledger
+    if callbacks:
+        cb_lines = ["[CALLBACK LEDGER]"]
+        for cb in callbacks:
+            if not isinstance(cb, dict):
+                continue
+            status = cb.get("status", "open")
+            if status == "open":
+                cb_lines.append(f"  - [{cb.get('id', '?')}] {cb.get('description', '')}")
+        cb_lines.append("[/CALLBACK LEDGER]")
+        if len(cb_lines) > 2:  # Has at least one open callback
+            parts.append("\n".join(cb_lines))
+
+    return "\n\n".join(parts) if parts else ""
+
+
 @app.post("/api/send-message-stream")
 async def send_message_stream(request: SendMessageRequest, http_request: Request):
     """
@@ -2829,12 +2981,40 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if use_ship_combat_mode:
         user_msg_data["ship_combat_mode"] = True
 
+    # ── Sex mode detection ──
+    use_sex_mode = False
+    _sex_scene = data.get("pipeline_state", {}).get("sex_scene")
+    if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and _sex_scene and _sex_scene.get("npcs"):
+        use_sex_mode = True
+
+    # Auto-switch to Opus for sex mode (regardless of current model)
+    if use_sex_mode and model_id != "claude-opus-4.6":
+        _original_model = model_id
+        model_id = "claude-opus-4.6"
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+
+    if use_sex_mode:
+        user_msg_data["sex_mode"] = True
+
+    # ── /sex command detection for handoff turn ──
+    # Detect /sex NPC_LIST prefix in user message to inject handoff directive
+    _sex_handoff_npcs = None
+    user_text_raw = request.message.strip()
+    if user_text_raw.lower().startswith("/sex ") and not use_sex_mode:
+        _sex_handoff_npcs = [n.strip() for n in user_text_raw[5:].split(",") if n.strip()]
+
     # Refresh client if model was auto-switched
     if _original_model:
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
@@ -3167,6 +3347,63 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 json_mode=True,
             )
 
+    elif use_sex_mode:
+        # ============================================================
+        # Sex mode: isolated intimate scene context with Opus
+        # ============================================================
+        sex_ps = data.get("pipeline_state", {})
+        sex_scene = sex_ps.get("sex_scene", {})
+        # Ensure we can restore model when scene ends (report_state-started scenes may omit this)
+        if isinstance(sex_scene, dict) and not sex_scene.get("original_model"):
+            inferred_original_model = _original_model
+            if not inferred_original_model:
+                current_chat_model = data.get("model")
+                if current_chat_model and current_chat_model != "claude-opus-4.6":
+                    inferred_original_model = current_chat_model
+            if inferred_original_model:
+                sex_scene["original_model"] = inferred_original_model
+
+        # Build system prompt: sex contract + selected project files only
+        sex_system_content = SEX_MODE_CONTRACT
+
+        if request.project:
+            uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            for fname in _sex_file_list(uploads_dir):
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        sex_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+
+        # Append scene context to system prompt (cacheable — stable across the scene)
+        sex_injection = _build_sex_injection(sex_ps, sex_scene)
+        if sex_injection:
+            sex_system_content += "\n\n" + sex_injection
+
+        system_msg = {"role": "system", "content": sex_system_content}
+
+        # Context isolation: only sex_mode messages from start_message_id
+        sex_start_id = sex_scene.get("start_message_id")
+        sex_history = []
+        found_start = not sex_start_id
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == sex_start_id:
+                found_start = True
+            if found_start and msg.get("sex_mode"):
+                sex_history.append({"role": msg["role"], "content": msg["content"]})
+
+        user_content = build_message_content(branch_path[-1])
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + sex_history + [new_user_msg]
+        context_start_index = max(1, len(branch_path) - len(sex_history) - 1)
+
+        # Set start_message_id on first sex mode exchange
+        if not sex_start_id:
+            sex_scene["start_message_id"] = user_msg_id
+
+        logger.info(f"Sex mode: {len(sex_scene.get('npcs', []))} NPCs for {username}, "
+                    f"{len(sex_history)} prior exchanges")
+
     elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
         stateful_pipeline_state = migrate_pipeline_state(copy.deepcopy(data.get("pipeline_state")))
@@ -3181,7 +3418,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         trim_anchor_id = data.get("_trim_anchor_id")
         # Collapse hack and combat messages into summary pairs before context trimming
-        branch_path_for_context = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
+        branch_path_for_context = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
             branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
         )
@@ -3224,6 +3461,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # User message with injections prepended + player agency reminder for multi-PC
         user_content = build_message_content(branch_path[-1])
+
+        # /sex command: inject handoff directive into user message
+        if _sex_handoff_npcs:
+            npc_list = ", ".join(_sex_handoff_npcs)
+            user_content += (
+                f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
+                "Write your final narrative beat leading into the intimate scene. "
+                "At the end, generate a summary of what led to this moment:\n"
+                "[SCENE HANDOFF]1-3 sentence summary of the emotional arc that led here[/SCENE HANDOFF]"
+            )
+
         agency_reminder = build_player_agency_reminder(
             user_content, stateful_pipeline_state.get("character_states", {}))
         parts = []
@@ -3239,9 +3487,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         # Collapse hack and combat messages in non-stateful path too
-        bp_filtered = collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))
+        bp_filtered = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
+
+        # /sex command: inject handoff directive into user message (non-stateful path)
+        if _sex_handoff_npcs:
+            npc_list = ", ".join(_sex_handoff_npcs)
+            user_content += (
+                f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
+                "Write your final narrative beat leading into the intimate scene. "
+                "At the end, generate a summary of what led to this moment:\n"
+                "[SCENE HANDOFF]1-3 sentence summary of the emotional arc that led here[/SCENE HANDOFF]"
+            )
 
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
@@ -3307,6 +3565,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         request_params["tool_choice"] = {"type": "auto"}
     elif use_ship_combat_mode:
         request_params = {}
+    elif use_sex_mode:
+        # Sex mode: pure Opus streaming, no tools, cache enabled
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
     else:
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -5346,6 +5614,41 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         assistant_message = accumulated_content or usage.get('content') or ''
                         reasoning_summary = accumulated_thinking or usage.get('reasoning')
 
+                        # ── Sex mode: detect [SCENE COMPLETE] and [SCENE HANDOFF] ──
+                        sex_scene_complete = False
+                        sex_scene_summary_text = None
+                        sex_restore_model = None
+                        if use_sex_mode and "[SCENE COMPLETE]" in assistant_message:
+                            sex_scene_complete = True
+                            _sm = re.search(r'\[SCENE SUMMARY:\s*(.*?)\]', assistant_message, re.DOTALL)
+                            if _sm:
+                                sex_scene_summary_text = _sm.group(1).strip()
+                            # Strip tags from displayed content
+                            assistant_message = assistant_message.replace("[SCENE COMPLETE]", "").strip()
+                            assistant_message = re.sub(r'\[SCENE SUMMARY:.*?\]', '', assistant_message, flags=re.DOTALL).strip()
+                            # Clear sex_scene state and restore original model
+                            ps = data.get("pipeline_state", {})
+                            sex_restore_model = (ps.get("sex_scene") or {}).get("original_model")
+                            ps["sex_scene"] = None
+                            if sex_restore_model:
+                                data["model"] = sex_restore_model
+
+                        # /sex handoff: detect [SCENE HANDOFF] block from the handoff turn
+                        if _sex_handoff_npcs and "[SCENE HANDOFF]" in assistant_message:
+                            _hm = re.search(r'\[SCENE HANDOFF\](.*?)\[/SCENE HANDOFF\]', assistant_message, re.DOTALL)
+                            _handoff_summary = _hm.group(1).strip() if _hm else f"An intimate scene begins with {', '.join(_sex_handoff_npcs)}."
+                            # Strip handoff tags from displayed content
+                            assistant_message = re.sub(r'\[SCENE HANDOFF\].*?\[/SCENE HANDOFF\]', '', assistant_message, flags=re.DOTALL).strip()
+                            assistant_message = re.sub(r'\[INTIMATE SCENE TRANSITION:.*?\]', '', assistant_message).strip()
+                            # Set sex_scene state for next turn
+                            ps = data.get("pipeline_state", {})
+                            ps["sex_scene"] = {
+                                "npcs": _sex_handoff_npcs,
+                                "summary": _handoff_summary,
+                                "original_model": data.get("model", DEFAULT_MODEL),
+                            }
+                            data["pipeline_state"] = ps
+
                         # Get cross-model providers for token counting
                         gpt_provider = ProviderRegistry.get("gpt-5.2")
                         claude_provider = get_claude_provider()
@@ -5514,6 +5817,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if combat_tool_input:
                                 assistant_msg_data["combat_tool_input"] = combat_tool_input
 
+                        # Flag sex mode messages
+                        if use_sex_mode:
+                            assistant_msg_data["sex_mode"] = True
+                            if sex_scene_summary_text:
+                                assistant_msg_data["sex_scene_summary"] = sex_scene_summary_text
+
                         # Flag ship combat mode messages (Claude path)
                         if use_ship_combat_mode:
                             assistant_msg_data["ship_combat_mode"] = True
@@ -5676,6 +5985,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['net_combat_mode'] = True
                         if use_combat_mode:
                             done_data['combat_mode'] = True
+                        if use_sex_mode:
+                            done_data['sex_mode'] = True
+                            if sex_scene_complete:
+                                done_data['sex_complete'] = True
+                        if _sex_handoff_npcs and data.get("pipeline_state", {}).get("sex_scene"):
+                            done_data['sex_mode_handoff'] = True
+                            done_data['sex_handoff_npcs'] = _sex_handoff_npcs
                         if use_ship_combat_mode:
                             done_data['ship_combat_mode'] = True
                             if ship_combat_started_this_turn:
@@ -5690,6 +6006,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     )
                         if _original_model:
                             done_data['original_model'] = _original_model
+                        elif sex_restore_model:
+                            done_data['original_model'] = sex_restore_model
                         if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
                             done_data['hack_complete'] = True
                         if use_net_combat_mode and net_combat_tool_input:
@@ -7377,6 +7695,33 @@ def set_project_game_system(request: SetProjectGameSystemRequest):
     save_project_metadata(username, request.project, metadata)
 
     return {"status": "ok", "game_system": request.game_system}
+
+
+class EndSexSceneRequest(BaseModel):
+    username: str
+    chat_name: str
+    project: str | None = None
+
+
+@app.post("/api/end-sex-scene")
+def end_sex_scene(request: EndSexSceneRequest):
+    """Manually end sex mode via /sex command (no args)."""
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    ps = data.get("pipeline_state", {})
+    sex_scene = ps.get("sex_scene")
+    if not sex_scene:
+        raise HTTPException(status_code=400, detail="No active sex scene")
+
+    restore_model = sex_scene.get("original_model") if isinstance(sex_scene, dict) else None
+    if restore_model:
+        data["model"] = restore_model
+    ps["sex_scene"] = None
+    save_chat(username, request.chat_name, data, request.project)
+    return {"status": "ok", "model": data.get("model")}
 
 
 @app.get("/api/character-sheet/{username}/{project}")

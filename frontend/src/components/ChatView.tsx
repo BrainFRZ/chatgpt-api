@@ -249,6 +249,7 @@ export default function ChatView({
           let backgroundColor;
           const isHackMode = !!(msg as any).hack_mode;
           const isShipCombatMode = !!(msg as any).ship_combat_mode;
+          const isSexMode = !!(msg as any).sex_mode;
           if (!isInContext) {
             // Out of context: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
@@ -258,6 +259,9 @@ export default function ChatView({
           } else if (isShipCombatMode) {
             // Ship combat mode: tactical amber/copper tint
             backgroundColor = msg.role === 'user' ? '#312417' : '#23190f';
+          } else if (isSexMode) {
+            // Sex mode: warm rose/pink tint
+            backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -272,9 +276,10 @@ export default function ChatView({
                 backgroundColor
               }}
             >
-              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} : {})}}>
+              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} : isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} : {})}}>
                 {isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
                 {!isHackMode && isShipCombatMode && <span style={{color: '#f59e0b', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>SHIP</span>}
+                {!isHackMode && !isShipCombatMode && isSexMode && <span style={{color: '#e88fa5', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>XXX</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button

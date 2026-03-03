@@ -293,6 +293,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
+            if (data.sex_mode) (assistantMessage as any).sex_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
@@ -312,7 +313,7 @@ export function useMessaging(deps: UseMessagingDeps) {
               deps.setStats(data.stats);
               deps.setContextStartIndex(data.context_start_index || 1);
               // Update model dropdown to reflect what actually ran
-              if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete)) {
+              if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete || data.sex_complete)) {
                   deps.setSelectedModel(data.original_model);
               } else if (data.model) {
                   deps.setSelectedModel(data.model);
@@ -432,6 +433,36 @@ export function useMessaging(deps: UseMessagingDeps) {
     deps.setStateNotifications([]);
 
     const ctx = createContextGuard();
+
+    // Handle /sex (no args) → end scene via API
+    const trimmedMsg = newMessage.trim();
+    if (trimmedMsg.toLowerCase() === '/sex' && deps.currentProject) {
+      setNewMessage('');
+      try {
+        const response = await fetch('/api/end-sex-scene', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: deps.user.username,
+            chat_name: ctx.chat,
+            project: ctx.project
+          })
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ detail: 'Failed to end scene' }));
+          deps.setError(err.detail || 'Failed to end sex scene');
+        } else {
+          const payload = await response.json().catch(() => null);
+          if (payload?.model) {
+            deps.setSelectedModel(payload.model);
+          }
+        }
+      } catch (err) {
+        deps.setError('Failed to end sex scene');
+      }
+      return;
+    }
+
     const messageText = newMessage;
     const filesToSend = [...stagedFiles];
 
@@ -603,7 +634,9 @@ export function useMessaging(deps: UseMessagingDeps) {
               reasoning: data.reasoning,
               model: data.model,
               service_tier: data.service_tier,
-              ...(data.hack_mode ? { hack_mode: true } : {})
+              ...(data.hack_mode ? { hack_mode: true } : {}),
+              ...(data.sex_mode ? { sex_mode: true } : {}),
+              ...(data.sex_mode_handoff ? { sex_mode_handoff: true } : {})
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
@@ -620,6 +653,9 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             if (data.net_combat_mode) {
               (userMsgWithId as any).net_combat_mode = true;
+            }
+            if (data.sex_mode) {
+              (userMsgWithId as any).sex_mode = true;
             }
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
               ? (data.ship_combat_init_message as ChatMessage)
@@ -643,7 +679,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setStats(data.stats);
             deps.setContextStartIndex(data.context_start_index || 1);
             // Update model dropdown to reflect what actually ran
-            if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete)) {
+            if (data.original_model && (data.hack_complete || data.combat_complete || data.ship_combat_complete || data.net_combat_complete || data.sex_complete)) {
                 // Auto-switched mode just ended — restore to original model
                 deps.setSelectedModel(data.original_model);
             } else if (data.model) {

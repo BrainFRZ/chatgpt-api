@@ -2198,7 +2198,13 @@ When a cyberdeck-equipped PC initiates a hack against a system (Quick Hack or Fu
 
 Simple Checks (single Hacking skill check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Sequences where the cyberdeck-equipped netrunner is jacking into a system.
 
-Describe the moment of jacking in narratively (the character connecting, the Matrix materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges."""
+Describe the moment of jacking in narratively (the character connecting, the Matrix materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges.
+
+### Intimate Scenes
+When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
+- `npcs`: list of NPC names involved
+- `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
+Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -2431,6 +2437,21 @@ STATE_REPORT_TOOL = {
                                 "size_class": {"type": "string"}
                             }
                         }
+                    }
+                }
+            },
+            "sex_scene": {
+                "type": ["object", "null"],
+                "description": "Set when an intimate/sexual scene begins between the PC and NPCs. null on all other turns. Only trigger when the narrative has clearly reached an intimate encounter, not just flirting or suggestive dialogue.",
+                "properties": {
+                    "npcs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of NPCs involved in the intimate scene"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
                     }
                 }
             }
