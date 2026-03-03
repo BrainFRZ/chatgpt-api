@@ -259,7 +259,10 @@ export default function CharacterPanel({
   const getCharData = (name: string) => {
     const cs = state.character_states || {};
     const entry = cs[name];
-    if (!entry) return { type: 'npc' };
+    if (!entry) {
+      const pcs = (state.scene_state || {}).pcs_present || [];
+      return { type: pcs.includes(name) ? 'pc' : 'npc' };
+    }
     return entry.data || entry || {};
   };
 
