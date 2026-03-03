@@ -928,27 +928,18 @@ export default function CharacterPanel({
         const ext = file.name.split('.').pop()?.toLowerCase() || '';
         const isYaml = ext === 'yaml' || ext === 'yml';
         if (isYaml) {
-          // YAML: split on banner blocks (# ===...title...# === or # ###...title...# ###)
-          const yamlPattern = /^# [=#]{3,}\n#\s+(.+)\n# [=#]{3,}/gm;
+          // YAML: split on banner blocks (# ===...title...# ===)
+          const yamlPattern = /^# ={3,}\n#\s+(.+)\n# ={3,}/gm;
           const yamlSections: { name: string; start: number; }[] = [];
           let m;
           while ((m = yamlPattern.exec(file.content)) !== null) {
             yamlSections.push({ name: m[1].trim(), start: m.index });
           }
           for (let i = 0; i < yamlSections.length; i++) {
-            const start = yamlSections[i].start;
-            const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : file.content.length;
-            const sectionText = file.content.slice(start, end);
             if (yamlSections[i].name.toLowerCase().includes(charLower)) {
-              return { sheetSection: sectionText.trim(), sheetIsYaml: true };
-            }
-            // Also check identity fields in YAML body (handles banners like "PLAYER CHARACTER" where name is in the data, not the title)
-            const identityRe = /^\s*(?:handle|name|real_name|identity_name)\s*:\s*"?([^"\n]+)"?/gm;
-            let idMatch;
-            while ((idMatch = identityRe.exec(sectionText)) !== null) {
-              if (idMatch[1].toLowerCase().includes(charLower)) {
-                return { sheetSection: sectionText.trim(), sheetIsYaml: true };
-              }
+              const start = yamlSections[i].start;
+              const end = i + 1 < yamlSections.length ? yamlSections[i + 1].start : file.content.length;
+              return { sheetSection: file.content.slice(start, end).trim(), sheetIsYaml: true };
             }
           }
         } else {
