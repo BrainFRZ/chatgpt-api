@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { styles } from '../styles';
+import NetMapPopup from './NetMapPopup';
 
 export interface CharacterPanelProps {
   isMobile: boolean;
@@ -187,6 +188,7 @@ export default function CharacterPanel({
 }: CharacterPanelProps) {
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
+  const [showNetMap, setShowNetMap] = useState(false);
 
   // Vital bar color by percentage
   const vitalColor = (cur: number, max: number, label?: string) => {
@@ -431,7 +433,25 @@ export default function CharacterPanel({
                 Brain Damage: {hs.brain_damage}
               </div>
             )}
+
           </>
+        )}
+
+        {/* NET Map button — outside condensed block so it shows on mobile too */}
+        {hs.system_map && (
+          <button
+            onClick={() => setShowNetMap(true)}
+            style={{
+              width: '100%', marginTop: '6px', padding: '4px',
+              fontSize: '0.65rem', fontWeight: 700,
+              color: '#00ff41', backgroundColor: '#00ff4112',
+              border: '1px solid #00ff4130', borderRadius: '3px',
+              cursor: 'pointer', fontFamily: 'monospace',
+              letterSpacing: '2px',
+            }}
+          >
+            MAP
+          </button>
         )}
       </div>
     );
@@ -1479,6 +1499,14 @@ export default function CharacterPanel({
     );
   };
 
+  // Derive net map source — hack mode or net combat
+  const netMapSource = hackState?.system_map ? hackState : (pipelineState?.net_combat?.system_map ? pipelineState.net_combat : null);
+
+  // Close net map when hack mode ends
+  useEffect(() => {
+    if (!netMapSource) setShowNetMap(false);
+  }, [netMapSource]);
+
   return (
     <>
       {renderDesktopPanel()}
@@ -1487,6 +1515,16 @@ export default function CharacterPanel({
       {renderAllCharactersModal()}
       {renderNpcMemoriesModal()}
       {renderCallbacksModal()}
+      {showNetMap && netMapSource?.system_map && (
+        <NetMapPopup
+          systemMap={netMapSource.system_map}
+          revealedNodes={netMapSource.revealed_nodes || netMapSource.nodes_visited || []}
+          currentNode={netMapSource.current_node || ''}
+          nodesVisited={netMapSource.nodes_visited || []}
+          iceStatus={netMapSource.ice_status || {}}
+          onClose={() => setShowNetMap(false)}
+        />
+      )}
     </>
   );
 }

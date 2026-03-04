@@ -240,11 +240,14 @@ class TestSetChatModel:
             "anthropic_key": "sk-ant-test"
         })
 
-        response = client.post("/api/set-chat-model", json={
-            "username": test_user,
-            "chat_name": "test_chat",
-            "model": "claude-sonnet-4.5"
-        })
+        # Mock count_tokens_api to avoid real API call with fake key
+        from providers.anthropic_provider import AnthropicProvider
+        with patch.object(AnthropicProvider, 'count_tokens_api', return_value=100):
+            response = client.post("/api/set-chat-model", json={
+                "username": test_user,
+                "chat_name": "test_chat",
+                "model": "claude-sonnet-4.5"
+            })
         assert response.status_code == 200
         assert response.json()["model"] == "claude-sonnet-4.5"
 
@@ -289,8 +292,8 @@ class TestSetChatModel:
         This ensures cache stability: trimming to target on switch means
         the first message won't cause an immediate re-trim on the second message.
         """
-        # Create a chat with messages that have token counts
-        # We'll create enough "tokens" to exceed Claude's target (140k) but stay under threshold (180k)
+        # Claude limits: threshold=195k, target=160k
+        # Create enough tokens to exceed target and trigger trimming
         chat_data = {
             "messages": [
                 {"id": "sys", "role": "system", "content": "You are helpful.", "total_tokens": 100},
@@ -300,16 +303,16 @@ class TestSetChatModel:
             "stats": {}
         }
 
-        # Add messages totaling ~150k tokens (between Claude's target=140k and threshold=180k)
+        # Add 20 messages at 10k each = 200k total (above threshold 195k, triggers trim to target 160k)
         parent_id = "sys"
-        for i in range(15):
+        for i in range(20):
             msg_id = f"msg{i}"
             chat_data["messages"].append({
                 "id": msg_id,
                 "parent_id": parent_id,
                 "role": "user" if i % 2 == 0 else "assistant",
-                "content": "x" * 1000,  # Content for token counting
-                "total_tokens": 10000  # Each message is 10k tokens
+                "content": "x" * 1000,
+                "total_tokens": 10000
             })
             parent_id = msg_id
 
@@ -326,16 +329,17 @@ class TestSetChatModel:
             "anthropic_key": "sk-ant-test"
         })
 
-        # Mock the Anthropic provider's count_tokens to return the pre-set total_tokens
-        # This ensures calculate_context_window uses our intended token counts
+        # Mock the Anthropic provider's token counting to avoid real API calls
         from providers.anthropic_provider import AnthropicProvider
-        original_count_tokens = AnthropicProvider.count_tokens
 
         def mock_count_tokens(self, text):
-            # Return a fixed high count to ensure we're over the target
-            return 10000  # Each call returns 10k tokens
+            return 10000
 
-        with patch.object(AnthropicProvider, 'count_tokens', mock_count_tokens):
+        def mock_count_tokens_api(self, text, api_key):
+            return 10000
+
+        with patch.object(AnthropicProvider, 'count_tokens', mock_count_tokens), \
+             patch.object(AnthropicProvider, 'count_tokens_api', mock_count_tokens_api):
             # Switch to Claude
             response = client.post("/api/set-chat-model", json={
                 "username": test_user,
@@ -346,13 +350,10 @@ class TestSetChatModel:
         assert response.status_code == 200
         result = response.json()
 
-        # The context_start_index should reflect trimming to TARGET (140k), not THRESHOLD (180k)
-        # With 16 messages at ~10k tokens each = 160k total
-        # Trimming to 140k target means we should drop at least 2-3 messages
-        # context_start_index > 1 means some messages are grayed out
+        # context_start_index should reflect trimming to target (160k)
+        # 21 messages at ~10k = 200k total, exceeds target, so some must be trimmed
         assert "context_start_index" in result
-        # We expect trimming since 160k > 140k target
-        assert result["context_start_index"] > 1, "Should trim to target (140k), not keep everything up to threshold (180k)"
+        assert result["context_start_index"] > 1, "Should trim to target (160k), not keep everything up to threshold (195k)"
 
 
 class TestGetChatModel:
@@ -406,18 +407,18 @@ class TestCreateChatWithModel:
         assert chat_data.get("model") == "claude-sonnet-4.5"
 
     def test_create_chat_without_model(self, client, test_user, temp_data_dir):
-        """Creating chat without model should not set model field."""
+        """Creating chat without explicit model should default to user's default model."""
         response = client.post("/api/create-chat", json={
             "username": test_user,
             "chat_name": "no_model_chat"
         })
         assert response.status_code == 200
 
-        # Verify the chat does not have model field (will default on read)
+        # Chat should have default model set (get_default_model_for_user resolves based on API keys)
         chat_path = Path(temp_data_dir) / test_user / "chat_no_model_chat.json"
         with open(chat_path) as f:
             chat_data = json.load(f)
-        assert "model" not in chat_data
+        assert "model" in chat_data
 
 
 # ============================================================

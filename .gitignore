@@ -16,6 +16,7 @@
 !frontend/src/components/CharacterPanel.tsx
 !frontend/src/components/ProjectLanding.tsx
 !frontend/src/components/Modals.tsx
+!frontend/src/components/NetMapPopup.tsx
 !frontend/src/hooks/
 !frontend/src/hooks/useMessaging.ts
 !frontend/src/hooks/useSync.ts
@@ -56,6 +57,8 @@
 !backend/tests/test_docs_refresh.py
 !backend/tests/test_malformed_tool_inputs.py
 !backend/tests/test_system_map_nudge_fuzz.py
+!backend/tests/test_netmap_malformed_fuzz.py
+!backend/tests/test_netmap_e2e.py
 !data/
 !data/rulebooks/
 !data/rulebooks/cp_red/

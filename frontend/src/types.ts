@@ -55,6 +55,19 @@ export interface ChatMessage {
   sex_mode?: boolean;  // True for messages during an intimate scene
 }
 
+export interface SystemMapNode {
+  type: 'gateway' | 'data_node' | 'control_node' | 'password_gate' | 'target';
+  ice: 'patrol' | 'tar' | 'black' | 'trace' | null;
+  dv: number;
+  connections: string[];
+  contents: string;
+}
+
+export interface SystemMap {
+  sr: number;
+  nodes: Record<string, SystemMapNode>;
+}
+
 export interface HackState {
   active: boolean;
   tier: 'quick_hack' | 'full_sequence' | 'full_run';
@@ -81,12 +94,13 @@ export interface HackState {
   // Shared fields
   current_node: string;
   nodes_visited: string[];
+  revealed_nodes?: string[];
   ice_status: Record<string, any>;
   trace_progress: number | null;
   tar_stacks: number;
   narrative_summary: string | null;
   available_actions: string[];
-  system_map: any | null;
+  system_map: SystemMap | null;
   start_message_id: string | null;
 }
 

@@ -373,7 +373,7 @@ def apply_game_state(game_state, agent_json, turn):
                             continue
                         try:
                             style_ip = int(ind.get("style_ip", 0))
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             style_ip = 0
                         style_cat = ind.get("style_category", "")
                         if not isinstance(style_cat, str):
@@ -2345,7 +2345,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                 scs = copy.deepcopy(scs)
                 try:
                     hp_max = int(scs.get("hp_max", 0))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     logger.warning(
                         "CPRED apply_cpred_combat_state: invalid set_combat_stats.hp_max for %s: %r",
                         name, scs.get("hp_max")
@@ -2373,7 +2373,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
         if hp_delta is not None:
             try:
                 hp_delta = int(hp_delta)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 logger.warning(
                     "CPRED apply_cpred_combat_state: invalid hp_delta for %s: %r",
                     name, upd.get("hp_delta")
@@ -2414,7 +2414,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                     raw_delta = armor_delta.get(loc, 0)
                     try:
                         delta = int(raw_delta)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         logger.warning(
                             "CPRED apply_cpred_combat_state: invalid armor_delta for %s %s: %r",
                             name, loc, raw_delta
@@ -2432,7 +2432,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                         raw_delta = armor_delta.get(loc, 0)
                         try:
                             delta = int(raw_delta)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             logger.warning(
                                 "CPRED apply_cpred_combat_state: invalid armor_delta for %s %s: %r",
                                 name, loc, raw_delta
@@ -2446,7 +2446,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
         if luck_delta is not None and is_pc:
             try:
                 luck_delta = int(luck_delta)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 logger.warning(
                     "CPRED apply_cpred_combat_state: invalid luck_delta for %s: %r",
                     name, upd.get("luck_delta")
@@ -2477,7 +2477,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                     wname = au.get("weapon", "")
                     try:
                         cur = int(au.get("current", 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         logger.warning(
                             "CPRED apply_cpred_combat_state: invalid ammo.current for %s weapon %s: %r",
                             name, wname, au.get("current")
@@ -2502,7 +2502,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                         wname = au.get("weapon", "")
                         try:
                             cur = int(au.get("current", 0))
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             logger.warning(
                                 "CPRED apply_cpred_combat_state: invalid ammo.current for %s weapon %s: %r",
                                 name, wname, au.get("current")
@@ -2530,7 +2530,7 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                 continue
             try:
                 dv_mod = int(ci.get("dv_mod", 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 logger.warning(
                     "CPRED apply_cpred_combat_state: invalid critical injury dv_mod for %s: %r",
                     name, ci.get("dv_mod")
@@ -2723,7 +2723,7 @@ On their turn, a Netrunner chooses EITHER Meat Action(s) OR NET Actions — neve
 
 ### Quick Hack Flow (Rulebook §3)
 3 linear nodes (entry → obstacle → objective).
-- Exchange 1: Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
+- Exchange 1: Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Initialize revealed_nodes with the starting node. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
 - Exchanges 2-5: Navigate obstacle nodes, resolve ICE encounters and checks. One player decision + resolution per exchange.
 - Final exchange: Objective node + completion. Set hack_complete: true.
 - Target 3-6 exchanges total. NEVER compress multiple phases into one exchange. NEVER choose actions for the player.
@@ -2731,18 +2731,20 @@ On their turn, a Netrunner chooses EITHER Meat Action(s) OR NET Actions — neve
 ### Full Run Flow (Rulebook §4)
 4-6 node network with routing choices.
 - Exchange 1: Generate system architecture per Rulebook §4. Store in hack_state.system_map as JSON: {"sr": N, "nodes": {"NodeName": {"type": "gateway|data_node|control_node|password_gate|target", "ice": "patrol|tar|black|trace|null", "dv": N, "connections": [...], "contents": "..."}}}
-- Describe the Gateway node. The player does NOT see the map — reveal only through navigation and Probe/Pathfinder.
+- Initialize revealed_nodes with the starting node. Describe the Gateway node. The player does NOT see the full map — reveal only through navigation and Probe/Pathfinder.
 - Subsequent exchanges: Player navigates, fights ICE, accesses objectives. Only reveal nodes the Netrunner can see.
 - Target 5-10 exchanges total.
 
 ### State Tracking
 - **alert_level**: Cannot decrease mid-run. See Alert Escalation below for triggers and thresholds.
 - **cycles_remaining**: Spent on Boosted actions (§7) and Disable (§5). Refresh on Jack Out.
-- **active_programs**: Track each Program's name, category, REZ, and status. Attackers Deactivate after use.
+- **active_programs**: Track each Program's name, category, REZ, and status. Attackers Deactivate after use. Programs only — do NOT put Hardware here.
+- **installed_hardware**: Track Cyberdeck Hardware (e.g. Backup Drive, Range Extension, Signal Scrambler). Hardware occupies Hardware Option Slots on the deck, NOT program slots. Read from the character sheet; do not change mid-run.
 - **ice_status**: Track per node — name, behavioral type, REZ current/max, status (active/bypassed/disabled/derezzed). When Black ICE hunts to a new node, move its entry to the new node key.
 - **brain_damage**: Cumulative HP damage from Black ICE and effects. Applied directly to HP, ignores armor, no Critical Injuries.
 - **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. See Trace & Convergence below.
 - **tar_stacks**: Each Tar encounter adds a stack. Effects per Rulebook §5.
+- **revealed_nodes**: Nodes the Netrunner knows exist (superset of nodes_visited). Add nodes discovered via Pathfinder, Eye-Dee, or any other means. Never remove entries.
 
 ### Alert Escalation
 Alert only rises from events INSIDE the architecture. These are the triggers — apply them immediately when they occur:
@@ -2850,6 +2852,7 @@ REPORT_HACK_STATE_TOOL = {
                     "cycles_remaining": {"type": "integer", "minimum": 0},
                     "active_programs": {
                         "type": "array",
+                        "description": "Programs only (Boosters, Defenders, Attackers). Do NOT include Hardware here.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -2859,6 +2862,11 @@ REPORT_HACK_STATE_TOOL = {
                                 "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}
                             }
                         }
+                    },
+                    "installed_hardware": {
+                        "type": "array",
+                        "description": "Cyberdeck Hardware (Backup Drive, Range Extension, etc.). Uses Hardware Option Slots, NOT program slots. Read from character sheet on first exchange.",
+                        "items": {"type": "string"}
                     },
                     "current_node": {"type": "string"},
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
@@ -2888,6 +2896,11 @@ REPORT_HACK_STATE_TOOL = {
                     "system_map": {
                         "type": ["object", "null"],
                         "description": "Set on first exchange with complete system architecture. Quick Hacks: 3 linear nodes. Full Runs: 4-6 node network."
+                    },
+                    "revealed_nodes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Node names the Netrunner has discovered (via entering, Pathfinder, etc.). Add newly discovered nodes — never remove."
                     },
                     "net_actions_used": {
                         "type": "integer",
@@ -2921,7 +2934,7 @@ def _get_alert_name(level):
     """Return alert level name for CPRED NET encounters."""
     try:
         level = int(level)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "Unknown"
     if level <= 0:
         return "Dormant"
@@ -2956,10 +2969,12 @@ def init_hack_state(
         "net_actions_per_turn": net_actions,
         "start_message_id": None,
         "system_map": None,
+        "revealed_nodes": ["Gateway"],
         "alert_level": 0,
         "cycles_remaining": cycles_max,
         "cycles_max": cycles_max,
         "active_programs": [],
+        "installed_hardware": [],
         "current_node": "Gateway",
         "nodes_visited": ["Gateway"],
         "ice_status": {},
@@ -2995,14 +3010,29 @@ def apply_hack_state(hack_state, tool_input):
 
     # Update tracked fields from model's state report
     for field in ["alert_level", "cycles_remaining", "active_programs",
-                  "current_node", "nodes_visited", "ice_status",
-                  "trace_progress", "tar_stacks", "brain_damage"]:
+                  "installed_hardware", "current_node", "nodes_visited",
+                  "ice_status", "trace_progress", "tar_stacks",
+                  "brain_damage", "revealed_nodes"]:
         if field in hs:
             hack_state[field] = hs[field]
 
     # System map (Full Run, first exchange only)
     if hs.get("system_map") and not hack_state.get("system_map"):
         hack_state["system_map"] = hs["system_map"]
+
+    # Validate revealed_nodes type — model may send garbage
+    if not isinstance(hack_state.get("revealed_nodes"), list):
+        visited_fallback = hack_state.get("nodes_visited", [])
+        hack_state["revealed_nodes"] = list(visited_fallback) if isinstance(visited_fallback, list) else ["Gateway"]
+
+    # Auto-merge: visiting a node always reveals it
+    visited = hack_state.get("nodes_visited", [])
+    revealed = hack_state.get("revealed_nodes", [])
+    if isinstance(visited, list) and isinstance(revealed, list):
+        for n in visited:
+            if n not in revealed:
+                revealed.append(n)
+        hack_state["revealed_nodes"] = revealed
 
     # Available actions for HUD
     if tool_input.get("available_actions"):
@@ -3019,7 +3049,7 @@ def apply_hack_state(hack_state, tool_input):
     if net_actions_used is not None:
         try:
             net_actions_used = int(net_actions_used)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             net_actions_used = 0
         remaining = hack_state.get("net_actions_remaining", hack_state.get("net_actions_per_turn", 3))
         remaining = max(0, remaining - net_actions_used)
@@ -3058,7 +3088,7 @@ def build_hack_injection(hack_state, pipeline_state=None):
 
     try:
         alert_level = int(hack_state.get("alert_level", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         alert_level = 0
     alert_name = _get_alert_name(alert_level)
     cycles_max = hack_state.get("cycles_max", 3)
@@ -3107,6 +3137,11 @@ def build_hack_injection(hack_state, pipeline_state=None):
     else:
         lines.append("Active Programs: None")
 
+    # Installed hardware (Hardware Option Slots — separate from programs)
+    hardware = hack_state.get("installed_hardware", [])
+    if isinstance(hardware, list) and hardware:
+        lines.append(f"Installed Hardware: {', '.join(str(h) for h in hardware)}")
+
     lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
     nodes_visited = hack_state.get("nodes_visited", ["Gateway"])
     if isinstance(nodes_visited, list):
@@ -3142,13 +3177,13 @@ def build_hack_injection(hack_state, pipeline_state=None):
             elif trace >= trace_max - 1:
                 trace_line += " [CRITICAL — completes next turn!]"
             lines.append(trace_line)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             lines.append(f"Trace Progress: {trace}")
 
     # Tar stacks
     try:
         tar = int(hack_state.get("tar_stacks", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         tar = 0
     if tar:
         lines.append(f"Tar Stacks: {tar} (-{tar * 2} to next check or 1 Cycle to ignore)")
@@ -3171,6 +3206,11 @@ def build_hack_injection(hack_state, pipeline_state=None):
         parts.append(f"[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
     else:
         parts.append("[SYSTEM MAP MISSING — you MUST include system_map in your report_hack_state call this exchange]")
+
+    # Revealed nodes for fog-of-war tracking
+    revealed = hack_state.get("revealed_nodes", [])
+    if isinstance(revealed, list) and revealed:
+        parts.append(f"Revealed nodes: {', '.join(str(n) for n in revealed)}")
 
     return "\n\n".join(parts)
 
@@ -3452,7 +3492,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
-- **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, ice_status, trace_progress, tar_stacks, brain_damage, system_map).
+- **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, revealed_nodes, ice_status, trace_progress, tar_stacks, brain_damage, system_map). revealed_nodes is a superset of nodes_visited — add nodes discovered via Pathfinder, Eye-Dee, or any other means. Never remove entries.
 - **cover_state**: meatspace cover for ALL combatants.
 - **combat**: initiative tracker (round, initiative_order, current_turn).
 
@@ -3565,14 +3605,20 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                 "properties": {
                     "alert_level": {"type": "integer", "minimum": 0},
                     "cycles_remaining": {"type": "integer", "minimum": 0},
-                    "active_programs": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]}, "rez": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}}}},
+                    "active_programs": {"type": "array", "description": "Programs only — NOT Hardware.", "items": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]}, "rez": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}}}},
+                    "installed_hardware": {"type": "array", "description": "Cyberdeck Hardware (Hardware Option Slots, NOT program slots).", "items": {"type": "string"}},
                     "current_node": {"type": "string"},
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
                     "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
                     "trace_progress": {"type": ["integer", "null"]},
                     "tar_stacks": {"type": "integer", "minimum": 0},
                     "brain_damage": {"type": "integer"},
-                    "system_map": {"type": ["object", "null"]}
+                    "system_map": {"type": ["object", "null"]},
+                    "revealed_nodes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Node names the Netrunner has discovered (via entering, Pathfinder, etc.). Add newly discovered nodes — never remove."
+                    }
                 }
             },
             "combat_complete": {
@@ -3622,8 +3668,10 @@ def init_net_combat_state(
         "cycles_remaining": cycles_max,
         "cycles_max": cycles_max,
         "active_programs": [],
+        "installed_hardware": [],
         "current_node": "Gateway",
         "nodes_visited": ["Gateway"],
+        "revealed_nodes": ["Gateway"],
         "ice_status": {},
         "trace_progress": None,
         "tar_stacks": 0,
@@ -3663,27 +3711,27 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
 
     try:
         interface_rank = int(hack_state.get("interface_rank", 4))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         interface_rank = 4
     try:
         cycles_remaining = int(hack_state.get("cycles_remaining", 3))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         cycles_remaining = 3
     try:
         cycles_max = int(hack_state.get("cycles_max", 3))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         cycles_max = 3
     try:
         alert_level = int(hack_state.get("alert_level", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         alert_level = 0
     try:
         tar_stacks = int(hack_state.get("tar_stacks", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         tar_stacks = 0
     try:
         brain_damage = int(hack_state.get("brain_damage", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         brain_damage = 0
     nodes_visited = hack_state.get("nodes_visited", ["Gateway"])
     if not isinstance(nodes_visited, list):
@@ -3691,12 +3739,18 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
     active_programs = hack_state.get("active_programs", [])
     if not isinstance(active_programs, list):
         active_programs = []
+    installed_hardware = hack_state.get("installed_hardware", [])
+    if not isinstance(installed_hardware, list):
+        installed_hardware = []
     available_actions = hack_state.get("available_actions", [])
     if not isinstance(available_actions, list):
         available_actions = []
     ice_status = hack_state.get("ice_status", {})
     if not isinstance(ice_status, dict):
         ice_status = {}
+    revealed_nodes = hack_state.get("revealed_nodes", [])
+    if not isinstance(revealed_nodes, list):
+        revealed_nodes = list(nodes_visited)
 
     net_actions = 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
     nc = {
@@ -3713,8 +3767,10 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "cycles_remaining": cycles_remaining,
         "cycles_max": cycles_max,
         "active_programs": copy.deepcopy(active_programs),
+        "installed_hardware": list(installed_hardware),
         "current_node": hack_state.get("current_node", "Gateway"),
         "nodes_visited": list(nodes_visited),
+        "revealed_nodes": list(revealed_nodes),
         "ice_status": copy.deepcopy(ice_status),
         "trace_progress": hack_state.get("trace_progress"),
         "tar_stacks": tar_stacks,
@@ -3773,7 +3829,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                 scs = copy.deepcopy(scs)
                 try:
                     hp_max = max(0, int(scs.get("hp_max", 0)))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     hp_max = 0
                 scs["hp_max"] = hp_max
                 d["combat_data"] = copy.deepcopy(scs)
@@ -3794,7 +3850,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
         if hp_delta is not None:
             try:
                 hp_delta = int(hp_delta)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 hp_delta = None
         if hp_delta is not None:
             if is_pc:
@@ -3823,7 +3879,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                 for loc in ("head", "body"):
                     try:
                         delta = int(armor_delta.get(loc, 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                     if delta:
                         er["armor"][loc] = max(0, er["armor"].get(loc, 0) + delta)
@@ -3836,7 +3892,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                     for loc in ("head", "body"):
                         try:
                             delta = int(armor_delta.get(loc, 0))
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             continue
                         if delta:
                             cd_armor[loc] = max(0, cd_armor.get(loc, 0) + delta)
@@ -3846,7 +3902,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
         if luck_delta is not None and is_pc:
             try:
                 luck_delta = int(luck_delta)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 luck_delta = None
         if luck_delta is not None and is_pc:
             er = edgerunners[name]
@@ -3863,7 +3919,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                     wname = au.get("weapon", "")
                     try:
                         cur = int(au.get("current", 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                     for w in er.get("weapons", []):
                         if w.get("name") == wname:
@@ -3880,7 +3936,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                         wname = au.get("weapon", "")
                         try:
                             cur = int(au.get("current", 0))
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             continue
                         for w in cd.get("weapons", []):
                             if w.get("name") == wname:
@@ -3893,7 +3949,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                 continue
             try:
                 dv_mod = int(ci.get("dv_mod", 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 dv_mod = 1
             ci_entry = {
                 "name": ci.get("name", "Unknown Injury"),
@@ -4007,12 +4063,27 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
     if isinstance(hs, dict):
         for field in ["alert_level", "cycles_remaining", "active_programs",
                       "current_node", "nodes_visited", "ice_status",
-                      "trace_progress", "tar_stacks", "brain_damage"]:
+                      "trace_progress", "tar_stacks", "brain_damage",
+                      "revealed_nodes"]:
             if field in hs:
                 nc[field] = hs[field]
         # System map (first exchange only)
         if hs.get("system_map") and not nc.get("system_map"):
             nc["system_map"] = hs["system_map"]
+
+    # Validate revealed_nodes type — model may send garbage
+    if not isinstance(nc.get("revealed_nodes"), list):
+        visited_fallback = nc.get("nodes_visited", [])
+        nc["revealed_nodes"] = list(visited_fallback) if isinstance(visited_fallback, list) else ["Gateway"]
+
+    # Auto-merge: visiting a node always reveals it
+    visited = nc.get("nodes_visited", [])
+    revealed = nc.get("revealed_nodes", [])
+    if isinstance(visited, list) and isinstance(revealed, list):
+        for n in visited:
+            if n not in revealed:
+                revealed.append(n)
+        nc["revealed_nodes"] = revealed
 
     # Available actions
     if tool_input.get("available_actions") and isinstance(tool_input["available_actions"], list):
@@ -4021,11 +4092,11 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
     # --- Brain damage delta → apply to Netrunner's HP ---
     try:
         current_bd = int(nc.get("brain_damage", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         current_bd = 0
     try:
         prev_bd = int(nc.get("_prev_brain_damage", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         prev_bd = 0
     bd_delta = current_bd - prev_bd
     if bd_delta > 0:
@@ -4172,6 +4243,10 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
                     prog_strs.append(str(p))
             lines.append(f"Active Programs: {', '.join(prog_strs)}")
 
+        hardware = nc.get("installed_hardware", [])
+        if isinstance(hardware, list) and hardware:
+            lines.append(f"Installed Hardware: {', '.join(str(h) for h in hardware)}")
+
         ice = nc.get("ice_status", {})
         if isinstance(ice, dict) and ice:
             lines.append("ICE Status:")
@@ -4187,7 +4262,7 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
                 sr = int(nc.get("sr", 3))
                 trace_max = max(1, 6 - sr)
                 lines.append(f"Trace Progress: {trace}/{trace_max}")
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 lines.append(f"Trace Progress: {trace}")
 
         tar = nc.get("tar_stacks", 0)
@@ -4206,6 +4281,11 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
             lines.append(f"\n[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
         else:
             lines.append("\n[SYSTEM MAP MISSING — you MUST include system_map in your report_net_combat_state call this exchange]")
+
+        # Revealed nodes for fog-of-war tracking
+        revealed = nc.get("revealed_nodes", [])
+        if isinstance(revealed, list) and revealed:
+            lines.append(f"\nRevealed nodes: {', '.join(str(n) for n in revealed)}")
 
     return "\n".join(lines)
 

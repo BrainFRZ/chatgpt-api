@@ -4066,7 +4066,7 @@ class TestContractDriftGuards:
         er_items = props["edgerunner_ops"]["items"]["properties"]
         op_enum = set(er_items["op"]["enum"])
         assert "critical_injury" in op_enum
-        assert set(er_items["action"]["enum"]) == {"add", "remove"}
+        assert set(er_items["action"]["enum"]) == {"add", "remove", "quick_fix"}
         assert "name" in er_items
         assert "effect" in er_items
         assert "dv_mod" in er_items
