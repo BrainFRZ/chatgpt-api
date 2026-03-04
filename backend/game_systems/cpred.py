@@ -2708,16 +2708,22 @@ Exploding: 🎲 [Description]: d10[**10** + **roll2**] +Interface X = Total vs D
 Fumble: 🎲 [Description]: d10[**1** - **roll2**] +Interface X = Total vs DV Z ✓/✗
 
 ### Exchange Flow
-Each exchange = one Netrunner turn with multiple NET Actions (see Rulebook §7 for count by Interface Rank).
+An exchange may cover part or all of a Netrunner turn. The player controls how many NET Actions to use per prompt — they may use 1, 2, or all of their actions in a single message. Resolve ONLY the actions the player specifies.
+
 1. Present current node state (ICE present, connections, contents visible)
-2. Player chooses action(s) for their NET Actions
-3. Resolve all NET Actions for the turn with dice rolls
-4. Report state via report_hack_state
-5. Present available actions for next exchange
+2. Resolve the NET Action(s) the player chose, with dice rolls
+3. Report state via report_hack_state — set `net_actions_used` to the number of actions resolved this exchange
+4. Check `net_actions_remaining` in the injected [HACK STATE]:
+   - **Actions remain (> 0):** Present available actions and STOP. Do NOT narrate meatspace.
+   - **Turn complete (0) or MEATSPACE ROUND DUE flag:** Narrate the meatspace crew's round FIRST, then present the Netrunner's new turn and available actions.
+5. Meatspace narration goes ABOVE NET content — crew's round first, then Netrunner's situation
+
+### Meat Actions During a Hack
+On their turn, a Netrunner chooses EITHER Meat Action(s) OR NET Actions — never both. If the player specifies a Meat Action (shoot, move, take cover, etc.), resolve it as a normal meatspace action. This consumes the Netrunner's entire turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to complete the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
 
 ### Quick Hack Flow (Rulebook §3)
-3 linear nodes (entry → obstacle → objective). No system_map.
-- Exchange 1: Entry node + first obstacle. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
+3 linear nodes (entry → obstacle → objective).
+- Exchange 1: Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
 - Exchanges 2-5: Navigate obstacle nodes, resolve ICE encounters and checks. One player decision + resolution per exchange.
 - Final exchange: Objective node + completion. Set hack_complete: true.
 - Target 3-6 exchanges total. NEVER compress multiple phases into one exchange. NEVER choose actions for the player.
@@ -2730,16 +2736,48 @@ Each exchange = one Netrunner turn with multiple NET Actions (see Rulebook §7 f
 - Target 5-10 exchanges total.
 
 ### State Tracking
-- **alert_level**: Track per Rulebook §6. Cannot decrease mid-run.
+- **alert_level**: Cannot decrease mid-run. See Alert Escalation below for triggers and thresholds.
 - **cycles_remaining**: Spent on Boosted actions (§7) and Disable (§5). Refresh on Jack Out.
 - **active_programs**: Track each Program's name, category, REZ, and status. Attackers Deactivate after use.
-- **ice_status**: Track per node — name, behavioral type, REZ current/max, status (active/bypassed/disabled/derezzed).
+- **ice_status**: Track per node — name, behavioral type, REZ current/max, status (active/bypassed/disabled/derezzed). When Black ICE hunts to a new node, move its entry to the new node key.
 - **brain_damage**: Cumulative HP damage from Black ICE and effects. Applied directly to HP, ignores armor, no Critical Injuries.
-- **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. Completes at (6 − SR) rounds (min 1).
+- **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. See Trace & Convergence below.
 - **tar_stacks**: Each Tar encounter adds a stack. Effects per Rulebook §5.
 
+### Alert Escalation
+Alert only rises from events INSIDE the architecture. These are the triggers — apply them immediately when they occur:
+- Detected by Patrol ICE (failed Stealth vs Patrol): **+1**
+- Failed Backdoor / Slide check (alarm tripped): **+1**
+- Derezzing or destroying ICE: **+1**
+- Using Brute Force to enter a password node: **+1**
+- Lingering in any single node 3+ rounds: **+1 per round** after the 2nd
+
+**Thresholds — enforce these mechanically:**
+| Alert | Name | Effects |
+|-------|------|---------|
+| 0 | Dormant | Normal DVs. System unaware. |
+| 1–2 | Elevated | System suspicious. No mechanical change yet. |
+| 3–4 | Active Search | **ALL Interface check DVs +2.** Patrol ICE detection rolls get +2 bonus. |
+| 5–6 | Lockdown | DV +2 persists. **Moving between nodes requires an Interface check (DV 6 + alert_level).** If no Trace ICE is active anywhere, spawn a new Trace ICE at the Gateway (active, REZ = SR × 2). |
+| 7+ | Convergence | **Spawn Black ICE** at the Netrunner's current node (Kraken or equivalent, REZ = SR × 3, treat as fresh hostile). Set `initiate_combat` with reason "Convergence" and facility-appropriate security NPCs. The hack is in endgame — Jack Out or finish the objective NOW. |
+
+When alert_level crosses a threshold boundary, apply the new effects immediately — do NOT wait until the next exchange. Stack with existing effects (e.g., DV +2 at Active Search persists through Lockdown and Convergence).
+
+### Trace & Convergence
+**Trace ICE** runs a countdown. When any Trace ICE is active and not derezzed/disabled:
+- Increment `trace_progress` by **1 at the end of each full turn** (after all NET actions are resolved, same time as meatspace round).
+- Trace completes when `trace_progress` ≥ **(6 − SR)** (minimum 1 round).
+
+**On Trace completion:**
+1. The Netrunner's physical body location is **burned** — the system's owners know exactly where the meat is.
+2. If `alert_level` < 7, **set alert_level to 7** (Convergence triggers immediately with all its effects).
+3. Narrate the consequence: security teams are en route to the Netrunner's physical location, comms chatter, alarms. Set `initiate_combat` with reason "Trace complete — physical location compromised" and dispatched enemies.
+4. The Netrunner can keep running but the clock is now a meat-clock — the crew must protect the body or extract.
+
+Derezzing or disabling Trace ICE **freezes** trace_progress (does not reset it). If new Trace ICE spawns later (e.g., from Lockdown), it resumes from the frozen count.
+
 ### Combat Breakout
-If meatspace combat breaks out during the hack — Convergence dispatches physical security, the body is discovered, ambush, alarm — set `initiate_combat` with the reason and enemy names. Do NOT set `hack_complete` — the hack continues in combined NET+combat mode. Do NOT resolve the combat; end the exchange after setting the trigger.
+If meatspace combat breaks out during the hack — Convergence dispatches physical security, Trace burns the location, the body is discovered, ambush, alarm — set `initiate_combat` with the reason and enemy names. Do NOT set `hack_complete` — the hack continues in combined NET+combat mode. Do NOT resolve the combat; end the exchange after setting the trigger.
 
 ### Completing the Hack
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
@@ -2826,7 +2864,7 @@ REPORT_HACK_STATE_TOOL = {
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
                     "ice_status": {
                         "type": "object",
-                        "description": "Map of node name to ICE status object.",
+                        "description": "Map of node name to ICE status object. Key = node the ICE is currently in. When Black ICE hunts to a new node, move its entry to the new node key.",
                         "additionalProperties": {
                             "type": "object",
                             "properties": {
@@ -2849,7 +2887,12 @@ REPORT_HACK_STATE_TOOL = {
                     },
                     "system_map": {
                         "type": ["object", "null"],
-                        "description": "Full Run only. Set on first exchange with complete system architecture. null for Quick Hacks."
+                        "description": "Set on first exchange with complete system architecture. Quick Hacks: 3 linear nodes. Full Runs: 4-6 node network."
+                    },
+                    "net_actions_used": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of NET Actions the Netrunner used this exchange. The backend tracks remaining actions and meatspace pacing."
                     }
                 }
             },
@@ -2876,6 +2919,10 @@ REPORT_HACK_STATE_TOOL = {
 
 def _get_alert_name(level):
     """Return alert level name for CPRED NET encounters."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return "Unknown"
     if level <= 0:
         return "Dormant"
     if level <= 2:
@@ -2921,6 +2968,8 @@ def init_hack_state(
         "brain_damage": 0,
         "narrative_summary": None,
         "available_actions": [],
+        "net_actions_remaining": net_actions,
+        "meatspace_due": False,
     }
     if context:
         state["context"] = context
@@ -2965,6 +3014,23 @@ def apply_hack_state(hack_state, tool_input):
                 type(tool_input["available_actions"]).__name__
             )
 
+    # NET action counter — decrement remaining, flag meatspace when turn complete
+    net_actions_used = hs.get("net_actions_used")
+    if net_actions_used is not None:
+        try:
+            net_actions_used = int(net_actions_used)
+        except (TypeError, ValueError):
+            net_actions_used = 0
+        remaining = hack_state.get("net_actions_remaining", hack_state.get("net_actions_per_turn", 3))
+        remaining = max(0, remaining - net_actions_used)
+        if remaining <= 0:
+            # Turn complete — reset for next turn and flag meatspace
+            hack_state["net_actions_remaining"] = hack_state.get("net_actions_per_turn", 3)
+            hack_state["meatspace_due"] = True
+        else:
+            hack_state["net_actions_remaining"] = remaining
+            hack_state["meatspace_due"] = False
+
     # Hack completion
     if tool_input.get("hack_complete"):
         hack_state["active"] = False
@@ -2990,23 +3056,46 @@ def build_hack_injection(hack_state, pipeline_state=None):
         preamble_lines.append(f"[TRANSITION] {_hack_context} [/TRANSITION]")
         preamble_lines.append("")
 
-    alert_name = _get_alert_name(hack_state.get("alert_level", 0))
+    try:
+        alert_level = int(hack_state.get("alert_level", 0))
+    except (TypeError, ValueError):
+        alert_level = 0
+    alert_name = _get_alert_name(alert_level)
     cycles_max = hack_state.get("cycles_max", 3)
     interface_rank = hack_state.get("interface_rank", 4)
     net_actions = hack_state.get("net_actions_per_turn", 3)
 
+    net_actions_remaining = hack_state.get("net_actions_remaining", net_actions)
+    meatspace_due = hack_state.get("meatspace_due", False)
+    actions_line = f"NET Actions Remaining: {net_actions_remaining}/{net_actions}"
+    if meatspace_due:
+        actions_line += " [MEATSPACE ROUND DUE — narrate crew's round first]"
+
+    # Build alert line with active effects reminder
+    alert_line = f"Alert Level: {alert_level} ({alert_name})"
+    alert_effects = []
+    if alert_level >= 3:
+        alert_effects.append("DVs +2")
+    if alert_level >= 5:
+        alert_effects.append("Interface check to move nodes")
+    if alert_level >= 7:
+        alert_effects.append("CONVERGENCE — Black ICE + security")
+    if alert_effects:
+        alert_line += f" [{', '.join(alert_effects)}]"
+
     lines = [
         "[HACK STATE]",
         f"Target: {hack_state.get('target_system', 'Unknown')} (SR {hack_state.get('sr', 3)})",
-        f"Tier: {hack_state.get('tier', 'full_run').replace('_', ' ').title()}",
+        f"Tier: {str(hack_state.get('tier') or 'full_run').replace('_', ' ').title()}",
         f"Interface Rank: {interface_rank} ({net_actions} NET Actions/turn)",
-        f"Alert Level: {hack_state.get('alert_level', 0)} ({alert_name})",
+        actions_line,
+        alert_line,
         f"Cycles: {hack_state.get('cycles_remaining', 0)}/{cycles_max}",
     ]
 
     # Active programs
     programs = hack_state.get("active_programs", [])
-    if programs:
+    if isinstance(programs, list) and programs:
         prog_strs = []
         for p in programs:
             if isinstance(p, dict):
@@ -3019,11 +3108,15 @@ def build_hack_injection(hack_state, pipeline_state=None):
         lines.append("Active Programs: None")
 
     lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
-    lines.append(f"Nodes Visited: {', '.join(hack_state.get('nodes_visited', ['Gateway']))}")
+    nodes_visited = hack_state.get("nodes_visited", ["Gateway"])
+    if isinstance(nodes_visited, list):
+        lines.append(f"Nodes Visited: {', '.join(str(n) for n in nodes_visited)}")
+    else:
+        lines.append(f"Nodes Visited: {nodes_visited}")
 
     # ICE status
     ice = hack_state.get("ice_status", {})
-    if ice:
+    if isinstance(ice, dict) and ice:
         lines.append("ICE Status:")
         for node, ice_data in ice.items():
             if isinstance(ice_data, dict):
@@ -3039,12 +3132,24 @@ def build_hack_injection(hack_state, pipeline_state=None):
     # Trace progress
     trace = hack_state.get("trace_progress")
     if trace is not None:
-        sr = hack_state.get("sr", 3)
-        trace_max = max(1, 6 - sr)
-        lines.append(f"Trace Progress: {trace}/{trace_max}")
+        try:
+            trace = int(trace)
+            sr = int(hack_state.get("sr", 3))
+            trace_max = max(1, 6 - sr)
+            trace_line = f"Trace Progress: {trace}/{trace_max}"
+            if trace >= trace_max:
+                trace_line += " [TRACE COMPLETE — location burned, Convergence NOW]"
+            elif trace >= trace_max - 1:
+                trace_line += " [CRITICAL — completes next turn!]"
+            lines.append(trace_line)
+        except (TypeError, ValueError):
+            lines.append(f"Trace Progress: {trace}")
 
     # Tar stacks
-    tar = hack_state.get("tar_stacks", 0)
+    try:
+        tar = int(hack_state.get("tar_stacks", 0))
+    except (TypeError, ValueError):
+        tar = 0
     if tar:
         lines.append(f"Tar Stacks: {tar} (-{tar * 2} to next check or 1 Cycle to ignore)")
 
@@ -3060,10 +3165,12 @@ def build_hack_injection(hack_state, pipeline_state=None):
         parts.append("\n".join(preamble_lines))
     parts.append("\n".join(lines))
 
-    # System map (Full Run — model reference, NOT shown to player)
+    # System map — both Quick Hacks (3 linear nodes) and Full Runs (4-6 node network) use system_map
     system_map = hack_state.get("system_map")
     if system_map:
         parts.append(f"[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+    else:
+        parts.append("[SYSTEM MAP MISSING — you MUST include system_map in your report_hack_state call this exchange]")
 
     return "\n\n".join(parts)
 
@@ -3326,7 +3433,8 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - Opposed check (Zap, no Program): Interface + d10 vs ICE stat + d10. Deals 1d6 REZ damage.
 - Program attack: Interface + Program ATK + d10 vs ICE DEF + d10. Damage per program listing.
 - Attack Programs Deactivate after use (1 use, then must Deactivate + Reactivate = 2 NET Actions).
-- Slide (flee): Interface + d10 vs ICE PER + d10. Escape to adjacent node. Once per turn. Cannot Slide preemptively.
+- Slide (flee): Interface + d10 vs ICE PER + d10. Escape to adjacent node; ICE stays where it was. Once per turn. Cannot Slide preemptively. Only way to escape hunting Black ICE without Derezzing it.
+- Black ICE hunts: triggered Black ICE pursues the Netrunner across nodes. Simply moving away does NOT escape — the ICE follows on its next action. Update ice_status to reflect its new node.
 - Crits/Fumbles: same as meatspace (d10 explodes on 10, subtracts on 1).
 - Luck: spend before the roll on Interface checks (1:1).
 - Opposed check ties go to the Defender (ICE).
@@ -3460,7 +3568,7 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                     "active_programs": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]}, "rez": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}}}},
                     "current_node": {"type": "string"},
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
-                    "ice_status": {"type": "object", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
+                    "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
                     "trace_progress": {"type": ["integer", "null"]},
                     "tar_stacks": {"type": "integer", "minimum": 0},
                     "brain_damage": {"type": "integer"},
@@ -3494,6 +3602,7 @@ def init_net_combat_state(
     target="",
     interface_rank=4,
     cycles_max=3,
+    sr=3,
     initiated_from="combat",
     **_kw
 ):
@@ -3508,6 +3617,7 @@ def init_net_combat_state(
         "net_actions_per_turn": net_actions,
         "start_message_id": None,
         # NET state fields (same as standalone hack)
+        "sr": sr,
         "alert_level": 0,
         "cycles_remaining": cycles_max,
         "cycles_max": cycles_max,
@@ -4022,11 +4132,12 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
         lines.append("[MEATSPACE COMBAT STATE]")
         lines.append("No initiative set. Bootstrap enemies and roll initiative this exchange.")
         breakout = nc.get("_combat_breakout")
-        if breakout:
+        if isinstance(breakout, dict):
             if breakout.get("reason"):
                 lines.append(f"Trigger: {breakout['reason']}")
-            if breakout.get("enemies"):
-                lines.append(f"Hostiles: {', '.join(breakout['enemies'])}")
+            enemies = breakout.get("enemies")
+            if isinstance(enemies, list) and enemies:
+                lines.append(f"Hostiles: {', '.join(str(e) for e in enemies)}")
         lines.append("[/MEATSPACE COMBAT STATE]")
     lines.append("")
 
@@ -4044,10 +4155,14 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
         lines.append(f"Alert Level: {nc.get('alert_level', 0)} ({alert_name})")
         lines.append(f"Cycles: {nc.get('cycles_remaining', 0)}/{nc.get('cycles_max', 3)}")
         lines.append(f"Current Node: {nc.get('current_node', 'Gateway')}")
-        lines.append(f"Nodes Visited: {', '.join(nc.get('nodes_visited', ['Gateway']))}")
+        nodes_visited = nc.get("nodes_visited", ["Gateway"])
+        if isinstance(nodes_visited, list):
+            lines.append(f"Nodes Visited: {', '.join(str(n) for n in nodes_visited)}")
+        else:
+            lines.append(f"Nodes Visited: {nodes_visited}")
 
         programs = nc.get("active_programs", [])
-        if programs:
+        if isinstance(programs, list) and programs:
             prog_strs = []
             for p in programs:
                 if isinstance(p, dict):
@@ -4058,7 +4173,7 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
             lines.append(f"Active Programs: {', '.join(prog_strs)}")
 
         ice = nc.get("ice_status", {})
-        if ice:
+        if isinstance(ice, dict) and ice:
             lines.append("ICE Status:")
             for node, ice_data in ice.items():
                 if isinstance(ice_data, dict):
@@ -4067,9 +4182,13 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
 
         trace = nc.get("trace_progress")
         if trace is not None:
-            sr = nc.get("sr", 3)
-            trace_max = max(1, 6 - sr)
-            lines.append(f"Trace Progress: {trace}/{trace_max}")
+            try:
+                trace = int(trace)
+                sr = int(nc.get("sr", 3))
+                trace_max = max(1, 6 - sr)
+                lines.append(f"Trace Progress: {trace}/{trace_max}")
+            except (TypeError, ValueError):
+                lines.append(f"Trace Progress: {trace}")
 
         tar = nc.get("tar_stacks", 0)
         if tar:
@@ -4081,10 +4200,12 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
 
         lines.append("[/NET STATE]")
 
-        # System map for Full Runs
+        # System map — both Quick Hacks (3 linear nodes) and Full Runs (4-6 node network) use system_map
         system_map = nc.get("system_map")
         if system_map:
             lines.append(f"\n[SYSTEM MAP]\n{_json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+        else:
+            lines.append("\n[SYSTEM MAP MISSING — you MUST include system_map in your report_net_combat_state call this exchange]")
 
     return "\n".join(lines)
 

@@ -318,7 +318,8 @@ export default function CharacterPanel({
         {/* NET Actions (CPRED only) */}
         {isCpred && hs.net_actions_per_turn && (
           <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
-            NET Actions: <span style={{ color: '#00ff41', fontWeight: 600 }}>{hs.net_actions_per_turn}/turn</span>
+            NET Actions: <span style={{ color: (hs.net_actions_remaining ?? hs.net_actions_per_turn) > 0 ? '#00ff41' : '#555', fontWeight: 600 }}>{hs.net_actions_remaining ?? hs.net_actions_per_turn}/{hs.net_actions_per_turn}</span>
+            {hs.meatspace_due && <span style={{ color: '#f59e0b', marginLeft: '6px', fontSize: '0.6rem' }}>MEATSPACE DUE</span>}
           </div>
         )}
 

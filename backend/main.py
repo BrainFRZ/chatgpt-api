@@ -5685,12 +5685,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     msg["total_tokens"] = user_claude_tokens
                                     break
 
-                            assistant_claude_tokens = usage['output_tokens']
-                            # Count GPT tokens on full output (narrative + tool call) for consistency
-                            full_output = assistant_message
-                            if stateful_tool_input:
-                                full_output = assistant_message + "\n" + json.dumps(stateful_tool_input)
-                            assistant_gpt_tokens = gpt_provider.count_tokens(full_output)
+                            # Count tokens on content only (tool_use JSON is stripped from stored content)
+                            assistant_claude_tokens = claude_provider.count_tokens_api(assistant_message, api_key)
+                            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
                         else:
                             known_tokens = system_msg_ref.get("total_gpt_tokens", 0)
                             for msg in branch_path[context_start_index:-1]:
@@ -5713,7 +5710,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     msg["total_tokens"] = user_gpt_tokens
                                     break
 
-                            assistant_gpt_tokens = usage['output_tokens']
+                            # Count tokens on content only (tool_use JSON is stripped from stored content)
+                            assistant_gpt_tokens = gpt_provider.count_tokens(assistant_message)
 
                         # Create ParsedResponse for cost calculation
                         from providers import ParsedResponse

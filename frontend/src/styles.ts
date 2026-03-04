@@ -448,7 +448,6 @@ export const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '0.9rem',
     color: '#aaa',
     lineHeight: 1.5,
-    whiteSpace: 'pre-wrap' as const,
     borderTop: '1px solid #3a3a5e',
     paddingTop: '12px',
   },

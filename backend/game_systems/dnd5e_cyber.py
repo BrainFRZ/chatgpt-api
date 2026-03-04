@@ -690,33 +690,50 @@ def build_hack_injection(hack_state):
     parts = []
 
     # Core hack state
-    alert_name = ALERT_LEVEL_NAMES.get(hack_state.get("alert_level", 0), "Unknown")
+    try:
+        alert_val = int(hack_state.get("alert_level", 0))
+    except (TypeError, ValueError):
+        alert_val = 0
+    alert_name = ALERT_LEVEL_NAMES.get(alert_val, "Unknown")
     processes_max = hack_state.get("processes_max", 4)
     lines = [
         "[HACK STATE]",
         f"Target: {hack_state.get('target_system', 'Unknown')} (SR {hack_state.get('sr', 3)})",
-        f"Tier: {hack_state.get('tier', 'full_sequence').replace('_', ' ').title()}",
-        f"Alert Level: {hack_state.get('alert_level', 0)} ({alert_name})",
+        f"Tier: {str(hack_state.get('tier') or 'full_sequence').replace('_', ' ').title()}",
+        f"Alert Level: {alert_val} ({alert_name})",
         f"Processes: {hack_state.get('processes_remaining', 0)}/{processes_max}",
     ]
 
     programs = hack_state.get("program_slots_used", [])
-    lines.append(f"Active Programs: {', '.join(programs) if programs else 'None'}")
+    if isinstance(programs, list) and programs:
+        lines.append(f"Active Programs: {', '.join(str(p) for p in programs)}")
+    else:
+        lines.append("Active Programs: None")
     lines.append(f"Current Node: {hack_state.get('current_node', 'Gateway')}")
-    lines.append(f"Nodes Visited: {', '.join(hack_state.get('nodes_visited', ['Gateway']))}")
+    nodes_visited = hack_state.get("nodes_visited", ["Gateway"])
+    if isinstance(nodes_visited, list):
+        lines.append(f"Nodes Visited: {', '.join(str(n) for n in nodes_visited)}")
+    else:
+        lines.append(f"Nodes Visited: {nodes_visited}")
 
     ice = hack_state.get("ice_status", {})
-    if ice:
+    if isinstance(ice, dict) and ice:
         lines.append("ICE Status:")
         for node, status in ice.items():
             lines.append(f"  {node}: {status}")
 
     trace = hack_state.get("trace_progress")
     if trace is not None:
-        sr = hack_state.get("sr", 3)
-        lines.append(f"Trace Progress: {trace}/{sr * 2}")
+        try:
+            sr = int(hack_state.get("sr", 3))
+            lines.append(f"Trace Progress: {int(trace)}/{sr * 2}")
+        except (TypeError, ValueError):
+            lines.append(f"Trace Progress: {trace}")
 
-    tar = hack_state.get("tar_stacks", 0)
+    try:
+        tar = int(hack_state.get("tar_stacks", 0))
+    except (TypeError, ValueError):
+        tar = 0
     if tar:
         lines.append(f"Tar Stacks: {tar} (−{tar * 2} to hacking checks)")
 
@@ -731,6 +748,8 @@ def build_hack_injection(hack_state):
     system_map = hack_state.get("system_map")
     if system_map:
         parts.append(f"[SYSTEM MAP]\n{json.dumps(system_map, indent=2)}\n[/SYSTEM MAP]")
+    elif hack_state.get("tier") == "full_sequence":
+        parts.append("[SYSTEM MAP MISSING — you MUST include system_map in your report_hack_state call this exchange]")
 
     return "\n\n".join(parts)
 

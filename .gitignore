@@ -54,6 +54,12 @@
 !backend/tests/test_anthropic_sync.py
 !backend/tests/test_bookmarks.py
 !backend/tests/test_docs_refresh.py
+!backend/tests/test_malformed_tool_inputs.py
+!backend/tests/test_system_map_nudge_fuzz.py
+!data/
+!data/rulebooks/
+!data/rulebooks/cp_red/
+!data/rulebooks/cp_red/Hacking Rulebook.md
 !PIPELINE_PLAN.md
 !android/
 !android/**
