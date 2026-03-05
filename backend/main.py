@@ -4920,6 +4920,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     except (json.JSONDecodeError, TypeError):
                         pass
 
+                # Emit backend-generated notifications from game system (pipeline path)
+                ps = pipeline_result.pipeline_state or {}
+                if "game_state" in ps:
+                    game_notifs = ps["game_state"].pop("_pending_notifications", [])
+                    if game_notifs:
+                        yield f"event: state_notifications\ndata: {json.dumps(game_notifs)}\n\n"
+                        await sync_manager.broadcast_to_chat(chat_key,
+                            SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": game_notifs}))
+
                 # Get cross-model providers for token counting
                 gpt_provider = ProviderRegistry.get("gpt-5.2")
                 claude_provider = get_claude_provider()
@@ -5609,6 +5618,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": ship_notifs})
                                 )
+
+                        # Emit backend-generated notifications (automated expenses, etc.)
+                        if stateful_pipeline_state and "game_state" in stateful_pipeline_state:
+                            game_notifs = stateful_pipeline_state["game_state"].pop("_pending_notifications", [])
+                            if game_notifs:
+                                yield f"event: state_notifications\ndata: {json.dumps(game_notifs)}\n\n"
+                                await sync_manager.broadcast_to_chat(chat_key,
+                                    SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": game_notifs}))
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''

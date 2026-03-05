@@ -8,6 +8,8 @@ Luck (session-spendable), Armor (head/body with ablation), eurobucks, critical i
 
 import copy
 import logging
+import random
+from datetime import date, timedelta
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,44 @@ def _fr_tier(score):
 # }
 
 
+# Monthly rent from Core Rulebook p.379 + Errata p.4 (eb/month)
+HOUSING_COSTS = {
+    "Living on The Street": 0,
+    "Living on The Street in a Vehicle": 0,
+    "Cube Hotel": 500,
+    "Cargo Container": 1000,
+    "Studio Apartment": 1500,
+    "Two-Bedroom Apartment": 2500,
+    "Corporate Conapt": 0,                  # Given by corp (Exec Teamwork)
+    "Upscale Conapt": 7500,
+    "Luxury Penthouse": 15000,
+    "Corporate Beaverville House": 0,       # Given by corp
+    "Corporate Beaverville McMansion": 0,   # Given by corp
+}
+# Bedrooms per housing type (CRB p.378-381); capacity = 1 + bedrooms
+HOUSING_BEDROOMS = {
+    "Living on The Street": 0,
+    "Living on The Street in a Vehicle": 0,
+    "Cube Hotel": 0,
+    "Cargo Container": 0,
+    "Studio Apartment": 0,
+    "Two-Bedroom Apartment": 2,
+    "Corporate Conapt": 2,
+    "Upscale Conapt": 2,
+    "Luxury Penthouse": 3,
+    "Corporate Beaverville House": 3,
+    "Corporate Beaverville McMansion": 4,
+}
+# Housing types where occupant faces street-sleeping consequences
+# despite "paying" (cost is 0 because sleeping rough, not because it's free)
+HOUSING_STREET_TYPES = {"Living on The Street", "Living on The Street in a Vehicle"}
+
+LIFESTYLE_COSTS = {
+    "Kibble": 100, "Generic Prepak": 200,
+    "Good Prepak": 500, "Fresh Food": 1000,
+}
+
+
 def init_game_state():
     """Return initial game state — edgerunners, IP tracker, relationships, factions."""
     return {"edgerunners": {}, "ip_tracker": {"session_scores": {"group": 0}, "awards": [], "balances": {}}, "relationships": {}, "factions": {}}
@@ -104,7 +144,18 @@ def _default_edgerunner():
         "cyberware_effects": [],
         "weapons": [],
         "lifestyle": None,
-        "housing": None
+        "housing": None,
+        "body": 0,
+        "endurance_base": 0,
+        "housing_paid_month": None,
+        "lifestyle_paid_month": None,
+        "days_on_street": 0,
+        "days_without_food": 0,
+        "housing_pending": None,
+        "lifestyle_pending": None,
+        "housing_shared_with": None,   # name of owner whose housing this edgerunner shares
+        "housing_bedrooms": None,      # per-unit bedroom override (None = use HOUSING_BEDROOMS table)
+        "crammed": False,              # True if occupants > capacity at this housing
     }
 
 
@@ -158,6 +209,17 @@ def apply_game_state(game_state, agent_json, turn):
                         if key in er:
                             er[key] = val
                     _update_seriously_wounded(er)
+                    # Enforce housing_shared_with invariants if set via fields
+                    if "housing_shared_with" in fields:
+                        hsw = er.get("housing_shared_with")
+                        if hsw is not None and hsw == er_name:
+                            er["housing_shared_with"] = None  # Reject self-ref
+                        elif hsw is not None:
+                            er["housing"] = None
+                            er["housing_pending"] = None
+                    # Inverse: setting housing clears sharing (matches housing op)
+                    if "housing" in fields and er.get("housing") is not None and er.get("housing_shared_with"):
+                        er["housing_shared_with"] = None
 
                 elif op == "hp":
                     change = int(op_data.get("change", 0))
@@ -274,6 +336,27 @@ def apply_game_state(game_state, agent_json, turn):
 
                 elif op == "housing":
                     er["housing"] = op_data.get("value")
+                    # Setting own housing cancels sharing (symmetric with housing_shared_with clearing housing)
+                    if er.get("housing_shared_with"):
+                        er["housing_shared_with"] = None
+
+                elif op == "housing_pending":
+                    er["housing_pending"] = op_data.get("value")
+
+                elif op == "lifestyle_pending":
+                    er["lifestyle_pending"] = op_data.get("value")
+
+                elif op == "housing_shared_with":
+                    value = op_data.get("value")
+                    if value is None or (isinstance(value, str) and value):
+                        # Reject self-referencing (would corrupt housing data)
+                        if value is not None and value == er_name:
+                            continue
+                        er["housing_shared_with"] = value
+                        # Sharing clears own housing (they use the owner's)
+                        if value is not None:
+                            er["housing"] = None
+                            er["housing_pending"] = None
 
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
@@ -493,7 +576,375 @@ def apply_game_state(game_state, agent_json, turn):
                 logger.warning(f"CPRED apply_game_state: error processing rel op {op_data}: {e}")
                 continue
 
+    # --- Automated monthly expense processing ---
+    hud = agent_json.get("hud_state")
+    if isinstance(hud, dict) and isinstance(hud.get("date"), str):
+        _process_expenses(game_state, hud["date"])
+
     return game_state
+
+
+def _parse_game_date(date_str):
+    """Parse a YYYY-MM-DD date string, returning None on failure."""
+    if not isinstance(date_str, str):
+        return None
+    try:
+        parts = date_str.strip().split("-")
+        if len(parts) >= 3:
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+def _get_housing_groups(edgerunners):
+    """Build housing groups from housing_shared_with fields.
+
+    Returns:
+        groups: dict mapping owner_name -> [owner_name, sharer1, sharer2, ...]
+        sharers: set of names who share someone else's housing
+    """
+    groups = {}
+    sharers = set()
+
+    for name, er in edgerunners.items():
+        shared_with = er.get("housing_shared_with")
+        if shared_with and isinstance(shared_with, str):
+            # Validate: owner must exist and have housing, and not itself be a sharer
+            owner_er = edgerunners.get(shared_with, {})
+            if (shared_with in edgerunners
+                    and owner_er.get("housing")
+                    and not owner_er.get("housing_shared_with")):
+                groups.setdefault(shared_with, [shared_with])
+                if name not in groups[shared_with]:
+                    groups[shared_with].append(name)
+                sharers.add(name)
+
+    # Ensure solo owners (with housing, not sharing) also appear
+    for name, er in edgerunners.items():
+        if er.get("housing") and name not in sharers and name not in groups:
+            groups[name] = [name]
+
+    return groups, sharers
+
+
+def _housing_cost_for_person(er_name, er, edgerunners, groups, sharers):
+    """Compute one person's housing cost share.
+
+    Returns: (cost_for_person, base_cost, housing_str, n_occupants)
+    """
+    if er_name in sharers:
+        # Sharer: look up owner's housing
+        owner_name = er.get("housing_shared_with")
+        owner_er = edgerunners.get(owner_name, {})
+        housing = owner_er.get("housing")
+        base_cost = HOUSING_COSTS.get(housing, 0) if housing else 0
+        group = groups.get(owner_name, [owner_name])
+        n = len(group)
+        cost = base_cost // n if n > 0 else 0
+        return cost, base_cost, housing, n
+    elif er.get("housing"):
+        # Owner (solo or with sharers)
+        housing = er["housing"]
+        base_cost = HOUSING_COSTS.get(housing, 0)
+        group = groups.get(er_name, [er_name])
+        n = len(group)
+        if n > 1:
+            cost = base_cost - (n - 1) * (base_cost // n)
+        else:
+            cost = base_cost
+        return cost, base_cost, housing, n
+    return 0, 0, None, 0
+
+
+def _process_expenses(game_state, new_date_str):
+    """
+    Process monthly expense deductions and daily consequences.
+    Called from apply_game_state() when hud_state.date changes.
+
+    Restructured as per-day → per-edgerunner to support housing sharing
+    (owner covers sharer shortfall requires accurate owner balance per-day).
+
+    Mutates edgerunner state (eurobucks, HP, tracking fields).
+    Appends notification dicts to game_state["_pending_notifications"].
+    """
+    old_date = _parse_game_date(game_state.get("current_date"))
+    new_date = _parse_game_date(new_date_str)
+
+    # Always update current_date even if parsing fails
+    game_state["current_date"] = new_date_str
+
+    if old_date is None or new_date is None:
+        # First turn: mark current month as paid to avoid retroactive charging
+        if new_date is not None:
+            month_str = f"{new_date.year}-{new_date.month:02d}"
+            _, sharers_set = _get_housing_groups(game_state.get("edgerunners", {}))
+            for er_name, er in game_state.get("edgerunners", {}).items():
+                has_housing = er.get("housing") or (er_name in sharers_set)
+                if has_housing and er.get("housing_paid_month") is None:
+                    er["housing_paid_month"] = month_str
+                if er.get("lifestyle") and er.get("lifestyle_paid_month") is None:
+                    er["lifestyle_paid_month"] = month_str
+        return  # First turn or unparseable — skip
+    if new_date <= old_date:
+        return  # No time advance
+
+    notifs = game_state.setdefault("_pending_notifications", [])
+    edgerunners = game_state.get("edgerunners", {})
+    groups, sharers_set = _get_housing_groups(edgerunners)
+
+    # Per-edgerunner tracking for batched notifications
+    er_track = {}
+    for n in edgerunners:
+        er_track[n] = {"paid": [], "unpaid": [], "consequences": [], "dead": False}
+
+    # Process day by day across all edgerunners
+    current = old_date
+    while current < new_date:
+        current += timedelta(days=1)
+        month_str = f"{current.year}-{current.month:02d}"
+
+        # --- Month boundary: apply pending tier changes, then recompute groups ---
+        if current.day == 1:
+            for er_name, er in sorted(edgerunners.items()):
+                if er_track[er_name]["dead"]:
+                    continue
+                if er.get("housing_pending") is not None:
+                    er["housing"] = er["housing_pending"]
+                    er["housing_pending"] = None
+                    # Setting own housing cancels sharing
+                    if er["housing"] is not None and er.get("housing_shared_with"):
+                        er["housing_shared_with"] = None
+                if er.get("lifestyle_pending") is not None:
+                    er["lifestyle"] = er["lifestyle_pending"]
+                    er["lifestyle_pending"] = None
+            # Recompute groups after pending changes
+            groups, sharers_set = _get_housing_groups(edgerunners)
+
+        # --- Housing payment (owner first, then sharers with shortfall coverage) ---
+        # Pass 1: owners/solo pay their housing share
+        for er_name in sorted(edgerunners.keys()):
+            er = edgerunners[er_name]
+            if er_track[er_name]["dead"] or er_name in sharers_set:
+                continue
+            if not er.get("housing") or er.get("housing_paid_month") == month_str:
+                continue
+            cost, base, housing, n_occ = _housing_cost_for_person(
+                er_name, er, edgerunners, groups, sharers_set)
+            if cost <= 0:
+                # Free housing (corp-provided, etc.) — mark as paid
+                er["housing_paid_month"] = month_str
+                # Don't reset days_on_street for street types — they're still sleeping rough
+                if housing not in HOUSING_STREET_TYPES:
+                    er["days_on_street"] = 0
+                continue
+            if er.get("eurobucks", 0) >= cost:
+                er["eurobucks"] -= cost
+                er["housing_paid_month"] = month_str
+                er["days_on_street"] = 0
+                label = f"Housing ({housing}"
+                if n_occ > 1:
+                    label += f", {n_occ} occupants, {cost}eb/{base}eb"
+                label += f"): -{cost}eb"
+                if current.day != 1:
+                    label += " (catch-up)"
+                er_track[er_name]["paid"].append(label)
+            elif current.day == 1:
+                er_track[er_name]["unpaid"].append(
+                    f"Housing ({housing}): {cost}eb — can't afford (balance: {er.get('eurobucks', 0)}eb)")
+
+        # Pass 2: sharers try to pay, with owner covering shortfall
+        for er_name in sorted(edgerunners.keys()):
+            er = edgerunners[er_name]
+            if er_track[er_name]["dead"] or er_name not in sharers_set:
+                continue
+            if er.get("housing_paid_month") == month_str:
+                continue
+            cost, base, housing, n_occ = _housing_cost_for_person(
+                er_name, er, edgerunners, groups, sharers_set)
+            if cost <= 0:
+                # Free housing (corp, street) — mark as paid
+                er["housing_paid_month"] = month_str
+                # Don't reset days_on_street for street types — they're still sleeping rough
+                if housing not in HOUSING_STREET_TYPES:
+                    er["days_on_street"] = 0
+                continue
+            sharer_bal = er.get("eurobucks", 0)
+            if sharer_bal >= cost:
+                # Sharer can afford on their own
+                er["eurobucks"] -= cost
+                er["housing_paid_month"] = month_str
+                er["days_on_street"] = 0
+                owner_name = er.get("housing_shared_with", "?")
+                label = f"Housing share ({owner_name}'s {housing}, {cost}eb/{base}eb): -{cost}eb"
+                if current.day != 1:
+                    label += " (catch-up)"
+                er_track[er_name]["paid"].append(label)
+            else:
+                # Sharer can't fully afford — try owner shortfall coverage
+                deficit = cost - sharer_bal
+                owner_name = er.get("housing_shared_with")
+                owner_er = edgerunners.get(owner_name, {}) if owner_name else {}
+                owner_bal = owner_er.get("eurobucks", 0)
+                if owner_name and not er_track.get(owner_name, {}).get("dead") and owner_bal >= deficit:
+                    # Owner covers the shortfall
+                    if sharer_bal > 0:
+                        er["eurobucks"] = 0
+                    owner_er["eurobucks"] -= deficit
+                    er["housing_paid_month"] = month_str
+                    er["days_on_street"] = 0
+                    label = f"Housing share ({owner_name}'s {housing}, {cost}eb/{base}eb): -{sharer_bal}eb"
+                    if current.day != 1:
+                        label += " (catch-up)"
+                    er_track[er_name]["paid"].append(label)
+                    er_track[owner_name]["paid"].append(
+                        f"{owner_name} covered {er_name}'s housing shortfall: -{deficit}eb")
+                elif current.day == 1:
+                    er_track[er_name]["unpaid"].append(
+                        f"Housing share ({owner_name}'s {housing}): {cost}eb — can't afford (balance: {sharer_bal}eb)")
+
+        # --- Lifestyle payment (no sharing, standard per-edgerunner) ---
+        for er_name in sorted(edgerunners.keys()):
+            er = edgerunners[er_name]
+            if er_track[er_name]["dead"]:
+                continue
+            if not er.get("lifestyle") or er.get("lifestyle_paid_month") == month_str:
+                continue
+            cost = LIFESTYLE_COSTS.get(er["lifestyle"], 0)
+            if cost > 0 and er.get("eurobucks", 0) >= cost:
+                er["eurobucks"] -= cost
+                er["lifestyle_paid_month"] = month_str
+                er["days_without_food"] = 0
+                label = f"Lifestyle ({er['lifestyle']}): -{cost}eb"
+                if current.day != 1:
+                    label += " (catch-up)"
+                er_track[er_name]["paid"].append(label)
+            elif cost > 0 and current.day == 1:
+                er_track[er_name]["unpaid"].append(
+                    f"Lifestyle ({er['lifestyle']}): {cost}eb — can't afford (balance: {er.get('eurobucks', 0)}eb)")
+
+        # --- Daily consequences ---
+        for er_name in sorted(edgerunners.keys()):
+            er = edgerunners[er_name]
+            if er_track[er_name]["dead"]:
+                continue
+
+            # Housing consequences: street-sleeping endurance checks
+            # Determine if this edgerunner's housing situation means sleeping rough
+            has_housing = er.get("housing") or er_name in sharers_set
+            is_street_type = er.get("housing") in HOUSING_STREET_TYPES
+            # Sharers who share a street-type housing also face consequences
+            if er_name in sharers_set and not is_street_type:
+                owner_name = er.get("housing_shared_with")
+                owner_er = edgerunners.get(owner_name, {})
+                is_street_type = owner_er.get("housing") in HOUSING_STREET_TYPES
+            is_unpaid = has_housing and er.get("housing_paid_month") != month_str and current.day >= 2
+
+            if is_street_type or is_unpaid:
+                er["days_on_street"] = er.get("days_on_street", 0) + 1
+                endurance_base = er.get("endurance_base", 0)
+                if endurance_base > 0:
+                    d10 = random.randint(1, 10)
+                    total = d10 + endurance_base
+                    if total <= 15:  # Must BEAT DV15
+                        hp_loss = random.randint(1, 6)
+                        hp = er.get("hp", {"current": 0, "max": 40})
+                        hp["current"] = max(0, hp["current"] - hp_loss)
+                        _update_seriously_wounded(er)
+                        er_track[er_name]["consequences"].append(
+                            f"Street sleep: d10[{d10}]+{endurance_base}={total} vs DV15 FAIL → -{hp_loss} HP")
+                    else:
+                        er_track[er_name]["consequences"].append(
+                            f"Street sleep: d10[{d10}]+{endurance_base}={total} vs DV15 ✓")
+                elif er.get("days_on_street") == 1:
+                    er_track[er_name]["consequences"].append(
+                        "Evicted — endurance_base not set, skipping roll (set via bootstrap)")
+
+            # Lifestyle consequences: starvation death saves
+            if er.get("lifestyle") and er.get("lifestyle_paid_month") != month_str:
+                er["days_without_food"] = er.get("days_without_food", 0) + 1
+                if er["days_without_food"] > 7:
+                    body = er.get("body", 0)
+                    if body > 0:
+                        d10 = random.randint(1, 10)
+                        if d10 >= body or d10 == 10:
+                            er["hp"]["current"] = 0
+                            _update_seriously_wounded(er)
+                            er_track[er_name]["consequences"].append(
+                                f"Starvation Death Save: d10[{d10}] vs BODY {body} — DEAD")
+                            er_track[er_name]["dead"] = True
+                        else:
+                            er_track[er_name]["consequences"].append(
+                                f"Starvation Death Save: d10[{d10}] vs BODY {body} ✓")
+                    elif er["days_without_food"] == 8:
+                        er_track[er_name]["consequences"].append(
+                            "Starving (day 8+) — body stat not set, skipping death save (set via bootstrap)")
+
+    # --- Crammed post-pass ---
+    if new_date > old_date:
+        final_month = f"{new_date.year}-{new_date.month:02d}"
+        for owner_name, group in groups.items():
+            owner_er = edgerunners.get(owner_name, {})
+            housing = owner_er.get("housing")
+            if not housing or housing in HOUSING_STREET_TYPES:
+                for m in group:
+                    if m in edgerunners:
+                        edgerunners[m]["crammed"] = False
+                continue
+            bedrooms = owner_er.get("housing_bedrooms")
+            if bedrooms is None:
+                bedrooms = HOUSING_BEDROOMS.get(housing, 0)
+            if not isinstance(bedrooms, int) or bedrooms < 0:
+                bedrooms = 0
+            capacity = 1 + bedrooms
+            paid_count = sum(1 for m in group
+                             if edgerunners.get(m, {}).get("housing_paid_month") == final_month)
+            is_crammed = paid_count > capacity
+            for m in group:
+                if m in edgerunners:
+                    # Only mark paid members as crammed; evicted members are on the street
+                    m_paid = edgerunners[m].get("housing_paid_month") == final_month
+                    edgerunners[m]["crammed"] = is_crammed and m_paid
+            if is_crammed:
+                notifs.append({
+                    "type": "housing_crammed",
+                    "owner": owner_name,
+                    "occupants": paid_count,
+                    "capacity": capacity,
+                    "summary": f"{owner_name}'s {housing}: {paid_count}/{capacity} capacity — all crammed (-2 all actions)",
+                })
+        # Reset crammed for edgerunners not in any group
+        for er_name, er in edgerunners.items():
+            if er_name not in sharers_set and er_name not in groups:
+                er["crammed"] = False
+
+    # --- Emit batched notifications ---
+    for er_name in sorted(edgerunners.keys()):
+        t = er_track[er_name]
+        er = edgerunners[er_name]
+        if t["paid"]:
+            notifs.append({
+                "type": "expense_paid",
+                "edgerunner": er_name,
+                "summary": "; ".join(t["paid"]),
+                "new_balance": er.get("eurobucks", 0),
+            })
+        if t["unpaid"]:
+            notifs.append({
+                "type": "expense_unpaid",
+                "edgerunner": er_name,
+                "summary": "; ".join(t["unpaid"]),
+            })
+        if t["consequences"]:
+            is_death = any("DEAD" in e for e in t["consequences"])
+            notifs.append({
+                "type": "expense_consequence",
+                "edgerunner": er_name,
+                "summary": "; ".join(t["consequences"]),
+                "result": "dead" if is_death else "ongoing",
+                "days_on_street": er.get("days_on_street", 0),
+                "days_without_food": er.get("days_without_food", 0),
+            })
 
 
 def _format_npc_line(name, data):
@@ -601,12 +1052,32 @@ def build_game_injection(game_state):
 
             lifestyle = er.get("lifestyle")
             housing = er.get("housing")
-            if lifestyle or housing:
+            shared_with = er.get("housing_shared_with")
+            if lifestyle or housing or shared_with:
                 parts = []
                 if lifestyle:
                     parts.append(f"Lifestyle: {lifestyle}")
-                if housing:
-                    parts.append(f"Housing: {housing}")
+                # Check shared_with first (matches expense system priority)
+                if shared_with and shared_with in edgerunners:
+                    owner_er = edgerunners[shared_with]
+                    owner_housing = owner_er.get("housing")
+                    if owner_housing and not owner_er.get("housing_shared_with"):
+                        parts.append(f"Housing: sharing {shared_with}'s {owner_housing}")
+                    else:
+                        parts.append(f"Housing: sharing {shared_with} (INVALID — owner has no housing)")
+                elif housing:
+                    # Owner: show bedroom count and sharers if any
+                    bedrooms = er.get("housing_bedrooms")
+                    if bedrooms is None:
+                        bedrooms = HOUSING_BEDROOMS.get(housing, 0)
+                    owner_sharers = [n for n, e in sorted(edgerunners.items())
+                                     if e.get("housing_shared_with") == name and n != name]
+                    if owner_sharers:
+                        parts.append(f"Housing: {housing} ({bedrooms}BR, shared with {', '.join(owner_sharers)})")
+                    else:
+                        parts.append(f"Housing: {housing}")
+                if er.get("crammed"):
+                    parts.append("CRAMMED (-2 all actions)")
                 lines.append(f"  {' | '.join(parts)}")
 
             if injuries:
@@ -652,6 +1123,67 @@ def build_game_injection(game_state):
     # Append relationship state
     rel_block = _build_relationship_injection(game_state)
     result += "\n\n" + rel_block
+
+    # Append expense status if any edgerunner has active consequences
+    expense_lines = []
+    for name, er in sorted(edgerunners.items()):
+        parts = []
+        if er.get("days_on_street", 0) > 0:
+            parts.append(f"sleeping on street ({er['days_on_street']} days)")
+        if er.get("days_without_food", 0) > 0:
+            grace = er["days_without_food"] <= 7
+            parts.append(f"no food ({er['days_without_food']} days{', in grace period' if grace else ', DAILY DEATH SAVES'})")
+        if er.get("crammed"):
+            parts.append("crammed housing (-2 all actions)")
+        if parts:
+            expense_lines.append(f"  {name}: {'; '.join(parts)}")
+    if expense_lines:
+        result += "\n\n[EXPENSE STATUS]\n" + "\n".join(expense_lines) + "\n[/EXPENSE STATUS]"
+
+    # Pre-month warning: upcoming expenses in last 5 days of month
+    # Uses pending values (housing_pending/lifestyle_pending) since those apply on the 1st
+    current_date = _parse_game_date(game_state.get("current_date"))
+    if current_date and current_date.day >= 26:
+        # Build effective edgerunner view with pending changes applied
+        eff_ers = {}
+        for n, er in edgerunners.items():
+            eff = dict(er)
+            if eff.get("housing_pending") is not None:
+                eff["housing"] = eff["housing_pending"]
+                # Setting own housing cancels sharing
+                if eff["housing"] is not None and eff.get("housing_shared_with"):
+                    eff["housing_shared_with"] = None
+            if eff.get("lifestyle_pending") is not None:
+                eff["lifestyle"] = eff["lifestyle_pending"]
+            eff_ers[n] = eff
+        eff_groups, eff_sharers = _get_housing_groups(eff_ers)
+        warning_lines = []
+        for name, eff in sorted(eff_ers.items()):
+            h_cost, _, h_housing, _ = _housing_cost_for_person(name, eff, eff_ers, eff_groups, eff_sharers)
+            l_cost = LIFESTYLE_COSTS.get(eff.get("lifestyle"), 0) if eff.get("lifestyle") else 0
+            total = h_cost + l_cost
+            if total <= 0:
+                continue
+            balance = edgerunners[name].get("eurobucks", 0)  # Use real balance, not effective
+            affordable = "OK" if balance >= total else "CANNOT AFFORD"
+            parts = []
+            if h_cost:
+                if name in eff_sharers:
+                    owner_name = eff.get("housing_shared_with", "?")
+                    parts.append(f"Housing share ({owner_name}'s {h_housing}): {h_cost}eb")
+                elif eff.get("housing"):
+                    parts.append(f"Housing ({eff['housing']}): {h_cost}eb")
+            if l_cost:
+                parts.append(f"Lifestyle ({eff['lifestyle']}): {l_cost}eb")
+            warning_lines.append(
+                f"  {name}: {' + '.join(parts)} = {total}eb. Balance: {balance}eb. {affordable}."
+            )
+        if warning_lines:
+            result += "\n\n[UPCOMING EXPENSES \u2014 due on the 1st]\n"
+            result += "\n".join(warning_lines)
+            result += "\n  \u2192 Mention this to the player so they can downgrade or earn more before the 1st."
+            result += "\n  \u2192 Use housing_pending / lifestyle_pending ops to schedule a tier change for next month."
+            result += "\n[/UPCOMING EXPENSES]"
 
     return result
 
@@ -893,7 +1425,14 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "lifestyle", "value": "<lifestyle tier>", "reason": "<why>"}
   Set lifestyle (e.g. "Generic Prepak", "Good Prepak"). Affects Social Ceiling.
 - {"edgerunner": "<name>", "op": "housing", "value": "<housing type>", "reason": "<why>"}
-  Set housing (e.g. "Cargo Container", "Apartment"). Affects monthly costs.
+  Set housing. Immediate change — system auto-deducts at new rate if this month is unpaid.
+  Valid: "Living on The Street", "Living on The Street in a Vehicle", "Cube Hotel", "Cargo Container", "Studio Apartment", "Two-Bedroom Apartment", "Corporate Conapt", "Upscale Conapt", "Luxury Penthouse", "Corporate Beaverville House", "Corporate Beaverville McMansion"
+- {"edgerunner": "<name>", "op": "housing_pending", "value": "Cargo Container", "reason": "Downgrading next month"}
+  Schedule housing tier change for the 1st of next month (applied automatically before deduction).
+- {"edgerunner": "<name>", "op": "lifestyle_pending", "value": "Kibble", "reason": "Cutting costs"}
+  Schedule lifestyle tier change for the 1st of next month.
+- {"edgerunner": "<name>", "op": "housing_shared_with", "value": "<owner name>", "reason": "Moving in with V"}
+  Share another edgerunner's housing (cost split evenly, auto-clears own housing). Set value to null to stop sharing.
 - {"edgerunner": "<name>", "op": "cyberware", "action": "add|remove", "value": "<cyberware name>"}
   Install or remove cyberware (pair with humanity ops).
 - {"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}
@@ -983,7 +1522,9 @@ DICE MECHANICS (quick reference — teach to Mechanics via beats):
 - Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
 - Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Flag social encounters so Mechanics applies these correctly.
-- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs: deduct eurobucks at session boundaries per Core Rulebook §10.
+- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
+  Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
+  Housing sharing: Multiple characters share via housing_shared_with op. Cost = base/N per person. If a sharer can't afford their share, the owner covers the deficit if possible. Capacity = 1 + bedrooms. Over capacity → "crammed" (fatigue, -2 all actions). Bedrooms: Cube Hotel/Cargo Container/Studio Apartment=0, Two-Bedroom Apartment/Corporate Conapt/Upscale Conapt=2, Luxury Penthouse/Corporate Beaverville House=3, Corporate Beaverville McMansion=4. Override with housing_bedrooms via set op if specific unit differs.
 
 PACING:
 - Gigs are job-based: Contact → Legwork → Action → Payoff
@@ -1084,7 +1625,7 @@ IMPORTANT:
 - "edgerunner_ops": HP, Humanity, Luck, Armor, Eurobucks, critical injuries, cyberware
 - "relationship_ops": RS/RomS/FR changes (most turns: empty array). Pre-roll only — do not emit for roll-dependent outcomes.
 - "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
-- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
+- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if the specific unit has non-default bedrooms. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
 
 MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the second stage.
 
@@ -1341,7 +1882,10 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round 2"}` (increments cumulative counter; auto-resets when HP > 0)
 - `{"edgerunner": "<name>", "op": "death_save_reset", "reason": "Stabilized"}` (manual reset)
 - `{"edgerunner": "<name>", "op": "lifestyle", "value": "Generic Prepak", "reason": "Monthly upkeep"}`
-- `{"edgerunner": "<name>", "op": "housing", "value": "Cargo Container", "reason": "Rented in Watson"}`
+- `{"edgerunner": "<name>", "op": "housing", "value": "Two-Bedroom Apartment", "reason": "Rented in Watson"}` (immediate change — system auto-deducts at new rate if unpaid)
+- `{"edgerunner": "<name>", "op": "housing_pending", "value": "Cargo Container", "reason": "Downgrading next month"}` (applied on the 1st)
+- `{"edgerunner": "<name>", "op": "lifestyle_pending", "value": "Kibble", "reason": "Cutting costs"}` (applied on the 1st)
+- `{"edgerunner": "<name>", "op": "housing_shared_with", "value": "<owner name>", "reason": "Moving in with V"}` (share owner's housing, cost split evenly, null to stop)
 - `{"edgerunner": "<name>", "op": "cyberware", "action": "add", "value": "Cybereye"}`
 - `{"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}`
 - `{"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}`
@@ -1424,7 +1968,9 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save (tracked via death_save op). Critical injuries add dv_mod.
 - Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
 - Social Ceiling (§11A): lifestyle/presentation caps social check totals. Degree of Success scales social outcomes by margin.
-- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs: deduct eurobucks at session boundaries per Core Rulebook §10.
+- Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
+  Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
+  Housing sharing: Multiple characters share via housing_shared_with op. Cost = base/N per person. If a sharer can't afford their share, the owner covers the deficit if possible. Capacity = 1 + bedrooms. Over capacity → "crammed" (fatigue, -2 all actions). Bedrooms: Cube Hotel/Cargo Container/Studio Apartment=0, Two-Bedroom Apartment/Corporate Conapt/Upscale Conapt=2, Luxury Penthouse/Corporate Beaverville House=3, Corporate Beaverville McMansion=4. Override with housing_bedrooms via set op if specific unit differs.
 - Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 
 ### HUD Line
@@ -1438,7 +1984,7 @@ Report updated values via `report_state` tool's `hud_state` field (date, time, l
 - Set pacing from gig/scenario context
 - Build scene_state from current location
 - Set character_states from known character sheets (structured format with type, vitals, resources, conditions, summary)
-- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets
+- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if non-default.
 - Use relationship_ops "set" to initialize tracked NPCs and factions from context
 - Add callback_ops for open gig threads, Fixer contacts
 
@@ -1613,7 +2159,7 @@ STATE_REPORT_TOOL = {
                     "required": ["edgerunner", "op"],
                     "properties": {
                         "edgerunner": {"type": "string"},
-                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing"]},
+                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing", "housing_pending", "lifestyle_pending", "housing_shared_with"]},
                         "change": {"type": "number"},
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},

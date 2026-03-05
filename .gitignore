@@ -59,6 +59,8 @@
 !backend/tests/test_system_map_nudge_fuzz.py
 !backend/tests/test_netmap_malformed_fuzz.py
 !backend/tests/test_netmap_e2e.py
+!backend/tests/test_monthly_expenses.py
+!backend/tests/test_housing_sharing.py
 !data/
 !data/rulebooks/
 !data/rulebooks/cp_red/

@@ -544,6 +544,43 @@ export default function ChatView({
             ...(isMobile ? styles.stateNotificationsContainerMobile : {}),
           }}>
             {stateNotifications.map((n: any, i: number) => {
+              if (n.type === 'expense_paid') {
+                return (
+                  <div key={i} style={styles.expensePaidNotification}>
+                    <span style={styles.notificationLabel}>{n.edgerunner}</span>
+                    {' '}{n.summary}
+                    {n.new_balance != null && <span style={{ color: '#888' }}> [Balance: {n.new_balance}eb]</span>}
+                  </div>
+                );
+              }
+              if (n.type === 'expense_unpaid') {
+                return (
+                  <div key={i} style={styles.expenseUnpaidNotification}>
+                    <span style={styles.notificationLabel}>{n.edgerunner}</span>
+                    {' '}{n.summary}
+                  </div>
+                );
+              }
+              if (n.type === 'expense_consequence') {
+                const isDeath = n.result === 'dead';
+                return (
+                  <div key={i} style={{
+                    ...styles.expenseConsequenceNotification,
+                    ...(isDeath ? { borderLeft: '3px solid #ff0000', background: 'rgba(255,0,0,0.08)' } : {}),
+                  }}>
+                    <span style={styles.notificationLabel}>{n.edgerunner}</span>
+                    {' '}{n.summary}
+                  </div>
+                );
+              }
+              if (n.type === 'housing_crammed') {
+                return (
+                  <div key={i} style={styles.expenseConsequenceNotification}>
+                    <span style={styles.notificationLabel}>{n.owner}</span>
+                    {' '}{n.summary}
+                  </div>
+                );
+              }
               if (n.type === 'ship_npc_action') {
                 const actor = n.character_name || (n.role ? `${String(n.role).charAt(0).toUpperCase()}${String(n.role).slice(1)}` : 'Crew');
                 return (
