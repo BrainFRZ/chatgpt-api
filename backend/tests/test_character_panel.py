@@ -518,12 +518,17 @@ class TestGameSystemSchemas:
         assert "vitals" in contract, \
             f"{system_id}: events_contract should describe structured character_states format"
 
-    @pytest.mark.parametrize("system_id", ["dnd5e", "coc7e", "sr6e", "cpred", "dnd5e_cyber"])
+    @pytest.mark.parametrize("system_id", ["dnd5e", "coc7e", "sr6e", "dnd5e_cyber"])
     def test_mechanics_contract_mentions_structured_format(self, system_id):
         gs = self.get_game_system(system_id)
         contract = gs["mechanics_contract"].lower()
         assert "vitals" in contract, \
             f"{system_id}: mechanics_contract should describe structured character_states format"
+
+    def test_cpred_deterministic_mechanics_flag(self):
+        gs = self.get_game_system("cpred")
+        assert gs["deterministic_mechanics"] is True, "CPRED should flag deterministic mechanics"
+        assert isinstance(gs["mechanics_contract"], str), "mechanics_contract must be a string"
 
     @pytest.mark.parametrize("system_id", ["dnd5e", "coc7e", "sr6e", "cpred", "dnd5e_cyber"])
     def test_game_system_has_all_keys(self, system_id):

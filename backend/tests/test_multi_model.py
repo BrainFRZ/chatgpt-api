@@ -12,6 +12,7 @@ import sys
 import json
 import shutil
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
@@ -755,6 +756,58 @@ class TestAnthropicProvider:
         # new_input = 500 - 300 - 0 = 200
         # total = 500 + 50 + 100 = 650
         assert result == "I:200 C:300 O:50 R:100 T:650"
+
+    def test_extract_usage_preserves_multiple_tool_calls(self):
+        """_extract_usage should return all tool_use blocks in order."""
+        from providers.anthropic_provider import AnthropicProvider
+        provider = AnthropicProvider()
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=60,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+            content=[
+                SimpleNamespace(type="thinking", thinking="...", thinking_tokens=10),
+                SimpleNamespace(type="tool_use", name="resolve_mechanics", id="tool_1", input={"actions": [{"id": 1}]}),
+                SimpleNamespace(type="tool_use", name="report_state", id="tool_2", input={"turn_summary": "ok"}),
+                SimpleNamespace(type="text", text="Narration"),
+            ],
+            stop_reason="tool_use",
+        )
+
+        usage = provider._extract_usage(response)
+
+        assert [t["name"] for t in usage["tool_uses"]] == ["resolve_mechanics", "report_state"]
+        assert usage["tool_uses"][0]["id"] == "tool_1"
+        assert usage["tool_uses"][1]["id"] == "tool_2"
+
+    def test_extract_usage_legacy_fields_use_first_tool_call(self):
+        """Legacy single-tool fields should map to the first tool_use call."""
+        from providers.anthropic_provider import AnthropicProvider
+        provider = AnthropicProvider()
+
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=50,
+                output_tokens=20,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+            content=[
+                SimpleNamespace(type="tool_use", name="resolve_mechanics", id="tool_1", input={"actions": []}),
+                SimpleNamespace(type="tool_use", name="report_state", id="tool_2", input={"turn_summary": "ok"}),
+            ],
+            stop_reason="tool_use",
+        )
+
+        usage = provider._extract_usage(response)
+
+        assert usage["tool_use_name"] == "resolve_mechanics"
+        assert usage["tool_use_id"] == "tool_1"
+        assert usage["tool_use_input"] == {"actions": []}
 
 
 class TestProviderRegistry:

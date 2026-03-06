@@ -33,7 +33,7 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 
 # Pipeline imports
 from pipeline import (
-    run_pipeline, PipelineResult, generate_debug_transcript,
+    run_pipeline, run_mode_pipeline, PipelineResult, ModeResult, generate_debug_transcript,
     apply_single_agent_state_updates,
     build_single_agent_injections, build_player_agency_reminder,
     generate_dice_pool,
@@ -2480,6 +2480,92 @@ def _combat_file_list(gs):
     return ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"]
 
 
+def _convert_state_ops_to_character_updates(state_ops: list) -> list:
+    """Convert resolver state_ops (hp, armor, critical_injury, luck) to character_updates format.
+
+    Groups ops by edgerunner name and builds a character_update dict per combatant.
+    """
+    by_name = {}
+    for op in state_ops:
+        if not isinstance(op, dict):
+            continue
+        name = op.get("edgerunner", "")
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = {"name": name}
+        upd = by_name[name]
+
+        op_type = op.get("op")
+        if op_type == "hp":
+            upd["hp_delta"] = upd.get("hp_delta", 0) + int(op.get("change", 0))
+        elif op_type == "armor":
+            loc = op.get("location", "body")
+            armor_delta = upd.get("armor_delta", {})
+            armor_delta[loc] = armor_delta.get(loc, 0) + int(op.get("change", 0))
+            upd["armor_delta"] = armor_delta
+        elif op_type == "critical_injury":
+            injuries = upd.get("critical_injury_add", [])
+            injuries.append({
+                "name": op.get("name", ""),
+                "location": op.get("location", "body"),
+                "effect": op.get("effect", ""),
+                "dv_mod": int(op.get("dv_mod", 0)),
+            })
+            upd["critical_injury_add"] = injuries
+        elif op_type == "luck":
+            upd["luck_delta"] = upd.get("luck_delta", 0) + int(op.get("change", 0))
+        elif op_type == "ammo":
+            ammo_list = upd.get("ammo_consumed", [])
+            ammo_list.append({
+                "weapon_name": op.get("weapon_name", ""),
+                "rounds_consumed": int(op.get("rounds_consumed", 0)),
+            })
+            upd["ammo_consumed"] = ammo_list
+
+    return list(by_name.values())
+
+
+def _merge_character_updates(existing: list, resolver_updates: list) -> list:
+    """Merge resolver-generated character_updates into planning-generated ones.
+
+    For matching names, merge deltas additively. New names are appended.
+    """
+    by_name = {}
+    for upd in (existing or []):
+        if isinstance(upd, dict) and upd.get("name"):
+            by_name[upd["name"]] = upd
+
+    for r_upd in (resolver_updates or []):
+        name = r_upd.get("name", "")
+        if not name:
+            continue
+        if name in by_name:
+            target = by_name[name]
+            # Merge hp_delta
+            if "hp_delta" in r_upd:
+                target["hp_delta"] = target.get("hp_delta", 0) + r_upd["hp_delta"]
+            # Merge armor_delta
+            if "armor_delta" in r_upd:
+                t_armor = target.get("armor_delta", {})
+                for loc, val in r_upd["armor_delta"].items():
+                    t_armor[loc] = t_armor.get(loc, 0) + val
+                target["armor_delta"] = t_armor
+            # Merge critical_injury_add
+            if "critical_injury_add" in r_upd:
+                target.setdefault("critical_injury_add", []).extend(r_upd["critical_injury_add"])
+            # Merge luck_delta
+            if "luck_delta" in r_upd:
+                target["luck_delta"] = target.get("luck_delta", 0) + r_upd["luck_delta"]
+            # Merge ammo_consumed
+            if "ammo_consumed" in r_upd:
+                target.setdefault("ammo_consumed", []).extend(r_upd["ammo_consumed"])
+        else:
+            by_name[name] = r_upd
+
+    return list(by_name.values())
+
+
 # ============================================================
 # Sex Mode
 # ============================================================
@@ -3078,7 +3164,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 hack_history.append({"role": msg["role"], "content": msg["content"]})
 
         # User message with hack state injection + dice pool prepended
-        hack_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        hack_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
         user_content = build_message_content(branch_path[-1])
         user_content = hack_injection + "\n\n" + (hack_dice_pool + "\n\n" if hack_dice_pool else "") + user_content
         new_user_msg = {"role": "user", "content": user_content}
@@ -3152,7 +3238,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 combat_history.append({"role": msg["role"], "content": msg["content"]})
 
         user_content = build_message_content(branch_path[-1])
-        combat_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        combat_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
         user_content = combat_injection + "\n\n" + (combat_dice_pool + "\n\n" if combat_dice_pool else "") + user_content
         new_user_msg = {"role": "user", "content": user_content}
 
@@ -3241,7 +3327,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 nc_history.append({"role": msg["role"], "content": msg["content"]})
 
         user_content = build_message_content(branch_path[-1])
-        nc_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        nc_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
         user_content = nc_injection + "\n\n" + (nc_dice_pool + "\n\n" if nc_dice_pool else "") + user_content
         new_user_msg = {"role": "user", "content": user_content}
 
@@ -3446,7 +3532,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             context_start_index = 1
 
         # Build injections for user message
-        sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        if gs and gs.get("id") == "cpred":
+            sa_dice_pool = ""  # No pool needed — resolve_mechanics tool uses direct RNG
+        else:
+            sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
         sa_doc_stems = get_staged_project_filenames(username, request.project)
         injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems)
 
@@ -3517,7 +3606,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             is_free_chat=False,
             use_cache=True
         )
-        request_params["tools"] = [gs["hack_tool"]]
+        hack_tools = [gs["hack_tool"]]
+        if gs.get("id") == "cpred":
+            from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
+            hack_tools.insert(0, RESOLVE_MECHANICS_TOOL)
+        request_params["tools"] = hack_tools
         request_params["tool_choice"] = {"type": "auto"}
     elif use_hack_mode:
         # GPT-5.2 hack mode: request_params not used (hack_gpt_request_params used instead)
@@ -3532,7 +3625,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             is_free_chat=False,
             use_cache=True
         )
-        request_params["tools"] = [gs["net_combat_tool"]]
+        net_combat_tools = [gs["net_combat_tool"]]
+        if gs.get("id") == "cpred":
+            from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
+            net_combat_tools.insert(0, RESOLVE_MECHANICS_TOOL)
+        request_params["tools"] = net_combat_tools
         request_params["tool_choice"] = {"type": "auto"}
     elif use_net_combat_mode:
         # GPT-5.2 net_combat mode: request_params not used
@@ -3547,7 +3644,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             is_free_chat=False,
             use_cache=True
         )
-        request_params["tools"] = [gs["combat_tool"]]
+        combat_tools = [gs["combat_tool"]]
+        if gs.get("id") == "cpred":
+            from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
+            combat_tools.insert(0, RESOLVE_MECHANICS_TOOL)
+        request_params["tools"] = combat_tools
         request_params["tool_choice"] = {"type": "auto"}
     elif use_combat_mode:
         # GPT-5.2 combat mode: request_params not used (combat_gpt_request_params used instead)
@@ -3585,7 +3686,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             use_cache=use_cache
         )
         if use_stateful:
-            request_params["tools"] = [gs["state_report_tool"]]
+            tools = [gs["state_report_tool"]]
+            if gs.get("id") == "cpred":
+                from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
+                tools.insert(0, RESOLVE_MECHANICS_TOOL)
+            request_params["tools"] = tools
             # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
             # Auto + strong contract instructions achieves the same result.
             request_params["tool_choice"] = {"type": "auto"}
@@ -4049,47 +4154,92 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
             use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode
             # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
+            use_mode_pipeline = model_id == "gpt-5.2" and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics")
 
-            if use_hack_mode and model_id == "gpt-5.2":
+            if use_mode_pipeline and use_hack_mode:
                 # ============================================================
-                # GPT-5.2 Hack mode: non-streaming JSON call
+                # GPT-5.2 Hack mode: 2-stage mode pipeline (Planning → Narration)
                 # ============================================================
-                logger.info(f"Hack mode (GPT-5.2): starting for {username}")
+                logger.info(f"Hack mode pipeline (GPT-5.2): starting for {username}")
 
                 # Emit hack_mode_active event
                 yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
 
-                # Non-streaming call with JSON mode
-                hack_response = await asyncio.to_thread(
-                    provider.send_request_non_streaming,
-                    client, hack_gpt_request_params, 60.0
+                # Build planning system prompt (hack contract + hacker profile + project files)
+                hack_planning_system = gs["hack_planning_contract"]
+                if hacker_profile:
+                    hack_planning_system += "\n\n" + hacker_profile
+                if request.project:
+                    rulebook_path = os.path.join(get_project_dir(username, request.project), "uploads", "Hacking Rulebook.md")
+                    if os.path.exists(rulebook_path):
+                        with open(rulebook_path, 'r', encoding='utf-8') as f:
+                            hack_planning_system += f"\n\n{'='*60}\nFILE: Hacking Rulebook.md\n{'='*60}\n\n" + f.read()
+
+                hack_narration_system = gs["hack_narration_contract"]
+
+                # Run mode pipeline
+                _PIPELINE_STOP = object()
+                def _next_mode_event(gen):
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return _PIPELINE_STOP
+
+                mode_gen = run_mode_pipeline(
+                    provider=provider, client=client,
+                    username=username, project=request.project or "",
+                    chat_name=request.chat_name, mode="hack",
+                    planning_system=hack_planning_system,
+                    narration_system=hack_narration_system,
+                    mode_messages=hack_history,
+                    user_content=user_content,
+                    planning_schema=gs["hack_planning_schema"],
+                    game_state=hack_ps.get("game_state"),
+                    character_states=hack_ps.get("character_states"),
                 )
 
-                hack_content = hack_response.get('content', '')
-                hack_reasoning = hack_response.get('reasoning')
+                mode_result = None
+                while True:
+                    pipeline_future = asyncio.ensure_future(
+                        asyncio.to_thread(_next_mode_event, mode_gen))
+                    while not pipeline_future.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pipeline_future), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                    result = pipeline_future.result()
+                    if result is _PIPELINE_STOP:
+                        break
+                    event_type, event_data = result
+                    if event_type == "pipeline_stage":
+                        yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+                    elif event_type == "content":
+                        accumulated_content += event_data["delta"]
+                        yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": event_data["delta"]}))
+                    elif event_type == "pipeline_done":
+                        mode_result = event_data
 
-                # Parse JSON response
-                try:
-                    hack_json = json.loads(hack_content)
-                except json.JSONDecodeError:
-                    logger.error(f"Hack mode: failed to parse JSON response: {hack_content[:200]}")
-                    hack_json = {}
+                if mode_result is None:
+                    raise Exception("Hack mode pipeline completed without result")
 
-                # Extract narrative and yield as content
-                narrative = hack_json.get("narrative", hack_content)
-                accumulated_content = narrative
-                if narrative:
-                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
-                    )
+                # Build hack_json compatible structure from planning output + resolved actions
+                hack_json = mode_result.planning_json
+                hack_json["narrative"] = mode_result.final_content
+                # Nest hack_state_updates under hack_state key for apply_hack_state
+                hack_state_updates = hack_json.get("hack_state_updates", {})
+                if hack_state_updates:
+                    hack_json["hack_state"] = hack_state_updates
+                narrative = mode_result.final_content
+                hack_reasoning = "\n".join(mode_result.reasoning_summaries) if mode_result.reasoning_summaries else None
 
                 if hack_reasoning:
                     accumulated_thinking = hack_reasoning
 
                 # Apply hack state updates
-                gs["apply_hack_state"](hack_state, hack_json)
+                gs["apply_hack_state"](hack_state, hack_json, resolver_state_ops=mode_result.state_ops)
                 data["hack_state"] = hack_state
 
                 # Emit updated hack state
@@ -4099,22 +4249,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
                     logger.info(f"Hack mode: completed for {username}: {hack_state.get('narrative_summary', '')[:100]}")
 
-                # Build usage dict from hack response
-                usage = {
-                    'input_tokens': hack_response.get('input_tokens', 0),
-                    'cache_read_tokens': hack_response.get('cache_read_tokens', 0),
-                    'cache_creation_tokens': hack_response.get('cache_creation_tokens', 0),
-                    'output_tokens': hack_response.get('output_tokens', 0),
-                    'reasoning_tokens': hack_response.get('reasoning_tokens', 0),
-                    'content': narrative,
-                    'reasoning': hack_reasoning,
-                    'service_tier': hack_response.get('service_tier'),
-                }
+                # Build usage from mode pipeline aggregate
+                usage = mode_result.aggregate_usage
+                usage['content'] = narrative
+                usage['reasoning'] = hack_reasoning
 
-                # === Done event handling (shared with standard path below) ===
                 assistant_message = narrative
                 reasoning_summary = hack_reasoning
-                service_tier = hack_response.get('service_tier')
+                service_tier = mode_result.service_tier_label
 
                 from providers import ParsedResponse
                 parsed = ParsedResponse(
@@ -4258,41 +4400,93 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 logger.info(f"Hack mode (GPT-5.2): completed for {username}")
 
-            elif use_combat_mode and model_id == "gpt-5.2":
+            elif use_mode_pipeline and use_combat_mode:
                 # ============================================================
-                # GPT-5.2 Combat mode: non-streaming JSON call
+                # GPT-5.2 Combat mode: 2-stage mode pipeline (Planning → Narration)
                 # ============================================================
-                logger.info(f"Combat mode (GPT-5.2): starting for {username}")
+                logger.info(f"Combat mode pipeline (GPT-5.2): starting for {username}")
 
                 # Emit state_update so character panel refreshes with current combat state
                 if data.get("pipeline_state"):
                     yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
 
-                # Non-streaming call with JSON mode
-                combat_response = await asyncio.to_thread(
-                    provider.send_request_non_streaming,
-                    client, combat_gpt_request_params, 60.0
+                # Build planning system prompt (combat contract + profile + project files)
+                combat_planning_system = gs["combat_planning_contract"]
+                if combat_profile:
+                    combat_planning_system += "\n\n" + combat_profile
+                if request.project:
+                    uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                    char_sheet_loaded = False
+                    for fname in _combat_file_list(gs):
+                        is_char_sheet = fname.startswith("Character Sheets")
+                        if is_char_sheet and char_sheet_loaded:
+                            continue
+                        fpath = os.path.join(uploads_dir, fname)
+                        if os.path.exists(fpath):
+                            with open(fpath, 'r', encoding='utf-8') as f:
+                                combat_planning_system += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                            if is_char_sheet:
+                                char_sheet_loaded = True
+
+                combat_narration_system = gs["combat_narration_contract"]
+
+                _PIPELINE_STOP = object()
+                def _next_mode_event(gen):
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return _PIPELINE_STOP
+
+                mode_gen = run_mode_pipeline(
+                    provider=provider, client=client,
+                    username=username, project=request.project or "",
+                    chat_name=request.chat_name, mode="combat",
+                    planning_system=combat_planning_system,
+                    narration_system=combat_narration_system,
+                    mode_messages=combat_history,
+                    user_content=user_content,
+                    planning_schema=gs["combat_planning_schema"],
+                    game_state=combat_ps.get("game_state"),
+                    character_states=combat_ps.get("character_states"),
                 )
 
-                combat_content = combat_response.get('content', '')
-                combat_reasoning = combat_response.get('reasoning')
+                mode_result = None
+                while True:
+                    pipeline_future = asyncio.ensure_future(
+                        asyncio.to_thread(_next_mode_event, mode_gen))
+                    while not pipeline_future.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pipeline_future), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                    result = pipeline_future.result()
+                    if result is _PIPELINE_STOP:
+                        break
+                    event_type, event_data = result
+                    if event_type == "pipeline_stage":
+                        yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+                    elif event_type == "content":
+                        accumulated_content += event_data["delta"]
+                        yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": event_data["delta"]}))
+                    elif event_type == "pipeline_done":
+                        mode_result = event_data
 
-                # Parse JSON response
-                try:
-                    combat_json = json.loads(combat_content)
-                except json.JSONDecodeError:
-                    logger.error(f"Combat mode: failed to parse JSON response: {combat_content[:200]}")
-                    combat_json = {}
+                if mode_result is None:
+                    raise Exception("Combat mode pipeline completed without result")
 
-                # Extract narrative and yield as content
-                narrative = combat_json.get("narrative", combat_content)
-                accumulated_content = narrative
-                if narrative:
-                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
-                    )
+                # Build combat_json compatible structure from planning output + resolved actions
+                combat_json = mode_result.planning_json
+                combat_json["narrative"] = mode_result.final_content
+                # Merge resolver-computed character_updates (hp, armor, crits, luck, ammo) into planner's judgment-based updates
+                _resolver_char_updates = _convert_state_ops_to_character_updates(mode_result.state_ops)
+                combat_json["character_updates"] = _merge_character_updates(
+                    combat_json.get("character_updates", []), _resolver_char_updates)
+
+                narrative = mode_result.final_content
+                combat_reasoning = "\n".join(mode_result.reasoning_summaries) if mode_result.reasoning_summaries else None
 
                 if combat_reasoning:
                     accumulated_thinking = combat_reasoning
@@ -4309,21 +4503,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                 )
 
-                # Build usage dict from combat response
-                usage = {
-                    'input_tokens': combat_response.get('input_tokens', 0),
-                    'cache_read_tokens': combat_response.get('cache_read_tokens', 0),
-                    'cache_creation_tokens': combat_response.get('cache_creation_tokens', 0),
-                    'output_tokens': combat_response.get('output_tokens', 0),
-                    'reasoning_tokens': combat_response.get('reasoning_tokens', 0),
-                    'content': narrative,
-                    'reasoning': combat_reasoning,
-                    'service_tier': combat_response.get('service_tier'),
-                }
+                # Build usage from mode pipeline aggregate
+                usage = mode_result.aggregate_usage
+                usage['content'] = narrative
+                usage['reasoning'] = combat_reasoning
 
                 assistant_message = narrative
                 reasoning_summary = combat_reasoning
-                service_tier = combat_response.get('service_tier')
+                service_tier = mode_result.service_tier_label
 
                 from providers import ParsedResponse
                 parsed = ParsedResponse(
@@ -4472,44 +4659,102 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 logger.info(f"Combat mode (GPT-5.2): completed for {username}, "
                             f"combat_complete={combat_json.get('combat_complete', False)}")
 
-            elif use_net_combat_mode and model_id == "gpt-5.2":
+            elif use_mode_pipeline and use_net_combat_mode:
                 # ============================================================
-                # GPT-5.2 NET Combat mode: non-streaming JSON call
+                # GPT-5.2 NET Combat mode: 2-stage mode pipeline (Planning → Narration)
                 # ============================================================
-                logger.info(f"Net combat mode (GPT-5.2): starting for {username}")
+                logger.info(f"Net combat mode pipeline (GPT-5.2): starting for {username}")
 
                 if data.get("pipeline_state"):
                     yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
 
-                nc_response = await asyncio.to_thread(
-                    provider.send_request_non_streaming,
-                    client, net_combat_gpt_request_params, 60.0
+                # Build planning system prompt (net_combat contract + profile + project files)
+                nc_planning_system = gs["net_combat_planning_contract"]
+                if nc_profile:
+                    nc_planning_system += "\n\n" + nc_profile
+                if request.project:
+                    uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                    char_sheet_loaded = False
+                    for fname in (gs.get("net_combat_files") or []):
+                        is_char_sheet = fname.startswith("Character Sheets")
+                        if is_char_sheet and char_sheet_loaded:
+                            continue
+                        fpath = os.path.join(uploads_dir, fname)
+                        if os.path.exists(fpath):
+                            with open(fpath, 'r', encoding='utf-8') as f:
+                                nc_planning_system += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                            if is_char_sheet:
+                                char_sheet_loaded = True
+
+                nc_narration_system = gs["net_combat_narration_contract"]
+
+                _PIPELINE_STOP = object()
+                def _next_mode_event(gen):
+                    try:
+                        return next(gen)
+                    except StopIteration:
+                        return _PIPELINE_STOP
+
+                mode_gen = run_mode_pipeline(
+                    provider=provider, client=client,
+                    username=username, project=request.project or "",
+                    chat_name=request.chat_name, mode="net_combat",
+                    planning_system=nc_planning_system,
+                    narration_system=nc_narration_system,
+                    mode_messages=nc_history,
+                    user_content=user_content,
+                    planning_schema=gs["net_combat_planning_schema"],
+                    game_state=nc_ps.get("game_state"),
+                    character_states=nc_ps.get("character_states"),
                 )
 
-                nc_content = nc_response.get('content', '')
-                nc_reasoning = nc_response.get('reasoning')
+                mode_result = None
+                while True:
+                    pipeline_future = asyncio.ensure_future(
+                        asyncio.to_thread(_next_mode_event, mode_gen))
+                    while not pipeline_future.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pipeline_future), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                    result = pipeline_future.result()
+                    if result is _PIPELINE_STOP:
+                        break
+                    event_type, event_data = result
+                    if event_type == "pipeline_stage":
+                        yield f"event: pipeline_stage\ndata: {json.dumps(event_data)}\n\n"
+                    elif event_type == "content":
+                        accumulated_content += event_data["delta"]
+                        yield f"event: content\ndata: {json.dumps(event_data)}\n\n"
+                        await sync_manager.broadcast_to_chat(
+                            chat_key,
+                            SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": event_data["delta"]}))
+                    elif event_type == "pipeline_done":
+                        mode_result = event_data
 
-                try:
-                    nc_json = json.loads(nc_content)
-                except json.JSONDecodeError:
-                    logger.error(f"Net combat mode: failed to parse JSON: {nc_content[:200]}")
-                    nc_json = {}
+                if mode_result is None:
+                    raise Exception("Net combat mode pipeline completed without result")
 
-                narrative = nc_json.get("narrative", nc_content)
-                accumulated_content = narrative
-                if narrative:
-                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
-                    await sync_manager.broadcast_to_chat(
-                        chat_key,
-                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative})
-                    )
+                # Build nc_json compatible structure from planning output + resolved actions
+                nc_json = mode_result.planning_json
+                nc_json["narrative"] = mode_result.final_content
+                _resolver_char_updates = _convert_state_ops_to_character_updates(mode_result.state_ops)
+                nc_json["character_updates"] = _merge_character_updates(
+                    nc_json.get("character_updates", []), _resolver_char_updates)
+                # Nest hack_state_updates under hack_state key for apply_net_combat_state
+                hack_updates = nc_json.get("hack_state_updates", {})
+                if hack_updates:
+                    nc_json["hack_state"] = hack_updates
+                narrative = mode_result.final_content
+                nc_reasoning = "\n".join(mode_result.reasoning_summaries) if mode_result.reasoning_summaries else None
 
                 if nc_reasoning:
                     accumulated_thinking = nc_reasoning
 
                 # Apply net_combat state updates
                 nc_ps = data.get("pipeline_state", {})
-                gs["apply_net_combat_state"](nc_ps, nc_json, game_state=nc_ps.get("game_state"))
+                gs["apply_net_combat_state"](nc_ps, nc_json, game_state=nc_ps.get("game_state"),
+                                             resolver_state_ops=mode_result.state_ops)
                 data["pipeline_state"] = nc_ps
 
                 yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
@@ -4518,20 +4763,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
                 )
 
-                usage = {
-                    'input_tokens': nc_response.get('input_tokens', 0),
-                    'cache_read_tokens': nc_response.get('cache_read_tokens', 0),
-                    'cache_creation_tokens': nc_response.get('cache_creation_tokens', 0),
-                    'output_tokens': nc_response.get('output_tokens', 0),
-                    'reasoning_tokens': nc_response.get('reasoning_tokens', 0),
-                    'content': narrative,
-                    'reasoning': nc_reasoning,
-                    'service_tier': nc_response.get('service_tier'),
-                }
+                # Build usage from mode pipeline aggregate
+                usage = mode_result.aggregate_usage
+                usage['content'] = narrative
+                usage['reasoning'] = nc_reasoning
 
                 assistant_message = narrative
                 reasoning_summary = nc_reasoning
-                service_tier = nc_response.get('service_tier')
+                service_tier = mode_result.service_tier_label
 
                 from providers import ParsedResponse
                 parsed = ParsedResponse(
@@ -4652,6 +4891,191 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 logger.info(f"Net combat mode (GPT-5.2): completed for {username}, "
                             f"combat_complete={nc_json.get('combat_complete', False)}, "
                             f"net_complete={nc_json.get('net_complete', False)}")
+
+            elif (use_hack_mode or use_combat_mode or use_net_combat_mode) and model_id == "gpt-5.2" and not use_mode_pipeline:
+                # ============================================================
+                # GPT-5.2 mode fallback: non-deterministic game systems use single-shot JSON
+                # ============================================================
+                if use_hack_mode:
+                    _mode_label = "hack"
+                    _mode_request_params = hack_gpt_request_params
+                elif use_combat_mode:
+                    _mode_label = "combat"
+                    _mode_request_params = combat_gpt_request_params
+                else:
+                    _mode_label = "net_combat"
+                    _mode_request_params = net_combat_gpt_request_params
+
+                logger.info(f"{_mode_label} mode (GPT-5.2 fallback): starting for {username}")
+
+                _mode_response = await asyncio.to_thread(
+                    provider.send_request_non_streaming,
+                    client, _mode_request_params, 60.0
+                )
+
+                _mode_content = _mode_response.get('content', '')
+                _mode_reasoning = _mode_response.get('reasoning')
+
+                try:
+                    _mode_json = json.loads(_mode_content)
+                except json.JSONDecodeError:
+                    logger.error(f"{_mode_label} mode: failed to parse JSON: {_mode_content[:200]}")
+                    _mode_json = {}
+
+                narrative = _mode_json.get("narrative", _mode_content)
+                accumulated_content = narrative
+                if narrative:
+                    yield f"event: content\ndata: {json.dumps({'delta': narrative})}\n\n"
+                    await sync_manager.broadcast_to_chat(
+                        chat_key,
+                        SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": narrative}))
+
+                if _mode_reasoning:
+                    accumulated_thinking = _mode_reasoning
+
+                # Apply mode-specific state
+                if use_hack_mode:
+                    hack_json = _mode_json
+                    gs["apply_hack_state"](hack_state, hack_json)
+                    data["hack_state"] = hack_state
+                    yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
+                    if hack_json.get("hack_complete"):
+                        yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
+                elif use_combat_mode:
+                    combat_json = _mode_json
+                    _cps = data.get("pipeline_state", {})
+                    _apply_combat_state(gs, _cps, combat_json)
+                    data["pipeline_state"] = _cps
+                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                else:
+                    nc_json = _mode_json
+                    _nps = data.get("pipeline_state", {})
+                    gs["apply_net_combat_state"](_nps, nc_json, game_state=_nps.get("game_state"))
+                    data["pipeline_state"] = _nps
+                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+
+                usage = {
+                    'input_tokens': _mode_response.get('input_tokens', 0),
+                    'cache_read_tokens': _mode_response.get('cache_read_tokens', 0),
+                    'cache_creation_tokens': _mode_response.get('cache_creation_tokens', 0),
+                    'output_tokens': _mode_response.get('output_tokens', 0),
+                    'reasoning_tokens': _mode_response.get('reasoning_tokens', 0),
+                    'content': narrative,
+                    'reasoning': _mode_reasoning,
+                    'service_tier': _mode_response.get('service_tier'),
+                }
+
+                assistant_message = narrative
+                reasoning_summary = _mode_reasoning
+                service_tier = _mode_response.get('service_tier')
+
+                from providers import ParsedResponse
+                parsed = ParsedResponse(
+                    content=assistant_message,
+                    reasoning=reasoning_summary,
+                    input_tokens=usage['input_tokens'],
+                    cache_read_tokens=usage['cache_read_tokens'],
+                    cache_creation_tokens=usage['cache_creation_tokens'],
+                    output_tokens=usage['output_tokens'],
+                    reasoning_tokens=usage['reasoning_tokens']
+                )
+
+                new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+                total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+
+                if service_tier:
+                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
+                else:
+                    total_cost = provider.calculate_cost(parsed)
+                tokens_str = provider.format_token_string(parsed)
+
+                actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
+
+                stats = data.get("stats", create_empty_stats())
+                stats["total_input_tokens"] += new_input_tokens
+                stats["total_cached_tokens"] += parsed.cache_read_tokens
+                stats["total_output_tokens"] += parsed.output_tokens
+                stats["total_reasoning_tokens"] = stats.get("total_reasoning_tokens", 0) + parsed.reasoning_tokens
+                stats["total_cost"] += actual_cost
+                stats["total_prompts"] += 1
+                stats["last_accessed"] = datetime.now(timezone.utc).isoformat()
+                data["stats"] = stats
+
+                assistant_msg_id = generate_message_id()
+                assistant_parent_id = user_msg_id
+                _mode_flag_key = "hack_mode" if use_hack_mode else ("combat_mode" if use_combat_mode else "net_combat_mode")
+                _mode_tool_key = "hack_tool_input" if use_hack_mode else ("combat_tool_input" if use_combat_mode else "net_combat_tool_input")
+                assistant_msg_data = {
+                    "id": assistant_msg_id,
+                    "parent_id": assistant_parent_id,
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                    "tokens": tokens_str,
+                    "cost": cost_str,
+                    "total_tokens": usage['output_tokens'],
+                    "total_gpt_tokens": usage['output_tokens'],
+                    "model": model_id,
+                    _mode_flag_key: True,
+                    _mode_tool_key: _mode_json,
+                }
+                if reasoning_summary:
+                    assistant_msg_data["reasoning"] = reasoning_summary
+                if service_tier:
+                    assistant_msg_data["service_tier"] = service_tier
+                if data.get("pipeline_state"):
+                    assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
+
+                data["messages"].append(assistant_msg_data)
+                data["current_leaf_id"] = assistant_msg_id
+                save_chat(username, request.chat_name, data, request.project)
+
+                if pending_usage is not None:
+                    save_daily_usage(username, pending_usage)
+
+                update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens,
+                                        parsed.output_tokens, parsed.reasoning_tokens, actual_cost,
+                                        model=model_id, context_tokens=0)
+
+                branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                done_data = {
+                    'assistant_message': assistant_message,
+                    'tokens': tokens_str,
+                    'cost': cost_str,
+                    'stats': stats,
+                    'context_start_index': context_start_index,
+                    'reasoning': reasoning_summary,
+                    'user_message_id': user_msg_id,
+                    'assistant_message_id': assistant_msg_id,
+                    'current_leaf_id': assistant_msg_id,
+                    'total_messages': len(branch_path_final),
+                    'model': model_id,
+                    _mode_flag_key: True,
+                }
+                if service_tier:
+                    done_data['service_tier'] = service_tier
+                if _original_model:
+                    done_data['original_model'] = _original_model
+                yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
+
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STREAM_DONE,
+                        data={
+                            "assistant_message": assistant_msg_data,
+                            "user_message_id": user_msg_id,
+                            "assistant_message_id": assistant_msg_id,
+                            "current_leaf_id": assistant_msg_id,
+                            "total_messages": len(branch_path_final),
+                            "stats": stats,
+                            "context_start_index": context_start_index,
+                            "pipeline_state": data.get("pipeline_state")
+                        }
+                    )
+                )
+
+                logger.info(f"{_mode_label} mode (GPT-5.2 fallback): completed for {username}")
 
             elif use_ship_combat_mode and model_id == "gpt-5.2":
                 # ============================================================
@@ -5280,6 +5704,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # ============================================================
                 event_count = 0
                 client_disconnected = False
+                resolve_mechanics_extra_usage = None  # Track usage from resolve_mechanics round-trip (cpred)
                 if model_id == "gpt-5.2":
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
                 else:
@@ -5321,12 +5746,147 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         logger.info(f"Stream done event received for user {username}")
                         usage = stream_event.usage
 
+                        # Incremental resolve_mechanics loop (cpred deterministic resolution).
+                        # Opus calls resolve_mechanics once per combatant turn; we loop
+                        # until the model stops calling it and calls report_*_state instead.
+                        accumulated_rm_state_ops = []
+                        if gs and gs.get("id") == "cpred":
+                            from game_systems.cpred_mechanics import resolve_actions as _rm_resolve_actions
+
+                            def _find_rm_call(_usage):
+                                """Extract resolve_mechanics tool_use from usage."""
+                                for _tc in (_usage.get('tool_uses') or []):
+                                    if _tc.get("name") == "resolve_mechanics":
+                                        return _tc
+                                if _usage.get('tool_use_name') == 'resolve_mechanics':
+                                    return {"name": _usage['tool_use_name'], "input": _usage.get('tool_use_input'), "id": _usage.get('tool_use_id')}
+                                return None
+
+                            _rm_request_params = copy.deepcopy(request_params)
+                            _rm_iteration = 0
+
+                            while True:
+                                _rm_call = _find_rm_call(usage)
+                                if _rm_call is None:
+                                    break  # No more resolve_mechanics — fall through to report_*_state
+
+                                _rm_input = _rm_call.get("input") or {}
+                                _rm_gs = (stateful_pipeline_state or {}).get("game_state", {})
+                                _rm_result = _rm_resolve_actions(
+                                    _rm_input.get("actions", []),
+                                    relationships=_rm_gs.get("relationships"),
+                                    factions=_rm_gs.get("factions"),
+                                )
+                                accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
+                                logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
+
+                                # Accumulate usage from this call
+                                _rm_usage_snapshot = {
+                                    k: (usage.get(k) or 0) for k in
+                                    ['input_tokens', 'output_tokens', 'cache_read_tokens',
+                                     'cache_creation_tokens', 'reasoning_tokens']
+                                }
+                                if resolve_mechanics_extra_usage is None:
+                                    resolve_mechanics_extra_usage = _rm_usage_snapshot
+                                else:
+                                    for _k in _rm_usage_snapshot:
+                                        resolve_mechanics_extra_usage[_k] = resolve_mechanics_extra_usage.get(_k, 0) + _rm_usage_snapshot[_k]
+
+                                # Build continuation: assistant + tool_result
+                                _resolved_tool_use_id = _rm_call.get("id")
+                                _rm_assistant = []
+                                for _blk in (usage.get('content_blocks') or []):
+                                    if _blk.type == "thinking":
+                                        _rm_assistant.append({
+                                            "type": "thinking",
+                                            "thinking": _blk.thinking or "",
+                                            "signature": getattr(_blk, 'signature', ''),
+                                        })
+                                    elif _blk.type == "redacted_thinking":
+                                        _rm_assistant.append({
+                                            "type": "redacted_thinking",
+                                            "data": getattr(_blk, 'data', ''),
+                                        })
+                                    elif _blk.type == "text":
+                                        _rm_assistant.append({"type": "text", "text": _blk.text})
+                                    elif _blk.type == "tool_use":
+                                        if _blk.id != _resolved_tool_use_id:
+                                            continue
+                                        _rm_assistant.append({
+                                            "type": "tool_use", "id": _blk.id,
+                                            "name": _blk.name, "input": _blk.input
+                                        })
+
+                                _rm_request_params["messages"] = _rm_request_params["messages"] + [
+                                    {"role": "assistant", "content": _rm_assistant},
+                                    {"role": "user", "content": [{
+                                        "type": "tool_result",
+                                        "tool_use_id": _resolved_tool_use_id,
+                                        "content": json.dumps(_rm_result)
+                                    }]}
+                                ]
+                                # Keep resolve_mechanics in tools — model may call it again
+
+                                if not client_disconnected:
+                                    yield f"event: mechanics_resolved\ndata: {json.dumps(_rm_result)}\n\n"
+
+                                # Stream continuation — model narrates this action, may call resolve_mechanics again
+                                _rm_stream = provider.send_request_stream(client, _rm_request_params)
+                                for _rm_event in _rm_stream:
+                                    if _rm_event.event_type == 'content_delta':
+                                        accumulated_content += _rm_event.content
+                                        if not client_disconnected:
+                                            yield f"event: content\ndata: {json.dumps({'delta': _rm_event.content})}\n\n"
+                                        await sync_manager.broadcast_to_chat(
+                                            chat_key,
+                                            SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": _rm_event.content})
+                                        )
+                                    elif _rm_event.event_type == 'thinking_delta':
+                                        accumulated_thinking += _rm_event.content
+                                        if not client_disconnected:
+                                            yield f"event: thinking\ndata: {json.dumps({'delta': _rm_event.content})}\n\n"
+                                        await sync_manager.broadcast_to_chat(
+                                            chat_key,
+                                            SyncEvent(type=SyncEventType.STREAM_THINKING, data={"delta": _rm_event.content})
+                                        )
+                                    elif _rm_event.event_type == 'done':
+                                        usage = _rm_event.usage
+
+                                _rm_iteration += 1
+
+                            # Merge accumulated usage from all resolve_mechanics iterations
+                            if resolve_mechanics_extra_usage:
+                                for _k in ['input_tokens', 'output_tokens', 'cache_read_tokens',
+                                           'cache_creation_tokens', 'reasoning_tokens']:
+                                    usage[_k] = (usage.get(_k) or 0) + resolve_mechanics_extra_usage.get(_k, 0)
+                            # Fall through to report_*_state handling with final usage
+
+                        # Merge accumulated resolver state_ops into tool_input before applying
+                        def _merge_resolver_ops_into_tool_input(_tool_input, _acc_ops):
+                            """Strip dice-dependent fields from model's tool_input and inject resolver-computed updates."""
+                            if not _acc_ops or not isinstance(_tool_input, dict):
+                                return
+                            _resolver_updates = _convert_state_ops_to_character_updates(_acc_ops)
+                            if _resolver_updates:
+                                # Strip dice-dependent fields from model's character_updates
+                                for _upd in _tool_input.get("character_updates", []):
+                                    if isinstance(_upd, dict):
+                                        _upd.pop("hp_delta", None)
+                                        _upd.pop("armor_delta", None)
+                                        _upd.pop("critical_injury_add", None)
+                                        _upd.pop("luck_delta", None)
+                                        _upd.pop("ammo", None)
+                                _tool_input["character_updates"] = _merge_character_updates(
+                                    _tool_input.get("character_updates", []), _resolver_updates
+                                )
+
                         # Handle hack mode tool output (Claude hack mode)
                         hack_tool_input = None
                         if use_hack_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["hack_tool"]):
-                                gs["apply_hack_state"](hack_state, tool_input)
+                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
+                                gs["apply_hack_state"](hack_state, tool_input, resolver_state_ops=accumulated_rm_state_ops)
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
                                 logger.info(f"Hack mode: applied hack state for {username}, "
@@ -5351,7 +5911,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
-                                        gs["apply_hack_state"](hack_state, retry_result)
+                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
+                                        gs["apply_hack_state"](hack_state, retry_result, resolver_state_ops=accumulated_rm_state_ops)
                                         data["hack_state"] = hack_state
                                         hack_tool_input = retry_result
                                         logger.info(f"Hack mode: retry succeeded for {username}")
@@ -5365,9 +5926,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_net_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["net_combat_tool"]):
+                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
                                 net_combat_tool_input = tool_input
                                 _nc_ps = data.get("pipeline_state", {})
-                                gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"))
+                                gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"),
+                                                             resolver_state_ops=accumulated_rm_state_ops)
                                 data["pipeline_state"] = _nc_ps
                                 logger.info(f"Net combat mode: applied state for {username}, "
                                             f"combat_complete={tool_input.get('combat_complete', False)}, "
@@ -5390,9 +5953,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
+                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
                                         net_combat_tool_input = retry_result
                                         _nc_ps = data.get("pipeline_state", {})
-                                        gs["apply_net_combat_state"](_nc_ps, retry_result, game_state=_nc_ps.get("game_state"))
+                                        gs["apply_net_combat_state"](_nc_ps, retry_result, game_state=_nc_ps.get("game_state"),
+                                                                     resolver_state_ops=accumulated_rm_state_ops)
                                         data["pipeline_state"] = _nc_ps
                                         logger.info(f"Net combat mode: retry succeeded for {username}")
                                     else:
@@ -5406,6 +5971,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["combat_tool"]):
+                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
                                 combat_tool_input = tool_input
                                 # Apply combat state updates
                                 _combat_ps = data.get("pipeline_state", {})
@@ -5431,6 +5997,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
+                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
                                         combat_tool_input = retry_result
                                         # Apply state from retry result
                                         _combat_ps = data.get("pipeline_state", {})
@@ -5500,6 +6067,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             }
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["state_report_tool"]):
+                                # Inject resolver state_ops (from resolve_mechanics loop) into edgerunner_ops
+                                if accumulated_rm_state_ops:
+                                    existing_er_ops = tool_input.get("edgerunner_ops") or []
+                                    tool_input["edgerunner_ops"] = existing_er_ops + accumulated_rm_state_ops
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
                                     stateful_pipeline_state["turn_counter"] += 1
@@ -5531,6 +6102,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
+                                        if accumulated_rm_state_ops:
+                                            existing_er_ops = retry_result.get("edgerunner_ops") or []
+                                            retry_result["edgerunner_ops"] = existing_er_ops + accumulated_rm_state_ops
                                         is_ooc = retry_result.get("is_ooc", False)
                                         if not is_ooc:
                                             stateful_pipeline_state["turn_counter"] += 1

@@ -166,6 +166,237 @@ def generate_dice_pool(game_system_id: str) -> str:
     )
 
 
+# ============================================================
+# Deterministic Mechanics Resolution (cpred only)
+# ============================================================
+
+def resolve_pipeline_mechanics(beats: list, game_state: dict) -> tuple:
+    """Resolve structured beats from Events using deterministic code.
+
+    For each beat with a non-null "resolution", dispatch to the appropriate
+    cpred_mechanics function. Annotate the beat with a "result" dict.
+
+    Returns (annotated_beats, collected_state_ops).
+    """
+    from game_systems.cpred_mechanics import resolve_actions
+    from game_systems.cpred import init_game_state as cpred_init_game_state, apply_game_state as cpred_apply_game_state
+
+    annotated = []
+    all_state_ops = []
+    # Resolve beats against an evolving snapshot so later beats see prior outcomes.
+    shadow_state = copy.deepcopy(game_state) if isinstance(game_state, dict) else {}
+    if not shadow_state:
+        shadow_state = cpred_init_game_state()
+    shadow_edgerunner_names = set((shadow_state.get("edgerunners") or {}).keys())
+
+    def _hydrate_action_from_state(action: dict) -> dict:
+        action_type = action.get("type")
+        target = action.get("target")
+        if isinstance(target, str) and target:
+            edgerunners = shadow_state.get("edgerunners", {})
+            er = edgerunners.get(target) if isinstance(edgerunners, dict) else None
+            if isinstance(er, dict):
+                loc = action.get("hit_location", "body")
+                if loc not in ("head", "body"):
+                    loc = "body"
+                armor = er.get("armor", {}) if isinstance(er.get("armor"), dict) else {}
+                hp = er.get("hp", {}) if isinstance(er.get("hp"), dict) else {}
+                if action_type in ("ranged_attack", "autofire", "melee_attack"):
+                    action["target_sp"] = int(armor.get(loc, action.get("target_sp", 0)))
+                action["target_hp_current"] = int(hp.get("current", action.get("target_hp_current", 0)))
+
+        character = action.get("character")
+        if action_type == "death_save" and isinstance(character, str) and character:
+            edgerunners = shadow_state.get("edgerunners", {})
+            er = edgerunners.get(character) if isinstance(edgerunners, dict) else None
+            if isinstance(er, dict):
+                action["death_save_count"] = int(er.get("death_save_count", action.get("death_save_count", 0)))
+                action["active_injuries"] = copy.deepcopy(er.get("critical_injuries", action.get("active_injuries", [])))
+                body_stat = er.get("body")
+                if isinstance(body_stat, int):
+                    action["body_stat"] = body_stat
+        return action
+
+    for beat in beats:
+        if not isinstance(beat, dict):
+            # Legacy string beat — pass through as narrative-only
+            annotated.append({"beat": beat, "resolution": None})
+            continue
+
+        resolution = beat.get("resolution")
+        if resolution is None:
+            annotated.append(beat)
+            continue
+
+        # Build an action from the resolution request
+        try:
+            action = dict(resolution)  # copy so we don't mutate
+            action = _hydrate_action_from_state(action)
+            result = resolve_actions(
+                [action],
+                relationships=shadow_state.get("relationships"),
+                factions=shadow_state.get("factions"),
+            )
+            action_results = result.get("results", [])
+            action_ops = result.get("state_ops", [])
+
+            # Determine on_outcome from success/failure
+            action_result = action_results[0] if action_results else {}
+            on_outcome = ""
+            if action_result.get("error"):
+                on_outcome = f"Error: {action_result['error']}"
+            elif action_result.get("success") is True:
+                on_outcome = resolution.get("on_success", "success")
+            elif action_result.get("success") is False:
+                on_outcome = resolution.get("on_failure", "failure")
+            elif action_result.get("type") == "initiative":
+                on_outcome = "Initiative rolled"
+            elif "hit" in action_result:
+                # Autofire (top-level hit, no attacks array)
+                on_outcome = resolution.get("on_hit", "hit") if action_result["hit"] else resolution.get("on_miss", "miss")
+            elif action_result.get("survived") is True:
+                on_outcome = "survived"
+            elif action_result.get("survived") is False:
+                on_outcome = "failed"
+            else:
+                # Attacks: check if any hit (melee has "hit", ranged has "roll.success")
+                attacks = action_result.get("attacks", [])
+                hits = sum(1 for a in attacks
+                           if a.get("hit", a.get("roll", {}).get("success", False)))
+                if hits > 0:
+                    on_outcome = resolution.get("on_hit", f"{hits} hit(s)")
+                elif attacks:
+                    on_outcome = resolution.get("on_miss", "miss")
+                else:
+                    on_outcome = resolution.get("on_success", "resolved")
+
+            action_result["on_outcome"] = on_outcome
+            beat_copy = dict(beat)
+            beat_copy["result"] = action_result
+            annotated.append(beat_copy)
+            all_state_ops.extend(action_ops)
+            if action_ops:
+                # Never create synthetic edgerunners in shadow state from NPC/enemy target ops.
+                shadow_ops = [
+                    op for op in action_ops
+                    if isinstance(op, dict) and op.get("edgerunner") in shadow_edgerunner_names
+                ]
+                if shadow_ops:
+                    cpred_apply_game_state(shadow_state, {"edgerunner_ops": shadow_ops}, turn=0)
+
+        except Exception as e:
+            logger.warning(f"resolve_pipeline_mechanics: error resolving beat: {e}")
+            beat_copy = dict(beat)
+            beat_copy["result"] = {"error": str(e)}
+            annotated.append(beat_copy)
+
+    return annotated, all_state_ops
+
+
+def _format_cpred_hud_line(hud_state: dict) -> str:
+    """Format CPRED hud_state object into a single HUD line for narration."""
+    if not isinstance(hud_state, dict) or not hud_state:
+        return ""
+
+    parts = []
+    if hud_state.get("date"):
+        parts.append(f"Date: {hud_state['date']}")
+    if hud_state.get("time"):
+        parts.append(f"Time: {hud_state['time']}")
+    if hud_state.get("location"):
+        parts.append(f"Loc: {hud_state['location']}")
+
+    funds = hud_state.get("funds")
+    if isinstance(funds, dict):
+        if funds:
+            funds_text = ", ".join(f"{k}: {v}" for k, v in sorted(funds.items()))
+            parts.append(f"Funds: {funds_text}")
+    elif funds:
+        parts.append(f"Funds: {funds}")
+
+    trackables = hud_state.get("trackables")
+    if trackables:
+        parts.append(f"Trackables: {trackables}")
+
+    if not parts:
+        return ""
+    return "[" + " | ".join(parts) + "]"
+
+
+def _sync_cpred_character_states_from_game_state(
+    character_states: dict,
+    game_state: dict,
+    current_turn: int,
+    tracked_edgerunners: Optional[set[str]] = None,
+) -> dict:
+    """Mirror CPRED edgerunner vitals/resources/conditions into character_states."""
+    if not isinstance(character_states, dict):
+        character_states = {}
+    edgerunners = game_state.get("edgerunners", {}) if isinstance(game_state, dict) else {}
+    if not isinstance(edgerunners, dict) or not edgerunners:
+        return character_states
+
+    def _upsert_stat(items: list, label: str, current: int, maximum: int) -> list:
+        out = [i for i in items if isinstance(i, dict)]
+        for item in out:
+            if item.get("label") == label:
+                item["current"] = current
+                item["max"] = maximum
+                return out
+        out.append({"label": label, "current": current, "max": maximum})
+        return out
+
+    allowed = tracked_edgerunners if isinstance(tracked_edgerunners, set) else set(edgerunners.keys())
+    tracked_names = {name for name in character_states.keys() if name in edgerunners and name in allowed}
+    if not tracked_names:
+        return character_states
+
+    updates = {}
+    for name in tracked_names:
+        er = edgerunners.get(name, {})
+        if not isinstance(er, dict):
+            continue
+
+        existing_entry = character_states.get(name, {})
+        existing_data = existing_entry.get("data", existing_entry) if isinstance(existing_entry, dict) else {}
+        data = copy.deepcopy(existing_data) if isinstance(existing_data, dict) else {}
+
+        hp = er.get("hp", {}) if isinstance(er.get("hp"), dict) else {}
+        humanity = er.get("humanity", {}) if isinstance(er.get("humanity"), dict) else {}
+        luck = er.get("luck", {}) if isinstance(er.get("luck"), dict) else {}
+
+        data.setdefault("type", "pc")
+        data.setdefault("class", "")
+        data.setdefault("level", None)
+
+        vitals = data.get("vitals", []) if isinstance(data.get("vitals"), list) else []
+        vitals = _upsert_stat(vitals, "HP", int(hp.get("current", 0)), int(hp.get("max", 0)))
+        vitals = _upsert_stat(vitals, "Humanity", int(humanity.get("current", 0)), int(humanity.get("max", 0)))
+        data["vitals"] = vitals
+
+        resources = data.get("resources", []) if isinstance(data.get("resources"), list) else []
+        resources = _upsert_stat(resources, "Luck", int(luck.get("current", 0)), int(luck.get("max", 0)))
+        data["resources"] = resources
+
+        existing_conditions = data.get("conditions", [])
+        if not isinstance(existing_conditions, list):
+            existing_conditions = []
+        conditions = [
+            c for c in existing_conditions
+            if isinstance(c, str) and c != "Seriously Wounded" and not c.startswith("Critical Injury: ")
+        ]
+        if er.get("seriously_wounded"):
+            conditions.append("Seriously Wounded")
+        for ci in er.get("critical_injuries", []):
+            if isinstance(ci, dict) and ci.get("name"):
+                conditions.append(f"Critical Injury: {ci['name']}")
+        data["conditions"] = conditions
+
+        updates[name] = data
+
+    return apply_character_states(character_states, updates, current_turn)
+
+
 def build_events_messages(
     system_prompt: str,
     history_messages: list[dict],
@@ -1614,41 +1845,108 @@ def run_pipeline(
         return
 
     # ---- STAGE 2: Mechanics ----
-    yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
+    if gs.get("deterministic_mechanics", gs.get("mechanics_contract") is None):
+        # Deterministic resolution — skip Mechanics API call (cpred)
+        yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
-    dice_pool = generate_dice_pool(game_system)
-    mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
-    # Build game injection for Mechanics (relationship tiers, game-specific state)
-    mechanics_game_injection = ""
-    if gs.get("build_game_injection"):
-        mechanics_game_injection = gs["build_game_injection"](new_pipeline_state.get("game_state", {})) or ""
-    mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool, game_injection=mechanics_game_injection)
+        canonical_edgerunners = set((new_pipeline_state.get("game_state", {}).get("edgerunners") or {}).keys())
+        resolved_beats, resolver_ops = resolve_pipeline_mechanics(
+            events_data.get("beats", []), new_pipeline_state.get("game_state", {})
+        )
 
-    mechanics_result = run_pipeline_stage(
-        provider, client, STAGE_CONFIGS["mechanics"],
-        mechanics_messages, username, project, chat_name
-    )
+        # Apply character_states from Events
+        new_pipeline_state["character_states"] = apply_character_states(
+            new_pipeline_state["character_states"],
+            events_data.get("character_states") if isinstance(events_data.get("character_states"), dict) else {},
+            current_turn
+        )
 
-    yield ("pipeline_stage", {"stage": "mechanics", "status": "complete"})
+        # Apply resolver's state ops (HP, armor, crit injuries, etc.)
+        if gs.get("apply_game_state") and resolver_ops:
+            resolver_ops_for_state = [
+                op for op in resolver_ops
+                if isinstance(op, dict) and op.get("edgerunner") in canonical_edgerunners
+            ]
+        else:
+            resolver_ops_for_state = []
+        if gs.get("apply_game_state") and resolver_ops_for_state:
+            gs["apply_game_state"](new_pipeline_state["game_state"],
+                                    {"edgerunner_ops": resolver_ops_for_state}, current_turn)
 
-    mechanics_data = mechanics_result.parsed_json
+        # Keep character_states synchronized with resolver-applied CPRED state.
+        if game_system == "cpred":
+            new_pipeline_state["character_states"] = _sync_cpred_character_states_from_game_state(
+                new_pipeline_state.get("character_states", {}),
+                new_pipeline_state.get("game_state", {}),
+                current_turn,
+                tracked_edgerunners=canonical_edgerunners,
+            )
+
+        # Build narration input matching what Narration expects
+        mechanics_data = {
+            "route": "narration",
+            "beats": resolved_beats,
+            "edgerunner_ops": (events_data.get("edgerunner_ops") or []) + resolver_ops,
+            "relationship_ops": events_data.get("relationship_ops") or [],
+            "character_states": {
+                name: (entry.get("data", entry) if isinstance(entry, dict) else entry)
+                for name, entry in new_pipeline_state.get("character_states", {}).items()
+            },
+            "hud": _format_cpred_hud_line(new_pipeline_state.get("hud_state", {})),
+            "arc_label": events_data.get("arc_label"),
+            "callbacks": events_data.get("callbacks") or [],
+            "current_player": events_data.get("current_player"),
+            "next_player": events_data.get("next_player"),
+            "next_player_prompt": events_data.get("next_player_prompt"),
+            "combat": events_data.get("combat"),
+        }
+
+        mechanics_result = PipelineStageResult(
+            stage="mechanics", content=json.dumps(mechanics_data),
+            parsed_json=mechanics_data, usage={}, service_tier="n/a"
+        )
+        stage_results.append(mechanics_result)
+
+        yield ("pipeline_stage", {"stage": "mechanics", "status": "complete"})
+
+    else:
+        # Standard Mechanics API call (other game systems)
+        yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
+
+        dice_pool = generate_dice_pool(game_system)
+        mechanics_system = build_agent_system_prompt(gs["mechanics_contract"], agent_instructions["mechanics"], agent_files["mechanics"])
+        # Build game injection for Mechanics (relationship tiers, game-specific state)
+        mechanics_game_injection = ""
+        if gs.get("build_game_injection"):
+            mechanics_game_injection = gs["build_game_injection"](new_pipeline_state.get("game_state", {})) or ""
+        mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool, game_injection=mechanics_game_injection)
+
+        mechanics_result = run_pipeline_stage(
+            provider, client, STAGE_CONFIGS["mechanics"],
+            mechanics_messages, username, project, chat_name
+        )
+
+        yield ("pipeline_stage", {"stage": "mechanics", "status": "complete"})
+
+        mechanics_data = mechanics_result.parsed_json
+        new_pipeline_state["character_states"] = apply_character_states(
+            new_pipeline_state["character_states"],
+            mechanics_data.get("character_states") if isinstance(mechanics_data.get("character_states"), dict) else {},
+            current_turn
+        )
+        # Scene-scope filtering for Mechanics-emitted relationship ops
+        if mechanics_data.get("relationship_ops"):
+            filter_ops_by_scene_scope(mechanics_data, pipeline_state.get("scene_state", {}))
+        # Apply game-specific state ops from Mechanics (roll-dependent outcomes)
+        if gs.get("apply_game_state"):
+            if "game_state" not in pipeline_state:
+                pipeline_state["game_state"] = gs["init_game_state"]()
+            gs["apply_game_state"](pipeline_state["game_state"], mechanics_data, current_turn)
+        stage_results.append(mechanics_result)
+        if mechanics_result.usage.get('reasoning'):
+            reasoning_summaries.append(f"[Mechanics] {mechanics_result.usage['reasoning']}")
+
     mechanics_route = mechanics_data.get("route", "narration")
-    new_pipeline_state["character_states"] = apply_character_states(
-        new_pipeline_state["character_states"],
-        mechanics_data.get("character_states") if isinstance(mechanics_data.get("character_states"), dict) else {},
-        current_turn
-    )
-    # Scene-scope filtering for Mechanics-emitted relationship ops
-    if mechanics_data.get("relationship_ops"):
-        filter_ops_by_scene_scope(mechanics_data, pipeline_state.get("scene_state", {}))
-    # Apply game-specific state ops from Mechanics (roll-dependent outcomes)
-    if gs.get("apply_game_state"):
-        if "game_state" not in pipeline_state:
-            pipeline_state["game_state"] = gs["init_game_state"]()
-        gs["apply_game_state"](pipeline_state["game_state"], mechanics_data, current_turn)
-    stage_results.append(mechanics_result)
-    if mechanics_result.usage.get('reasoning'):
-        reasoning_summaries.append(f"[Mechanics] {mechanics_result.usage['reasoning']}")
 
     # ---- SHORT CIRCUIT: Mechanics → Output ----
     if mechanics_route == "output":
@@ -1739,6 +2037,219 @@ def run_pipeline(
         injected_state=injected_state_snapshot,
         stage_usage=_build_stage_usage(stage_results, provider),
         trim_anchor_id=new_trim_anchor_id
+    ))
+
+
+@dataclass
+class ModeResult:
+    """Result from a 2-stage mode pipeline (combat/hack/net_combat)."""
+    mode: str
+    final_content: str
+    planning_json: dict
+    resolved_actions: list
+    state_ops: list
+    aggregate_usage: dict
+    aggregate_cost: float
+    reasoning_summaries: list[str]
+    service_tier_label: str
+
+
+def run_mode_pipeline(
+    provider: OpenAIProvider,
+    client,
+    username: str,
+    project: str,
+    chat_name: str,
+    mode: str,
+    planning_system: str,
+    narration_system: str,
+    mode_messages: list[dict],
+    user_content: str,
+    planning_schema: dict,
+    game_state: dict = None,
+    character_states: dict = None,
+) -> Iterator[tuple[str, dict]]:
+    """Run a 2-stage mode pipeline for combat/hack/net_combat.
+
+    Stage 1 (Planning): Non-streaming JSON call — model proposes actions + state updates.
+    Backend Resolution: resolve_actions() on the actions array.
+    Stage 2 (Narration): Streaming call — model writes prose from resolved actions.
+
+    Yields same event types as run_pipeline(): pipeline_stage, content, pipeline_done.
+    """
+    from game_systems.cpred_mechanics import resolve_actions
+
+    # ---- STAGE 1: Planning ----
+    yield ("pipeline_stage", {"stage": "planning", "status": "thinking"})
+
+    planning_messages = [
+        {"role": "system", "content": planning_system
+         + "\n\nYou MUST output valid JSON matching this schema:\n"
+         + json.dumps(planning_schema, indent=2)},
+    ] + mode_messages + [
+        {"role": "user", "content": user_content}
+    ]
+
+    planning_config = StageConfig(
+        name="planning",
+        reasoning_effort="medium",
+        service_tier="auto",
+        json_mode=True,
+    )
+
+    planning_result = run_pipeline_stage(
+        provider, client, planning_config,
+        planning_messages, username, project, chat_name
+    )
+
+    yield ("pipeline_stage", {"stage": "planning", "status": "complete"})
+
+    planning_data = planning_result.parsed_json or {}
+    reasoning_summaries = []
+    if planning_result.usage.get('reasoning'):
+        reasoning_summaries.append(f"[Planning] {planning_result.usage['reasoning']}")
+
+    # ---- Backend Resolution (sequential with HP tracking) ----
+    actions = planning_data.get("actions", [])
+    resolved = {"results": [], "state_ops": []}
+    if actions:
+        # Separate initiative actions (resolve first for ordering)
+        init_actions = [a for a in actions if a.get("type") == "initiative"]
+        ambush_actions = [a for a in actions if a.get("type") == "ambush"]
+        combat_actions = [a for a in actions if a.get("type") not in ("initiative", "ambush")]
+
+        # Extract relationships/factions for bonus auto-computation
+        _rels = game_state.get("relationships") if isinstance(game_state, dict) else None
+        _facs = game_state.get("factions") if isinstance(game_state, dict) else None
+
+        # Resolve ambush first if present
+        ambush_result = resolve_actions(ambush_actions, relationships=_rels, factions=_facs) if ambush_actions else {"results": [], "state_ops": []}
+
+        # Determine surprised combatants from ambush results
+        _surprised_names = []
+        for _ar in ambush_result.get("results", []):
+            for _tr in _ar.get("results", []):
+                if _tr.get("surprised"):
+                    _surprised_names.append(_tr.get("target", ""))
+
+        # Inject surprised list into initiative actions
+        for _ia in init_actions:
+            if _surprised_names:
+                _ia["surprised"] = _surprised_names
+
+        init_result = resolve_actions(init_actions, relationships=_rels, factions=_facs) if init_actions else {"results": [], "state_ops": []}
+
+        # Sort combat_actions by initiative order if available
+        if init_result["results"]:
+            _init_order = init_result["results"][0].get("order", [])
+            _order_map = {e["name"]: i for i, e in enumerate(_init_order)}
+            combat_actions.sort(key=lambda a: _order_map.get(a.get("character", ""), 999))
+
+        # Extract combatant HP from game_state (PCs) and character_states (enemies)
+        _combatant_hp = {}
+        if game_state and isinstance(game_state, dict):
+            for _er_name, _er_data in game_state.get("edgerunners", {}).items():
+                _hp = _er_data.get("hp", {})
+                if isinstance(_hp, dict) and "current" in _hp:
+                    _combatant_hp[_er_name] = _hp["current"]
+        if character_states and isinstance(character_states, dict):
+            for _cs_name, _cs_entry in character_states.items():
+                if _cs_name in _combatant_hp:
+                    continue  # PC already tracked via edgerunners
+                _d = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                for _v in _d.get("vitals", []):
+                    if _v.get("label") == "HP" and "current" in _v:
+                        _combatant_hp[_cs_name] = _v["current"]
+                        break
+
+        # Resolve combat actions sequentially with HP tracking
+        combat_resolved = resolve_actions(
+            combat_actions, relationships=_rels, factions=_facs,
+            sequential=True, combatant_hp=_combatant_hp
+        ) if combat_actions else {"results": [], "state_ops": []}
+
+        # Merge all results
+        resolved = {
+            "results": ambush_result["results"] + init_result["results"] + combat_resolved["results"],
+            "state_ops": ambush_result["state_ops"] + init_result["state_ops"] + combat_resolved["state_ops"],
+        }
+
+    # ---- STAGE 2: Narration (streaming) ----
+    yield ("pipeline_stage", {"stage": "narration", "status": "thinking"})
+
+    # Build narration input: planning output + resolved actions
+    narration_input = {
+        "planning": planning_data,
+        "resolved_actions": resolved["results"],
+        "state_ops": resolved["state_ops"],
+    }
+
+    narration_messages = [
+        {"role": "system", "content": narration_system},
+    ] + mode_messages + [
+        {"role": "user", "content": json.dumps(narration_input, indent=2)}
+    ]
+
+    narration_config = StageConfig(
+        name="narration",
+        reasoning_effort="low",
+        service_tier="auto",
+        json_mode=False,
+    )
+
+    narration_params = provider.build_pipeline_request(
+        messages=narration_messages,
+        username=username,
+        project=project,
+        chat_name=chat_name,
+        stage_name="narration",
+        reasoning_effort=narration_config.reasoning_effort,
+        service_tier=narration_config.service_tier,
+        json_mode=False
+    )
+
+    narration_content = ""
+    narration_usage = None
+    first_content = True
+
+    for stream_event in provider.send_request_stream(client, narration_params):
+        if stream_event.event_type == 'content_delta':
+            if first_content:
+                yield ("pipeline_stage", {"stage": "narration", "status": "streaming"})
+                first_content = False
+            narration_content += stream_event.content
+            yield ("content", {"delta": stream_event.content})
+        elif stream_event.event_type == 'done':
+            narration_usage = stream_event.usage
+            narration_content = narration_content or (narration_usage or {}).get('content') or ''
+
+    yield ("pipeline_stage", {"stage": "narration", "status": "complete"})
+
+    # Aggregate usage
+    stage_results = [planning_result]
+    narration_stage_result = PipelineStageResult(
+        stage="narration",
+        content=narration_content,
+        parsed_json=None,
+        usage=narration_usage or {},
+        service_tier="standard"
+    )
+    stage_results.append(narration_stage_result)
+    if narration_usage and narration_usage.get('reasoning'):
+        reasoning_summaries.append(f"[Narration] {narration_usage['reasoning']}")
+
+    aggregate = _aggregate_usage(stage_results, provider)
+
+    yield ("pipeline_done", ModeResult(
+        mode=mode,
+        final_content=narration_content,
+        planning_json=planning_data,
+        resolved_actions=resolved["results"],
+        state_ops=resolved["state_ops"],
+        aggregate_usage=aggregate["usage"],
+        aggregate_cost=aggregate["cost"],
+        reasoning_summaries=reasoning_summaries,
+        service_tier_label="standard",
     ))
 
 

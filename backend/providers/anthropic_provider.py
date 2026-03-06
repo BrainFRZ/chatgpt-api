@@ -202,7 +202,7 @@ class AnthropicProvider(ModelProvider):
         thinking_tokens = 0
         reasoning = None
         content = None
-        tool_use_input = None
+        tool_uses = []
         for block in response.content:
             if block.type == "thinking":
                 reasoning = block.thinking
@@ -213,7 +213,18 @@ class AnthropicProvider(ModelProvider):
             elif block.type == "text":
                 content = block.text
             elif block.type == "tool_use":
-                tool_use_input = block.input
+                tool_uses.append({
+                    "input": block.input,
+                    "name": block.name,
+                    "id": block.id,
+                })
+
+        # Keep legacy single-tool fields for downstream compatibility.
+        # Use the first call because CPRED can emit resolve_mechanics before report_state.
+        first_tool_use = tool_uses[0] if tool_uses else {}
+        tool_use_input = first_tool_use.get("input")
+        tool_use_name = first_tool_use.get("name")
+        tool_use_id = first_tool_use.get("id")
 
         text_output_tokens = max(0, output_tokens - thinking_tokens)
 
@@ -225,7 +236,12 @@ class AnthropicProvider(ModelProvider):
             'reasoning_tokens': thinking_tokens,
             'content': content,
             'reasoning': reasoning,
-            'tool_use_input': tool_use_input
+            'tool_use_input': tool_use_input,
+            'tool_use_name': tool_use_name,
+            'tool_use_id': tool_use_id,
+            'tool_uses': tool_uses,
+            'stop_reason': getattr(response, 'stop_reason', None),
+            'content_blocks': response.content,
         }
 
     def parse_response(self, response: Any) -> ParsedResponse:

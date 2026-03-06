@@ -3675,10 +3675,12 @@ class TestCpredNetCombatMalformedFuzz:
     def test_apply_net_combat_state_handles_none_net_combat(self):
         pipeline_state = _net_combat_pipeline_state()
         pipeline_state["net_combat"] = None
+        resolver_ops = [{"op": "brain_damage", "target": "V", "change": -1}]
         cpred_apply_net_combat_state(
             pipeline_state,
-            {"hack_state": {"brain_damage": 1}, "available_actions": ["Backdoor"]},
+            {"hack_state": {}, "available_actions": ["Backdoor"]},
             game_state=_net_game_state(),
+            resolver_state_ops=resolver_ops,
         )
         assert isinstance(pipeline_state.get("net_combat"), dict)
         assert pipeline_state["net_combat"].get("brain_damage") == 1
@@ -4015,12 +4017,13 @@ class TestPipelineSingleAgentDifferential:
             }
         )
         mechanics_data = _make_mechanics_response(character_states={})
-        mechanics_data["edgerunner_ops"] = [
+        resolver_ops = [
             {"edgerunner": "V", "op": "hp", "change": -5, "reason": "incoming fire"},
             {"edgerunner": "V", "op": "armor", "location": "body", "change": -1, "reason": "ablation"},
         ]
 
-        pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system="cpred")
+        with patch("pipeline.resolve_pipeline_mechanics", return_value=(events_data.get("beats", []), resolver_ops)):
+            pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system="cpred")
 
         single_state = migrate_pipeline_state(copy.deepcopy(base))
         single_state["turn_counter"] += 1
@@ -4029,12 +4032,140 @@ class TestPipelineSingleAgentDifferential:
         apply_single_agent_state_updates(single_state, copy.deepcopy(events_data), current_turn, game_system=gs_cpred)
         apply_single_agent_state_updates(
             single_state,
-            {"character_states": {}, "edgerunner_ops": copy.deepcopy(mechanics_data["edgerunner_ops"])},
+            {"character_states": {}, "edgerunner_ops": copy.deepcopy(resolver_ops)},
             current_turn,
             game_system=gs_cpred,
         )
 
         assert self._state_snapshot(single_state) == self._state_snapshot(pipeline_result)
+
+    def test_cpred_deterministic_narration_receives_hud_line(self):
+        base = _fresh_pipeline_state()
+        events_data = _make_events_response(
+            extra_fields={
+                "hud_state": {
+                    "date": "Day 9",
+                    "time": "2230",
+                    "location": "Afterlife",
+                    "funds": "2500 eb",
+                },
+                "character_states": {},
+                "edgerunner_ops": [],
+            }
+        )
+        mechanics_data = _make_mechanics_response(character_states={})
+        provider = self._build_provider_for_payloads(events_data, mechanics_data)
+
+        list(run_pipeline(
+            provider=provider,
+            client=MagicMock(),
+            username="testuser",
+            project="testproject",
+            chat_name="testchat",
+            branch_path=_make_branch_path(3),
+            agent_instructions={"events": "", "mechanics": "", "narration": ""},
+            agent_files={"events": "", "mechanics": "", "narration": ""},
+            pipeline_state=copy.deepcopy(base),
+            game_system="cpred",
+        ))
+
+        narration_req = provider.build_pipeline_request.call_args_list[-1].kwargs
+        narration_msgs = narration_req["messages"]
+        payload = json.loads(narration_msgs[-1]["content"])
+        assert payload["hud"] == "[Date: Day 9 | Time: 2230 | Loc: Afterlife | Funds: 2500 eb]"
+        assert isinstance(payload["hud"], str)
+
+    def test_cpred_deterministic_syncs_character_states_after_resolver_ops(self):
+        base = _fresh_pipeline_state()
+        events_data = _make_events_response(
+            extra_fields={
+                "edgerunner_ops": [
+                    {"edgerunner": "V", "op": "set", "fields": {
+                        "hp": {"current": 35, "max": 40},
+                        "humanity": {"current": 48, "max": 60},
+                        "luck": {"current": 6, "max": 7},
+                        "armor": {"head": 11, "body": 11},
+                        "eurobucks": 2500,
+                    }}
+                ],
+                "character_states": {
+                    "V": {
+                        "type": "pc",
+                        "class": "Solo",
+                        "level": None,
+                        "vitals": [{"label": "HP", "current": 35, "max": 40}],
+                        "resources": [{"label": "Luck", "current": 6, "max": 7}],
+                        "conditions": [],
+                        "summary": "Very Heavy Pistol",
+                    }
+                },
+            }
+        )
+        mechanics_data = _make_mechanics_response(character_states={})
+        resolver_ops = [
+            {"edgerunner": "V", "op": "hp", "change": -5, "reason": "incoming fire"},
+            {"edgerunner": "V", "op": "luck", "change": -2, "reason": "Luck spent on skill check"},
+            {"edgerunner": "V", "op": "critical_injury", "action": "add", "name": "Broken Arm", "dv_mod": 0},
+        ]
+
+        with patch("pipeline.resolve_pipeline_mechanics", return_value=(events_data.get("beats", []), resolver_ops)):
+            pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system="cpred")
+
+        v_state = pipeline_result["character_states"]["V"]["data"]
+        hp = next(v for v in v_state["vitals"] if v.get("label") == "HP")
+        luck = next(r for r in v_state["resources"] if r.get("label") == "Luck")
+        assert hp["current"] == 30
+        assert luck["current"] == 4
+        assert "Critical Injury: Broken Arm" in v_state.get("conditions", [])
+
+    def test_cpred_deterministic_does_not_sync_enemy_from_stub_edgerunner(self):
+        base = _fresh_pipeline_state()
+        events_data = _make_events_response(
+            extra_fields={
+                "edgerunner_ops": [
+                    {"edgerunner": "V", "op": "set", "fields": {
+                        "hp": {"current": 35, "max": 40},
+                        "humanity": {"current": 48, "max": 60},
+                        "luck": {"current": 6, "max": 7},
+                        "armor": {"head": 11, "body": 11},
+                        "eurobucks": 2500,
+                    }}
+                ],
+                "character_states": {
+                    "V": {
+                        "type": "pc",
+                        "class": "Solo",
+                        "level": None,
+                        "vitals": [{"label": "HP", "current": 35, "max": 40}],
+                        "resources": [{"label": "Luck", "current": 6, "max": 7}],
+                        "conditions": [],
+                        "summary": "Very Heavy Pistol",
+                    },
+                    "Ganger": {
+                        "type": "enemy",
+                        "class": "Mook",
+                        "level": None,
+                        "vitals": [{"label": "HP", "current": 12, "max": 12}],
+                        "resources": [],
+                        "conditions": [],
+                        "summary": "Leather jacket",
+                    },
+                },
+            }
+        )
+        mechanics_data = _make_mechanics_response(character_states={})
+        resolver_ops = [
+            {"edgerunner": "Ganger", "op": "hp", "change": -5, "reason": "incoming fire"},
+        ]
+
+        with patch("pipeline.resolve_pipeline_mechanics", return_value=(events_data.get("beats", []), resolver_ops)):
+            pipeline_result = self._run_pipeline_once(base, events_data, mechanics_data, game_system="cpred")
+
+        ganger = pipeline_result["character_states"]["Ganger"]["data"]
+        hp = next(v for v in ganger["vitals"] if v.get("label") == "HP")
+        assert hp["current"] == 12
+        assert hp["max"] == 12
+        assert "Ganger" not in pipeline_result["game_state"].get("edgerunners", {})
 
 
 class TestContractDriftGuards:

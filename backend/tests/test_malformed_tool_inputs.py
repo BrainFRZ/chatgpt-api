@@ -255,10 +255,12 @@ class TestMalformedToolInputs(unittest.TestCase):
     def test_regression_apply_net_combat_state_handles_none_net_combat(self):
         pipeline_state = _net_combat_pipeline_state()
         pipeline_state["net_combat"] = None
+        resolver_ops = [{"op": "brain_damage", "target": "V", "change": -1}]
         apply_net_combat_state(
             pipeline_state,
-            {"hack_state": {"brain_damage": 1}, "available_actions": ["Backdoor"]},
+            {"hack_state": {}, "available_actions": ["Backdoor"]},
             game_state=_net_game_state(),
+            resolver_state_ops=resolver_ops,
         )
         self.assertIsInstance(pipeline_state.get("net_combat"), dict)
         self.assertEqual(pipeline_state["net_combat"].get("brain_damage"), 1)

@@ -64,6 +64,124 @@ def _fr_tier(score):
 
 
 # ============================================================
+# Structured Tier Bonuses (context → bonus mapping)
+# ============================================================
+
+def _rs_bonus(score):
+    """Return {context: bonus} for an RS score.
+
+    "social" = social-adjacent skills only (persuasion, conversation, etc.)
+    "all" = every check including combat (extreme hatred fuels focus/aggression)
+    """
+    if score >= 95:  return {"social": 3}
+    if score >= 85:  return {"social": 3, "persuasion": 3}
+    if score >= 70:  return {"social": 2, "persuasion": 3, "acting": 3}
+    if score >= 55:  return {"social": 2, "persuasion": 3}
+    if score >= 40:  return {"persuasion": 1, "human_perception": 1}
+    if score >= 25:  return {"persuasion": 1}
+    if score >= 10:  return {}
+    if score >= -9:  return {}
+    if score >= -24: return {"persuasion": -3}
+    if score >= -39: return {"social": -1}
+    if score >= -54: return {"social": -2, "contacts": -3}
+    if score >= -69: return {"all": -2}
+    if score >= -84: return {"all": -3}
+    if score >= -94: return {"all": -3}
+    return {"all": -4}
+
+
+def _roms_bonus(score):
+    """Return {context: bonus} for a RomS score.
+
+    High RomS ("all") applies to combat too — intimate knowledge of a
+    partner's movements, reflexes, and tells translates to tactical advantage.
+    """
+    if score >= 95: return {"all": 3}
+    if score >= 85: return {"all": 3}
+    if score >= 65: return {"all": 2}
+    if score >= 45: return {"social": 2}
+    if score >= 25: return {"social": 1, "human_perception": 1}
+    if score >= 10: return {"persuasion": 1}
+    return {}
+
+
+def _fr_bonus(score):
+    """Return {context: bonus} for a FR score."""
+    if score >= 90:  return {"social": 3}
+    if score >= 70:  return {"social": 2}
+    if score >= 50:  return {"social": 2}
+    if score >= 30:  return {"social": 1}
+    if score >= 10:  return {}
+    if score >= -9:  return {}
+    if score >= -29: return {"social": -1}
+    if score >= -49: return {"social": -1}
+    if score >= -69: return {"social": -2}
+    if score >= -89: return {"social": -2}
+    return {"social": -3}
+
+
+_SOCIAL_ADJACENT = frozenset({
+    "social", "persuasion", "acting", "human_perception", "contacts",
+    "conversation", "interrogation", "intimidation",
+})
+
+
+def _resolve_bonus_for_context(bonus_dict, check_context):
+    """Resolve a single bonus dict against a check_context.
+
+    Priority: exact match > "social" (only for social-adjacent contexts) > "all" > 0.
+    """
+    if not bonus_dict or not check_context:
+        return bonus_dict.get("all", 0) if bonus_dict else 0
+    # Exact match first
+    if check_context in bonus_dict:
+        return bonus_dict[check_context]
+    # "social" fallback only for social-adjacent contexts
+    if check_context in _SOCIAL_ADJACENT and "social" in bonus_dict:
+        return bonus_dict["social"]
+    return bonus_dict.get("all", 0)
+
+
+def compute_rel_bonus(relationships, factions, target, check_context=None):
+    """Compute the combined relationship bonus for an action targeting an NPC/faction.
+
+    Looks up target in relationships and factions, resolves context-specific bonuses
+    from RS, RomS, and FR tiers, and returns the clamped [-5, +5] integer.
+    """
+    if not target:
+        return 0
+
+    total = 0
+
+    if relationships and isinstance(relationships, dict):
+        target_lower = target.lower()
+        for npc_name, npc_data in relationships.items():
+            if npc_name.lower() == target_lower:
+                if not isinstance(npc_data, dict):
+                    continue
+                rs = npc_data.get("rs")
+                if isinstance(rs, (int, float)):
+                    total += _resolve_bonus_for_context(_rs_bonus(rs), check_context)
+                roms = npc_data.get("roms")
+                if isinstance(roms, (int, float)):
+                    total += _resolve_bonus_for_context(_roms_bonus(roms), check_context)
+                break
+
+    if factions and isinstance(factions, dict):
+        target_lower = target.lower()
+        for fac_name, fac_data in factions.items():
+            if fac_name.lower() == target_lower:
+                if not isinstance(fac_data, dict):
+                    continue
+                fr = fac_data.get("fr")
+                if isinstance(fr, (int, float)):
+                    total += _resolve_bonus_for_context(_fr_bonus(fr), check_context)
+                break
+
+    return max(-5, min(5, total))
+
+
+# ============================================================
 # Structured Game State
 # ============================================================
 #
@@ -325,6 +443,16 @@ def apply_game_state(game_state, agent_json, turn):
                             w["current_ammo"] = max(0, current)
                             break
 
+                elif op == "ammo":
+                    # Resolver-generated: subtract rounds_consumed from weapon
+                    wname = op_data.get("weapon_name", "")
+                    consumed = int(op_data.get("rounds_consumed", 0))
+                    if wname and consumed > 0:
+                        for w in er.get("weapons", []):
+                            if w.get("name") == wname:
+                                w["current_ammo"] = max(0, w.get("current_ammo", 0) - consumed)
+                                break
+
                 elif op == "death_save":
                     er["death_save_count"] = er.get("death_save_count", 0) + 1
 
@@ -526,18 +654,21 @@ def apply_game_state(game_state, agent_json, turn):
                     if target not in relationships:
                         relationships[target] = {"rs": 0, "roms": 0}
                     relationships[target]["rs"] = max(-100, min(100, relationships[target].get("rs", 0) + change))
+                    op_data["new_total"] = relationships[target]["rs"]
 
                 elif op == "roms":
                     change = int(op_data.get("change", 0))
                     if target not in relationships:
                         relationships[target] = {"rs": 0, "roms": 0}
                     relationships[target]["roms"] = max(0, min(100, relationships[target].get("roms", 0) + change))
+                    op_data["new_total"] = relationships[target]["roms"]
 
                 elif op == "fr":
                     change = int(op_data.get("change", 0))
                     if target not in factions:
                         factions[target] = {"fr": 0}
                     factions[target]["fr"] = max(-100, min(100, factions[target].get("fr", 0) + change))
+                    op_data["new_total"] = factions[target]["fr"]
 
                 elif op == "npc_rs":
                     other = op_data.get("other")
@@ -549,6 +680,7 @@ def apply_game_state(game_state, agent_json, turn):
                         if other not in npc_rels:
                             npc_rels[other] = {"rs": 0, "roms": 0}
                         npc_rels[other]["rs"] = max(-100, min(100, npc_rels[other].get("rs", 0) + change))
+                        op_data["new_total"] = npc_rels[other]["rs"]
 
                 elif op == "npc_roms":
                     other = op_data.get("other")
@@ -560,6 +692,7 @@ def apply_game_state(game_state, agent_json, turn):
                         if other not in npc_rels:
                             npc_rels[other] = {"rs": 0, "roms": 0}
                         npc_rels[other]["roms"] = max(0, min(100, npc_rels[other].get("roms", 0) + change))
+                        op_data["new_total"] = npc_rels[other]["roms"]
 
                 elif op == "npc_set":
                     other = op_data.get("other")
@@ -1185,6 +1318,25 @@ def build_game_injection(game_state):
             result += "\n  \u2192 Use housing_pending / lifestyle_pending ops to schedule a tier change for next month."
             result += "\n[/UPCOMING EXPENSES]"
 
+    # Bootstrap validation: warn if critical fields are missing (needed for expense consequence rolls)
+    bootstrap_warnings = []
+    for name, er in sorted(edgerunners.items()):
+        missing = []
+        if not er.get("body"):
+            missing.append("body")
+        if not er.get("endurance_base"):
+            missing.append("endurance_base")
+        if not er.get("hp", {}).get("max"):
+            missing.append("hp.max")
+        if missing:
+            fields_hint = ", ".join(f"{f}: <value>" for f in missing)
+            bootstrap_warnings.append(
+                f"[WARNING: {name} missing {', '.join(missing)} — expense consequences will be skipped. "
+                f'Set via: {{op: "set", edgerunner: "{name}", fields: {{{fields_hint}}}}}]'
+            )
+    if bootstrap_warnings:
+        result += "\n\n" + "\n".join(bootstrap_warnings)
+
     return result
 
 
@@ -1323,7 +1475,10 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "notes": "<pacing observations>"
   },
   "time_passed": "<how much in-world time this turn covers>",
-  "beats": ["<beat 1>", "<beat 2>", ...],
+  "beats": [
+    {"beat": "<narrative description>", "resolution": null},
+    {"beat": "<narrative description>", "resolution": {<resolution object — see RESOLUTION TYPES below>}}
+  ],
   "player_action": "<what the player is attempting>",
   "callbacks": [
     {"callback": "<triggered callback description>", "source": "<NPC name or null>"}
@@ -1448,7 +1603,7 @@ Use "edgerunner_ops" to update this state. Operations:
 
 IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
 
-OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Do NOT emit HP, armor, critical injury, or Luck-spent ops for outcomes that depend on Mechanics — Mechanics emits those after adjudication.
+OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Mechanics-dependent ops (HP, armor, luck-spent, critical injuries) are emitted by the backend resolver, not by Events.
 
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
@@ -1483,7 +1638,8 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
   * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
-- Presence requirements: RS/RomS combat and mechanical bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
+- Presence requirements: RS/RomS bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
+- Combat bonuses: Deeply negative RS (hatred fuels aggression) and high RomS (intimate knowledge of a partner's tells/reflexes) apply to combat rolls, not just social. The backend auto-applies these — "all" tier bonuses affect every check including attacks.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 - OPS SCOPE: Emit relationship_ops ONLY for state changes certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
@@ -1511,7 +1667,7 @@ RULES REFERENCE:
 The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you reference most often — defer to the Core Rulebook for edge cases and detailed tables.
 Consult Character Descs for canonical physical descriptions, personality, and NPC behavior. Override training data if details conflict.
 
-DICE MECHANICS (quick reference — teach to Mechanics via beats):
+DICE MECHANICS (reference — use to set DVs and resolution fields):
 - Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
 - DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
 - Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
@@ -1521,7 +1677,7 @@ DICE MECHANICS (quick reference — teach to Mechanics via beats):
 - Armor ablation: SP drops by 1 per penetrating hit. AP ammo ablates by 2.
 - Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
-- Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Flag social encounters so Mechanics applies these correctly.
+- Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Set appropriate DVs for social checks.
 - Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
   Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
   Housing sharing: Multiple characters share via housing_shared_with op. Cost = base/N per person. If a sharer can't afford their share, the owner covers the deficit if possible. Capacity = 1 + bedrooms. Over capacity → "crammed" (fatigue, -2 all actions). Bedrooms: Cube Hotel/Cargo Container/Studio Apartment=0, Two-Bedroom Apartment/Corporate Conapt/Upscale Conapt=2, Luxury Penthouse/Corporate Beaverville House=3, Corporate Beaverville McMansion=4. Override with housing_bedrooms via set op if specific unit differs.
@@ -1615,190 +1771,56 @@ ROUTING RULES:
 - Route to "mechanics" for ALL in-character gameplay
 - Route to "output" for pure OOC questions, IP awards, or IP spending
 
+RESOLUTION TYPES (for beats):
+Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Set "resolution" to null for narrative-only beats (dialogue, movement, scene description). Set "resolution" to a typed object for any beat requiring mechanical adjudication.
+
+- skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "stat_value": <int>, "skill": "<Skill>", "skill_value": <int>, "dv": <int>, "seriously_wounded": <bool>, "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
+  Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation.
+
+- ranged_attack: {"type": "ranged_attack", "character": "<attacker>", "stat_value": <REF>, "skill_value": <weapon skill>, "weapon_type": "<Pistol|SMG|Shotgun|Assault Rifle|Sniper Rifle|Bows & Crossbow|Grenade Launcher|Rocket Launcher>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-7>, "hit_location": "head|body", "is_ap": <bool>, "is_rubber": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "aimed_shot": "head|leg|held_item|null", "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Range brackets: 0=0-6m, 1=7-12m, 2=13-25m, 3=26-50m, 4=51-100m, 5=101-200m, 6=201-400m, 7=401-800m.
+
+- melee_attack: {"type": "melee_attack", "character": "<attacker>", "attacker_stat": <DEX>, "attacker_skill": <weapon skill>, "defender_stat": <DEX>, "defender_skill": <Evasion>, "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "hit_location": "head|body", "seriously_wounded_attacker": <bool>, "seriously_wounded_defender": <bool>, "is_brawling": <bool>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Opposed roll: attacker d10+DEX+skill vs defender d10+DEX+Evasion. Melee halves SP (round up). Brawling faces full SP.
+
+- autofire: {"type": "autofire", "character": "<attacker>", "stat_value": <REF>, "skill_value": <Autofire skill>, "weapon_type": "<SMG|Assault Rifle>", "autofire_multiplier": <3|4>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-4>, "hit_location": "head|body", "is_ap": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Autofire multiplier: 3 for SMG, 4 for AR. Consumes 10 rounds. Damage = 2d6 × margin, capped by multiplier.
+
+- death_save: {"type": "death_save", "character": "<name>", "body_stat": <BODY>, "death_save_count": <cumulative count>, "active_injuries": [{"name": "<injury>", "dv_mod": <int>}, ...]}
+  Roll d10 vs BODY. Natural 10 always fails. Cumulative +1 per previous save.
+
+- initiative: {"type": "initiative", "character": "all", "combatants": [{"name": "<name>", "ref": <REF stat>}, ...]}
+  Roll d10+REF per combatant. Returns sorted initiative order.
+
 CHARACTER CREATION:
 - Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
 
 IMPORTANT:
 - Output ONLY valid JSON
-- "beats" array: discrete narrative events
+- "beats" array: each beat is {"beat": "<description>", "resolution": <null or resolution object>}. Include resolution for any beat requiring dice — the backend resolves the math.
 - "character_states": structured per-character objects with type, vitals, resources, conditions, summary (Luck mirrored for HUD)
-- "edgerunner_ops": HP, Humanity, Luck, Armor, Eurobucks, critical injuries, cyberware
+- "edgerunner_ops": pre-roll ops only (bootstrap/set, eurobucks, equipment, luck_reset). Do NOT emit HP, armor, or critical injury ops — the resolver handles those.
 - "relationship_ops": RS/RomS/FR changes (most turns: empty array). Pre-roll only — do not emit for roll-dependent outcomes.
 - "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
 - Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if the specific unit has non-default bedrooms. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
 
-MECHANICS_CONTRACT = """You are the MECHANICS AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the second stage.
-
-YOUR ROLE: Receive the Events analysis and adjudicate all game mechanics using Cyberpunk RED rules. Resolve skill checks, combat, armor ablation, critical injuries, and death saves. Determine what ACTUALLY happens.
-
-YOU RECEIVE: JSON from Events containing beats, player_action, callbacks, emotional_context, character_states, edgerunner_ops, relationship_ops, hud_state, and combat.
-
-CRITICAL: Events' beats are PROPOSALS. You are the authority on what actually happens.
-
-YOU MUST OUTPUT VALID JSON:
-
-SCHEMA A - Route to Narration (default):
-{
-  "route": "narration",
-  "beats": [
-    {
-      "beat": "<what happens>",
-      "outcome": "<mechanical result>",
-      "rolls": [
-        {
-          "description": "<what this roll is for>",
-          "stat": "<STAT name>",
-          "stat_value": <stat value>,
-          "skill": "<Skill name>",
-          "skill_value": <skill value>,
-          "d10": <die result>,
-          "exploding": [<additional d10s if 10 rolled>],
-          "fumble": <subtracted d10 if 1 rolled>,
-          "luck_spent": <0 or Luck points added>,
-          "rs_modifier": <0 or RS/RomS/FR bonus applied>,
-          "total": <final total>,
-          "dv": <difficulty value>,
-          "result": "<success/failure>"
-        }
-      ],
-      "damage": {
-        "weapon": "<weapon used>",
-        "hit_location": "head|body",
-        "base_damage": <weapon damage>,
-        "rolls": [<damage dice>],
-        "total_damage": <total>,
-        "armor_sp": <location SP>,
-        "damage_after_armor": <penetrating damage>,
-        "ablation": <true if armor penetrated>,
-        "critical_injury": "<null or injury name+effect if 2+ damage dice show 6>"
-      },
-      "state_changes": ["<change from this beat>", ...]
-    }
-  ],
-  "dramatic_notes": "<tone/pacing guidance — high-octane cyberpunk>",
-  "hud": "<HUD line>",
-  "edgerunner_ops": [
-    {"edgerunner": "<name>", "op": "hp", "change": <int>, "reason": "<why>"},
-    {"edgerunner": "<name>", "op": "armor", "location": "head|body", "change": <int>, "reason": "<why>"},
-    {"edgerunner": "<name>", "op": "luck", "change": <int>, "reason": "<why>"},
-    {"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "<injury>", "effect": "<effect>", "dv_mod": <int>}
-  ],
-  "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
-  "arc_label": <pass through from Events unchanged>,
-  "callbacks": <pass through from Events unchanged>,
-  "current_player": <pass through from Events unchanged>,
-  "next_player": <pass through from Events unchanged>,
-  "next_player_prompt": <pass through from Events unchanged>,
-  "combat": <pass through from Events unchanged>,
-  "character_states": {
-    "<CharacterName>": {
-      "type": "pc|npc|enemy",
-      "class": "Solo",
-      "level": null,
-      "vitals": [
-        {"label": "HP", "current": 27, "max": 40},
-        {"label": "Humanity", "current": 48, "max": 60}
-      ],
-      "resources": [
-        {"label": "Luck", "current": 3, "max": 7}
-      ],
-      "conditions": ["Seriously Wounded"],
-      "summary": "Medium pistol (10 rounds), light armorjack (SP 10/11)"
-    }
-  }
-}
-
-SCHEMA B - Route to Output (OOC rules questions):
-{
-  "route": "output",
-  "content": "<rules explanation>"
-}
-
-RULES REFERENCE:
-The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you adjudicate most often — defer to the Core Rulebook for edge cases and detailed tables.
-
-SKILL CHECK RULES (Cyberpunk RED):
-- Roll: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
-- DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
-- Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
-- Critical failure: natural 1 → roll another d10 and subtract. Does NOT chain on a second 1.
-- Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
-- Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
-- RS/RomS/FR modifiers: Apply relationship tier bonuses to social checks involving tracked NPCs/factions. Read the [RELATIONSHIP STATE] injection for current tiers and bonuses. Maximum combined relationship bonus: +5 to any single check.
-- RomS mechanical bonuses: T2 Dating = -1 Death Save rolls; T3-T4 = +1 LUCK/session; T5 = take damage for partner 1/session; T6 = redirect 10 dmg 1/session. Apply when conditions are met.
-
-DAMAGE RESOLUTION:
-1. Roll weapon damage dice.
-2. Critical injury check: if 2+ dice show 6 → critical injury triggered. 5 bonus damage direct to HP (ignores SP) + injury effect from table.
-3. Subtract location SP from damage. If damage ≤ SP, no penetration — stop (crit bonus from step 2 still applies).
-4. Ablation: if damage penetrates, SP drops by 1. AP ammo: SP drops by 2.
-5. Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
-6. Remaining damage after SP → applied to HP.
-
-DEATH SAVES (at 0 HP):
-- Roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails.
-- Cumulative +1 per save already made. Critical injuries add their dv_mod to the roll.
-- Emit {"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round N"} after each save to track the cumulative counter. Read the [EDGERUNNER STATE] death_save_count for the current cumulative modifier.
-- Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
-
-SOCIAL MECHANICS:
-- Social Ceiling (§11A): lifestyle/presentation tier caps social check totals. Style Over Substance overrides at high skill.
-- Degree of Success: margin over/under DV scales social outcomes (basic/strong/exceptional success; simple/bad/disastrous failure).
-
-COMBAT (incidental — structured combat uses combat mode):
-- For incidental attacks outside structured combat, consult Core Rulebook §3–§5 for attack DVs and damage resolution.
-- Autofire: d10 + REF + Autofire vs Autofire DV table. On hit: 2d6 × margin (capped by weapon autofire value: 3 SMG, 4 AR). 10 rounds per burst.
-- Suppressive Fire: everyone in 25m out of cover rolls WILL + Concentration + d10 vs attacker's REF + Autofire + d10. Failures must take cover.
-
-ROLL FORMAT (for display by Narration):
-🎲 [Description]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-Exploding: 🎲 [Description]: d10[**10** + **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-Fumble: 🎲 [Description]: d10[**1** - **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-With Luck: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +Luck N = Total vs DV Z ✓/✗
-With RS/RomS/FR: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +RS N = Total vs DV Z ✓/✗
-
-HUD:
-- Format: [Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]
-- Build from hud_state, advance time by time_passed
-
-IMPORTANT:
-- Output ONLY valid JSON
-- Emit edgerunner_ops for state changes from your adjudicated rolls: HP damage (op: "hp"), armor ablation (op: "armor", location: "head|body"), Luck spent (op: "luck"), critical injuries (op: "critical_injury"), death saves (op: "death_save"). Same format as Events. Events handles pre-roll ops — do not duplicate.
-- Emit relationship_ops for roll-dependent RS/RomS/FR changes (e.g. a COOL+Persuasion check that impresses an NPC). Same op format as Events. Events already emitted pre-roll ops — yours are additional. Maximum combined relationship bonus: +5.
-- Pass through arc_label, callbacks, current_player, next_player, next_player_prompt, combat unchanged
-- character_states is YOUR updated version (structured per-character objects with type, vitals, resources, conditions, summary) — apply beat outcomes
-- DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
-  - "_conditions_add": ["Seriously Wounded"] → appends conditions
-  - "_conditions_remove": ["Critical Injury: Broken Arm"] → removes conditions
-  - "_resource_deltas": [{"label": "Luck", "delta": -1}] → adjusts resource current value (clamped to 0..max)
-  - Delta ops merge into existing persisted state — you only need to specify what changed
-
-ROLL ADJUDICATION:
-- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
-- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
-- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
-- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
-- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive."""
-
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the final stage.
 
-YOUR ROLE: Take the mechanical outcomes from Mechanics and produce the narrative prose the player reads. You own the character voices, tone, and literary quality — which for Cyberpunk RED means high-octane action, style over substance, and Night City as a character in its own right.
+YOUR ROLE: Take the resolved mechanical outcomes and produce the narrative prose the player reads. You own the character voices, tone, and literary quality — which for Cyberpunk RED means high-octane action, style over substance, and Night City as a character in its own right.
 
-YOU RECEIVE: JSON from Mechanics containing beats (with rolls, damage, state_changes), dramatic_notes, hud, edgerunner_ops, relationship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
+YOU RECEIVE: JSON with beats containing resolution requests and resolved results, plus edgerunner_ops, relationship_ops, hud, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
+
+Each beat has:
+- "beat": narrative description of what happens
+- "resolution": null (narrative-only) or the original resolution request
+- "result": (present on resolved beats) contains roll details and a "formatted" string for your 🎲 line, plus "on_outcome" describing what happened
 
 YOUR OUTPUT: Plain text narrative prose (NOT JSON).
 
 OUTPUT STRUCTURE:
 0. If "arc_label" is non-null, display as bold header: **[Gig: The Heywood Score]**
-1. Narrate beats in order as cohesive cyberpunk prose. Use "outcome" and "state_changes" for ground truth.
-2. Place roll breakdowns naturally within their beat:
-   Skill check: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-   Exploding: 🎲 [Description]: d10[**10** + **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-   Fumble: 🎲 [Description]: d10[**1** - **roll2**] +STAT X +Skill Y = Total vs DV Z ✓/✗
-   With Luck: 🎲 [Description]: d10[**roll**] +STAT X +Skill Y +Luck N = Total vs DV Z ✓/✗
+1. Narrate beats in order as cohesive cyberpunk prose. Each resolved beat's "result" is ground truth — use "result.on_outcome" for what happened.
+2. Place roll breakdowns naturally within their beat. Each resolved beat's "result.formatted" provides the 🎲 line — use it verbatim or adapt to fit the narrative flow.
 3. If "edgerunner_ops" contains changes, show a brief OOC summary above the HUD:
    📊 **HP** V -8 (27/40) · Shotgun blast | **Armor** V Body SP -1 (10) · Ablation
    📊 **Humanity** V -4 (44/70) · Cyberarm | **EB** Crew -500 (1,850) · Ammo buy
@@ -1822,13 +1844,14 @@ TONE:
 - Social stratification: the contrast between corpo towers and combat zone squalor
 
 RULES REFERENCE:
-Consult the Core Rulebook for any mechanical details referenced in the Mechanics output.
+Consult the Core Rulebook for any mechanical details referenced in the resolved beats.
 Consult Character Descs for canonical physical descriptions, personality, and intimacy narration. Override training data if details conflict.
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
 - Append HUD exactly as provided.
-- The beats array IS ground truth — do not invent outcomes.
+- The resolved beats are ground truth — do not invent outcomes. Use result.on_outcome and result.formatted from each resolved beat.
+- If a beat's result contains an "error" key, narrate it as a narrative-only moment (no dice line) and move on.
 - Never control the player's edgerunner."""
 
 SINGLE_AGENT_STATE_CONTRACT = """## Persistent State System (Cyberpunk RED)
@@ -1911,14 +1934,15 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
   * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
-- Presence requirements: RS/RomS combat and mechanical bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
+- Presence requirements: RS/RomS bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
+- Combat bonuses: Deeply negative RS (hatred/obsession) and high RomS (intimate familiarity) apply "all" bonuses to combat rolls too — the backend auto-applies these.
 - Bootstrap: When [RELATIONSHIP STATE] is empty, use "set" ops to initialize NPCs and factions from context.
 
 ### Dice Mechanics (relationship modifiers):
-- Apply RS/RomS/FR tier bonuses to social checks involving tracked NPCs/factions. Read [RELATIONSHIP STATE] for current tiers.
-- Maximum combined relationship bonus: +5 to any single check.
+- Relationship bonuses are auto-applied by the backend when your action includes a `target`. For skill_check, also include `check_context` (e.g. "social", "persuasion", "perception"). Combat actions (ranged_attack, melee_attack, autofire) always use "combat" context automatically.
+- Most RS/FR bonuses are social-only. But deeply negative RS ("all" penalty from hatred) and high RomS ("all" bonus from intimacy) apply to combat rolls too.
+- Maximum combined relationship bonus: ±5 to any single check.
 - RomS mechanical bonuses: T2 = -1 Death Save rolls; T3-T4 = +1 LUCK/session; T5 = take damage for partner 1/session; T6 = redirect 10 dmg 1/session.
-- Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y +RS N = Total vs DV Z ✓/✗
 
 ### IP Scoring (Improvement Points — §7):
 Use the "ip_ops" array to maintain running numerical scores for IP awards. The [IP TRACKER] injection shows current session scores and prior awards — it persists across context trims and is your authoritative memory of session performance.
@@ -1955,7 +1979,7 @@ IP spending: Handle spend requests as OOC bookkeeping. When the player is done s
 The Core Rulebook is your authoritative rules source (§1–§15). The quick reference below covers the mechanics you use most often — defer to the Core Rulebook for edge cases and detailed tables.
 Consult Character Descs for canonical physical descriptions, personality, and intimacy narration. Override training data if details conflict.
 
-### Dice Mechanics:
+### Dice Mechanics (reference — resolved by resolve_mechanics tool):
 - Core resolution: d10 + STAT + Skill vs DV. Must BEAT the DV (equal does not succeed).
 - DVs: Simple 9, Everyday 13, Difficult 15, Professional 17, Heroic 21, Incredible 24, Legendary 29
 - Critical success: natural 10 → roll another d10 and add. Does NOT chain on a second 10.
@@ -1971,7 +1995,6 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 - Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
   Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
   Housing sharing: Multiple characters share via housing_shared_with op. Cost = base/N per person. If a sharer can't afford their share, the owner covers the deficit if possible. Capacity = 1 + bedrooms. Over capacity → "crammed" (fatigue, -2 all actions). Bedrooms: Cube Hotel/Cargo Container/Studio Apartment=0, Two-Bedroom Apartment/Corporate Conapt/Upscale Conapt=2, Luxury Penthouse/Corporate Beaverville House=3, Corporate Beaverville McMansion=4. Override with housing_bedrooms via set op if specific unit differs.
-- Format: 🎲 [Desc]: d10[**roll**] +STAT X +Skill Y = Total vs DV Z ✓/✗
 
 ### HUD Line
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
@@ -2005,7 +2028,8 @@ Simple Checks (single Interface + d10 check) resolve normally in the narrative �
 Describe the moment of jacking in narratively (connecting the trodes, the NET materializing), then set the trigger. The app will switch to a dedicated hack encounter mode for subsequent exchanges.
 
 ### Rules:
-- Call `report_state` every turn
+- Call `resolve_mechanics` BEFORE narrative when mechanical actions are needed, then `report_state` after narrative
+- Call `report_state` every turn (even when no mechanics are involved)
 - Do NOT reference the state system in your narrative
 - If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
 - If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
@@ -2013,15 +2037,33 @@ Describe the moment of jacking in narratively (connecting the trodes, the NET ma
 - Violence is consequential — armor breaks, people die ugly
 - Tech is invasive — cyberware costs humanity
 
-### Roll Adjudication
-- A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
-- When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
-- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
-- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice results. Show the actual numbers, modifiers, and math for the player's rolls.
-- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure — not simply make things difficult.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome. Never turn a failure into a clean success — introduce consequences, partial progress, or new obstacles.
-- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+### Mechanics Resolution (resolve_mechanics tool)
+When your turn involves skill checks, attacks, damage, or death saves, call the `resolve_mechanics` tool with ALL mechanical actions BEFORE writing narrative. Then narrate using the returned results. Then call `report_state`.
+
+NEVER invent or narrate dice roll outcomes without calling `resolve_mechanics` first. If a turn involves ANY mechanical action, you MUST call the tool. Do not resolve your own rolls. Only the backend produces dice results.
+
+**GM discretion**: You decide when a roll is needed. If failure on a check would create a narrative dead end or break the story, or if success/failure is guaranteed or the action shouldn't be possible, resolve it narratively without calling `resolve_mechanics`. Only skip rolls in these cases — most checks need a roll.
+
+Turn flow:
+1. Assess what mechanical actions this turn requires
+2. Call `resolve_mechanics({actions: [...]})` with all actions in a single batch
+3. Read the returned results — these are ground truth (real dice rolls from the backend)
+4. Write your narrative prose incorporating the results (use `formatted` strings for 🎲 lines)
+5. Call `report_state` with state updates derived from the results (the resolver emits `state_ops` — use those for your edgerunner_ops)
+
+When NO mechanical actions are needed (dialogue, scene description, OOC), skip `resolve_mechanics` and go directly to narrative + `report_state`.
+
+Action types for resolve_mechanics:
+- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
+- ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location (head/body), is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?}
+- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
+- autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?}
+- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+- initiative: {type, character: "all", combatants: [{name, ref}]}
+
+Guidelines:
+- Be transparent about dice results — use the formatted roll strings in your narrative
+- PC death should not be possible outside designated Death Risk points — use fail-forward
 
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
@@ -2327,7 +2369,7 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
             },
             "character_updates": {
                 "type": "array",
-                "description": "State changes for every affected combatant this exchange.",
+                "description": "Judgment-only state changes for affected combatants. Dice-dependent fields (hp_delta, armor_delta, critical_injury_add, luck_delta, ammo) are tracked automatically by the backend from resolve_mechanics results — do NOT include them here.",
                 "items": {
                     "type": "object",
                     "required": ["name"],
@@ -2364,45 +2406,10 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
                                 }
                             }
                         },
-                        "hp_delta": {"type": "integer", "description": "HP change after armor. Negative = damage, positive = healing."},
-                        "armor_delta": {
-                            "type": "object",
-                            "description": "SP ablation per location. Negative values = SP lost.",
-                            "properties": {
-                                "head": {"type": "integer"},
-                                "body": {"type": "integer"}
-                            }
-                        },
-                        "luck_delta": {"type": "integer", "description": "Luck points spent (negative) or recovered (positive)."},
-                        "ammo": {
-                            "type": "array",
-                            "description": "Explicit current magazine count per weapon after this exchange.",
-                            "items": {
-                                "type": "object",
-                                "required": ["weapon", "current"],
-                                "properties": {
-                                    "weapon": {"type": "string"},
-                                    "current": {"type": "integer"}
-                                }
-                            }
-                        },
-                        "critical_injury_add": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["name", "location", "effect"],
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "location": {"type": "string", "enum": ["body", "head"]},
-                                    "effect": {"type": "string"},
-                                    "dv_mod": {"type": "integer", "description": "Death Save modifier from this injury. 0 if injury has no Death Save effect, 1 for injuries that add Death Save +1."}
-                                }
-                            }
-                        },
                         "critical_injury_remove": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Critical injury names to remove."
+                            "description": "Critical injury names to remove (treatment/healing only)."
                         },
                         "conditions_add": {"type": "array", "items": {"type": "string"}},
                         "conditions_remove": {"type": "array", "items": {"type": "string"}}
@@ -2499,13 +2506,11 @@ At 0 HP, character must make a Death Save each round:
 - Quick Fix vs Treatment: critical_injury_add records new injuries. For Quick Fix (temporary, 1 min, expires end of day), set status to "quick_fixed" via edgerunner_ops. critical_injury_remove is permanent treatment (4 hrs, can't self-treat).
 
 STATE TRACKING via report_combat_state:
-- hp_delta: HP change after armor (negative = damage). Applied to edgerunner state for PCs, character_states vitals for enemies.
-- armor_delta: {head: int, body: int} — SP ablation per location. Report only the location hit.
-- luck_delta: Luck points spent (negative) or recovered.
-- ammo: array of {weapon, current} — explicit current magazine count AFTER firing. Always report for weapons used this exchange.
+The backend tracks all dice-dependent state (hp_delta, armor_delta, critical_injury_add, luck_delta, ammo) automatically from resolve_mechanics results. Do NOT include these fields in character_updates.
+
+report_combat_state character_updates should ONLY include:
 - set_combat_stats: first-exchange enemy bootstrap ONLY — sets hp_max, armor, weapons, stats for a new enemy.
-- critical_injury_add: [{name, location, effect, dv_mod}] — add critical injuries with Death Save modifier.
-- critical_injury_remove: [name] — remove healed/treated injuries.
+- critical_injury_remove: [name] — remove healed/treated injuries (treatment, not combat damage).
 - conditions_add/remove: general conditions (Seriously Wounded auto-managed via HP).
 - cover_state: report ALL combatants every exchange — {name, in_cover, cover_type, cover_hp}.
 
@@ -2516,7 +2521,7 @@ Use set_combat_stats to define their mechanical identity:
 - armor: {head: SP, body: SP} (see armor table in Ruleset §11)
 - weapons: [{name, damage, ammo, magazine, skill}] (see weapon tables in Ruleset §10)
 - stats: {REF, DEX, BODY, WILL, COOL, ...} — combat-relevant stats
-After bootstrap, use hp_delta/armor_delta/ammo to track changes.
+After bootstrap, the backend resolves mechanical outcomes (HP, armor, ammo) automatically — do NOT set hp_delta/armor_delta/ammo yourself.
 
 NPC STAT GENERATION:
 Use the "combat number" system for enemies — a single base value (STAT+Skill combined) for attacks and defense instead of individual skills. Scale by threat tier:
@@ -2559,27 +2564,58 @@ When a netrunner declares NET actions during combat initiative:
 VEHICLE COMBAT:
 Reference Combat Ruleset §18 for vehicle stats, ramming, mounted weapons, and chase mechanics.
 
-DICE POOL:
-A [DICE POOL] block is provided with pre-rolled random values. Use them in order (left to right). Do NOT generate your own random numbers. If a pool is exhausted, note this in your output.
+MECHANICS RESOLUTION (resolve_mechanics tool — INCREMENTAL):
+Call `resolve_mechanics` ONCE PER COMBATANT TURN, not batched. Narrate AFTER receiving dice results, never before.
 
-ROLL FORMAT (show in narrative):
+COMBAT FLOW (each exchange):
+1. AMBUSH (if applicable): If combat starts from an ambush, call resolve_mechanics with
+   type "ambush" first. Read the results to see which targets are surprised.
+   Surprised targets do not act in round 1.
+2. Call resolve_mechanics with type "initiative" for all combatants (first round only,
+   or when new combatants join). Include surprised names if applicable.
+   Read the returned initiative order.
+3. For each combatant's turn (in initiative order):
+   a. Call resolve_mechanics with that combatant's actions for their turn.
+      A turn may include multiple actions (main action + supplemental, combo attacks).
+   b. Read the results (hit/miss, damage, eliminations).
+   c. Narrate 1-3 sentences for this turn using the actual dice results.
+   d. Skip combatants eliminated by prior turns.
+   e. Skip surprised combatants in round 1.
+4. Continue narrating past round boundaries until the PLAYER'S turn.
+   If NPCs act before the player in round 2+, resolve and narrate their turns too.
+   Stop and yield to player input only at the player character's turn.
+5. After all NPC actions resolved, call report_combat_state with judgment fields only:
+   - cover_state, conditions, combat (round/turn tracking), combat_complete
+   - Do NOT include hp_delta, armor_delta, critical_injury_add, luck_delta, or ammo
+   - The backend tracks all dice-dependent state from resolve_mechanics results
+
+IMPORTANT: Call resolve_mechanics ONCE per combatant turn, not batched.
+Narrate AFTER receiving dice results, never before.
+
+Action types:
+- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}
+- initiative: {type, character: "all", combatants: [{name, ref}], surprised?: [names]}
+- ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?, weapon_name?}
+- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
+- autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
+- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
+- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+
+ROLL FORMAT (from resolve_mechanics results):
 - Attack: 🎲 [V attacks Borg Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
 - Damage + ablation: 🎲 [Heavy Pistol damage]: 3d6[**4,3,5**] = 12 → Body SP 11 → 12−11 = 1 net damage, SP ablates to 10
 - Crit (two+ 6s): 🎲 [Assault Rifle damage]: 5d6[**6,6,3,2,4**] = 21 → CRIT! +5 bonus direct to HP → Body SP 11 → 21−11 = 10 net + 5 crit = 15 total HP damage
 - Death Save: 🎲 [Death Save]: d10[**8**] vs BODY 6 (+1 cumulative, +1 crit injury = effective 10) → FAIL
 
-ROLL ADJUDICATION:
-- Apply the game system's rules exactly as written (RAW). If unsure, choose the interpretation closest to RAW.
-- Roll whenever success or failure is not guaranteed by circumstance or skill gap. If you choose NOT to roll, explicitly say why.
-- Be transparent about dice results. Show the actual numbers, modifiers, and math.
-- Do not fudge outcomes to protect the player from normal failure. Only intervene when failure would break the campaign's structure.
-- When you must soften a result (rare), use fail-forward or complications instead of rewriting the outcome.
-- PC death should not be possible outside designated Death Risk points. If an outcome would kill a PC, use fail-forward: change the trajectory of the scene, introduce complications, but keep them alive.
+GUIDELINES:
+- Do not fudge outcomes to protect the player from normal failure
+- PC death should not be possible outside designated Death Risk points — use fail-forward
 
 COMBAT FLOW:
-- Each exchange covers the current combatant's turn plus any immediate reactions.
-- Advance current_turn to the next combatant in initiative order after each turn.
-- When the last combatant acts, increment round and return to top.
+- Each exchange covers ALL NPC turns until the player's next turn.
+- Resolve and narrate each NPC turn incrementally (one resolve_mechanics call per turn).
+- Continue past round boundaries — if NPCs act before the player in the next round, narrate them too.
+- Stop and yield to player input only at the player character's turn.
 - End combat when all enemies are at 0 HP, fled, or surrendered. Set combat_complete=true.
 
 NARRATIVE STYLE:
@@ -3059,6 +3095,35 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                                 w["ammo"] = max(0, cur)
                                 break
 
+        # --- ammo_consumed (resolver-generated: subtract rounds from weapon) ---
+        ammo_consumed = upd.get("ammo_consumed")
+        if ammo_consumed and isinstance(ammo_consumed, list):
+            if is_pc:
+                er = edgerunners[name]
+                for ac in ammo_consumed:
+                    if not isinstance(ac, dict):
+                        continue
+                    wname = ac.get("weapon_name", "")
+                    consumed = int(ac.get("rounds_consumed", 0))
+                    for w in er.get("weapons", []):
+                        if w.get("name") == wname:
+                            w["current_ammo"] = max(0, w.get("current_ammo", 0) - consumed)
+                            break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    for ac in ammo_consumed:
+                        if not isinstance(ac, dict):
+                            continue
+                        wname = ac.get("weapon_name", "")
+                        consumed = int(ac.get("rounds_consumed", 0))
+                        for w in cd.get("weapons", []):
+                            if w.get("name") == wname:
+                                w["ammo"] = max(0, w.get("ammo", 0) - consumed)
+                                break
+
         # --- critical_injury_add ---
         critical_injury_add = upd.get("critical_injury_add", [])
         if critical_injury_add and not isinstance(critical_injury_add, list):
@@ -3239,13 +3304,16 @@ You are running a live netrunning encounter. A Netrunner has jacked into a targe
 ### Rules Reference
 The Hacking Rulebook document is your authoritative source for all netrunning mechanics. Consult it for: Cyberdeck stats and Cycle counts (§2), Quick Hack structure (§3), Full Run architecture design (§4), ICE behavioral types and stat blocks (§5), Alert thresholds and escalation (§6), NET Actions, Interface Abilities, Boosted Actions, and Handling ICE options (§7). The operational summary below covers how to *run* hack mode in this app — defer to the Rulebook for rules details, DVs, and stat blocks.
 
-### Dice Mechanics (Quick Reference)
+### Dice Mechanics (reference — resolved by resolve_mechanics tool)
 - Flat check: Interface + d10 vs DV. Must BEAT the DV.
 - Opposed check: Interface + d10 vs ICE stat + d10
 - Critical: natural 10 → roll another d10 and ADD. Does NOT chain.
 - Fumble: natural 1 → roll another d10 and SUBTRACT. Does NOT chain.
 - Luck: spend points to add to Interface checks (1:1).
-- A [DICE POOL] block is provided with pre-rolled random values. Use them in order (left to right). Do NOT generate your own random numbers.
+
+### Mechanics Resolution (resolve_mechanics tool — INCREMENTAL)
+Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE combat) individually. Narrate AFTER receiving each result. Use skill_check action type for Interface checks (stat_value = Interface rank, skill_value = 0, dv = target DV). After all actions are resolved and narrated, call `report_hack_state`.
+Brain damage from Black ICE is tracked automatically by the backend — do NOT set brain_damage in report_hack_state.
 
 ### Roll Format
 Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
@@ -3435,10 +3503,6 @@ REPORT_HACK_STATE_TOOL = {
                         "description": "Trace ICE progress counter. null if no Trace active."
                     },
                     "tar_stacks": {"type": "integer", "minimum": 0},
-                    "brain_damage": {
-                        "type": "integer",
-                        "description": "Cumulative brain damage during this hack (applied to HP, ignores armor)."
-                    },
                     "system_map": {
                         "type": ["object", "null"],
                         "description": "Set on first exchange with complete system architecture. Quick Hacks: 3 linear nodes. Full Runs: 4-6 node network."
@@ -3537,7 +3601,7 @@ def init_hack_state(
     return state
 
 
-def apply_hack_state(hack_state, tool_input):
+def apply_hack_state(hack_state, tool_input, resolver_state_ops=None):
     """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
     if not isinstance(tool_input, dict):
         logger.warning(
@@ -3558,9 +3622,12 @@ def apply_hack_state(hack_state, tool_input):
     for field in ["alert_level", "cycles_remaining", "active_programs",
                   "installed_hardware", "current_node", "nodes_visited",
                   "ice_status", "trace_progress", "tar_stacks",
-                  "brain_damage", "revealed_nodes"]:
+                  "revealed_nodes"]:
         if field in hs:
             hack_state[field] = hs[field]
+
+    # brain_damage is resolver-authoritative — ignore model's value
+    # (resolver_state_ops applied at the end of this function)
 
     # System map (Full Run, first exchange only)
     if hs.get("system_map") and not hack_state.get("system_map"):
@@ -3616,6 +3683,16 @@ def apply_hack_state(hack_state, tool_input):
     initiate_combat = tool_input.get("initiate_combat")
     if initiate_combat and isinstance(initiate_combat, dict) and not tool_input.get("hack_complete"):
         hack_state["_initiate_combat"] = initiate_combat
+
+    # Apply resolver brain_damage ops (cumulative)
+    if resolver_state_ops:
+        bd_total = sum(
+            abs(int(op.get("change", 0)))
+            for op in resolver_state_ops
+            if isinstance(op, dict) and op.get("op") == "brain_damage"
+        )
+        if bd_total > 0:
+            hack_state["brain_damage"] = hack_state.get("brain_damage", 0) + bd_total
 
     return hack_state
 
@@ -4030,7 +4107,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 
 ### Cross-Theater Interactions
 - **Netrunner's body is in meatspace**: can be shot, hit, caught in AoE. Track via character_updates. With Virtuality Goggles the Netrunner can still see and move in meatspace; without them the Netrunner is **Unconscious** in meatspace (no Move Action, no dodge).
-- **Brain damage**: Black ICE and NET effects deal brain damage (HP loss ignoring armor, no crit injuries). Track cumulatively in hack_state.brain_damage — the system auto-applies the delta to the Netrunner's HP. Do NOT also report brain damage as character_updates.hp_delta (that would double-count).
+- **Brain damage**: Black ICE and NET effects deal brain damage (HP loss ignoring armor, no crit injuries). Brain damage is tracked automatically by the backend from resolve_mechanics results — do NOT set brain_damage in hack_state or character_updates.hp_delta.
 - **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
 - **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
 - **Mortally Wounded (0 HP)**: Netrunner gets ONE final NET turn (emergency jack-out or last-ditch action), then forced disconnect. Set net_complete=true on forced disconnect.
@@ -4038,7 +4115,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
-- **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, revealed_nodes, ice_status, trace_progress, tar_stacks, brain_damage, system_map). revealed_nodes is a superset of nodes_visited — add nodes discovered via Pathfinder, Eye-Dee, or any other means. Never remove entries.
+- **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, revealed_nodes, ice_status, trace_progress, tar_stacks, system_map). revealed_nodes is a superset of nodes_visited — add nodes discovered via Pathfinder, Eye-Dee, or any other means. Never remove entries. brain_damage is backend-managed — do not set it.
 - **cover_state**: meatspace cover for ALL combatants.
 - **combat**: initiative tracker (round, initiative_order, current_turn).
 
@@ -4051,18 +4128,27 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 ### Enemy/NPC Bootstrap
 Same as standalone combat: check project files for named enemy stat blocks before generating from tier tables. Use set_combat_stats on first exchange for new enemies. Combat number system for threat tiers.
 
-### Dice Pool
-A [DICE POOL] block is provided. Use values in order (left to right). Do NOT generate your own.
+### Mechanics Resolution (resolve_mechanics tool — INCREMENTAL)
+Call `resolve_mechanics` ONCE PER COMBATANT TURN for meatspace actions, and once per NET action. Narrate AFTER receiving dice results, never before.
+
+For NET Interface checks, use skill_check: {type: "skill_check", character: "<netrunner>", stat_value: <Interface rank>, skill_value: 0, dv: <target DV>}
+
+Turn flow:
+1. For each combatant's turn (in initiative order):
+   a. Call resolve_mechanics with that combatant's actions
+   b. Read results, narrate 1-3 sentences
+   c. Skip eliminated combatants
+2. For the Netrunner's NET actions, call resolve_mechanics for each NET action
+3. Call `report_net_combat_state` with judgment fields only (no hp_delta, armor_delta, etc.)
+   The backend tracks all dice-dependent state from resolve_mechanics results.
 
 ### Roll Format
-Attack: 🎲 [V attacks Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
-Damage: 🎲 [Heavy Pistol]: 3d6[**4,3,5**] = 12 → Body SP 11 → 1 net, SP→10
+Meatspace: 🎲 [V attacks Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
+Meatspace damage: 🎲 [Heavy Pistol]: 3d6[**4,3,5**] = 12 → Body SP 11 → 1 net, SP→10
 NET flat: 🎲 [Backdoor]: d10[**8**] +Interface 7 = 15 vs DV 12 ✓
 NET opposed: 🎲 [Zap vs Patrol]: d10[**6**] +Interface 7 = 13 vs d10[**4**] +DEF 6 = 10 ✓
 
-### Roll Adjudication
-- RAW. If unsure, closest to RAW.
-- Roll when outcome is uncertain. If auto-success, say why.
+### Guidelines
 - Transparent dice. Show numbers, modifiers, math.
 - No fudging. Fail-forward when failure would break the campaign.
 - PC death only at Death Risk points.
@@ -4097,7 +4183,7 @@ REPORT_NET_COMBAT_STATE_TOOL = {
             },
             "character_updates": {
                 "type": "array",
-                "description": "State changes for affected combatants (meatspace). Do NOT include brain damage here — it's tracked in hack_state.",
+                "description": "Judgment-only state changes for affected combatants (meatspace). Dice-dependent fields (hp_delta, armor_delta, critical_injury_add, luck_delta, ammo) are tracked automatically by the backend from resolve_mechanics results — do NOT include them here. Brain damage is also backend-tracked.",
                 "items": {
                     "type": "object",
                     "required": ["name"],
@@ -4113,11 +4199,6 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                                 "stats": {"type": "object"}
                             }
                         },
-                        "hp_delta": {"type": "integer"},
-                        "armor_delta": {"type": "object", "properties": {"head": {"type": "integer"}, "body": {"type": "integer"}}},
-                        "luck_delta": {"type": "integer"},
-                        "ammo": {"type": "array", "items": {"type": "object", "required": ["weapon", "current"], "properties": {"weapon": {"type": "string"}, "current": {"type": "integer"}}}},
-                        "critical_injury_add": {"type": "array", "items": {"type": "object", "required": ["name", "location", "effect"], "properties": {"name": {"type": "string"}, "location": {"type": "string", "enum": ["body", "head"]}, "effect": {"type": "string"}, "dv_mod": {"type": "integer"}}}},
                         "critical_injury_remove": {"type": "array", "items": {"type": "string"}},
                         "conditions_add": {"type": "array", "items": {"type": "string"}},
                         "conditions_remove": {"type": "array", "items": {"type": "string"}}
@@ -4158,7 +4239,6 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                     "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
                     "trace_progress": {"type": ["integer", "null"]},
                     "tar_stacks": {"type": "integer", "minimum": 0},
-                    "brain_damage": {"type": "integer"},
                     "system_map": {"type": ["object", "null"]},
                     "revealed_nodes": {
                         "type": "array",
@@ -4489,6 +4569,35 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                                 w["ammo"] = max(0, cur)
                                 break
 
+        # --- ammo_consumed (resolver-generated: subtract rounds from weapon) ---
+        ammo_consumed = upd.get("ammo_consumed")
+        if ammo_consumed and isinstance(ammo_consumed, list):
+            if is_pc:
+                er = edgerunners[name]
+                for ac in ammo_consumed:
+                    if not isinstance(ac, dict):
+                        continue
+                    wname = ac.get("weapon_name", "")
+                    consumed = int(ac.get("rounds_consumed", 0))
+                    for w in er.get("weapons", []):
+                        if w.get("name") == wname:
+                            w["current_ammo"] = max(0, w.get("current_ammo", 0) - consumed)
+                            break
+            else:
+                entry = cs.get(name, {})
+                d = entry.get("data", entry)
+                cd = d.get("combat_data")
+                if cd:
+                    for ac in ammo_consumed:
+                        if not isinstance(ac, dict):
+                            continue
+                        wname = ac.get("weapon_name", "")
+                        consumed = int(ac.get("rounds_consumed", 0))
+                        for w in cd.get("weapons", []):
+                            if w.get("name") == wname:
+                                w["ammo"] = max(0, w.get("ammo", 0) - consumed)
+                                break
+
         # --- critical_injury_add ---
         for ci in (upd.get("critical_injury_add") or []):
             if not isinstance(ci, dict):
@@ -4553,7 +4662,7 @@ def _apply_character_updates_shared(pipeline_state, character_updates, game_stat
                 conditions.remove(cond)
 
 
-def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
+def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver_state_ops=None, **_kw):
     """Apply combined net_combat state updates from report_net_combat_state tool output."""
     if not isinstance(tool_input, dict):
         logger.warning("apply_net_combat_state: tool_input must be an object, got %s",
@@ -4607,9 +4716,10 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
         nc = {}
     hs = tool_input.get("hack_state", {})
     if isinstance(hs, dict):
+        # brain_damage excluded — resolver-authoritative (applied via resolver_state_ops)
         for field in ["alert_level", "cycles_remaining", "active_programs",
                       "current_node", "nodes_visited", "ice_status",
-                      "trace_progress", "tar_stacks", "brain_damage",
+                      "trace_progress", "tar_stacks",
                       "revealed_nodes"]:
             if field in hs:
                 nc[field] = hs[field]
@@ -4634,6 +4744,17 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, **_kw):
     # Available actions
     if tool_input.get("available_actions") and isinstance(tool_input["available_actions"], list):
         nc["available_actions"] = tool_input["available_actions"]
+
+    # Inject resolver brain_damage before delta calculation
+    if resolver_state_ops:
+        bd_total = sum(
+            abs(int(op.get("change", 0)))
+            for op in resolver_state_ops
+            if isinstance(op, dict) and op.get("op") == "brain_damage"
+        )
+        if bd_total > 0:
+            prev_bd = int(nc.get("brain_damage", 0))
+            nc["brain_damage"] = prev_bd + bd_total
 
     # --- Brain damage delta → apply to Netrunner's HP ---
     try:
@@ -4878,6 +4999,217 @@ def apply_net_combat_writeback(net_combat_state, pipeline_state):
 
 
 # ============================================================
+# Mode Pipeline: Planning + Narration Contract Variants
+# ============================================================
+
+COMBAT_PLANNING_CONTRACT = """You are the COMBAT PLANNER for a Cyberpunk RED session. A battle is underway.
+
+YOUR ROLE: Analyze the combat state and player input. Determine what mechanical actions occur this exchange. Output ONLY structured JSON — NO narrative text.
+
+You decide:
+- Which combatant acts (based on initiative order)
+- What actions they take (attack, move, use cover, skill check, death save)
+- Target selection, weapon choice, range bracket, hit location
+- Luck spends, aimed shots, special ammo
+- Cover state changes, movement decisions
+- NPC tactical decisions
+- Whether combat is ending
+
+The backend will resolve all dice rolls deterministically. Do NOT roll dice or calculate outcomes.
+
+RULES REFERENCE:
+Consult the Combat Ruleset for DV tables (§3), damage rules (§12), critical injury tables (§15), cover (§16).
+
+KEY RULES:
+- Initiative: REF + d10. Highest first.
+- Action Economy: Move Action (MOVE×2 m/yds) + Action per turn.
+- Ranged Attack: d10 + REF + Weapon Skill vs DV (range/DV table).
+- Melee Attack: opposed roll (attacker vs defender Evasion).
+- Autofire: d10 + REF + Autofire vs DV. Damage = 2d6 × margin. 10 rounds consumed.
+- Seriously Wounded: HP < half max → −2 to ALL actions.
+- Mortally Wounded: 0 HP → Death Save each turn.
+
+NPC STAT GENERATION:
+| Tier        | Combat# | HP    | Armor SP | Typical Enemy                        |
+|-------------|---------|-------|----------|--------------------------------------|
+| Mook        | 10–12   | 20–25 | 4–7      | Ganger, scav, boostergang foot       |
+| Lieutenant  | 12–14   | 25–35 | 7–11     | Gang leader, corpo security, fixer   |
+| Mini-Boss   | 14–16   | 35–45 | 11–13    | Experienced solo, cyberpsycho, elite |
+| Boss        | 16–18   | 45–60 | 13–18    | Borg, veteran solo, event boss       |
+
+ACTION TYPES for the "actions" array:
+- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}
+- initiative: {type, character: "all", combatants: [{name, ref}], surprised?: [names]}
+- ranged_attack: {type, character, stat_value, skill_value, weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?, weapon_name?}
+- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
+- autofire: {type, character, stat_value, skill_value, weapon_type, autofire_multiplier, target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
+- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?}
+- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+
+OUTPUT: JSON with these fields:
+- actions: array of mechanical actions to resolve (will be resolved by backend)
+- character_updates: state changes that are judgment-based (cover changes, enemy bootstrap via set_combat_stats, conditions). Do NOT include hp_delta, armor_delta, ammo, or critical injuries — the backend computes these from resolved actions.
+- cover_state: cover status for ALL combatants
+- combat: initiative tracker update (round, initiative_order, current_turn) or null if ending
+- combat_complete: boolean
+- narrative_summary: 1-3 sentence fight summary ONLY when combat_complete=true
+- scene_notes: 1-2 sentences describing what happened for the narrator
+- initiate_net_combat: set when a netrunner declares NET actions during combat"""
+
+COMBAT_PLANNING_SCHEMA = {
+    "type": "object",
+    "required": ["actions", "character_updates", "cover_state", "combat", "combat_complete", "scene_notes"],
+    "properties": {
+        "actions": {"type": "array", "items": {"type": "object"}},
+        "character_updates": {"type": "array", "items": {"type": "object"}},
+        "cover_state": {"type": "array", "items": {"type": "object"}},
+        "combat": {"oneOf": [{"type": "object"}, {"type": "null"}]},
+        "combat_complete": {"type": "boolean"},
+        "narrative_summary": {"type": "string"},
+        "scene_notes": {"type": "string"},
+        "initiate_net_combat": {"type": ["object", "null"]},
+    }
+}
+
+COMBAT_NARRATION_CONTRACT = """You are the COMBAT NARRATOR for a Cyberpunk RED session.
+
+You receive resolved combat actions with dice results from the backend. Your ONLY job is to write the combat narrative.
+
+RULES:
+- Use the formatted roll strings from resolved_actions for all 🎲 lines — do NOT invent dice results
+- Present tense, visceral, Night City grit
+- 2-5 sentences of prose narration
+- Include 🎲 roll breakdown lines for every resolved action
+- Name combatants. Chrome reflects neon. Armor breaks. Bullets are real.
+- End each exchange setting up what the next active combatant faces
+- Use scene_notes from the planning stage for context on what happened
+
+ROLL FORMAT (from resolved actions):
+🎲 [Description]: {formatted string from result}
+
+If combat_complete is true, write a wrap-up paragraph summarizing the aftermath."""
+
+HACK_PLANNING_CONTRACT = """You are the HACK PLANNER for a Cyberpunk RED NET encounter.
+
+YOUR ROLE: Analyze the hack state and player input. Determine what NET actions occur this exchange. Output ONLY structured JSON — NO narrative text.
+
+You decide:
+- Which NET Action the netrunner performs (Jack In, Move, Interface Check, Zap, Activate/Deactivate Program, Slide, Probe, Pathfinder, Cloak, etc.)
+- DV targets for skill checks
+- ICE engagement decisions (Zap vs use Program)
+- Alert level changes
+- System map updates (revealed nodes, ICE status)
+- Meatspace crew round narration flags
+- Whether the hack is completing
+
+The backend resolves dice. Do NOT roll dice or calculate outcomes.
+
+DICE ACTION TYPES for the "actions" array:
+- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?} — for flat Interface checks
+- opposed_check: {type, character, attacker_stat (=Interface rank), defender_stat (=ICE stat), attacker_label, defender_label} — for Zap, Slide
+- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
+
+OUTPUT: JSON with these fields:
+- actions: array of mechanical actions to resolve
+- hack_state_updates: judgment-based state changes (alert_level, nodes_visited, programs_used, cycles_remaining, system_map changes, ice_status, net_actions_used)
+- scene_notes: what happened this exchange for the narrator
+- hack_complete: boolean
+- narrative_summary: 1-3 sentence summary ONLY when hack_complete=true
+- meatspace_round: boolean — true if meatspace crew round should be narrated"""
+
+HACK_PLANNING_SCHEMA = {
+    "type": "object",
+    "required": ["actions", "hack_state_updates", "scene_notes", "hack_complete"],
+    "properties": {
+        "actions": {"type": "array", "items": {"type": "object"}},
+        "hack_state_updates": {"type": "object"},
+        "scene_notes": {"type": "string"},
+        "hack_complete": {"type": "boolean"},
+        "narrative_summary": {"type": "string"},
+        "meatspace_round": {"type": "boolean"},
+    }
+}
+
+HACK_NARRATION_CONTRACT = """You are the HACK NARRATOR for a Cyberpunk RED NET encounter.
+
+You receive resolved NET actions with dice results from the backend. Your ONLY job is to write the narrative.
+
+RULES:
+- Use the formatted roll strings from resolved_actions for all 🎲 lines — do NOT invent dice results
+- Describe the NET as an abstract digital landscape — data streams as light, ICE as presence/resistance
+- Present tense, tense and atmospheric
+- 2-5 sentences of prose narration per section
+- Include 🎲 roll breakdown lines for every resolved action
+- If meatspace_round is true, narrate the meatspace crew's round ABOVE NET content, separated by ---
+- End each exchange presenting available options to the player
+
+ROLL FORMAT:
+🎲 [Description]: {formatted string from result}
+
+If hack_complete is true, write a wrap-up paragraph."""
+
+NET_COMBAT_PLANNING_CONTRACT = """You are the NET COMBAT PLANNER for a Cyberpunk RED dual-theater encounter (meatspace + NET).
+
+YOUR ROLE: Analyze both combat and NET state. Determine what actions occur this exchange. Output ONLY structured JSON — NO narrative text.
+
+Each exchange covers one combatant's turn:
+- Non-Netrunner turns: meatspace actions only
+- Netrunner turns: Move Action in meatspace + NET Actions (2/3/4/5 for Interface ranks 1-3/4-6/7-9/10)
+
+The backend resolves all dice deterministically.
+
+MEATSPACE ACTION TYPES:
+- ranged_attack, melee_attack, autofire, skill_check, death_save, initiative (same schemas as combat planning)
+
+NET ACTION TYPES:
+- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target)
+- opposed_check: Zap/Slide (attacker_stat=Interface, defender_stat=ICE stat)
+- program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
+
+OUTPUT: JSON with these fields:
+- actions: array of ALL mechanical actions (meatspace + NET) to resolve
+- character_updates: meatspace judgment-based state changes (set_combat_stats for enemy bootstrap, conditions, cover changes)
+- cover_state: cover status for ALL meatspace combatants
+- combat: meatspace initiative tracker update or null
+- combat_complete: boolean
+- hack_state_updates: NET state changes (alert_level, ice_status, programs, cycles, net_actions_used)
+- net_complete: boolean
+- scene_notes: what happened for the narrator
+- narrative_summary: summary ONLY when both combat_complete and net_complete"""
+
+NET_COMBAT_PLANNING_SCHEMA = {
+    "type": "object",
+    "required": ["actions", "character_updates", "cover_state", "combat", "combat_complete", "hack_state_updates", "net_complete", "scene_notes"],
+    "properties": {
+        "actions": {"type": "array", "items": {"type": "object"}},
+        "character_updates": {"type": "array", "items": {"type": "object"}},
+        "cover_state": {"type": "array", "items": {"type": "object"}},
+        "combat": {"oneOf": [{"type": "object"}, {"type": "null"}]},
+        "combat_complete": {"type": "boolean"},
+        "hack_state_updates": {"type": "object"},
+        "net_complete": {"type": "boolean"},
+        "scene_notes": {"type": "string"},
+        "narrative_summary": {"type": "string"},
+    }
+}
+
+NET_COMBAT_NARRATION_CONTRACT = """You are the NET COMBAT NARRATOR for a Cyberpunk RED dual-theater encounter.
+
+You receive resolved actions (meatspace + NET) with dice results from the backend. Write the narrative.
+
+RULES:
+- Use the formatted roll strings from resolved_actions for all 🎲 lines — do NOT invent dice results
+- Format: meatspace narration first, then --- separator, then NET narration
+- On non-Netrunner turns where nothing happens in NET, omit the separator and NET section
+- Present tense, visceral, Night City grit for meatspace; tense and digital for NET
+- 2-5 sentences per section
+- Name combatants. Chrome reflects neon. Data streams as light.
+- End each exchange setting up the next combatant's situation
+
+If both combat_complete and net_complete, write a wrap-up paragraph."""
+
+
+# ============================================================
 # Game System Definition
 # ============================================================
 
@@ -4885,7 +5217,8 @@ GAME_SYSTEM = {
     "id": "cpred",
     "display_name": "Cyberpunk RED",
     "events_contract": EVENTS_CONTRACT,
-    "mechanics_contract": MECHANICS_CONTRACT,
+    "deterministic_mechanics": True,
+    "mechanics_contract": "",  # Deterministic resolution — no Mechanics API call
     "narration_contract": NARRATION_CONTRACT,
     "single_agent_contract": SINGLE_AGENT_STATE_CONTRACT,
     "state_report_tool": STATE_REPORT_TOOL,
@@ -4899,6 +5232,9 @@ GAME_SYSTEM = {
     "build_combat_injection": build_cpred_combat_injection,
     "apply_combat_state": apply_cpred_combat_state,
     "combat_files": ["Combat Ruleset.md", "Character Sheets.md", "Character Sheets.yaml"],
+    "combat_planning_contract": COMBAT_PLANNING_CONTRACT,
+    "combat_planning_schema": COMBAT_PLANNING_SCHEMA,
+    "combat_narration_contract": COMBAT_NARRATION_CONTRACT,
     # Hack mode (NET encounters)
     "hack_contract": HACK_CONTRACT,
     "hack_tool": REPORT_HACK_STATE_TOOL,
@@ -4907,6 +5243,9 @@ GAME_SYSTEM = {
     "build_hack_injection": build_hack_injection,
     "build_hacker_profile": build_netrunner_profile,
     "apply_hack_writeback": apply_hack_writeback,
+    "hack_planning_contract": HACK_PLANNING_CONTRACT,
+    "hack_planning_schema": HACK_PLANNING_SCHEMA,
+    "hack_narration_contract": HACK_NARRATION_CONTRACT,
     # NET-in-meatspace combined combat mode
     "net_combat_contract": NET_COMBAT_CONTRACT,
     "net_combat_tool": REPORT_NET_COMBAT_STATE_TOOL,
@@ -4917,4 +5256,7 @@ GAME_SYSTEM = {
     "build_net_combat_profile": build_net_combat_profile,
     "apply_net_combat_writeback": apply_net_combat_writeback,
     "net_combat_files": ["Combat Ruleset.md", "Hacking Rulebook.md", "Character Sheets.md", "Character Sheets.yaml"],
+    "net_combat_planning_contract": NET_COMBAT_PLANNING_CONTRACT,
+    "net_combat_planning_schema": NET_COMBAT_PLANNING_SCHEMA,
+    "net_combat_narration_contract": NET_COMBAT_NARRATION_CONTRACT,
 }

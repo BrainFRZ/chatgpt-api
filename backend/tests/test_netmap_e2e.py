@@ -118,7 +118,7 @@ def _make_hack_tool_input(
     alert_level=0, cycles_remaining=3, current_node="Gateway",
     nodes_visited=None, revealed_nodes=None, ice_status=None,
     active_programs=None, system_map=None, trace_progress=None,
-    tar_stacks=0, brain_damage=0, net_actions_used=1,
+    tar_stacks=0, net_actions_used=1,
     hack_complete=False, narrative_summary=None, available_actions=None,
     initiate_combat=None,
 ):
@@ -136,7 +136,6 @@ def _make_hack_tool_input(
             "ice_status": ice_status or {},
             "trace_progress": trace_progress,
             "tar_stacks": tar_stacks,
-            "brain_damage": brain_damage,
             "system_map": system_map,
             "revealed_nodes": revealed_nodes or ["Gateway"],
             "net_actions_used": net_actions_used,
@@ -151,7 +150,7 @@ def _make_net_combat_tool_input(
     alert_level=0, cycles_remaining=3, current_node="Gateway",
     nodes_visited=None, revealed_nodes=None, ice_status=None,
     active_programs=None, system_map=None, trace_progress=None,
-    tar_stacks=0, brain_damage=0,
+    tar_stacks=0,
     combat=None, character_updates=None, cover_state=None,
     combat_complete=False, net_complete=False,
     narrative_summary=None, available_actions=None,
@@ -172,7 +171,6 @@ def _make_net_combat_tool_input(
             "ice_status": ice_status or {},
             "trace_progress": trace_progress,
             "tar_stacks": tar_stacks,
-            "brain_damage": brain_damage,
             "system_map": system_map,
             "revealed_nodes": revealed_nodes or ["Gateway"],
         },
@@ -633,7 +631,7 @@ class TestApplyNetCombatState(unittest.TestCase):
         self.assertEqual(ps["net_combat"]["narrative_summary"], "All done")
 
     def test_brain_damage_delta_applied(self):
-        """Brain damage delta should be tracked via _prev_brain_damage."""
+        """Brain damage delta should be tracked via _prev_brain_damage and resolver_state_ops."""
         ps = self._fresh_ps()
         ps["net_combat"]["brain_damage"] = 0
         ps["net_combat"]["_prev_brain_damage"] = 0
@@ -648,8 +646,10 @@ class TestApplyNetCombatState(unittest.TestCase):
                 }
             }
         }
-        inp = _make_net_combat_tool_input(brain_damage=3)
-        cpred_apply_net_combat_state(ps, inp, game_state=ps.get("game_state"))
+        inp = _make_net_combat_tool_input()
+        resolver_ops = [{"op": "brain_damage", "target": "V", "change": -3}]
+        cpred_apply_net_combat_state(ps, inp, game_state=ps.get("game_state"),
+                                     resolver_state_ops=resolver_ops)
         self.assertEqual(ps["net_combat"]["brain_damage"], 3)
         self.assertEqual(ps["net_combat"]["_prev_brain_damage"], 3)
         # HP should have been reduced
@@ -973,12 +973,12 @@ class TestFullHackLifecycle(unittest.TestCase):
             },
             tar_stacks=0,
             alert_level=3,
-            brain_damage=2,
             cycles_remaining=2,
             net_actions_used=2,
             active_programs=SAMPLE_PROGRAMS,
         )
-        cpred_apply_hack_state(hs, inp4)
+        resolver_ops_4 = [{"op": "brain_damage", "target": "V", "change": -2}]
+        cpred_apply_hack_state(hs, inp4, resolver_state_ops=resolver_ops_4)
         self.assertIn("Core", hs["revealed_nodes"])
         self.assertEqual(len(hs["revealed_nodes"]), 5)
 
@@ -987,13 +987,13 @@ class TestFullHackLifecycle(unittest.TestCase):
             current_node="Core",
             nodes_visited=["Gateway", "Lobby", "Server Room", "Admin", "Core"],
             revealed_nodes=["Gateway", "Lobby", "Admin", "Server Room", "Core"],
-            brain_damage=4,
             alert_level=4,
             cycles_remaining=1,
             hack_complete=True,
             narrative_summary="Payroll data exfiltrated. 2 cycles, 4 brain damage."
         )
-        cpred_apply_hack_state(hs, inp5)
+        resolver_ops_5 = [{"op": "brain_damage", "target": "V", "change": -2}]
+        cpred_apply_hack_state(hs, inp5, resolver_state_ops=resolver_ops_5)
         self.assertFalse(hs["active"])
         self.assertEqual(hs["narrative_summary"], "Payroll data exfiltrated. 2 cycles, 4 brain damage.")
         # revealed = visited at end
@@ -1072,11 +1072,11 @@ class TestHackToNetCombatTransition(unittest.TestCase):
             nodes_visited=["Gateway", "Lobby", "Admin"],
             revealed_nodes=["Gateway", "Lobby", "Admin", "Server Room", "Core"],
             alert_level=4,
-            brain_damage=2,
             net_actions_used=2,
             initiate_combat={"reason": "Black ICE triggered physical alarm", "enemies": ["Guard 1", "Drone"]}
         )
-        cpred_apply_hack_state(hs, inp2)
+        resolver_ops_2 = [{"op": "brain_damage", "target": "V", "change": -2}]
+        cpred_apply_hack_state(hs, inp2, resolver_state_ops=resolver_ops_2)
         self.assertIn("_initiate_combat", hs)
 
         # Phase 3: Transition
@@ -1103,7 +1103,6 @@ class TestHackToNetCombatTransition(unittest.TestCase):
             nodes_visited=["Gateway", "Lobby", "Admin"],
             revealed_nodes=["Gateway", "Lobby", "Admin", "Server Room", "Core"],
             alert_level=4,
-            brain_damage=3,
             combat={
                 "round": 1,
                 "initiative_order": ["V", "Guard 1", "Drone"],
@@ -1114,7 +1113,9 @@ class TestHackToNetCombatTransition(unittest.TestCase):
                 {"name": "Drone", "set_combat_stats": {"hp_max": 15, "armor": {"head": 0, "body": 7}, "weapons": [], "stats": {}}},
             ],
         )
-        cpred_apply_net_combat_state(ps, nc_inp1, game_state=ps.get("game_state"))
+        nc_resolver_ops_1 = [{"op": "brain_damage", "target": "V", "change": -1}]
+        cpred_apply_net_combat_state(ps, nc_inp1, game_state=ps.get("game_state"),
+                                     resolver_state_ops=nc_resolver_ops_1)
         self.assertEqual(ps["net_combat"]["brain_damage"], 3)
         # Brain damage delta: 3 - 2 = 1 → HP should be 39
         self.assertEqual(ps["game_state"]["edgerunners"]["V"]["hp"]["current"], 39)
@@ -1125,7 +1126,6 @@ class TestHackToNetCombatTransition(unittest.TestCase):
             nodes_visited=["Gateway", "Lobby", "Admin", "Core"],
             revealed_nodes=["Gateway", "Lobby", "Admin", "Server Room", "Core"],
             alert_level=5,
-            brain_damage=3,
             combat={
                 "round": 2,
                 "initiative_order": ["V", "Guard 1", "Drone"],
@@ -1478,11 +1478,11 @@ class TestSequentialApplyAccumulation(unittest.TestCase):
                 revealed_nodes=revealed,
                 alert_level=min(i, 7),
                 cycles_remaining=max(1, 3 - i // 3),
-                brain_damage=i,
                 tar_stacks=i % 3,
                 net_actions_used=1,
             )
-            cpred_apply_hack_state(hs, inp)
+            resolver_ops = [{"op": "brain_damage", "target": "V", "change": -1}] if i > 0 else None
+            cpred_apply_hack_state(hs, inp, resolver_state_ops=resolver_ops)
 
             # Invariant: visited ⊆ revealed
             for v in hs["nodes_visited"]:

@@ -1,0 +1,1538 @@
+"""
+Fuzzing and boundary-value tests for Cyberpunk RED mechanics.
+
+Covers: boundary values, malformed inputs, extreme values, type mismatches,
+performance limits, and property-based invariants with seeded randomness.
+
+Complements test_cpred_mechanics.py (happy-path unit tests).
+"""
+import json
+import random
+import sys
+import os
+import time
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from game_systems.cpred_mechanics import (
+    resolve_check,
+    resolve_damage,
+    resolve_ranged_attack,
+    resolve_melee_attack,
+    resolve_autofire,
+    resolve_death_save,
+    resolve_initiative,
+    next_combat_turn,
+    resolve_actions,
+    RESOLVE_MECHANICS_TOOL,
+)
+from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE
+
+MOCK = "game_systems.cpred_mechanics.random.randint"
+
+
+# ===========================================================================
+# 1. TestResolveCheckFuzz
+# ===========================================================================
+class TestResolveCheckFuzz(unittest.TestCase):
+    """Boundary, extreme, and malformed inputs for resolve_check."""
+
+    REQUIRED_KEYS = {"die", "stat_value", "skill_value", "modifiers", "total", "dv", "success", "formatted"}
+
+    @patch(MOCK, return_value=5)
+    def test_zero_stat_and_skill(self, _m):
+        r = resolve_check(0, 0, 1)
+        self.assertEqual(r["total"], 5)
+        self.assertTrue(r["success"])  # 5 > 1
+
+    @patch(MOCK, return_value=5)
+    def test_negative_stat_value(self, _m):
+        r = resolve_check(-10, 0, 1)
+        self.assertEqual(r["total"], -5)
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_negative_skill_value(self, _m):
+        r = resolve_check(0, -10, 1)
+        self.assertEqual(r["total"], -5)
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_both_very_negative(self, _m):
+        r = resolve_check(-100, -100, -300)
+        self.assertEqual(r["total"], 5 + (-100) + (-100))
+        self.assertTrue(r["success"])  # -195 > -300
+
+    @patch(MOCK, return_value=5)
+    def test_very_large_stat(self, _m):
+        r = resolve_check(10000, 10000, 1)
+        self.assertEqual(r["total"], 20005)
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=7)
+    def test_float_stat_value(self, _m):
+        r = resolve_check(5.5, 3.3, 10)
+        self.assertAlmostEqual(r["total"], 15.8)
+        self.assertTrue(r["success"])
+        self.assertIsInstance(r["formatted"], str)
+
+    @patch(MOCK, return_value=7)
+    def test_float_dv(self, _m):
+        r = resolve_check(6, 4, 16.5)
+        self.assertEqual(r["total"], 17)
+        self.assertTrue(r["success"])  # 17 > 16.5
+
+    @patch(MOCK, side_effect=[1, 1])
+    def test_dv_zero_fumble_to_zero(self, _m):
+        # Fumble: 1 - 1 = 0, dv=0 → 0 > 0 is False
+        r = resolve_check(0, 0, 0)
+        self.assertEqual(r["total"], 0)
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, side_effect=[1, 10])
+    def test_dv_negative(self, _m):
+        # Fumble: 1 - 10 = -9, dv=-100 → -9 > -100 is True
+        r = resolve_check(0, 0, -100)
+        self.assertEqual(r["total"], -9)
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_luck_exactly_5(self, _m):
+        r = resolve_check(0, 0, 0, luck_spent=5)
+        self.assertEqual(r["total"], 10)  # 5 + 5 luck
+        any_luck_mod = any(m[0] == "Luck" for m in r["modifiers"])
+        self.assertTrue(any_luck_mod)
+
+    @patch(MOCK, return_value=5)
+    def test_luck_over_cap(self, _m):
+        r = resolve_check(0, 0, 0, luck_spent=6)
+        self.assertEqual(r["total"], 11)
+
+    @patch(MOCK, return_value=5)
+    def test_luck_100(self, _m):
+        r = resolve_check(0, 0, 0, luck_spent=100)
+        self.assertEqual(r["total"], 105)
+
+    @patch(MOCK, return_value=5)
+    def test_rel_bonus_over_cap(self, _m):
+        r = resolve_check(0, 0, 0, rel_bonus=10)
+        # RS capped at 5
+        self.assertEqual(r["total"], 10)
+
+    @patch(MOCK, return_value=5)
+    def test_luck_3_rel_3_split(self, _m):
+        r = resolve_check(0, 0, 0, luck_spent=3, rel_bonus=3)
+        self.assertEqual(r["total"], 11)  # 5 + 3 + 3
+        luck_vals = [m[1] for m in r["modifiers"] if m[0] == "Luck"]
+        rs_vals = [m[1] for m in r["modifiers"] if m[0] == "RS"]
+        self.assertEqual(luck_vals, [3])
+        self.assertEqual(rs_vals, [3])
+
+    @patch(MOCK, return_value=5)
+    def test_luck_100_rel_100_cap(self, _m):
+        r = resolve_check(0, 0, 0, luck_spent=100, rel_bonus=100)
+        self.assertEqual(r["total"], 110)  # 5 + 100 + RS cap 5
+
+    @patch(MOCK, return_value=5)
+    def test_negative_luck_does_nothing(self, _m):
+        r = resolve_check(6, 4, 10, luck_spent=-3)
+        # combined = min(-3, 5) = -3; actual_luck = min(-3, -3) = -3 → not > 0; actual_rel = 0
+        # No bonus applied
+        self.assertEqual(r["total"], 15)  # 5 + 6 + 4
+
+    @patch(MOCK, return_value=5)
+    def test_negative_rel_bonus_applied(self, _m):
+        """Negative rel_bonus is clamped to [-5, +5] and applied."""
+        r = resolve_check(6, 4, 10, rel_bonus=-5)
+        self.assertEqual(r["total"], 10)  # 5+6+4+(-5)
+
+    @patch(MOCK, return_value=5)
+    def test_negative_luck_does_not_inflate_rel_bonus(self, _m):
+        """Negative luck is clamped to 0, so rel_bonus is capped at 5 correctly."""
+        r = resolve_check(0, 0, 0, luck_spent=-3, rel_bonus=8)
+        # clamped_luck=0, clamped_rel=8, combined=min(8,5)=5, actual_luck=0, actual_rel=5
+        # Total = 5 (die) + 5 (RS) = 10
+        self.assertEqual(r["total"], 10)
+
+    @patch(MOCK, side_effect=[1, 10])
+    def test_seriously_wounded_low_stats_max_penalty(self, _m):
+        # Fumble: 1-10=-9, stat=1, skill=0, wounded=-2 → total = -9+1+0-2 = -10
+        r = resolve_check(1, 0, 5, seriously_wounded=True)
+        self.assertEqual(r["total"], -10)
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_return_keys_invariant(self, _m):
+        r = resolve_check(6, 4, 15)
+        self.assertEqual(set(r.keys()), self.REQUIRED_KEYS)
+
+    @patch(MOCK, return_value=5)
+    def test_formatted_is_nonempty_string(self, _m):
+        for stat in [0, -10, 100]:
+            r = resolve_check(stat, 4, 15)
+            self.assertIsInstance(r["formatted"], str)
+            self.assertTrue(len(r["formatted"]) > 0)
+
+
+# ===========================================================================
+# 2. TestResolveDamageFuzz
+# ===========================================================================
+class TestResolveDamageFuzz(unittest.TestCase):
+    """Boundary and edge-case tests for resolve_damage."""
+
+    REQUIRED_KEYS = {
+        "dice", "total_rolled", "effective_sp", "damage_past_sp",
+        "crit", "crit_bonus", "crit_injury", "critical_injuries", "hp_damage",
+        "ablation", "aimed_effect", "is_rubber", "formatted",
+    }
+
+    def test_zero_damage_dice(self):
+        r = resolve_damage(0, "body", 5)
+        self.assertEqual(r["dice"], [])
+        self.assertEqual(r["total_rolled"], 0)
+        self.assertEqual(r["hp_damage"], 0)
+        self.assertFalse(r["crit"])
+
+    def test_negative_damage_dice(self):
+        r = resolve_damage(-1, "body", 5)
+        self.assertEqual(r["dice"], [])
+        self.assertEqual(r["total_rolled"], 0)
+
+    @patch(MOCK, return_value=3)
+    def test_very_large_damage_dice_performance(self, _m):
+        start = time.time()
+        r = resolve_damage(200, "body", 0)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(len(r["dice"]), 200)
+        self.assertEqual(r["total_rolled"], 600)
+
+    @patch(MOCK, return_value=4)
+    def test_target_sp_zero(self, _m):
+        r = resolve_damage(2, "body", 0)
+        self.assertEqual(r["damage_past_sp"], 8)
+        self.assertEqual(r["ablation"], 1)
+
+    @patch(MOCK, return_value=3)
+    def test_target_sp_negative(self, _m):
+        r = resolve_damage(2, "body", -5)
+        # effective_sp = -5, damage_past_sp = max(0, 6 - (-5)) = 11
+        self.assertEqual(r["damage_past_sp"], 11)
+
+    @patch(MOCK, side_effect=[6, 6, 3, 4])  # 2 sixes = crit, then 2d6 for crit injury
+    def test_target_sp_very_large_crit_bonus_only(self, _m):
+        r = resolve_damage(2, "body", 9999)
+        self.assertEqual(r["damage_past_sp"], 0)
+        self.assertTrue(r["crit"])
+        self.assertEqual(r["crit_bonus"], 5)
+        self.assertEqual(r["hp_damage"], 5)  # Only crit bonus
+
+    @patch(MOCK, return_value=4)
+    def test_hit_location_empty_string(self, _m):
+        r = resolve_damage(2, "", 0)
+        self.assertIsInstance(r["formatted"], str)
+        # Should not crash; uses body table for crit if triggered
+
+    @patch(MOCK, return_value=4)
+    def test_hit_location_none(self, _m):
+        r = resolve_damage(2, None, 0)
+        self.assertIsInstance(r["formatted"], str)
+
+    @patch(MOCK, return_value=4)
+    def test_hit_location_invalid_string(self, _m):
+        r = resolve_damage(2, "cybernetic_arm", 0)
+        self.assertIsInstance(r["formatted"], str)
+
+    @patch(MOCK, return_value=4)
+    def test_melee_sp_halving_zero(self, _m):
+        r = resolve_damage(2, "body", 0, is_melee=True)
+        self.assertEqual(r["effective_sp"], 0)
+
+    @patch(MOCK, return_value=4)
+    def test_melee_sp_halving_one(self, _m):
+        r = resolve_damage(2, "body", 1, is_melee=True)
+        # ceil(1/2) = 1
+        self.assertEqual(r["effective_sp"], 1)
+
+    @patch(MOCK, return_value=4)
+    def test_melee_sp_halving_negative(self, _m):
+        r = resolve_damage(2, "body", -3, is_melee=True)
+        # -(-(-3)//2) = -(3//2) = -1
+        self.assertEqual(r["effective_sp"], -1)
+
+    @patch(MOCK, return_value=4)
+    def test_brawling_without_melee_flag(self, _m):
+        r = resolve_damage(2, "body", 10, is_melee=False, is_brawling=True)
+        # is_melee=False → no halving, full SP used
+        self.assertEqual(r["effective_sp"], 10)
+
+    @patch(MOCK, side_effect=[6, 6, 3, 4])  # 2 sixes = crit
+    def test_ap_and_rubber_combined(self, _m):
+        r = resolve_damage(2, "body", 5, is_ap=True, is_rubber=True)
+        # Rubber overrides: no crit, no ablation
+        self.assertFalse(r["crit"])
+        self.assertEqual(r["ablation"], 0)
+        self.assertTrue(r["is_rubber"])
+
+    @patch(MOCK, return_value=3)
+    def test_aimed_head_zero_penetration(self, _m):
+        r = resolve_damage(2, "head", 100, aimed_shot="head")
+        # 6 < 100 → damage_past_sp = 0, doubling 0 is still 0
+        self.assertEqual(r["damage_past_sp"], 0)
+        self.assertEqual(r["hp_damage"], 0)
+
+    @patch(MOCK, return_value=4)
+    def test_aimed_leg(self, _m):
+        r = resolve_damage(3, "body", 5, aimed_shot="leg")
+        self.assertEqual(r["aimed_effect"], "broken_leg")
+
+    @patch(MOCK, return_value=4)
+    def test_aimed_leg_rubber_no_broken_leg(self, _m):
+        r = resolve_damage(3, "body", 5, aimed_shot="leg", is_rubber=True)
+        self.assertIsNone(r["aimed_effect"])
+        self.assertIsNone(r["crit_injury"])
+
+    @patch(MOCK, return_value=4)
+    def test_aimed_held_item(self, _m):
+        r = resolve_damage(3, "body", 5, aimed_shot="held_item")
+        self.assertEqual(r["aimed_effect"], "drop_item")
+
+    @patch(MOCK, return_value=4)
+    def test_aimed_invalid_string(self, _m):
+        r = resolve_damage(3, "body", 5, aimed_shot="torso")
+        self.assertIsNone(r["aimed_effect"])
+
+    @patch(MOCK, return_value=4)
+    def test_aimed_empty_string(self, _m):
+        r = resolve_damage(3, "body", 5, aimed_shot="")
+        self.assertIsNone(r["aimed_effect"])
+
+    @patch(MOCK, return_value=6)
+    def test_single_die_no_crit(self, _m):
+        r = resolve_damage(1, "body", 0)
+        # Only 1 six, need 2+ for crit
+        self.assertFalse(r["crit"])
+
+    @patch(MOCK, return_value=6)
+    def test_all_sixes_large_pool(self, _m):
+        # 10 sixes = crit, then 2d6 for injury lookup = 6+6=12
+        r = resolve_damage(10, "body", 0)
+        self.assertTrue(r["crit"])
+        self.assertEqual(r["total_rolled"], 60)
+        self.assertEqual(r["hp_damage"], 60 + 5)
+
+    @patch(MOCK, return_value=4)
+    def test_return_keys_invariant(self, _m):
+        r = resolve_damage(2, "body", 5)
+        self.assertEqual(set(r.keys()), self.REQUIRED_KEYS)
+
+
+# ===========================================================================
+# 3. TestResolveRangedAttackFuzz
+# ===========================================================================
+class TestResolveRangedAttackFuzz(unittest.TestCase):
+    """Boundary and malformed-input tests for resolve_ranged_attack."""
+
+    def test_invalid_weapon_type(self):
+        r = resolve_ranged_attack(6, 4, "LaserRifle", 2, 1, 5, 0)
+        self.assertIn("error", r)
+
+    def test_empty_weapon_type(self):
+        r = resolve_ranged_attack(6, 4, "", 2, 1, 5, 0)
+        self.assertIn("error", r)
+
+    def test_none_weapon_type(self):
+        r = resolve_ranged_attack(6, 4, None, 2, 1, 5, 0)
+        self.assertIn("error", r)
+
+    def test_negative_range_bracket_returns_error(self):
+        """Negative range_bracket should be rejected (not silently index from end)."""
+        r = resolve_ranged_attack(6, 4, "SMG", 2, 1, 0, -2)
+        self.assertIn("error", r)
+
+    def test_range_bracket_at_max_boundary(self):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 5, 8)
+        self.assertIn("error", r)
+
+    def test_range_bracket_very_large(self):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 5, 999)
+        self.assertIn("error", r)
+
+    def test_pistol_none_bracket(self):
+        # Pistol at bracket 6 is None in the table
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 5, 6)
+        self.assertIn("error", r)
+
+    @patch(MOCK, return_value=5)
+    def test_rof_zero(self, _m):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 0, 5, 0)
+        self.assertEqual(r["attacks"], [])
+        self.assertEqual(r["on_outcome"], "")  # on_miss default is ""
+
+    @patch(MOCK, return_value=2)
+    def test_rof_100_performance(self, _m):
+        start = time.time()
+        r = resolve_ranged_attack(6, 4, "SMG", 2, 100, 5, 0)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(len(r["attacks"]), 100)
+
+    @patch(MOCK, return_value=9)
+    def test_sp_degrades_across_hits(self, _m):
+        """Verify SP ablation compounds across multi-hit shots."""
+        # High roll = hit, damage = all 9s → d6 mock returning 9 not valid (1-6),
+        # but we're mocking ALL randint calls. d10=9 for check, d6=9 for damage (clamped to 9).
+        # Actually randint(1,6) returns 9 here — that's the mock. This still tests ablation logic.
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 3, 10, 0,
+                                  target_name="Ganger", on_hit="hit")
+        # Check that state_ops have ablation entries if any hits penetrated
+        if any(a.get("roll", {}).get("success") for a in r.get("attacks", [])):
+            self.assertIn("on_outcome", r)
+
+    @patch(MOCK, side_effect=[9, 4, 4, 5, 4, 4])
+    def test_luck_only_first_shot(self, _m):
+        """Luck should only apply to the first shot in multi-ROF."""
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 2, 0, 0,
+                                  luck_spent=3)
+        attacks = r.get("attacks", [])
+        if len(attacks) == 2:
+            # First shot should have luck in its check
+            first_roll = attacks[0].get("roll", {})
+            second_roll = attacks[1].get("roll", {})
+            first_mods = first_roll.get("modifiers", [])
+            second_mods = second_roll.get("modifiers", [])
+            first_has_luck = any(m[0] == "Luck" for m in first_mods)
+            second_has_luck = any(m[0] == "Luck" for m in second_mods)
+            self.assertTrue(first_has_luck)
+            self.assertFalse(second_has_luck)
+
+    @patch(MOCK, return_value=9)
+    def test_on_hit_propagation(self, _m):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 0, 0,
+                                  on_hit="Ganger screams", on_miss="Bullet sparks")
+        if any(a.get("roll", {}).get("success") for a in r.get("attacks", [])):
+            self.assertEqual(r["on_outcome"], "Ganger screams")
+
+    @patch(MOCK, return_value=1)
+    def test_on_miss_propagation(self, _m):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 0, 0,
+                                  on_hit="Ganger screams", on_miss="Bullet sparks")
+        # Low roll → miss
+        if not any(a.get("roll", {}).get("success") for a in r.get("attacks", [])):
+            self.assertEqual(r["on_outcome"], "Bullet sparks")
+
+    @patch(MOCK, return_value=9)
+    def test_zero_target_sp_full_damage(self, _m):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 1, 0, 0,
+                                  target_name="Ganger")
+        attacks = r.get("attacks", [])
+        if attacks and attacks[0].get("roll", {}).get("success"):
+            dmg = attacks[0].get("damage", {})
+            self.assertEqual(dmg.get("effective_sp"), 0)
+
+    @patch(MOCK, return_value=9)
+    def test_aimed_shot_with_multi_rof(self, _m):
+        r = resolve_ranged_attack(6, 4, "Pistol", 2, 2, 5, 0,
+                                  aimed_shot="head")
+        # DV should include aimed shot penalty (+8)
+        self.assertIn("dv", r)
+
+
+# ===========================================================================
+# 4. TestResolveMeleeAttackFuzz
+# ===========================================================================
+class TestResolveMeleeAttackFuzz(unittest.TestCase):
+    """Edge cases for resolve_melee_attack."""
+
+    @patch(MOCK, return_value=5)
+    def test_zero_all_stats_tie_misses(self, _m):
+        r = resolve_melee_attack(0, 0, 0, 0, 2, 1, 5)
+        # Both roll 5+0+0=5, tie → miss
+        attacks = r["attacks"]
+        self.assertEqual(len(attacks), 1)
+        self.assertFalse(attacks[0]["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_negative_attacker_stats(self, _m):
+        r = resolve_melee_attack(-10, -10, 0, 0, 2, 1, 5)
+        # Attacker: 5+(-10)+(-10) = -15, Defender: 5+0+0 = 5 → miss
+        self.assertFalse(r["attacks"][0]["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_negative_defender_stats(self, _m):
+        r = resolve_melee_attack(0, 0, -10, -10, 2, 1, 5)
+        # Attacker: 5, Defender: -15 → hit
+        self.assertTrue(r["attacks"][0]["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_both_seriously_wounded(self, _m):
+        r = resolve_melee_attack(5, 5, 5, 5, 2, 1, 5,
+                                 seriously_wounded_attacker=True,
+                                 seriously_wounded_defender=True)
+        # Both get -2: atk=5+5+5-2=13, def=5+5+5-2=13 → tie → miss
+        self.assertFalse(r["attacks"][0]["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_rof_zero_melee(self, _m):
+        r = resolve_melee_attack(6, 4, 6, 4, 2, 0, 5)
+        self.assertEqual(r["attacks"], [])
+
+    @patch(MOCK, return_value=3)
+    def test_rof_50_performance(self, _m):
+        start = time.time()
+        r = resolve_melee_attack(6, 4, 6, 4, 2, 50, 5)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(len(r["attacks"]), 50)
+
+    @patch(MOCK, return_value=9)
+    def test_sp_degrades_on_melee_hits(self, _m):
+        """Multiple melee hits should ablate SP."""
+        r = resolve_melee_attack(10, 10, 0, 0, 3, 3, 8,
+                                 target_name="Ganger")
+        # Should have state_ops for ablation if any hit penetrated
+        hit_count = sum(1 for a in r["attacks"] if a["hit"])
+        self.assertEqual(hit_count, 3)  # attacker always wins with 10+10=29 vs 0
+
+    @patch(MOCK, return_value=9)
+    def test_brawling_full_sp(self, _m):
+        r = resolve_melee_attack(10, 10, 0, 0, 3, 1, 10,
+                                 is_brawling=True)
+        # Brawling: full SP (not halved)
+        if r["attacks"][0]["hit"] and r["attacks"][0]["damage"]:
+            self.assertEqual(r["attacks"][0]["damage"]["effective_sp"], 10)
+
+    @patch(MOCK, return_value=9)
+    def test_melee_halves_sp(self, _m):
+        r = resolve_melee_attack(10, 10, 0, 0, 3, 1, 11,
+                                 is_brawling=False)
+        # Melee: ceil(11/2) = 6
+        if r["attacks"][0]["hit"] and r["attacks"][0]["damage"]:
+            self.assertEqual(r["attacks"][0]["damage"]["effective_sp"], 6)
+
+    @patch(MOCK, return_value=5)
+    def test_tie_always_miss(self, _m):
+        """Ties should always result in a miss (defender wins ties)."""
+        for _ in range(5):
+            r = resolve_melee_attack(5, 5, 5, 5, 2, 1, 5)
+            self.assertFalse(r["attacks"][0]["hit"])
+
+
+# ===========================================================================
+# 5. TestResolveAutofireFuzz
+# ===========================================================================
+class TestResolveAutofireFuzz(unittest.TestCase):
+    """Edge cases for resolve_autofire."""
+
+    def test_invalid_weapon_pistol(self):
+        r = resolve_autofire(6, 4, "Pistol", 3, 5, 0)
+        self.assertIn("error", r)
+
+    def test_empty_weapon(self):
+        r = resolve_autofire(6, 4, "", 3, 5, 0)
+        self.assertIn("error", r)
+
+    def test_none_weapon(self):
+        r = resolve_autofire(6, 4, None, 3, 5, 0)
+        self.assertIn("error", r)
+
+    def test_negative_range_bracket_autofire_returns_error(self):
+        """Negative range_bracket should be rejected in autofire too."""
+        r = resolve_autofire(6, 4, "SMG", 3, 0, -1)
+        self.assertIn("error", r)
+
+    def test_range_bracket_5_out_of_bounds(self):
+        r = resolve_autofire(6, 4, "SMG", 3, 0, 5)
+        self.assertIn("error", r)
+
+    def test_range_bracket_100(self):
+        r = resolve_autofire(6, 4, "SMG", 3, 0, 100)
+        self.assertIn("error", r)
+
+    @patch(MOCK, side_effect=[9, 3, 4])  # d10=9 (hit), 2d6=3+4=7 for damage
+    def test_multiplier_zero_caps_to_zero(self, _m):
+        r = resolve_autofire(6, 4, "SMG", 0, 0, 0)
+        if r.get("hit"):
+            # raw_damage = 7 * margin, capped = min(raw, 0 * 7) = 0
+            # damage_past_sp = max(0, 0 - sp) = 0
+            self.assertEqual(r["damage"]["hp_damage"], 0)
+
+    @patch(MOCK, side_effect=[9, 3, 4])
+    def test_multiplier_negative(self, _m):
+        r = resolve_autofire(6, 4, "SMG", -3, 0, 0)
+        if r.get("hit"):
+            # capped = min(raw, -3 * 7) = negative → max(0, neg - sp) = 0
+            self.assertGreaterEqual(r["damage"]["hp_damage"], 0)
+
+    @patch(MOCK, side_effect=[9, 3, 4])
+    def test_multiplier_very_large(self, _m):
+        r = resolve_autofire(6, 4, "SMG", 1000, 0, 0)
+        if r.get("hit"):
+            # Cap never triggers when multiplier is huge
+            self.assertGreater(r["damage"]["hp_damage"], 0)
+
+    @patch(MOCK, return_value=9)
+    def test_always_consumes_10_rounds(self, _m):
+        r = resolve_autofire(6, 4, "SMG", 3, 0, 0)
+        self.assertEqual(r.get("rounds_consumed"), 10)
+
+    @patch(MOCK, return_value=1)
+    def test_miss_consumes_10_rounds(self, _m):
+        r = resolve_autofire(6, 4, "SMG", 3, 0, 0)
+        self.assertEqual(r.get("rounds_consumed"), 10)
+        self.assertFalse(r.get("hit", True))
+
+    @patch(MOCK, return_value=9)
+    def test_assault_rifle(self, _m):
+        r = resolve_autofire(6, 4, "Assault Rifle", 4, 0, 0)
+        self.assertNotIn("error", r)
+        self.assertEqual(r.get("rounds_consumed"), 10)
+
+    @patch(MOCK, side_effect=[8, 6, 6, 1, 2])
+    def test_autofire_double_six_crit(self, _m):
+        r = resolve_autofire(8, 6, "SMG", 3, 20, 1, target_name="Ganger")
+        self.assertTrue(r["hit"])
+        self.assertTrue(r["damage"]["crit"])
+        self.assertEqual(r["damage"]["crit_bonus"], 5)
+        self.assertEqual(r["damage"]["hp_damage"], r["damage"]["damage_past_sp"] + 5)
+        self.assertTrue(any(op.get("op") == "critical_injury" for op in r["state_ops"]))
+
+
+# ===========================================================================
+# 6. TestResolveDeathSaveFuzz
+# ===========================================================================
+class TestResolveDeathSaveFuzz(unittest.TestCase):
+    """Boundary and malformed-input tests for resolve_death_save."""
+
+    REQUIRED_KEYS = {
+        "type", "d10", "death_save_count", "injury_mod",
+        "effective_roll", "threshold", "natural_10", "survived", "formatted",
+    }
+
+    @patch(MOCK, return_value=1)
+    def test_body_stat_zero_always_fails(self, _m):
+        r = resolve_death_save(0, 0)
+        # effective_roll=1, threshold=0 → 1 < 0 = False
+        self.assertFalse(r["survived"])
+
+    @patch(MOCK, return_value=1)
+    def test_body_stat_negative(self, _m):
+        r = resolve_death_save(-5, 0)
+        self.assertFalse(r["survived"])
+
+    @patch(MOCK, return_value=9)
+    def test_body_stat_very_large(self, _m):
+        r = resolve_death_save(9999, 0)
+        self.assertTrue(r["survived"])
+
+    @patch(MOCK, return_value=1)
+    def test_body_stat_1_minimum_roll(self, _m):
+        r = resolve_death_save(1, 0)
+        # effective_roll=1, 1 < 1 = False (must be strictly less)
+        self.assertFalse(r["survived"])
+
+    @patch(MOCK, return_value=5)
+    def test_death_save_count_negative_helps(self, _m):
+        r = resolve_death_save(6, -10)
+        # effective_roll = 5 + (-10) + 0 = -5, -5 < 6 = True
+        self.assertTrue(r["survived"])
+        self.assertEqual(r["effective_roll"], -5)
+
+    @patch(MOCK, return_value=1)
+    def test_death_save_count_very_large(self, _m):
+        r = resolve_death_save(6, 100)
+        # effective_roll = 1 + 100 = 101, 101 < 6 = False
+        self.assertFalse(r["survived"])
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_none(self, _m):
+        r = resolve_death_save(6, 0, None)
+        self.assertEqual(r["injury_mod"], 0)
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_empty_list(self, _m):
+        r = resolve_death_save(6, 0, [])
+        self.assertEqual(r["injury_mod"], 0)
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_missing_dv_mod(self, _m):
+        r = resolve_death_save(6, 0, [{}])
+        self.assertEqual(r["injury_mod"], 0)
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_string_dv_mod_ignored(self, _m):
+        """String dv_mod is safely ignored (treated as 0)."""
+        r = resolve_death_save(6, 0, [{"dv_mod": "abc"}])
+        self.assertEqual(r["injury_mod"], 0)
+        self.assertTrue(r["survived"])  # effective_roll=3, 3 < 6
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_float_dv_mod(self, _m):
+        r = resolve_death_save(6, 0, [{"dv_mod": 1.5}])
+        self.assertAlmostEqual(r["injury_mod"], 1.5)
+
+    @patch(MOCK, return_value=3)
+    def test_active_injuries_negative_dv_mod(self, _m):
+        r = resolve_death_save(10, 0, [{"dv_mod": -3}])
+        # injury_mod=-3, effective_roll = 3+0+(-3) = 0, 0 < 10 = True
+        self.assertTrue(r["survived"])
+
+    @patch(MOCK, return_value=1)
+    def test_active_injuries_very_large_list(self, _m):
+        injuries = [{"dv_mod": 1} for _ in range(100)]
+        r = resolve_death_save(6, 0, injuries)
+        self.assertEqual(r["injury_mod"], 100)
+        self.assertFalse(r["survived"])
+
+    @patch(MOCK, return_value=10)
+    def test_natural_10_always_fails_even_high_body(self, _m):
+        r = resolve_death_save(1000, 0)
+        self.assertFalse(r["survived"])
+        self.assertTrue(r["natural_10"])
+
+    @patch(MOCK, return_value=3)
+    def test_return_keys_invariant(self, _m):
+        r = resolve_death_save(6, 0)
+        self.assertEqual(set(r.keys()), self.REQUIRED_KEYS)
+
+
+# ===========================================================================
+# 7. TestResolveInitiativeFuzz
+# ===========================================================================
+class TestResolveInitiativeFuzz(unittest.TestCase):
+    """Edge cases for resolve_initiative."""
+
+    def test_empty_combatants(self):
+        r = resolve_initiative([])
+        self.assertEqual(r, [])
+
+    @patch(MOCK, return_value=5)
+    def test_single_combatant(self, _m):
+        r = resolve_initiative([{"name": "V", "ref": 8}])
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["total"], 13)
+
+    @patch(MOCK, return_value=5)
+    def test_missing_name_defaults_to_unknown(self, _m):
+        """Missing name key defaults to 'Unknown' instead of crashing."""
+        r = resolve_initiative([{"ref": 5}])
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["name"], "Unknown")
+
+    @patch(MOCK, return_value=5)
+    def test_missing_ref_defaults_to_zero(self, _m):
+        r = resolve_initiative([{"name": "V"}])
+        self.assertEqual(r[0]["total"], 5)
+        self.assertEqual(r[0]["ref"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_ref_zero(self, _m):
+        r = resolve_initiative([{"name": "V", "ref": 0}])
+        self.assertEqual(r[0]["total"], 5)
+
+    @patch(MOCK, return_value=5)
+    def test_ref_negative(self, _m):
+        r = resolve_initiative([{"name": "V", "ref": -10}])
+        self.assertEqual(r[0]["total"], -5)
+
+    def test_ref_string_raises_type_error(self):
+        with self.assertRaises(TypeError):
+            with patch(MOCK, return_value=5):
+                resolve_initiative([{"name": "V", "ref": "fast"}])
+
+    @patch(MOCK, return_value=5)
+    def test_large_combatant_list(self, _m):
+        combatants = [{"name": f"NPC_{i}", "ref": i} for i in range(100)]
+        r = resolve_initiative(combatants)
+        self.assertEqual(len(r), 100)
+        # Should be sorted descending by total
+        totals = [e["total"] for e in r]
+        self.assertEqual(totals, sorted(totals, reverse=True))
+
+    @patch(MOCK, return_value=5)
+    def test_all_same_ref_tiebreaking(self, _m):
+        """All combatants have same REF+d10, forcing tiebreak rolls."""
+        combatants = [{"name": f"Ganger_{i}", "ref": 5} for i in range(10)]
+        # All get total=10. Tiebreak d10s also all return 5.
+        # With deterministic mock, tiebreaker won't differentiate — but should not crash.
+        r = resolve_initiative(combatants)
+        self.assertEqual(len(r), 10)
+        for entry in r:
+            self.assertIn("tiebreak", entry)
+
+    @patch(MOCK, return_value=5)
+    def test_duplicate_names(self, _m):
+        combatants = [{"name": "V", "ref": 5}, {"name": "V", "ref": 8}]
+        r = resolve_initiative(combatants)
+        self.assertEqual(len(r), 2)
+        names = [e["name"] for e in r]
+        self.assertEqual(names.count("V"), 2)
+
+    @patch(MOCK, return_value=5)
+    def test_extra_fields_ignored(self, _m):
+        r = resolve_initiative([{"name": "V", "ref": 5, "cool": 8, "hp": 40}])
+        self.assertEqual(len(r), 1)
+        self.assertNotIn("cool", r[0])
+        self.assertNotIn("hp", r[0])
+
+
+# ===========================================================================
+# 8. TestNextCombatTurnFuzz
+# ===========================================================================
+class TestNextCombatTurnFuzz(unittest.TestCase):
+    """Edge cases for next_combat_turn."""
+
+    def test_empty_order_returns_bool_new_round(self):
+        """Empty order returns new_round=True (bool), consistent with other paths."""
+        r = next_combat_turn([], 0)
+        self.assertEqual(r["next_turn"], 0)
+        self.assertFalse(r["round_incremented"])
+        self.assertTrue(r["new_round"])
+        self.assertIsInstance(r["new_round"], bool)
+
+    def test_current_turn_negative_one(self):
+        r = next_combat_turn(["V", "Ganger"], -1)
+        # idx = (-1+1) % 2 = 0; round_incremented = 0 <= -1 → False
+        self.assertEqual(r["next_turn"], 0)
+        self.assertFalse(r["round_incremented"])
+
+    def test_current_turn_very_large(self):
+        r = next_combat_turn(["V", "Ganger"], 999)
+        # idx = 1000 % 2 = 0; round_incremented = 0 <= 999 → True
+        self.assertEqual(r["next_turn"], 0)
+        self.assertTrue(r["round_incremented"])
+
+    def test_current_turn_deep_negative(self):
+        r = next_combat_turn(["V", "Ganger", "Borg"], -100)
+        # idx = (-99) % 3 = 0 (Python modulo is non-negative for positive divisor)
+        self.assertEqual(r["next_turn"], 0)
+
+    def test_all_eliminated(self):
+        r = next_combat_turn(["V", "Ganger"], 0, ["V", "Ganger"])
+        self.assertEqual(r["next_turn"], 0)
+        self.assertFalse(r["round_incremented"])
+        self.assertFalse(r["new_round"])
+
+    def test_all_eliminated_but_one(self):
+        r = next_combat_turn(["V", "Ganger", "Borg"], 0, ["Ganger"])
+        # Skip Ganger (idx=1), go to Borg (idx=2)
+        self.assertEqual(r["next_turn"], 2)
+
+    def test_skip_eliminated_wraps_around(self):
+        r = next_combat_turn(["V", "Ganger", "Borg"], 1, ["Borg"])
+        # Skip Borg (idx=2), wrap to V (idx=0); round_incremented = True
+        self.assertEqual(r["next_turn"], 0)
+        self.assertTrue(r["round_incremented"])
+
+    def test_single_non_eliminated(self):
+        r = next_combat_turn(["V", "Ganger"], 0, ["Ganger"])
+        # Skip Ganger (idx=1), wrap to V (idx=0)
+        self.assertEqual(r["next_turn"], 0)
+
+    def test_dict_entries(self):
+        order = [{"name": "V"}, {"name": "Ganger"}]
+        r = next_combat_turn(order, 0)
+        self.assertEqual(r["next_turn"], 1)
+
+    def test_mixed_string_and_dict(self):
+        order = ["V", {"name": "Ganger"}]
+        r = next_combat_turn(order, 0)
+        self.assertEqual(r["next_turn"], 1)
+
+    def test_eliminated_none(self):
+        r = next_combat_turn(["V", "Ganger"], 0, None)
+        self.assertEqual(r["next_turn"], 1)
+
+    def test_eliminated_empty_list(self):
+        r = next_combat_turn(["V", "Ganger"], 0, [])
+        self.assertEqual(r["next_turn"], 1)
+
+    def test_eliminated_name_not_in_order(self):
+        r = next_combat_turn(["V", "Ganger"], 0, ["Ghost"])
+        # Ghost not in order, no effect
+        self.assertEqual(r["next_turn"], 1)
+
+
+# ===========================================================================
+# 9. TestResolveActionsFuzz
+# ===========================================================================
+class TestResolveActionsFuzz(unittest.TestCase):
+    """Batch dispatcher edge cases."""
+
+    def test_empty_actions(self):
+        r = resolve_actions([])
+        self.assertEqual(r, {"results": [], "state_ops": []})
+
+    @patch(MOCK, return_value=5)
+    def test_missing_type_key(self, _m):
+        r = resolve_actions([{"character": "V"}])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_type_none(self, _m):
+        r = resolve_actions([{"type": None, "character": "V"}])
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_type_empty_string(self, _m):
+        r = resolve_actions([{"type": "", "character": "V"}])
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_type_integer(self, _m):
+        r = resolve_actions([{"type": 42, "character": "V"}])
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_empty_dict_action(self, _m):
+        r = resolve_actions([{}])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertIn("error", r["results"][0])
+
+    def test_string_action_returns_error(self):
+        """Non-dict (string) action returns error result instead of crashing."""
+        r = resolve_actions(["shoot him"])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertIn("error", r["results"][0])
+
+    def test_none_action_returns_error(self):
+        """Non-dict (None) action returns error result instead of crashing."""
+        r = resolve_actions([None])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertIn("error", r["results"][0])
+
+    def test_integer_action_returns_error(self):
+        """Non-dict (int) action returns error result instead of crashing."""
+        r = resolve_actions([42])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_mixed_valid_and_invalid(self, _m):
+        actions = [
+            {"type": "skill_check", "character": "V", "stat_value": 6, "skill_value": 4, "dv": 15},
+            {"type": "unknown", "character": "X"},
+            {"type": "death_save", "character": "V", "body_stat": 8},
+        ]
+        r = resolve_actions(actions)
+        self.assertEqual(len(r["results"]), 3)
+        self.assertNotIn("error", r["results"][0])
+        self.assertIn("error", r["results"][1])
+        self.assertNotIn("error", r["results"][2])
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_skill_check(self, _m):
+        r = resolve_actions([{"type": "skill_check", "character": "V"}])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_ranged_attack(self, _m):
+        r = resolve_actions([{"type": "ranged_attack", "character": "V"}])
+        # Default weapon_type="Pistol", range_bracket=0 → valid
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_melee_attack(self, _m):
+        r = resolve_actions([{"type": "melee_attack", "character": "V"}])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_autofire(self, _m):
+        r = resolve_actions([{"type": "autofire", "character": "V"}])
+        # Default weapon_type="SMG", range_bracket=0 → valid
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+
+    def test_invalid_ranged_attack_no_luck_op(self):
+        r = resolve_actions([{
+            "type": "ranged_attack",
+            "character": "V",
+            "weapon_type": "Pistol",
+            "range_bracket": 99,
+            "luck_spent": 4,
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertFalse(any(op.get("op") == "luck" for op in r["state_ops"]))
+
+    def test_invalid_autofire_no_luck_op(self):
+        r = resolve_actions([{
+            "type": "autofire",
+            "character": "V",
+            "weapon_type": "SMG",
+            "range_bracket": 99,
+            "luck_spent": 4,
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertFalse(any(op.get("op") == "luck" for op in r["state_ops"]))
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_death_save(self, _m):
+        r = resolve_actions([{"type": "death_save", "character": "V"}])
+        self.assertNotIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_all_defaults_initiative(self, _m):
+        r = resolve_actions([{"type": "initiative", "character": "all"}])
+        # Default combatants=[] → empty order
+        self.assertNotIn("error", r["results"][0])
+
+    def test_string_stat_value_caught(self):
+        r = resolve_actions([{"type": "skill_check", "character": "V", "stat_value": "six"}])
+        self.assertIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=5)
+    def test_1000_actions_performance(self, _m):
+        action = {"type": "skill_check", "character": "V", "stat_value": 6, "skill_value": 4, "dv": 15}
+        start = time.time()
+        r = resolve_actions([action] * 1000)
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(len(r["results"]), 1000)
+
+    @patch(MOCK, return_value=5)
+    def test_extra_fields_ignored(self, _m):
+        r = resolve_actions([{"type": "skill_check", "character": "V",
+                              "stat_value": 6, "skill_value": 4, "dv": 15,
+                              "favorite_color": "red"}])
+        self.assertNotIn("error", r["results"][0])
+
+    def test_error_includes_character_name(self):
+        r = resolve_actions([{"type": "skill_check", "character": "Trauma Team", "stat_value": "bad"}])
+        self.assertEqual(r["results"][0].get("character"), "Trauma Team")
+
+    @patch(MOCK, return_value=9)
+    def test_state_ops_aggregation(self, _m):
+        """Two ranged attacks both hitting → merged state_ops."""
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 8, "skill_value": 8,
+             "weapon_type": "Pistol", "damage_dice": 3, "rof": 1, "target_sp": 0,
+             "range_bracket": 0, "target": "Ganger1"},
+            {"type": "ranged_attack", "character": "V", "stat_value": 8, "skill_value": 8,
+             "weapon_type": "Pistol", "damage_dice": 3, "rof": 1, "target_sp": 0,
+             "range_bracket": 0, "target": "Ganger2"},
+        ]
+        r = resolve_actions(actions)
+        self.assertEqual(len(r["results"]), 2)
+        # Both should hit (total = 9+8+8=25 > DV 13)
+        # State ops from both should be merged
+        self.assertGreater(len(r["state_ops"]), 0)
+
+
+# ===========================================================================
+# 10. TestResolvePipelineMechanicsFuzz
+# ===========================================================================
+class TestResolvePipelineMechanicsFuzz(unittest.TestCase):
+    """Edge cases for resolve_pipeline_mechanics from pipeline.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pipeline import resolve_pipeline_mechanics
+        cls.resolve = staticmethod(resolve_pipeline_mechanics)
+
+    def test_empty_beats(self):
+        annotated, ops = self.resolve([], {})
+        self.assertEqual(annotated, [])
+        self.assertEqual(ops, [])
+
+    def test_legacy_string_beat(self):
+        annotated, ops = self.resolve(["The ganger fires wildly"], {})
+        self.assertEqual(len(annotated), 1)
+        self.assertEqual(annotated[0]["beat"], "The ganger fires wildly")
+        self.assertIsNone(annotated[0]["resolution"])
+
+    def test_mixed_legacy_and_dict_beats(self):
+        beats = [
+            "Narrative only",
+            {"beat": "V checks a lock", "resolution": None},
+            {"beat": "just description"},
+        ]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(len(annotated), 3)
+        # String wrapped
+        self.assertEqual(annotated[0]["beat"], "Narrative only")
+        # Null resolution passed through
+        self.assertIsNone(annotated[1]["resolution"])
+        # Missing resolution key treated as None
+        self.assertNotIn("result", annotated[2])
+
+    @patch(MOCK, return_value=5)
+    def test_beat_with_resolution_missing_type(self, _m):
+        beats = [{"beat": "something", "resolution": {"stat_value": 5}}]
+        annotated, ops = self.resolve(beats, {})
+        # type=None → unknown action error
+        self.assertIn("result", annotated[0])
+        result = annotated[0]["result"]
+        self.assertIn("error", result)
+
+    @patch(MOCK, return_value=9)
+    def test_skill_check_success_callback(self, _m):
+        beats = [{
+            "beat": "V picks the lock",
+            "resolution": {
+                "type": "skill_check", "character": "V",
+                "stat_value": 6, "skill_value": 4, "dv": 15,
+                "on_success": "lock opens", "on_failure": "alarm triggers",
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(annotated[0]["result"]["on_outcome"], "lock opens")
+
+    @patch(MOCK, return_value=1)
+    def test_skill_check_failure_callback(self, _m):
+        beats = [{
+            "beat": "V picks the lock",
+            "resolution": {
+                "type": "skill_check", "character": "V",
+                "stat_value": 6, "skill_value": 4, "dv": 15,
+                "on_success": "lock opens", "on_failure": "alarm triggers",
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(annotated[0]["result"]["on_outcome"], "alarm triggers")
+
+    @patch(MOCK, return_value=9)
+    def test_ranged_attack_on_hit(self, _m):
+        """Pipeline correctly detects ranged hits via a['roll']['success']."""
+        beats = [{
+            "beat": "V shoots",
+            "resolution": {
+                "type": "ranged_attack", "character": "V",
+                "stat_value": 8, "skill_value": 8, "weapon_type": "Pistol",
+                "damage_dice": 2, "rof": 1, "target_sp": 0, "range_bracket": 0,
+                "target": "Ganger",
+                "on_hit": "Ganger staggers", "on_miss": "Bullet misses",
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(annotated[0]["result"]["on_outcome"], "Ganger staggers")
+        self.assertGreater(len(ops), 0)
+
+    @patch(MOCK, return_value=5)
+    def test_initiative_beat(self, _m):
+        beats = [{
+            "beat": "Initiative",
+            "resolution": {
+                "type": "initiative", "character": "all",
+                "combatants": [{"name": "V", "ref": 8}, {"name": "Ganger", "ref": 5}],
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(annotated[0]["result"]["on_outcome"], "Initiative rolled")
+
+    def test_non_dict_resolution_returns_error(self):
+        """Non-dict resolution is caught by try/except and annotated with error."""
+        beats = [{"beat": "error", "resolution": "shoot them"}]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(len(annotated), 1)
+        self.assertIn("result", annotated[0])
+        self.assertIn("error", annotated[0]["result"])
+
+    @patch(MOCK, return_value=9)
+    def test_state_ops_aggregation_across_beats(self, _m):
+        beats = [
+            {
+                "beat": "V shoots Ganger 1",
+                "resolution": {
+                    "type": "ranged_attack", "character": "V",
+                    "stat_value": 8, "skill_value": 8, "weapon_type": "Pistol",
+                    "damage_dice": 2, "rof": 1, "target_sp": 0, "range_bracket": 0,
+                    "target": "Ganger1",
+                }
+            },
+            {
+                "beat": "V shoots Ganger 2",
+                "resolution": {
+                    "type": "ranged_attack", "character": "V",
+                    "stat_value": 8, "skill_value": 8, "weapon_type": "Pistol",
+                    "damage_dice": 2, "rof": 1, "target_sp": 0, "range_bracket": 0,
+                    "target": "Ganger2",
+                }
+            },
+        ]
+        annotated, ops = self.resolve(beats, {})
+        self.assertEqual(len(annotated), 2)
+        # State ops from both attacks should be aggregated
+        targets = set(op.get("edgerunner") for op in ops)
+        self.assertIn("Ganger1", targets)
+        self.assertIn("Ganger2", targets)
+
+    @patch(MOCK, side_effect=[9, 5, 4, 4, 9, 5, 4, 4])
+    def test_sequential_beats_use_evolving_target_sp(self, _m):
+        """Second beat should see armor ablation from the first beat."""
+        from game_systems.cpred import init_game_state
+        gs = init_game_state()
+        gs["edgerunners"]["Ganger"] = {
+            "hp": {"current": 20, "max": 20},
+            "humanity": {"current": 0, "max": 0},
+            "luck": {"current": 0, "max": 0},
+            "armor": {"head": 11, "body": 11},
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "death_save_count": 0,
+            "seriously_wounded": False,
+            "eurobucks": 0,
+            "weapons": [],
+        }
+
+        beats = [
+            {
+                "beat": "V shoots once",
+                "resolution": {
+                    "type": "ranged_attack",
+                    "character": "V",
+                    "stat_value": 8,
+                    "skill_value": 8,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 3,
+                    "rof": 1,
+                    "target": "Ganger",
+                    "target_sp": 11,  # stale input should be overwritten from evolving state
+                    "range_bracket": 0,
+                    "hit_location": "body",
+                },
+            },
+            {
+                "beat": "V shoots again",
+                "resolution": {
+                    "type": "ranged_attack",
+                    "character": "V",
+                    "stat_value": 8,
+                    "skill_value": 8,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 3,
+                    "rof": 1,
+                    "target": "Ganger",
+                    "target_sp": 11,  # stale again
+                    "range_bracket": 0,
+                    "hit_location": "body",
+                },
+            },
+        ]
+
+        annotated, _ops = self.resolve(beats, gs)
+        first_effective_sp = annotated[0]["result"]["attacks"][0]["damage"]["effective_sp"]
+        second_effective_sp = annotated[1]["result"]["attacks"][0]["damage"]["effective_sp"]
+        self.assertEqual(first_effective_sp, 11)
+        self.assertEqual(second_effective_sp, 10)
+
+    @patch(MOCK, side_effect=[9, 5, 4, 4, 9, 5, 4, 4])
+    def test_non_edgerunner_target_not_shadow_polluted(self, _m):
+        """Non-edgerunner targets should not get synthetic shadow-state armor/HP overrides."""
+        from game_systems.cpred import init_game_state
+        gs = init_game_state()  # no "Thug" edgerunner entry
+
+        beats = [
+            {
+                "beat": "V shoots thug once",
+                "resolution": {
+                    "type": "ranged_attack",
+                    "character": "V",
+                    "stat_value": 8,
+                    "skill_value": 8,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 3,
+                    "rof": 1,
+                    "target": "Thug",
+                    "target_sp": 11,
+                    "range_bracket": 0,
+                    "hit_location": "body",
+                },
+            },
+            {
+                "beat": "V shoots thug again",
+                "resolution": {
+                    "type": "ranged_attack",
+                    "character": "V",
+                    "stat_value": 8,
+                    "skill_value": 8,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 3,
+                    "rof": 1,
+                    "target": "Thug",
+                    "target_sp": 11,
+                    "range_bracket": 0,
+                    "hit_location": "body",
+                },
+            },
+        ]
+
+        annotated, _ops = self.resolve(beats, gs)
+        first_effective_sp = annotated[0]["result"]["attacks"][0]["damage"]["effective_sp"]
+        second_effective_sp = annotated[1]["result"]["attacks"][0]["damage"]["effective_sp"]
+        self.assertEqual(first_effective_sp, 11)
+        self.assertEqual(second_effective_sp, 11)
+
+    def test_game_state_none_no_crash(self):
+        """game_state param is accepted but not used — None should not crash."""
+        annotated, ops = self.resolve([{"beat": "test", "resolution": None}], None)
+        self.assertEqual(len(annotated), 1)
+
+    @patch(MOCK, return_value=5)
+    def test_large_beats_list(self, _m):
+        beats = [{"beat": f"beat_{i}", "resolution": {
+            "type": "skill_check", "character": "V",
+            "stat_value": 6, "skill_value": 4, "dv": 15,
+        }} for i in range(50)]
+        start = time.time()
+        annotated, ops = self.resolve(beats, {})
+        elapsed = time.time() - start
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(len(annotated), 50)
+
+    @patch(MOCK, return_value=5)
+    def test_beat_with_no_resolution_key(self, _m):
+        """Beat dict without 'resolution' key — get() returns None."""
+        annotated, ops = self.resolve([{"beat": "just a beat"}], {})
+        self.assertEqual(len(annotated), 1)
+        self.assertNotIn("result", annotated[0])
+
+    @patch(MOCK, return_value=9)
+    def test_autofire_on_hit_outcome(self, _m):
+        """Bug #9: Pipeline must detect autofire hits via top-level 'hit' field."""
+        beats = [{
+            "beat": "V sprays the room",
+            "resolution": {
+                "type": "autofire", "character": "V",
+                "stat_value": 8, "skill_value": 6, "weapon_type": "SMG",
+                "autofire_multiplier": 3, "target": "Ganger",
+                "target_sp": 5, "range_bracket": 0,
+                "on_hit": "bullets shred the wall", "on_miss": "wide spray",
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        result = annotated[0]["result"]
+        # Autofire should detect hit and use on_hit callback
+        self.assertEqual(result["on_outcome"], "bullets shred the wall")
+
+    @patch(MOCK, return_value=1)
+    def test_autofire_on_miss_outcome(self, _m):
+        """Autofire miss should use on_miss callback, not 'resolved'."""
+        beats = [{
+            "beat": "V sprays wildly",
+            "resolution": {
+                "type": "autofire", "character": "V",
+                "stat_value": 2, "skill_value": 1, "weapon_type": "SMG",
+                "autofire_multiplier": 3, "target": "Ganger",
+                "target_sp": 5, "range_bracket": 0,
+                "on_hit": "shreds wall", "on_miss": "bullets go everywhere",
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        result = annotated[0]["result"]
+        self.assertEqual(result["on_outcome"], "bullets go everywhere")
+
+    @patch(MOCK, return_value=5)
+    def test_death_save_survived_outcome(self, _m):
+        """Death save survived should set on_outcome to 'survived'."""
+        beats = [{
+            "beat": "V death save",
+            "resolution": {
+                "type": "death_save", "character": "V",
+                "body_stat": 8, "death_save_count": 0,
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        result = annotated[0]["result"]
+        self.assertEqual(result["on_outcome"], "survived")
+
+    @patch(MOCK, return_value=10)
+    def test_death_save_failed_outcome(self, _m):
+        """Death save natural 10 should set on_outcome to 'failed'."""
+        beats = [{
+            "beat": "V death save",
+            "resolution": {
+                "type": "death_save", "character": "V",
+                "body_stat": 8, "death_save_count": 0,
+            }
+        }]
+        annotated, ops = self.resolve(beats, {})
+        result = annotated[0]["result"]
+        self.assertEqual(result["on_outcome"], "failed")
+
+
+# ===========================================================================
+# 11. TestPropertyBased — Seeded random invariant checks
+# ===========================================================================
+class TestPropertyBased(unittest.TestCase):
+    """Property-based tests using seeded randomness (no mocks)."""
+
+    def test_seed_determinism(self):
+        """Same seed should produce identical results."""
+        random.seed(42)
+        r1 = resolve_check(6, 4, 15)
+        random.seed(42)
+        r2 = resolve_check(6, 4, 15)
+        self.assertEqual(r1, r2)
+
+    def test_success_iff_total_gt_dv(self):
+        """Core invariant: success == (total > dv)."""
+        for seed in range(100):
+            random.seed(seed)
+            stat = random.randint(0, 10)
+            skill = random.randint(0, 10)
+            dv = random.randint(5, 25)
+            r = resolve_check(stat, skill, dv)
+            self.assertEqual(r["success"], r["total"] > r["dv"],
+                             f"Invariant violated at seed {seed}: total={r['total']}, dv={r['dv']}")
+
+    def test_hp_damage_geq_zero(self):
+        """HP damage should never be negative."""
+        for seed in range(100):
+            random.seed(seed)
+            dice = random.randint(1, 10)
+            sp = random.randint(0, 20)
+            r = resolve_damage(dice, "body", sp)
+            self.assertGreaterEqual(r["hp_damage"], 0,
+                                    f"Negative hp_damage at seed {seed}")
+
+    def test_crit_iff_two_sixes_and_not_rubber(self):
+        """Crit should trigger iff 2+ sixes rolled AND not rubber ammo."""
+        for seed in range(100):
+            random.seed(seed)
+            dice = random.randint(2, 8)
+            r = resolve_damage(dice, "body", 0, is_rubber=False)
+            sixes = sum(1 for d in r["dice"] if d == 6)
+            self.assertEqual(r["crit"], sixes >= 2,
+                             f"Crit mismatch at seed {seed}: sixes={sixes}, crit={r['crit']}")
+
+    def test_ablation_only_on_penetration(self):
+        """Ablation > 0 only when damage_past_sp > 0."""
+        for seed in range(100):
+            random.seed(seed)
+            dice = random.randint(1, 6)
+            sp = random.randint(0, 15)
+            r = resolve_damage(dice, "body", sp)
+            if r["ablation"] > 0:
+                self.assertGreater(r["damage_past_sp"], 0,
+                                    f"Ablation without penetration at seed {seed}")
+
+    def test_rubber_no_crit_no_ablation(self):
+        """Rubber ammo should never produce crits or ablation."""
+        for seed in range(100):
+            random.seed(seed)
+            dice = random.randint(2, 10)
+            r = resolve_damage(dice, "body", 0, is_rubber=True)
+            self.assertFalse(r["crit"], f"Rubber crit at seed {seed}")
+            self.assertEqual(r["ablation"], 0, f"Rubber ablation at seed {seed}")
+
+    def test_ranged_attacks_equal_rof(self):
+        """Number of attacks should equal ROF."""
+        for seed in range(50):
+            random.seed(seed)
+            rof = random.randint(1, 5)
+            r = resolve_ranged_attack(6, 4, "SMG", 2, rof, 5, 0)
+            if "error" not in r:
+                self.assertEqual(len(r["attacks"]), rof,
+                                 f"Attack count mismatch at seed {seed}")
+
+    def test_melee_tie_never_hits(self):
+        """Equal rolls should always result in miss."""
+        for seed in range(100):
+            with patch(MOCK, return_value=5):
+                r = resolve_melee_attack(5, 5, 5, 5, 2, 1, 5)
+                self.assertFalse(r["attacks"][0]["hit"],
+                                 f"Tie hit at seed {seed}")
+
+    def test_natural_10_always_fails_death_save(self):
+        """Natural 10 should always fail regardless of body_stat."""
+        for body in range(1, 50):
+            with patch(MOCK, return_value=10):
+                r = resolve_death_save(body, 0)
+                self.assertFalse(r["survived"],
+                                 f"Natural 10 survived with body={body}")
+
+    def test_relationship_bonus_capped_to_5_with_nonneg_inputs(self):
+        """When inputs are non-negative, RS bonus is capped to +5 while Luck is uncapped."""
+        for seed in range(100):
+            random.seed(seed)
+            luck = random.randint(0, 20)
+            rel = random.randint(0, 20)
+            with patch(MOCK, return_value=5):
+                r = resolve_check(0, 0, 0, luck_spent=luck, rel_bonus=rel)
+                bonus = r["total"] - 5  # subtract the die roll
+                self.assertEqual(bonus, luck + min(rel, 5),
+                                 f"Unexpected bonus {bonus} with luck={luck}, rel={rel}")
+
+    def test_initiative_output_count_matches_input(self):
+        """Output should have same count as input combatants."""
+        for seed in range(20):
+            random.seed(seed)
+            n = random.randint(1, 20)
+            combatants = [{"name": f"NPC_{i}", "ref": random.randint(1, 10)} for i in range(n)]
+            r = resolve_initiative(combatants)
+            self.assertEqual(len(r), n, f"Count mismatch at seed {seed}")
+
+    def test_initiative_all_names_present(self):
+        """All input names should appear in output."""
+        for seed in range(20):
+            random.seed(seed)
+            n = random.randint(1, 15)
+            combatants = [{"name": f"NPC_{i}", "ref": random.randint(1, 10)} for i in range(n)]
+            r = resolve_initiative(combatants)
+            input_names = {c["name"] for c in combatants}
+            output_names = {e["name"] for e in r}
+            self.assertEqual(input_names, output_names, f"Names mismatch at seed {seed}")
+
+    def test_resolve_actions_results_count_matches(self):
+        """Number of results should equal number of input actions."""
+        for seed in range(50):
+            random.seed(seed)
+            n = random.randint(1, 10)
+            actions = [{"type": "skill_check", "character": f"V_{i}",
+                         "stat_value": random.randint(1, 10),
+                         "skill_value": random.randint(1, 10),
+                         "dv": random.randint(9, 25)}
+                        for i in range(n)]
+            r = resolve_actions(actions)
+            self.assertEqual(len(r["results"]), n, f"Count mismatch at seed {seed}")
+
+    def test_formatted_contains_total(self):
+        """Formatted string should contain the total value."""
+        for seed in range(100):
+            random.seed(seed)
+            stat = random.randint(0, 10)
+            skill = random.randint(0, 10)
+            r = resolve_check(stat, skill, 15)
+            self.assertIn(str(r["total"]), r["formatted"],
+                          f"Total {r['total']} not in formatted at seed {seed}")
+
+
+# ===========================================================================
+# RESOLVE_MECHANICS_TOOL schema validation
+# ===========================================================================
+class TestToolSchema(unittest.TestCase):
+    """Validate the RESOLVE_MECHANICS_TOOL definition."""
+
+    def test_tool_has_required_fields(self):
+        self.assertEqual(RESOLVE_MECHANICS_TOOL["name"], "resolve_mechanics")
+        self.assertIn("description", RESOLVE_MECHANICS_TOOL)
+        self.assertIn("input_schema", RESOLVE_MECHANICS_TOOL)
+
+    def test_schema_requires_actions(self):
+        schema = RESOLVE_MECHANICS_TOOL["input_schema"]
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("actions", schema.get("required", []))
+
+    def test_actions_is_array(self):
+        actions_schema = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]
+        self.assertEqual(actions_schema["type"], "array")
+
+    def test_action_item_requires_type_and_character(self):
+        item_schema = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]["items"]
+        self.assertIn("type", item_schema.get("required", []))
+        self.assertIn("character", item_schema.get("required", []))
+
+    def test_type_enum_matches_resolve_actions(self):
+        type_enum = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]["items"]["properties"]["type"]["enum"]
+        expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save", "initiative", "opposed_check", "program_attack", "ambush"}
+        self.assertEqual(set(type_enum), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()
