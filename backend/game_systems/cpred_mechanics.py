@@ -653,23 +653,66 @@ def resolve_opposed_check(
     defender_stat: int,
     attacker_label: str = "Attacker",
     defender_label: str = "Defender",
+    attacker_skill: int = 0,
+    defender_skill: int = 0,
+    attacker_skill_label: str = "",
+    defender_skill_label: str = "",
+    seriously_wounded_attacker: bool = False,
+    seriously_wounded_defender: bool = False,
+    luck_spent: int = 0,
+    rel_bonus: int = 0,
 ) -> dict:
-    """Resolve an opposed check: both sides roll d10 + stat.
+    """Resolve an opposed check: both sides roll d10 + stat (+ skill).
 
     Handles exploding 10s and fumble 1s. Ties go to defender.
-    Returns dict with full breakdown and formatted string.
+    Supports full stat+skill opposed rolls (Stealth vs Perception, Persuasion
+    vs Concentration, etc.) as well as stat-only NET checks (Zap vs DEF).
 
-    Used for: Zap vs ICE DEF, Slide vs ICE PER, Program ATK vs ICE DEF.
+    Returns dict with full breakdown and formatted string.
     """
     atk_die = _roll_check_die()
     def_die = _roll_check_die()
-    atk_total = atk_die["total"] + attacker_stat
-    def_total = def_die["total"] + defender_stat
+
+    # --- Attacker total ---
+    atk_total = atk_die["total"] + attacker_stat + attacker_skill
+    atk_mods = []
+    if seriously_wounded_attacker:
+        atk_total -= 2
+        atk_mods.append(("Wounded", -2))
+    clamped_luck = max(0, luck_spent)
+    if clamped_luck > 0:
+        atk_total += clamped_luck
+        atk_mods.append(("Luck", clamped_luck))
+    clamped_rel = max(-5, min(5, rel_bonus))
+    if clamped_rel != 0:
+        atk_total += clamped_rel
+        atk_mods.append(("RS", clamped_rel))
+
+    # --- Defender total ---
+    def_total = def_die["total"] + defender_stat + defender_skill
+    def_mods = []
+    if seriously_wounded_defender:
+        def_total -= 2
+        def_mods.append(("Wounded", -2))
+
     success = atk_total > def_total  # ties go to defender
     margin = atk_total - def_total
 
-    atk_fmt = f"{_format_die(atk_die)} +{attacker_label} {attacker_stat} = {atk_total}"
-    def_fmt = f"{_format_die(def_die)} +{defender_label} {defender_stat} = {def_total}"
+    # --- Formatted strings ---
+    def _fmt_side(die, stat, stat_label, skill, skill_label, mods, total):
+        parts = [_format_die(die)]
+        parts.append(f"+{stat_label} {stat}")
+        if skill or skill_label:
+            parts.append(f"+{skill_label or 'Skill'} {skill}")
+        for label, val in mods:
+            parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
+        parts.append(f"= {total}")
+        return " ".join(parts)
+
+    atk_fmt = _fmt_side(atk_die, attacker_stat, attacker_label, attacker_skill,
+                        attacker_skill_label, atk_mods, atk_total)
+    def_fmt = _fmt_side(def_die, defender_stat, defender_label, defender_skill,
+                        defender_skill_label, def_mods, def_total)
     formatted = f"{atk_fmt} vs {def_fmt} {'✓' if success else '✗'}"
 
     return {
@@ -1318,13 +1361,31 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 })
 
             elif action_type == "opposed_check":
+                actor_name = action.get("character", "")
+                _opp_target = action.get("target", "")
+                # Auto-compute rel_bonus from relationships
+                _opp_rel = action.get("rel_bonus", 0)
+                if relationships or factions:
+                    if _opp_target:
+                        _opp_rel = compute_rel_bonus(
+                            relationships, factions, _opp_target,
+                            check_context=action.get("check_context"),
+                        )
                 result = resolve_opposed_check(
                     attacker_stat=action.get("attacker_stat", 0),
                     defender_stat=action.get("defender_stat", 0),
                     attacker_label=action.get("attacker_label", "Attacker"),
                     defender_label=action.get("defender_label", "Defender"),
+                    attacker_skill=action.get("attacker_skill", 0),
+                    defender_skill=action.get("defender_skill", 0),
+                    attacker_skill_label=action.get("attacker_skill_label", ""),
+                    defender_skill_label=action.get("defender_skill_label", ""),
+                    seriously_wounded_attacker=action.get("seriously_wounded_attacker", False),
+                    seriously_wounded_defender=action.get("seriously_wounded_defender", False),
+                    luck_spent=action.get("luck_spent", 0),
+                    rel_bonus=_opp_rel,
                 )
-                result["character"] = action.get("character", "")
+                result["character"] = actor_name
                 # Zap damage: on hit, roll Interface rank d6 for REZ damage
                 if action.get("zap") and result["success"]:
                     _zap_dice = max(1, action.get("interface_rank", 1))
@@ -1373,6 +1434,13 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         elif isinstance(_target_node_hint, str) and _target_node_hint:
                             _rez_op["target_node"] = _target_node_hint
                         all_state_ops.append(_rez_op)
+                luck_op = _luck_spend_state_op(
+                    edgerunner=actor_name,
+                    luck_spent=action.get("luck_spent", 0),
+                    reason="Luck spent on opposed check",
+                )
+                if luck_op:
+                    all_state_ops.append(luck_op)
                 results.append(result)
 
             elif action_type == "program_attack":
@@ -1552,10 +1620,14 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     _perc_stat = _tgt.get("perception_stat", 0)
                     _perc_skill = _tgt.get("perception_skill", 0)
                     _opp = resolve_opposed_check(
-                        attacker_stat=_stealth_stat + _stealth_skill,
-                        defender_stat=_perc_stat + _perc_skill,
-                        attacker_label="Stealth",
-                        defender_label="Perception",
+                        attacker_stat=_stealth_stat,
+                        defender_stat=_perc_stat,
+                        attacker_label="DEX",
+                        defender_label="INT",
+                        attacker_skill=_stealth_skill,
+                        defender_skill=_perc_skill,
+                        attacker_skill_label="Stealth",
+                        defender_skill_label="Concentration",
                     )
                     _ambush_results.append({
                         "target": _tgt_name,
@@ -1618,7 +1690,11 @@ RESOLVE_MECHANICS_TOOL = {
         "target, target_sp, range_bracket (0-4 only, max 51-100m), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?, on_hit?, on_miss?}\n"
         "- death_save: {type, character, body_stat, death_save_count, active_injuries? (array of {dv_mod})}\n"
         "- initiative: {type, character: 'all', combatants: [{name, ref}]}\n"
-        "- opposed_check: {type, character, attacker_stat, defender_stat, attacker_label?, defender_label?}\n"
+        "- opposed_check: {type, character, attacker_stat, attacker_skill?, defender_stat, defender_skill?, "
+        "attacker_label? (stat name), defender_label? (stat name), attacker_skill_label?, defender_skill_label?, "
+        "seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target? (NPC name for rel bonus), "
+        "check_context? (social/persuasion/combat/perception)} — for contested rolls (Stealth vs Concentration, "
+        "Persuasion vs Concentration, etc.) and NET opposed checks (Zap/Slide with zap?: true, interface_rank?: N)\n"
         "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"

@@ -26,6 +26,7 @@ from game_systems.cpred_mechanics import (
     resolve_death_save,
     resolve_initiative,
     next_combat_turn,
+    resolve_opposed_check,
     resolve_actions,
     RESOLVE_MECHANICS_TOOL,
 )
@@ -972,6 +973,20 @@ class TestResolveActionsFuzz(unittest.TestCase):
         self.assertIn("error", r["results"][0])
         self.assertFalse(any(op.get("op") == "luck" for op in r["state_ops"]))
 
+    @patch(MOCK, side_effect=[9, 1])
+    def test_invalid_opposed_check_no_luck_op(self, _m):
+        r = resolve_actions([{
+            "type": "opposed_check",
+            "character": "V",
+            "attacker_stat": 6,
+            "defender_stat": 4,
+            "luck_spent": 4,
+            "zap": True,
+            "interface_rank": "bad",
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertFalse(any(op.get("op") == "luck" for op in r["state_ops"]))
+
     @patch(MOCK, return_value=5)
     def test_all_defaults_death_save(self, _m):
         r = resolve_actions([{"type": "death_save", "character": "V"}])
@@ -1146,6 +1161,125 @@ class TestResolveActionsUncommittedFuzz(unittest.TestCase):
             deact_ops = [op for op in result["state_ops"] if op.get("op") == "program_deactivate"]
             self.assertEqual(len(deact_ops), 1, f"seed={seed}")
             self.assertEqual(deact_ops[0]["program_name"], program_name, f"seed={seed}")
+
+
+# ===========================================================================
+# 9c. TestOpposedCheckUncommittedFuzz
+# ===========================================================================
+class TestOpposedCheckUncommittedFuzz(unittest.TestCase):
+    """Seeded fuzz coverage for expanded opposed_check inputs."""
+
+    def test_seeded_opposed_check_totals_margin_and_tie_rule(self):
+        for seed in range(500):
+            rng = random.Random(seed)
+            attacker_stat = rng.randint(-10, 20)
+            defender_stat = rng.randint(-10, 20)
+            attacker_skill = rng.randint(-5, 12)
+            defender_skill = rng.randint(-5, 12)
+            luck_spent = rng.randint(-4, 12)
+            rel_bonus = rng.randint(-20, 20)
+            wounded_attacker = bool(rng.getrandbits(1))
+            wounded_defender = bool(rng.getrandbits(1))
+
+            result = resolve_opposed_check(
+                attacker_stat=attacker_stat,
+                defender_stat=defender_stat,
+                attacker_label="COOL",
+                defender_label="WILL",
+                attacker_skill=attacker_skill,
+                defender_skill=defender_skill,
+                attacker_skill_label="Persuasion",
+                defender_skill_label="Concentration",
+                seriously_wounded_attacker=wounded_attacker,
+                seriously_wounded_defender=wounded_defender,
+                luck_spent=luck_spent,
+                rel_bonus=rel_bonus,
+            )
+
+            expected_atk = result["attacker_roll"]["die"]["total"] + attacker_stat + attacker_skill
+            if wounded_attacker:
+                expected_atk -= 2
+            expected_atk += max(0, luck_spent)
+            expected_atk += max(-5, min(5, rel_bonus))
+
+            expected_def = result["defender_roll"]["die"]["total"] + defender_stat + defender_skill
+            if wounded_defender:
+                expected_def -= 2
+
+            self.assertEqual(result["attacker_total"], expected_atk, f"seed={seed}")
+            self.assertEqual(result["defender_total"], expected_def, f"seed={seed}")
+            self.assertEqual(result["margin"], expected_atk - expected_def, f"seed={seed}")
+            self.assertEqual(result["success"], expected_atk > expected_def, f"seed={seed}")
+            if expected_atk == expected_def:
+                self.assertFalse(result["success"], f"seed={seed}: ties must fail for attacker")
+
+    def test_seeded_resolve_actions_opposed_luck_state_op(self):
+        for seed in range(350):
+            rng = random.Random(seed)
+            luck_spent = rng.randint(-5, 10)
+            action = {
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": rng.randint(1, 10),
+                "attacker_skill": rng.randint(0, 10),
+                "defender_stat": rng.randint(1, 10),
+                "defender_skill": rng.randint(0, 10),
+                "luck_spent": luck_spent,
+            }
+
+            result = resolve_actions([action])
+            self.assertEqual(len(result["results"]), 1, f"seed={seed}")
+            out = result["results"][0]
+            self.assertNotIn("error", out, f"seed={seed}")
+            luck_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "luck"]
+
+            if luck_spent > 0:
+                self.assertEqual(len(luck_ops), 1, f"seed={seed}")
+                self.assertEqual(luck_ops[0]["edgerunner"], "V", f"seed={seed}")
+                self.assertEqual(luck_ops[0]["change"], -luck_spent, f"seed={seed}")
+            else:
+                self.assertEqual(len(luck_ops), 0, f"seed={seed}")
+
+    def test_seeded_resolve_actions_opposed_rel_bonus_autocompute(self):
+        for seed in range(200):
+            rng = random.Random(seed)
+            action = {
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": rng.randint(1, 10),
+                "attacker_skill": rng.randint(0, 10),
+                "defender_stat": rng.randint(1, 10),
+                "defender_skill": rng.randint(0, 10),
+                "luck_spent": rng.randint(0, 5),
+                "target": "Rogue",
+                "check_context": "social",
+            }
+            relationships = {"Rogue": {"rs": 95, "roms": 95}}
+            factions = {"Rogue": {"fr": 90}}
+
+            result = resolve_actions([action], relationships=relationships, factions=factions)
+            out = result["results"][0]
+            self.assertNotIn("error", out, f"seed={seed}")
+
+            base = out["attacker_roll"]["die"]["total"] + action["attacker_stat"] + action["attacker_skill"]
+            bonus_from_flags = 0
+            bonus_from_flags += max(0, action["luck_spent"])
+            applied_rel = out["attacker_total"] - base - bonus_from_flags
+            self.assertEqual(applied_rel, 5, f"seed={seed}")
+
+    def test_opposed_check_skill_labels_render_even_for_zero_skill(self):
+        result = resolve_opposed_check(
+            attacker_stat=6,
+            defender_stat=6,
+            attacker_label="DEX",
+            defender_label="INT",
+            attacker_skill=0,
+            defender_skill=0,
+            attacker_skill_label="Stealth",
+            defender_skill_label="Concentration",
+        )
+        self.assertIn("+Stealth 0", result["attacker_roll"]["formatted"])
+        self.assertIn("+Concentration 0", result["defender_roll"]["formatted"])
 
 
 # ===========================================================================

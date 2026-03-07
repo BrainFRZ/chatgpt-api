@@ -1802,6 +1802,9 @@ Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Se
 - skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "stat_value": <int>, "skill": "<Skill>", "skill_value": <int>, "dv": <int>, "seriously_wounded": <bool>, "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
   Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation.
 
+- opposed_check: {"type": "opposed_check", "character": "<name>", "attacker_stat": <int>, "attacker_skill": <int>, "defender_stat": <int>, "defender_skill": <int>, "attacker_label": "<stat name>", "defender_label": "<stat name>", "attacker_skill_label": "<skill name>", "defender_skill_label": "<skill name>", "seriously_wounded_attacker": <bool>, "seriously_wounded_defender": <bool>, "luck_spent": <0-N>, "target": "<NPC name for rel bonus>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative>", "on_failure": "<narrative>"}
+  Use for contested rolls where both sides roll d10+STAT+Skill: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Ties go to defender.
+
 - ranged_attack: {"type": "ranged_attack", "character": "<attacker>", "stat_value": <REF>, "skill_value": <weapon skill>, "weapon_type": "<Pistol|SMG|Shotgun|Assault Rifle|Sniper Rifle|Bows & Crossbow|Grenade Launcher|Rocket Launcher>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-7>, "hit_location": "head|body", "is_ap": <bool>, "is_rubber": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "aimed_shot": "head|leg|held_item|null", "on_hit": "<narrative>", "on_miss": "<narrative>"}
   Range brackets: 0=0-6m, 1=7-12m, 2=13-25m, 3=26-50m, 4=51-100m, 5=101-200m, 6=201-400m, 7=401-800m.
 
@@ -2080,6 +2083,7 @@ When NO mechanical actions are needed (dialogue, scene description, OOC), skip `
 
 Action types for resolve_mechanics:
 - skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
+- opposed_check: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, attacker_label (stat name e.g. "COOL"), defender_label (stat name e.g. "COOL"), attacker_skill_label (e.g. "Persuasion"), defender_skill_label (e.g. "Concentration"), seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target? (NPC name for rel bonus), check_context? (social/persuasion/combat/perception)} — for contested rolls: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Both sides roll d10+stat+skill; ties go to defender.
 - ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location (head/body), is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?}
 - melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
 - autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?}
@@ -2636,6 +2640,7 @@ Action types:
 - melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
 - autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
 - skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
+- opposed_check: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, attacker_label, defender_label, attacker_skill_label, defender_skill_label, seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target?, check_context?} — contested rolls (e.g. Stealth vs Concentration mid-combat)
 - death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
 
 ROLL FORMAT (from resolve_mechanics results):
@@ -5821,7 +5826,7 @@ The backend resolves dice. Do NOT roll dice or calculate outcomes.
 
 DICE ACTION TYPES for the "actions" array:
 - skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true} — for flat Interface checks
-- opposed_check: {type, character, attacker_stat (=Interface rank), defender_stat (=ICE stat), attacker_label, defender_label, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls Interface rank d6 REZ damage on hit.
+- opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls Interface rank d6 REZ damage on hit. Skill fields default to 0 for NET checks.
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
@@ -5885,7 +5890,7 @@ MEATSPACE ACTION TYPES:
 
 NET ACTION TYPES:
 - skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true)
-- opposed_check: Zap/Slide (attacker_stat=Interface, defender_stat=ICE stat, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls Interface rank d6 REZ damage on hit.
+- opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls Interface rank d6 REZ damage on hit. Skill fields default to 0 for NET.
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
