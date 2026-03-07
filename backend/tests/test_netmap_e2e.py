@@ -21,7 +21,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from game_systems.cpred import (
     apply_hack_state as cpred_apply_hack_state,
+    apply_hack_writeback as cpred_apply_hack_writeback,
     apply_net_combat_state as cpred_apply_net_combat_state,
+    apply_net_combat_writeback as cpred_apply_net_combat_writeback,
     build_hack_injection as cpred_build_hack_injection,
     build_net_combat_injection as cpred_build_net_combat_injection,
     init_hack_state as cpred_init_hack_state,
@@ -426,6 +428,21 @@ class TestApplyHackStateRevealedNodes(unittest.TestCase):
         cpred_apply_hack_state(hs, inp)
         self.assertEqual(hs["active_programs"], SAMPLE_PROGRAMS)
 
+    def test_tar_consumed_overrides_model_tar_in_same_update(self):
+        hs = self._fresh()
+        hs["tar_stacks"] = 2
+        inp = _make_hack_tool_input(tar_stacks=1)
+        cpred_apply_hack_state(hs, inp, resolver_state_ops=[{"op": "tar_consumed"}])
+        self.assertEqual(hs["tar_stacks"], 0)
+
+    def test_tar_consumed_clears_when_no_new_tar_reported(self):
+        hs = self._fresh()
+        hs["tar_stacks"] = 2
+        inp = _make_hack_tool_input()
+        inp["hack_state"].pop("tar_stacks", None)
+        cpred_apply_hack_state(hs, inp, resolver_state_ops=[{"op": "tar_consumed"}])
+        self.assertEqual(hs["tar_stacks"], 0)
+
 
 # ============================================================
 # Unit: init_net_combat_from_hack — revealed_nodes carry-over
@@ -614,6 +631,14 @@ class TestApplyNetCombatState(unittest.TestCase):
         self.assertIsNone(ps["combat"])
         self.assertTrue(ps["net_combat"]["combat_complete"])
 
+    def test_missing_combat_field_does_not_clear_combat(self):
+        ps = self._fresh_ps()
+        self.assertIsInstance(ps["combat"], dict)
+        inp = _make_net_combat_tool_input()
+        inp.pop("combat", None)
+        cpred_apply_net_combat_state(ps, inp)
+        self.assertIsInstance(ps["combat"], dict)
+
     def test_net_complete(self):
         ps = self._fresh_ps()
         inp = _make_net_combat_tool_input(net_complete=True)
@@ -671,6 +696,110 @@ class TestApplyNetCombatState(unittest.TestCase):
         inp = _make_net_combat_tool_input(available_actions=["Jack Out", "Zap"])
         cpred_apply_net_combat_state(ps, inp)
         self.assertEqual(ps["net_combat"]["available_actions"], ["Jack Out", "Zap"])
+
+    def test_tar_consumed_overrides_model_tar_in_same_update(self):
+        ps = self._fresh_ps()
+        ps["net_combat"]["tar_stacks"] = 2
+        inp = _make_net_combat_tool_input(tar_stacks=1)
+        cpred_apply_net_combat_state(ps, inp, resolver_state_ops=[{"op": "tar_consumed"}])
+        self.assertEqual(ps["net_combat"]["tar_stacks"], 0)
+
+    def test_tar_consumed_clears_when_no_new_tar_reported(self):
+        ps = self._fresh_ps()
+        ps["net_combat"]["tar_stacks"] = 2
+        inp = _make_net_combat_tool_input()
+        inp["hack_state"].pop("tar_stacks", None)
+        cpred_apply_net_combat_state(ps, inp, resolver_state_ops=[{"op": "tar_consumed"}])
+        self.assertEqual(ps["net_combat"]["tar_stacks"], 0)
+
+    def test_trace_does_not_tick_without_net_actions_used(self):
+        ps = self._fresh_ps()
+        ps["net_combat"]["trace_progress"] = 0
+        inp = _make_net_combat_tool_input(
+            trace_progress=0,
+            ice_status={"Core": {"name": "Hellhound", "behavior": "trace", "rez_current": 6, "rez_max": 6, "status": "active"}},
+        )
+        cpred_apply_net_combat_state(ps, inp)
+        self.assertEqual(ps["net_combat"]["trace_progress"], 0)
+
+    def test_trace_ticks_when_net_actions_used_positive(self):
+        ps = self._fresh_ps()
+        ps["net_combat"]["trace_progress"] = 0
+        inp = _make_net_combat_tool_input(
+            trace_progress=0,
+            ice_status={"Core": {"name": "Hellhound", "behavior": "trace", "rez_current": 6, "rez_max": 6, "status": "active"}},
+        )
+        inp["hack_state"]["net_actions_used"] = 1
+        cpred_apply_net_combat_state(ps, inp)
+        self.assertEqual(ps["net_combat"]["trace_progress"], 1)
+
+
+class TestProgramDestroyWriteback(unittest.TestCase):
+    def _pipeline_with_programs(self):
+        return {
+            "game_state": {
+                "edgerunners": {
+                    "V": {
+                        "programs": [
+                            {"name": "Sword", "category": "attacker", "rez_max": 6},
+                            {"name": "Armor", "category": "defender", "rez_max": 4},
+                        ]
+                    }
+                }
+            },
+            "character_states": {
+                "V": {
+                    "data": {
+                        "type": "pc",
+                        "resources": [{"label": "Cycles", "current": 3, "max": 3}],
+                    }
+                }
+            },
+        }
+
+    def test_hack_writeback_removes_destroyed_without_backup_drive(self):
+        ps = self._pipeline_with_programs()
+        hack_state = {
+            "hacker_name": "V",
+            "destroyed_programs": ["Sword"],
+            "installed_hardware": [],
+        }
+        cpred_apply_hack_writeback(hack_state, ps)
+        names = [p.get("name") for p in ps["game_state"]["edgerunners"]["V"]["programs"]]
+        self.assertEqual(names, ["Armor"])
+
+    def test_hack_writeback_preserves_destroyed_with_backup_drive(self):
+        ps = self._pipeline_with_programs()
+        hack_state = {
+            "hacker_name": "V",
+            "destroyed_programs": ["Sword"],
+            "installed_hardware": ["Backup Drive"],
+        }
+        cpred_apply_hack_writeback(hack_state, ps)
+        names = [p.get("name") for p in ps["game_state"]["edgerunners"]["V"]["programs"]]
+        self.assertEqual(set(names), {"Sword", "Armor"})
+
+    def test_net_combat_writeback_removes_destroyed_without_backup_drive(self):
+        ps = self._pipeline_with_programs()
+        nc_state = {
+            "netrunner": "V",
+            "destroyed_programs": ["Sword"],
+            "installed_hardware": [],
+        }
+        cpred_apply_net_combat_writeback(nc_state, ps)
+        names = [p.get("name") for p in ps["game_state"]["edgerunners"]["V"]["programs"]]
+        self.assertEqual(names, ["Armor"])
+
+    def test_net_combat_writeback_preserves_destroyed_with_backup_drive(self):
+        ps = self._pipeline_with_programs()
+        nc_state = {
+            "netrunner": "V",
+            "destroyed_programs": ["Sword"],
+            "installed_hardware": ["Backup Drive"],
+        }
+        cpred_apply_net_combat_writeback(nc_state, ps)
+        names = [p.get("name") for p in ps["game_state"]["edgerunners"]["V"]["programs"]]
+        self.assertEqual(set(names), {"Sword", "Armor"})
 
 
 # ============================================================
@@ -958,6 +1087,7 @@ class TestFullHackLifecycle(unittest.TestCase):
             active_programs=SAMPLE_PROGRAMS,
         )
         cpred_apply_hack_state(hs, inp3)
+        # TAR stacks persist — no resolver ran, so not consumed
         self.assertEqual(hs["tar_stacks"], 1)
         self.assertIn("Server Room", hs["nodes_visited"])
 
@@ -1277,7 +1407,7 @@ class TestInjectionCompleteness(unittest.TestCase):
             "[SYSTEM MAP]", "[/SYSTEM MAP]",
             "Revealed nodes:",
             "Alert Level: 5",
-            "Interface check to move nodes",  # alert 5 effect
+            "LOCKDOWN — move between nodes requires Interface check DV",  # alert 5 effect
             "Cycles:",
             "Active Programs:",
             "Current Node: Server Room",

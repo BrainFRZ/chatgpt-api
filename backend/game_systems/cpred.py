@@ -11,6 +11,8 @@ import logging
 import random
 from datetime import date, timedelta
 
+from .cpred_tables import ICE_STAT_BLOCKS
+
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +276,8 @@ def _default_edgerunner():
         "housing_shared_with": None,   # name of owner whose housing this edgerunner shares
         "housing_bedrooms": None,      # per-unit bedroom override (None = use HOUSING_BEDROOMS table)
         "crammed": False,              # True if occupants > capacity at this housing
+        "programs": [],                # persistent programs: [{name, category, rez_max, status}]
+        "conditions": [],              # general conditions: ["partially_nude", "seriously_wounded", etc.]
     }
 
 
@@ -485,6 +489,23 @@ def apply_game_state(game_state, agent_json, turn):
                         if value is not None:
                             er["housing"] = None
                             er["housing_pending"] = None
+
+                elif op == "add_condition":
+                    condition = op_data.get("condition", "")
+                    if condition:
+                        conditions = er.setdefault("conditions", [])
+                        if condition not in conditions:
+                            conditions.append(condition)
+
+                elif op == "remove_condition":
+                    condition = op_data.get("condition", "")
+                    if condition:
+                        conditions = er.get("conditions", [])
+                        if condition in conditions:
+                            conditions.remove(condition)
+
+                elif op == "programs_set":
+                    er["programs"] = copy.deepcopy(op_data.get("programs", []))
 
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
@@ -1244,6 +1265,10 @@ def build_game_injection(game_state):
 
             if cyberware:
                 lines.append(f"  Cyberware: {', '.join(cyberware)}")
+
+            conditions = er.get("conditions", [])
+            if conditions:
+                lines.append(f"  Conditions: {', '.join(conditions)}")
 
         lines.append("[/EDGERUNNER STATE]")
         result = "\n".join(lines)
@@ -2060,6 +2085,18 @@ Action types for resolve_mechanics:
 - autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?}
 - death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
 - initiative: {type, character: "all", combatants: [{name, ref}]}
+- program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
+- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
+- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+
+Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type.
+Active effects shown in injection — narrate them, do NOT manually track them. Giant's forced Jack Out cascades all rezzed Black ICE effects — this can be lethal. KRASH Barrier = immune to forced Jack Out. When programs are DESTROYED, narrate dramatically. Fire extinguish → backend auto-sets nudity condition.
+
+When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated. Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
+For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls Interface rank d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
+Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack/NET session.
 
 Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
@@ -3257,10 +3294,10 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
                     )
 
     # --- combat (initiative/round) ---
+    _has_combat_field = "combat" in tool_input
     new_combat = tool_input.get("combat")
-    if tool_input.get("combat_complete") or new_combat is None:
+    if tool_input.get("combat_complete") or (_has_combat_field and new_combat is None):
         pipeline_state["combat"] = None
-        pipeline_state["net_combat"] = None
     elif isinstance(new_combat, dict):
         old_start = (pipeline_state.get("combat") or {}).get("start_message_id")
         old_cover = (pipeline_state.get("combat") or {}).get("cover", {})
@@ -3313,7 +3350,13 @@ The Hacking Rulebook document is your authoritative source for all netrunning me
 
 ### Mechanics Resolution (resolve_mechanics tool — INCREMENTAL)
 Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE combat) individually. Narrate AFTER receiving each result. Use skill_check action type for Interface checks (stat_value = Interface rank, skill_value = 0, dv = target DV). After all actions are resolved and narrated, call `report_hack_state`.
-Brain damage from Black ICE is tracked automatically by the backend — do NOT set brain_damage in report_hack_state.
+When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in report_hack_state.
+For anti-program ICE (Dragon/Killer/Sabertooth) attacking programs, use `ice_attack_vs_program`: {type, character (ICE name), ice_type, target_program, target_program_def, target_program_rez}.
+When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
+For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls Interface rank d6 REZ damage on hit and auto-applies to ice_status.
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
+Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack.
 
 ### Roll Format
 Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
@@ -3400,6 +3443,23 @@ Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what w
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
 - Forced disconnect (Convergence, Trace complete, or HP reaches 0 from brain damage)
+
+### Black ICE Types (Backend-Enforced)
+Include "ice_type": "<name>" (e.g. "Hellhound") in resolve_mechanics calls. Backend looks up stats and resolves unique effects automatically.
+
+Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp
+Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth
+
+program_attack_vs_netrunner schema: {type, character, ice_type, interface_rank, target_def, target}
+ice_attack_vs_program schema: {type, character, ice_type, target_program, target_program_def, target_program_rez}
+(Backend auto-reads active_programs, installed_hardware, and ice_status from hack_state — model does NOT need to pass these.)
+
+Active effects shown in injection — narrate them, do NOT manually track them.
+MOVEMENT LOCKED = do NOT allow node movement. ON FIRE = 2 meat HP/turn, extinguish costs full meat action (not NET action), report on_fire: false when extinguished. Debuffs = backend-tracked.
+When a program is DESTROYED (by anti-program ICE or Asp/Raven), it is permanently lost — narrate this dramatically and note the loss on the character sheet.
+When fire is extinguished, backend auto-sets nudity condition (partially_nude for 1 round, nude for 2+). NPCs react based on personality and attraction criteria.
+Giant's forced Jack Out cascades all **rezzed Black ICE** effects (status "active", behavior "black" — bypassed ICE never activated and is excluded) — this can be lethal. If the Netrunner dies, use a fail-forward approach (they survive barely, but with severe consequences).
+KRASH Barrier hardware = immune to forced Jack Out (Giant's brain damage still applies, but no cascade and no disconnection).
 
 ### Style
 Describe the NET as an abstract digital landscape overlaid through Virtuality. Data streams as rivers of light, ICE as hostile presence and resistance, firewalls as crystalline barriers. Keep it punchy — each exchange is a beat in a digital heist. The NET is hostile, alien, beautiful."""
@@ -3516,6 +3576,10 @@ REPORT_HACK_STATE_TOOL = {
                         "type": "integer",
                         "minimum": 0,
                         "description": "Number of NET Actions the Netrunner used this exchange. The backend tracks remaining actions and meatspace pacing."
+                    },
+                    "on_fire": {
+                        "type": "boolean",
+                        "description": "Set to false when fire is extinguished (full meat action). Backend auto-sets nudity condition."
                     }
                 }
             },
@@ -3595,13 +3659,277 @@ def init_hack_state(
         "available_actions": [],
         "net_actions_remaining": net_actions,
         "meatspace_due": False,
+        "_prev_alert_level": 0,
+        # Per-ICE-type persistent effects
+        "on_fire": False,
+        "fire_rounds": 0,
+        "movement_locked_by": None,
+        "movement_locked_by_key": None,
+        "slide_penalty": 0,
+        "net_action_penalty": 0,
+        "active_debuffs": [],
+        "destroyed_programs": [],
     }
+    # Bootstrap active_programs from edgerunner persistent programs
+    if isinstance(_kw.get("game_state"), dict) and hacker_name:
+        _gs_er = _kw["game_state"].get("edgerunners", {}).get(hacker_name, {})
+        _gs_progs = _gs_er.get("programs", [])
+        if isinstance(_gs_progs, list) and _gs_progs:
+            state["active_programs"] = [
+                {"name": p.get("name", "?"), "category": p.get("category", "attacker"),
+                 "rez": p.get("rez_max", 0), "status": "deactivated"}
+                for p in _gs_progs if isinstance(p, dict) and p.get("status") != "destroyed"
+            ]
     if context:
         state["context"] = context
     return state
 
 
-def apply_hack_state(hack_state, tool_input, resolver_state_ops=None):
+_ICE_EFFECT_OPS = {"program_destroy", "body_fire", "movement_lock", "stat_debuff",
+                   "slide_penalty", "net_action_penalty", "forced_jack_out", "program_rez_damage"}
+
+# Table-driven: ICE names whose effect is slide_penalty (used for auto-clear)
+_SLIDE_ICE_NAMES = {b["name"].lower() for b in ICE_STAT_BLOCKS.values() if b.get("effect") == "slide_penalty"}
+
+
+def _apply_persistent_ice_effects(state, model_hs, game_state, name_key, tick_condition):
+    """Shared logic for fire tick/extinguish, wisp penalty, movement lock auto-clear, slide penalty auto-clear.
+
+    Args:
+        state: hack_state or net_combat dict (mutated)
+        model_hs: the tool_input's hack_state sub-dict (for reading on_fire: false etc.)
+        game_state: game_state dict
+        name_key: field name for the netrunner in state ("hacker_name" or "netrunner")
+        tick_condition: whether to tick fire/wisp this call (meatspace_due or _has_net_actions)
+    """
+    # --- Fire tick ---
+    # Fire ticks once per completed NET turn (same call that sets meatspace_due). Intentional.
+    try:
+        if tick_condition and state.get("on_fire") and isinstance(game_state, dict):
+            runner_name = state.get(name_key, "")
+            er = game_state.get("edgerunners", {}).get(runner_name, {})
+            if er.get("hp"):
+                er["hp"]["current"] = max(0, er["hp"]["current"] - 2)
+                _update_seriously_wounded(er)
+                state["fire_rounds"] = state.get("fire_rounds", 0) + 1
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # --- Fire extinguish: model reports on_fire: false ---
+    if isinstance(model_hs, dict) and "on_fire" in model_hs and not model_hs.get("on_fire") and state.get("on_fire"):
+        state["on_fire"] = False
+        fire_rounds = state.get("fire_rounds", 0)
+        nudity = "nude" if fire_rounds >= 2 else "partially_nude" if fire_rounds >= 1 else None
+        if nudity and isinstance(game_state, dict):
+            runner_name = state.get(name_key, "")
+            er = game_state.get("edgerunners", {}).get(runner_name, {})
+            conditions = er.setdefault("conditions", [])
+            for old_c in ["partially_nude", "nude"]:
+                if old_c in conditions:
+                    conditions.remove(old_c)
+            conditions.append(nudity)
+        state["fire_rounds"] = 0
+
+    # --- Wisp penalty: subtract from net_actions_remaining ---
+    if tick_condition and state.get("net_action_penalty", 0) > 0:
+        penalty = state["net_action_penalty"]
+        state["net_actions_remaining"] = max(0, state.get("net_actions_remaining",
+                                                           state.get("net_actions_per_turn", 3)) - penalty)
+        state["net_action_penalty"] = 0
+
+    # --- Movement lock auto-clear: if locking ICE is derezzed ---
+    try:
+        locked_by = state.get("movement_locked_by")
+        if locked_by:
+            ice_status = state.get("ice_status", {})
+            if isinstance(ice_status, dict):
+                locked_by_key = state.get("movement_locked_by_key")
+                if locked_by_key:
+                    # Keyed lock is authoritative: if key is missing or inactive, lock clears.
+                    _source_ice = ice_status.get(locked_by_key, {})
+                    still_locked = isinstance(_source_ice, dict) and _source_ice.get("status") == "active"
+                    if not still_locked and locked_by_key not in ice_status:
+                        # If key vanished (e.g., ICE moved node and key changed), allow a
+                        # safe rebind only when a single active same-name source exists.
+                        _same_name_active = [
+                            _k for _k, _v in ice_status.items()
+                            if isinstance(_v, dict)
+                            and _v.get("status") == "active"
+                            and _v.get("name") == locked_by
+                        ]
+                        if len(_same_name_active) == 1:
+                            state["movement_locked_by_key"] = _same_name_active[0]
+                            still_locked = True
+                else:
+                    still_locked = any(
+                        isinstance(v, dict) and v.get("name") == locked_by and v.get("status") == "active"
+                        for v in ice_status.values()
+                    )
+                if not still_locked:
+                    state["movement_locked_by"] = None
+                    state["movement_locked_by_key"] = None
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # --- Slide penalty auto-clear: if no active ICE with slide_penalty effect ---
+    try:
+        if state.get("slide_penalty", 0) != 0:
+            ice_status = state.get("ice_status", {})
+            if isinstance(ice_status, dict):
+                has_slide_source = any(
+                    isinstance(v, dict) and v.get("status") == "active"
+                    and str(v.get("name", "")).lower() in _SLIDE_ICE_NAMES
+                    for v in ice_status.values()
+                )
+                if not has_slide_source:
+                    state["slide_penalty"] = 0
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+
+def _apply_ice_effect_ops(state, resolver_state_ops, game_state=None):
+    """Apply ICE-effect state_ops to hack_state or net_combat state. Shared helper."""
+    if not resolver_state_ops:
+        return
+    for op in resolver_state_ops:
+        if not isinstance(op, dict):
+            continue
+        op_type = op.get("op")
+        try:
+            _apply_single_ice_op(state, op, op_type)
+        except (TypeError, ValueError, OverflowError, KeyError):
+            continue
+
+
+def _apply_single_ice_op(state, op, op_type):
+    """Apply a single ICE effect op. Raises on bad data — caller catches."""
+    if op_type == "program_destroy":
+        prog_name = op.get("program_name", "")
+        programs = state.get("active_programs", [])
+        if isinstance(programs, list):
+            for p in programs:
+                if isinstance(p, dict) and p.get("name") == prog_name:
+                    p["status"] = "destroyed"
+                    break
+        destroyed = state.setdefault("destroyed_programs", [])
+        if prog_name and prog_name not in destroyed:
+            destroyed.append(prog_name)
+
+    elif op_type == "body_fire":
+        state["on_fire"] = True
+
+    elif op_type == "movement_lock":
+        state["movement_locked_by"] = op.get("locked_by")
+        state["movement_locked_by_key"] = op.get("locked_by_key")
+
+    elif op_type == "stat_debuff":
+        debuffs = state.setdefault("active_debuffs", [])
+        debuffs.append({
+            "stats": op.get("stats", []),
+            "amount": op.get("amount", 0),
+            "source": op.get("source", ""),
+            "duration": op.get("duration", "1 hour"),
+        })
+
+    elif op_type == "slide_penalty":
+        state["slide_penalty"] = state.get("slide_penalty", 0) + op.get("penalty", -2)
+
+    elif op_type == "net_action_penalty":
+        state["net_action_penalty"] = state.get("net_action_penalty", 0) + op.get("penalty", 1)
+
+    elif op_type == "forced_jack_out":
+        state["narrative_summary"] = state.get("narrative_summary") or "Forced Jack Out — unsafe disconnect."
+        state["_forced_disconnect"] = True
+
+    elif op_type == "program_rez_damage":
+        prog_name = op.get("program_name", "")
+        damage = int(op.get("damage", 0))
+        programs = state.get("active_programs", [])
+        if isinstance(programs, list):
+            for p in programs:
+                if isinstance(p, dict) and p.get("name") == prog_name:
+                    p["rez"] = max(0, int(p.get("rez", 0)) - damage)
+                    if p["rez"] <= 0 or op.get("destroyed"):
+                        p["status"] = "destroyed"
+                        destroyed = state.setdefault("destroyed_programs", [])
+                        if prog_name and prog_name not in destroyed:
+                            destroyed.append(prog_name)
+                    break
+
+
+def _apply_rez_damage_to_ice_status(state, op):
+    """Apply resolver rez_damage op to the intended ICE instance.
+
+    Prefers explicit key fields when provided, and otherwise falls back to
+    legacy name matching (favoring active/current-node matches).
+    """
+    try:
+        damage = int(op.get("damage", 0))
+    except (TypeError, ValueError, OverflowError):
+        return
+    if damage <= 0:
+        return
+
+    ice_status = state.get("ice_status", {})
+    if not isinstance(ice_status, dict):
+        return
+
+    target_key = (
+        op.get("target_key")
+        or op.get("target_ice_key")
+        or op.get("ice_key")
+        or op.get("ice_status_key")
+    )
+    target_node_hint = op.get("target_node")
+    target_name = op.get("target", "")
+    target_name_norm = str(target_name).strip().lower() if isinstance(target_name, str) else ""
+
+    victim = None
+    if target_key and isinstance(ice_status.get(target_key), dict):
+        victim = ice_status.get(target_key)
+
+    if victim is None and target_name_norm:
+        matches = [
+            (k, v) for k, v in ice_status.items()
+            if isinstance(v, dict) and str(v.get("name", "")).strip().lower() == target_name_norm
+        ]
+        if not matches:
+            return
+        active_matches = [(k, v) for (k, v) in matches if v.get("status") == "active"]
+        candidates = active_matches or matches
+        _has_target_node_hint = isinstance(target_node_hint, str) and bool(target_node_hint)
+        if _has_target_node_hint:
+            hint_candidates = [
+                (k, v) for (k, v) in candidates
+                if k == target_node_hint or k.startswith(f"{target_node_hint}_")
+            ]
+            if len(hint_candidates) == 1:
+                victim = hint_candidates[0][1]
+            elif len(hint_candidates) > 1:
+                # Explicit target node hint is ambiguous; do not guess via other fallbacks.
+                return
+        current_node = state.get("current_node")
+        if victim is None and not _has_target_node_hint and isinstance(current_node, str):
+            for k, v in candidates:
+                if k == current_node:
+                    victim = v
+                    break
+        if victim is None and not _has_target_node_hint and len(candidates) == 1:
+            victim = candidates[0][1]
+        if victim is None:
+            # Ambiguous duplicate-name target with no explicit key.
+            return
+    if victim is None:
+        return
+
+    if not isinstance(victim, dict):
+        return
+    victim["rez_current"] = max(0, int(victim.get("rez_current", 0)) - damage)
+    if victim["rez_current"] <= 0:
+        victim["status"] = "derezzed"
+
+
+def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state=None):
     """Apply report_hack_state tool output to hack_state. Returns updated hack_state."""
     if not isinstance(tool_input, dict):
         logger.warning(
@@ -3686,13 +4014,134 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None):
 
     # Apply resolver brain_damage ops (cumulative)
     if resolver_state_ops:
-        bd_total = sum(
-            abs(int(op.get("change", 0)))
-            for op in resolver_state_ops
-            if isinstance(op, dict) and op.get("op") == "brain_damage"
-        )
+        bd_total = 0
+        for op in resolver_state_ops:
+            if not isinstance(op, dict) or op.get("op") != "brain_damage":
+                continue
+            try:
+                bd_total += abs(int(op.get("change", 0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
         if bd_total > 0:
             hack_state["brain_damage"] = hack_state.get("brain_damage", 0) + bd_total
+
+    # Process program_deactivate and rez_damage ops from resolver
+    if resolver_state_ops:
+        for op in resolver_state_ops:
+            if not isinstance(op, dict):
+                continue
+            if op.get("op") == "program_deactivate":
+                prog_name = op.get("program_name", "")
+                programs = hack_state.get("active_programs", [])
+                if isinstance(programs, list):
+                    for p in programs:
+                        if isinstance(p, dict) and p.get("name") == prog_name:
+                            p["status"] = "deactivated"
+                            break
+            elif op.get("op") == "rez_damage":
+                try:
+                    _apply_rez_damage_to_ice_status(hack_state, op)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+    # Apply ICE-effect state_ops (program_destroy, body_fire, movement_lock, etc.)
+    # Filter to only ICE-effect ops — brain_damage/program_deactivate/rez_damage already handled above
+    _ice_ops = [op for op in (resolver_state_ops or [])
+                if isinstance(op, dict) and op.get("op") in _ICE_EFFECT_OPS]
+    _apply_ice_effect_ops(hack_state, _ice_ops, game_state=game_state)
+
+    # tar_consumed is resolver-authoritative.
+    if resolver_state_ops and any(
+        isinstance(op, dict) and op.get("op") == "tar_consumed"
+        for op in resolver_state_ops
+    ):
+        hack_state["tar_stacks"] = 0
+
+    # Fire tick, fire extinguish, wisp penalty, movement lock auto-clear, slide penalty auto-clear
+    _apply_persistent_ice_effects(hack_state, hs, game_state, "hacker_name", hack_state.get("meatspace_due"))
+
+    # --- Trace auto-increment: tick once per completed turn (when meatspace_due triggers) ---
+    try:
+        if hack_state.get("meatspace_due"):
+            ice_status = hack_state.get("ice_status", {})
+            if isinstance(ice_status, dict):
+                has_active_trace = any(
+                    isinstance(v, dict) and v.get("status") == "active"
+                    and isinstance(v.get("behavior", ""), str)
+                    and "trace" in v.get("behavior", "").lower()
+                    for v in ice_status.values()
+                )
+                if has_active_trace and hack_state.get("trace_progress") is not None:
+                    hack_state["trace_progress"] = int(hack_state.get("trace_progress", 0)) + 1
+                    sr = int(hack_state.get("sr", 3))
+                    trace_max = max(1, 6 - sr)
+                    if hack_state["trace_progress"] >= trace_max:
+                        hack_state["alert_level"] = max(int(hack_state.get("alert_level", 0)), 7)
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # --- Alert threshold ICE auto-spawn ---
+    try:
+        prev_alert = int(hack_state.get("_prev_alert_level", 0))
+        new_alert = int(hack_state.get("alert_level", 0))
+        ice_status = hack_state.get("ice_status", {})
+        if not isinstance(ice_status, dict):
+            ice_status = {}
+
+        # Lockdown (5+): auto-spawn Trace ICE at Gateway if none exists
+        if new_alert >= 5 and prev_alert < 5:
+            has_trace = any(
+                isinstance(v, dict)
+                and isinstance(v.get("behavior", ""), str)
+                and "trace" in v.get("behavior", "").lower()
+                and v.get("status") in ("active", "bypassed")
+                for v in ice_status.values()
+            )
+            if not has_trace:
+                sr = int(hack_state.get("sr", 3))
+                ice_status["Gateway_Trace"] = {
+                    "name": "Trace ICE", "behavior": "trace",
+                    "rez_current": sr * 2, "rez_max": sr * 2, "status": "active"
+                }
+                hack_state["ice_status"] = ice_status
+                hack_state["trace_progress"] = 0
+
+        # Convergence (7+): auto-spawn Black ICE at Netrunner's current node
+        if new_alert >= 7 and prev_alert < 7:
+            sr = int(hack_state.get("sr", 3))
+            current_node = hack_state.get("current_node", "Gateway")
+            spawn_key = str(current_node) + "_Convergence"
+            ice_status[spawn_key] = {
+                "name": "Kraken", "behavior": "black", "ice_type": "kraken",
+                "rez_current": ICE_STAT_BLOCKS["kraken"]["rez"],
+                "rez_max": ICE_STAT_BLOCKS["kraken"]["rez"], "status": "active"
+            }
+            hack_state["ice_status"] = ice_status
+
+        hack_state["_prev_alert_level"] = new_alert
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # --- Forced disconnect: brain damage >= Netrunner max HP ---
+    try:
+        brain_damage = int(hack_state.get("brain_damage", 0))
+        if brain_damage > 0 and hack_state.get("active") and isinstance(game_state, dict):
+            hacker_name = hack_state.get("hacker_name", "")
+            er = game_state.get("edgerunners", {}).get(hacker_name, {})
+            max_hp = int(er.get("hp", {}).get("max", 0))
+            current_hp = int(er.get("hp", {}).get("current", 999))
+            if max_hp > 0 and current_hp - brain_damage <= 0:
+                hack_state["active"] = False
+                hack_state["narrative_summary"] = (
+                    hack_state.get("narrative_summary")
+                    or f"{hacker_name} flatlined from brain damage — forced disconnect."
+                )
+                hack_state["_forced_disconnect"] = True
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    if hack_state.get("_forced_disconnect"):
+        hack_state["active"] = False
 
     return hack_state
 
@@ -3721,6 +4170,11 @@ def build_hack_injection(hack_state, pipeline_state=None):
     net_actions_remaining = hack_state.get("net_actions_remaining", net_actions)
     meatspace_due = hack_state.get("meatspace_due", False)
     actions_line = f"NET Actions Remaining: {net_actions_remaining}/{net_actions}"
+    try:
+        if int(net_actions_remaining) <= 0:
+            actions_line += " [NO NET ACTIONS LEFT — end NET turn]"
+    except (TypeError, ValueError, OverflowError):
+        pass
     if meatspace_due:
         actions_line += " [MEATSPACE ROUND DUE — narrate crew's round first]"
 
@@ -3730,7 +4184,8 @@ def build_hack_injection(hack_state, pipeline_state=None):
     if alert_level >= 3:
         alert_effects.append("DVs +2")
     if alert_level >= 5:
-        alert_effects.append("Interface check to move nodes")
+        lockdown_dv = 6 + alert_level
+        alert_effects.append(f"LOCKDOWN — move between nodes requires Interface check DV {lockdown_dv}")
     if alert_level >= 7:
         alert_effects.append("CONVERGENCE — Black ICE + security")
     if alert_effects:
@@ -3783,7 +4238,8 @@ def build_hack_injection(hack_state, pipeline_state=None):
                 rez_cur = ice_data.get("rez_current", 0)
                 rez_max = ice_data.get("rez_max", 0)
                 status = ice_data.get("status", "active")
-                lines.append(f"  {node}: {name} ({behavior}) — REZ {rez_cur}/{rez_max}, {status}")
+                _ice_type_tag = f" [{ice_data.get('ice_type', '')}]" if ice_data.get("ice_type") else ""
+                lines.append(f"  {node}: {name}{_ice_type_tag} ({behavior}) — REZ {rez_cur}/{rez_max}, {status}")
             else:
                 lines.append(f"  {node}: {ice_data}")
 
@@ -3809,12 +4265,41 @@ def build_hack_injection(hack_state, pipeline_state=None):
     except (TypeError, ValueError, OverflowError):
         tar = 0
     if tar:
-        lines.append(f"Tar Stacks: {tar} (-{tar * 2} to next check or 1 Cycle to ignore)")
+        lines.append(f"Tar Stacks: {tar} (-{tar * 2} auto-applied to next NET check, or spend 1 Cycle to clear)")
 
     # Brain damage
     brain_dmg = hack_state.get("brain_damage", 0)
     if brain_dmg:
         lines.append(f"Brain Damage This Hack: {brain_dmg}")
+
+    # Active ICE effects
+    _effects = []
+    if hack_state.get("on_fire"):
+        _effects.append("ON FIRE — clothes burning, 2 meat HP/turn (full meat action to extinguish)")
+    if hack_state.get("movement_locked_by"):
+        _effects.append(f"MOVEMENT LOCKED by {hack_state['movement_locked_by']} — cannot move between nodes until derezzed")
+    try:
+        if hack_state.get("slide_penalty", 0) != 0:
+            _effects.append(f"SLIDE PENALTY: {hack_state['slide_penalty']} to all Slide checks (from Skunk)")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if hack_state.get("net_action_penalty", 0) > 0:
+            _effects.append(f"NET ACTION PENALTY: -{hack_state['net_action_penalty']} next turn (from Wisp)")
+    except (TypeError, ValueError):
+        pass
+    for _db in hack_state.get("active_debuffs", []):
+        if isinstance(_db, dict):
+            _stats = _db.get("stats", [])
+            _stats_str = "/".join(str(s) for s in _stats) if isinstance(_stats, list) else str(_stats)
+            _effects.append(f"DEBUFF: {_stats_str} -{_db.get('amount', 0)} ({_db.get('source', '?')}, {_db.get('duration', '?')})")
+    _destroyed = hack_state.get("destroyed_programs", [])
+    if isinstance(_destroyed, list) and _destroyed:
+        _effects.append(f"DESTROYED PROGRAMS: {', '.join(str(d) for d in _destroyed)} (permanently lost)")
+    if _effects:
+        lines.append("Active Effects:")
+        for _eff in _effects:
+            lines.append(f"  {_eff}")
 
     lines.append("[/HACK STATE]")
 
@@ -4038,6 +4523,34 @@ def apply_hack_writeback(hack_state, pipeline_state):
                         break
                 break
 
+    # Write back destroyed programs to edgerunner persistent programs.
+    # Backup Drive preserves destroyed programs after the run.
+    game_state = pipeline_state.get("game_state", {})
+    destroyed = hack_state.get("destroyed_programs", [])
+    _hw = hack_state.get("installed_hardware", [])
+    has_backup_drive = isinstance(_hw, list) and any(
+        "backup drive" in str(h).lower() for h in _hw
+    )
+    if (isinstance(destroyed, list) and destroyed and hacker_name
+            and isinstance(game_state, dict) and not has_backup_drive):
+        er = game_state.get("edgerunners", {}).get(hacker_name, {})
+        er_progs = er.get("programs", [])
+        if isinstance(er_progs, list):
+            er["programs"] = [p for p in er_progs
+                              if isinstance(p, dict) and p.get("name") not in destroyed]
+
+    # Fire → nudity at hack end (if never extinguished)
+    if hack_state.get("on_fire") and hacker_name and isinstance(game_state, dict):
+        fire_rounds = hack_state.get("fire_rounds", 0)
+        nudity = "nude" if fire_rounds >= 2 else "partially_nude" if fire_rounds >= 1 else None
+        if nudity:
+            er = game_state.get("edgerunners", {}).get(hacker_name, {})
+            conditions = er.setdefault("conditions", [])
+            for old_c in ["partially_nude", "nude"]:
+                if old_c in conditions:
+                    conditions.remove(old_c)
+            conditions.append(nudity)
+
 
 # ============================================================
 # NET-in-Meatspace Combined Combat Mode
@@ -4107,10 +4620,15 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 
 ### Cross-Theater Interactions
 - **Netrunner's body is in meatspace**: can be shot, hit, caught in AoE. Track via character_updates. With Virtuality Goggles the Netrunner can still see and move in meatspace; without them the Netrunner is **Unconscious** in meatspace (no Move Action, no dodge).
-- **Brain damage**: Black ICE and NET effects deal brain damage (HP loss ignoring armor, no crit injuries). Brain damage is tracked automatically by the backend from resolve_mechanics results — do NOT set brain_damage in hack_state or character_updates.hp_delta.
+- **Brain damage**: When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in hack_state or character_updates.hp_delta. For anti-program ICE, use `ice_attack_vs_program`: {type, character, ice_type, target_program, target_program_def, target_program_rez}.
+- **Program deactivation**: When resolve_mechanics returns `program_deactivated`, the program is deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
+- **Zap damage**: For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls Interface rank d6 REZ damage on hit and auto-applies to ice_status.
+- **TAR penalty**: TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+- **Alert DV penalty**: +2 to all NET skill check DVs at alert 3+ is auto-applied by the backend. Do NOT add +2 manually.
+- **Forced disconnect**: Backend auto-sets net_complete=true on explicit forced jack-out/flatline conditions.
 - **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
 - **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
-- **Mortally Wounded (0 HP)**: Netrunner gets ONE final NET turn (emergency jack-out or last-ditch action), then forced disconnect. Set net_complete=true on forced disconnect.
+- **Mortally Wounded (0 HP)**: Do NOT auto-end NET at 0 HP. Netrunner can still act (with the normal 0 HP penalties), including attempting safe Jack Out.
 - **Flatlined**: immediate forced disconnect. Set net_complete=true.
 
 ### State Tracking
@@ -4412,8 +4930,19 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "narrative_summary": None,
         # Brain damage delta tracking starts clean from current value
         "_prev_brain_damage": brain_damage,
+        # Alert level threshold tracking for auto-spawn
+        "_prev_alert_level": alert_level,
         # Combat breakout context for first-exchange injection
         "_combat_breakout": combat_info,
+        # Per-ICE-type persistent effects (carried over from hack)
+        "on_fire": hack_state.get("on_fire", False),
+        "fire_rounds": hack_state.get("fire_rounds", 0),
+        "movement_locked_by": hack_state.get("movement_locked_by"),
+        "movement_locked_by_key": hack_state.get("movement_locked_by_key"),
+        "slide_penalty": hack_state.get("slide_penalty", 0),
+        "net_action_penalty": hack_state.get("net_action_penalty", 0),
+        "active_debuffs": copy.deepcopy(hack_state.get("active_debuffs") if isinstance(hack_state.get("active_debuffs"), list) else []),
+        "destroyed_programs": list(hack_state.get("destroyed_programs")) if isinstance(hack_state.get("destroyed_programs"), list) else [],
     }
     if _combined_context:
         nc["context"] = _combined_context
@@ -4693,9 +5222,10 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
                         }
 
     # Combat initiative
+    _has_combat_field = "combat" in tool_input
     new_combat = tool_input.get("combat")
     combat_complete = tool_input.get("combat_complete", False)
-    if combat_complete or new_combat is None:
+    if combat_complete or (_has_combat_field and new_combat is None):
         # Meatspace combat done — clear initiative but keep net_combat active
         pipeline_state["combat"] = None
     elif isinstance(new_combat, dict):
@@ -4747,11 +5277,14 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
 
     # Inject resolver brain_damage before delta calculation
     if resolver_state_ops:
-        bd_total = sum(
-            abs(int(op.get("change", 0)))
-            for op in resolver_state_ops
-            if isinstance(op, dict) and op.get("op") == "brain_damage"
-        )
+        bd_total = 0
+        for op in resolver_state_ops:
+            if not isinstance(op, dict) or op.get("op") != "brain_damage":
+                continue
+            try:
+                bd_total += abs(int(op.get("change", 0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
         if bd_total > 0:
             prev_bd = int(nc.get("brain_damage", 0))
             nc["brain_damage"] = prev_bd + bd_total
@@ -4783,9 +5316,127 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
                     v["current"] = er["hp"]["current"]
                     break
 
+    # Process program_deactivate and rez_damage ops from resolver
+    if resolver_state_ops:
+        for op in resolver_state_ops:
+            if not isinstance(op, dict):
+                continue
+            if op.get("op") == "program_deactivate":
+                prog_name = op.get("program_name", "")
+                programs = nc.get("active_programs", [])
+                if isinstance(programs, list):
+                    for p in programs:
+                        if isinstance(p, dict) and p.get("name") == prog_name:
+                            p["status"] = "deactivated"
+                            break
+            elif op.get("op") == "rez_damage":
+                try:
+                    _apply_rez_damage_to_ice_status(nc, op)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+    # Apply ICE-effect state_ops (program_destroy, body_fire, movement_lock, etc.)
+    # Filter to only ICE-effect ops — brain_damage/program_deactivate/rez_damage already handled above
+    _ice_ops = [op for op in (resolver_state_ops or [])
+                if isinstance(op, dict) and op.get("op") in _ICE_EFFECT_OPS]
+    _apply_ice_effect_ops(nc, _ice_ops, game_state=game_state)
+
+    # Determine if Netrunner took NET actions this exchange (used by multiple sections)
+    _has_net_actions = False
+    if isinstance(hs, dict):
+        try:
+            _has_net_actions = int(hs.get("net_actions_used", 0)) > 0
+        except (TypeError, ValueError, OverflowError):
+            _has_net_actions = False
+
+    # tar_consumed is resolver-authoritative.
+    if resolver_state_ops and any(
+        isinstance(op, dict) and op.get("op") == "tar_consumed"
+        for op in resolver_state_ops
+    ):
+        nc["tar_stacks"] = 0
+
+    # Fire tick, fire extinguish, wisp penalty, movement lock auto-clear, slide penalty auto-clear
+    _apply_persistent_ice_effects(nc, hs, game_state, "netrunner", _has_net_actions)
+
+    # --- Trace auto-increment: tick once per completed Netrunner NET turn ---
+    try:
+        if _has_net_actions:
+            ice_status = nc.get("ice_status", {})
+            if isinstance(ice_status, dict):
+                has_active_trace = any(
+                    isinstance(v, dict) and v.get("status") == "active"
+                    and isinstance(v.get("behavior", ""), str)
+                    and "trace" in v.get("behavior", "").lower()
+                    for v in ice_status.values()
+                )
+                if has_active_trace and nc.get("trace_progress") is not None:
+                    nc["trace_progress"] = int(nc.get("trace_progress", 0)) + 1
+                    sr = int(nc.get("sr", 3))
+                    trace_max = max(1, 6 - sr)
+                    if nc["trace_progress"] >= trace_max:
+                        nc["alert_level"] = max(int(nc.get("alert_level", 0)), 7)
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    # --- Alert threshold ICE auto-spawn ---
+    try:
+        prev_alert = int(nc.get("_prev_alert_level", 0))
+        new_alert = int(nc.get("alert_level", 0))
+        ice_status = nc.get("ice_status", {})
+        if not isinstance(ice_status, dict):
+            ice_status = {}
+
+        if new_alert >= 5 and prev_alert < 5:
+            has_trace = any(
+                isinstance(v, dict)
+                and isinstance(v.get("behavior", ""), str)
+                and "trace" in v.get("behavior", "").lower()
+                and v.get("status") in ("active", "bypassed")
+                for v in ice_status.values()
+            )
+            if not has_trace:
+                sr = int(nc.get("sr", 3))
+                ice_status["Gateway_Trace"] = {
+                    "name": "Trace ICE", "behavior": "trace",
+                    "rez_current": sr * 2, "rez_max": sr * 2, "status": "active"
+                }
+                nc["ice_status"] = ice_status
+                nc["trace_progress"] = 0
+
+        if new_alert >= 7 and prev_alert < 7:
+            sr = int(nc.get("sr", 3))
+            current_node = nc.get("current_node", "Gateway")
+            spawn_key = str(current_node) + "_Convergence"
+            ice_status[spawn_key] = {
+                "name": "Kraken", "behavior": "black", "ice_type": "kraken",
+                "rez_current": ICE_STAT_BLOCKS["kraken"]["rez"],
+                "rez_max": ICE_STAT_BLOCKS["kraken"]["rez"], "status": "active"
+            }
+            nc["ice_status"] = ice_status
+
+        nc["_prev_alert_level"] = new_alert
+    except (TypeError, ValueError, OverflowError):
+        pass
+
     # --- Completion flags ---
     nc["combat_complete"] = tool_input.get("combat_complete", nc.get("combat_complete", False))
     nc["net_complete"] = tool_input.get("net_complete", nc.get("net_complete", False))
+    if nc.get("_forced_disconnect"):
+        nc["net_complete"] = True
+
+    # --- Forced disconnect on flatline only (after completion flags so it can't be overwritten) ---
+    try:
+        netrunner_name = nc.get("netrunner", "")
+        if netrunner_name and not nc.get("net_complete") and isinstance(game_state, dict):
+            er = game_state.get("edgerunners", {}).get(netrunner_name, {})
+            current_hp = int(er.get("hp", {}).get("current", 999))
+            # Mortally wounded at 0 HP does not auto-disconnect; flatline does.
+            if current_hp < 0:
+                nc["net_complete"] = True
+                nc["_forced_disconnect"] = True
+    except (TypeError, ValueError, OverflowError):
+        pass
 
     if nc["combat_complete"] and nc["net_complete"]:
         nc["active"] = False
@@ -4886,11 +5537,26 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
         lines.append("[/NET STATE]")
     else:
         alert_name = _get_alert_name(nc.get("alert_level", 0))
+        try:
+            _nc_alert_level = int(nc.get("alert_level", 0))
+        except (TypeError, ValueError, OverflowError):
+            _nc_alert_level = 0
         lines.append("[NET STATE]")
         lines.append(f"Netrunner: {nc.get('netrunner', '?')}")
         lines.append(f"Target: {nc.get('target', 'Unknown')}")
         lines.append(f"Interface Rank: {nc.get('interface_rank', 4)} ({nc.get('net_actions_per_turn', 3)} NET Actions/turn)")
-        lines.append(f"Alert Level: {nc.get('alert_level', 0)} ({alert_name})")
+        _nc_alert_line = f"Alert Level: {_nc_alert_level} ({alert_name})"
+        _nc_alert_effects = []
+        if _nc_alert_level >= 3:
+            _nc_alert_effects.append("DVs +2")
+        if _nc_alert_level >= 5:
+            _nc_lockdown_dv = 6 + _nc_alert_level
+            _nc_alert_effects.append(f"LOCKDOWN — move between nodes requires Interface check DV {_nc_lockdown_dv}")
+        if _nc_alert_level >= 7:
+            _nc_alert_effects.append("CONVERGENCE — Black ICE + security")
+        if _nc_alert_effects:
+            _nc_alert_line += f" [{', '.join(_nc_alert_effects)}]"
+        lines.append(_nc_alert_line)
         lines.append(f"Cycles: {nc.get('cycles_remaining', 0)}/{nc.get('cycles_max', 3)}")
         lines.append(f"Current Node: {nc.get('current_node', 'Gateway')}")
         nodes_visited = nc.get("nodes_visited", ["Gateway"])
@@ -4919,7 +5585,8 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
             lines.append("ICE Status:")
             for node, ice_data in ice.items():
                 if isinstance(ice_data, dict):
-                    lines.append(f"  {node}: {ice_data.get('name', '?')} ({ice_data.get('behavior', '?')}) — "
+                    _nc_ice_type_tag = f" [{ice_data.get('ice_type', '')}]" if ice_data.get("ice_type") else ""
+                    lines.append(f"  {node}: {ice_data.get('name', '?')}{_nc_ice_type_tag} ({ice_data.get('behavior', '?')}) — "
                                  f"REZ {ice_data.get('rez_current', 0)}/{ice_data.get('rez_max', 0)}, {ice_data.get('status', 'active')}")
 
         trace = nc.get("trace_progress")
@@ -4932,13 +5599,45 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
             except (TypeError, ValueError, OverflowError):
                 lines.append(f"Trace Progress: {trace}")
 
-        tar = nc.get("tar_stacks", 0)
+        try:
+            tar = int(nc.get("tar_stacks", 0))
+        except (TypeError, ValueError, OverflowError):
+            tar = 0
         if tar:
-            lines.append(f"Tar Stacks: {tar}")
+            lines.append(f"Tar Stacks: {tar} (-{tar * 2} auto-applied to next NET check, or spend 1 Cycle to clear)")
 
         bd = nc.get("brain_damage", 0)
         if bd:
             lines.append(f"Brain Damage This Run: {bd}")
+
+        # Active ICE effects
+        _nc_effects = []
+        if nc.get("on_fire"):
+            _nc_effects.append("ON FIRE — clothes burning, 2 meat HP/turn (full meat action to extinguish)")
+        if nc.get("movement_locked_by"):
+            _nc_effects.append(f"MOVEMENT LOCKED by {nc['movement_locked_by']} — cannot move between nodes until derezzed")
+        try:
+            if nc.get("slide_penalty", 0) != 0:
+                _nc_effects.append(f"SLIDE PENALTY: {nc['slide_penalty']} to all Slide checks (from Skunk)")
+        except (TypeError, ValueError):
+            pass
+        try:
+            if nc.get("net_action_penalty", 0) > 0:
+                _nc_effects.append(f"NET ACTION PENALTY: -{nc['net_action_penalty']} next turn (from Wisp)")
+        except (TypeError, ValueError):
+            pass
+        for _db in nc.get("active_debuffs", []):
+            if isinstance(_db, dict):
+                _stats = _db.get("stats", [])
+                _stats_str = "/".join(str(s) for s in _stats) if isinstance(_stats, list) else str(_stats)
+                _nc_effects.append(f"DEBUFF: {_stats_str} -{_db.get('amount', 0)} ({_db.get('source', '?')}, {_db.get('duration', '?')})")
+        _nc_destroyed = nc.get("destroyed_programs", [])
+        if isinstance(_nc_destroyed, list) and _nc_destroyed:
+            _nc_effects.append(f"DESTROYED PROGRAMS: {', '.join(str(d) for d in _nc_destroyed)} (permanently lost)")
+        if _nc_effects:
+            lines.append("Active Effects:")
+            for _eff in _nc_effects:
+                lines.append(f"  {_eff}")
 
         lines.append("[/NET STATE]")
 
@@ -4996,6 +5695,22 @@ def apply_net_combat_writeback(net_combat_state, pipeline_state):
                         r["current"] = cycles_remaining
                         break
                 break
+
+    # Write back destroyed programs to edgerunner persistent programs.
+    # Backup Drive preserves destroyed programs after the run.
+    game_state = pipeline_state.get("game_state", {})
+    destroyed = net_combat_state.get("destroyed_programs", [])
+    _hw = net_combat_state.get("installed_hardware", [])
+    has_backup_drive = isinstance(_hw, list) and any(
+        "backup drive" in str(h).lower() for h in _hw
+    )
+    if (isinstance(destroyed, list) and destroyed and netrunner_name
+            and isinstance(game_state, dict) and not has_backup_drive):
+        er = game_state.get("edgerunners", {}).get(netrunner_name, {})
+        er_progs = er.get("programs", [])
+        if isinstance(er_progs, list):
+            er["programs"] = [p for p in er_progs
+                              if isinstance(p, dict) and p.get("name") not in destroyed]
 
 
 # ============================================================
@@ -5105,9 +5820,16 @@ You decide:
 The backend resolves dice. Do NOT roll dice or calculate outcomes.
 
 DICE ACTION TYPES for the "actions" array:
-- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?} — for flat Interface checks
-- opposed_check: {type, character, attacker_stat (=Interface rank), defender_stat (=ICE stat), attacker_label, defender_label} — for Zap, Slide
+- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true} — for flat Interface checks
+- opposed_check: {type, character, attacker_stat (=Interface rank), defender_stat (=ICE stat), attacker_label, defender_label, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls Interface rank d6 REZ damage on hit.
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
+- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
+- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions).
+Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually to the DV.
+
+Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type in the action.
 
 OUTPUT: JSON with these fields:
 - actions: array of mechanical actions to resolve
@@ -5162,9 +5884,16 @@ MEATSPACE ACTION TYPES:
 - ranged_attack, melee_attack, autofire, skill_check, death_save, initiative (same schemas as combat planning)
 
 NET ACTION TYPES:
-- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target)
-- opposed_check: Zap/Slide (attacker_stat=Interface, defender_stat=ICE stat)
+- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true)
+- opposed_check: Zap/Slide (attacker_stat=Interface, defender_stat=ICE stat, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls Interface rank d6 REZ damage on hit.
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
+- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
+- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+
+Black ICE Types: Anti-Personnel: Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program: Dragon, Killer, Sabertooth. Always include ice_type.
+
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions).
+Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually.
 
 OUTPUT: JSON with these fields:
 - actions: array of ALL mechanical actions (meatspace + NET) to resolve

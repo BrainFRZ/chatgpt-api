@@ -17,6 +17,7 @@ from .cpred_tables import (
     RANGED_DV_TABLE,
     AUTOFIRE_DV_TABLE,
     AIMED_SHOT_DV_PENALTY,
+    ICE_STAT_BLOCKS,
 )
 
 logger = logging.getLogger(__name__)
@@ -695,11 +696,13 @@ def resolve_program_attack(
     target_rez: int,
     program_name: str = "Program",
     target_name: str = "ICE",
+    track_rez: bool = True,
+    damage_kind: str = "REZ damage",
 ) -> dict:
     """Resolve a program attack: opposed check then damage if hit.
 
     Attack: Interface + Program ATK + d10 vs ICE DEF + d10
-    Damage: Nd6 REZ damage on hit.
+    Damage: Nd6 damage on hit.
     Returns full breakdown with hit/miss, damage, and rez tracking.
     """
     # Opposed check: attacker_stat = interface + program_atk, defender_stat = target_def
@@ -714,23 +717,25 @@ def resolve_program_attack(
     hit = roll_result["success"]
     damage_dice = []
     damage_total = 0
-    rez_remaining = target_rez
+    rez_remaining = target_rez if track_rez else None
     derezzed = False
 
     if hit:
         damage_dice = [_roll_d6() for _ in range(program_damage_dice)]
         damage_total = sum(damage_dice)
-        rez_remaining = max(0, target_rez - damage_total)
-        derezzed = rez_remaining <= 0
+        if track_rez:
+            rez_remaining = max(0, target_rez - damage_total)
+            derezzed = rez_remaining <= 0
 
     dice_str = ",".join(str(d) for d in damage_dice) if damage_dice else ""
     damage_fmt = ""
     if hit:
-        damage_fmt = f" → {program_damage_dice}d6[**{dice_str}**] = {damage_total} REZ damage"
-        if derezzed:
-            damage_fmt += f" → {target_name} DEREZZED"
-        else:
-            damage_fmt += f" → {target_name} REZ {rez_remaining}/{target_rez}"
+        damage_fmt = f" → {program_damage_dice}d6[**{dice_str}**] = {damage_total} {damage_kind}"
+        if track_rez:
+            if derezzed:
+                damage_fmt += f" → {target_name} DEREZZED"
+            else:
+                damage_fmt += f" → {target_name} REZ {rez_remaining}/{target_rez}"
 
     formatted = roll_result["formatted"] + damage_fmt
 
@@ -886,11 +891,212 @@ def next_combat_turn(
 
 
 # ---------------------------------------------------------------------------
+# ICE type lookup and effect resolution
+# ---------------------------------------------------------------------------
+
+def _lookup_ice_type(ice_type_raw):
+    """Normalize model string to ICE_STAT_BLOCKS key. Returns block or None."""
+    if not ice_type_raw:
+        return None
+    key = str(ice_type_raw).strip().lower()
+    return ICE_STAT_BLOCKS.get(key)
+
+
+def _normalize_ice_key_candidate(raw_key, ice_status):
+    """Return a valid ICE status key or None."""
+    if not raw_key or not isinstance(ice_status, dict):
+        return None
+    if isinstance(ice_status.get(raw_key), dict):
+        return raw_key
+    return None
+
+
+def resolve_ice_effect(ice_block, active_programs=None, installed_hardware=None,
+                       ice_status=None, exclude_ice=None, exclude_ice_key=None,
+                       source_ice_key=None, _depth=0):
+    """Resolve the special effect of a Black ICE hit.
+
+    Returns {effect, state_ops, formatted, annotations}.
+    """
+    effect = ice_block.get("effect", "")
+    name = ice_block.get("name", "ICE")
+    state_ops = []
+    annotations = []
+    formatted_parts = []
+
+    _hw = installed_hardware if isinstance(installed_hardware, list) else []
+    hw_list = [str(h).lower() for h in _hw]
+
+    if effect == "program_destroy":
+        targets_defender = ice_block.get("targets_defender", False)
+        candidates = []
+        if isinstance(active_programs, list):
+            for p in active_programs:
+                # Anti-program ICE can only destroy rezzed programs.
+                if isinstance(p, dict) and p.get("status") == "active":
+                    if targets_defender and p.get("category") != "defender":
+                        continue
+                    candidates.append(p.get("name", "Unknown"))
+        if candidates:
+            chosen = random.choice(candidates)
+            state_ops.append({"op": "program_destroy", "program_name": chosen,
+                              "source": name})
+            cat_note = " (Defender)" if targets_defender else ""
+            formatted_parts.append(f"{name} destroys {chosen}{cat_note}!")
+        else:
+            cat_note = " Defender" if targets_defender else ""
+            formatted_parts.append(f"{name} finds no{cat_note} programs to destroy.")
+            annotations.append("no_targets")
+
+    elif effect == "body_fire":
+        if any("insulated wiring" in h for h in hw_list):
+            formatted_parts.append(f"{name} fire blocked by Insulated Wiring!")
+            annotations.append("blocked_by_hardware")
+        else:
+            state_ops.append({"op": "body_fire", "active": True,
+                              "damage_per_turn": 2, "source": name})
+            formatted_parts.append(f"{name} sets clothes on fire! 2 meat HP/turn until extinguished.")
+
+    elif effect == "movement_lock":
+        _lock_op = {"op": "movement_lock", "locked_by": name}
+        if source_ice_key:
+            _lock_op["locked_by_key"] = source_ice_key
+        state_ops.append(_lock_op)
+        formatted_parts.append(f"{name} locks movement — cannot move between nodes until derezzed!")
+
+    elif effect == "stat_debuff":
+        debuff_stats = ice_block.get("debuff_stats", [])
+        if not isinstance(debuff_stats, list):
+            debuff_stats = []
+        amount = _roll_d6()
+        state_ops.append({"op": "stat_debuff", "stats": debuff_stats,
+                          "amount": amount, "source": name,
+                          "duration": "1 hour"})
+        formatted_parts.append(f"{name} debuffs {'/'.join(str(s) for s in debuff_stats)} by {amount} (1d6={amount}) for 1 hour!")
+
+    elif effect == "slide_penalty":
+        state_ops.append({"op": "slide_penalty", "penalty": -2, "source": name})
+        formatted_parts.append(f"{name} imposes -2 to all Slide checks until derezzed!")
+
+    elif effect == "net_action_penalty":
+        state_ops.append({"op": "net_action_penalty", "penalty": 1, "source": name})
+        formatted_parts.append(f"{name} steals 1 NET Action next turn!")
+
+    elif effect == "forced_jack_out":
+        # Check KRASH Barrier
+        if any("krash barrier" in h for h in hw_list):
+            formatted_parts.append(f"{name} forced Jack Out blocked by KRASH Barrier!")
+            annotations.append("blocked_by_hardware")
+        else:
+            # Cascade: resolve all rezzed Black ICE effects
+            cascade = _resolve_jack_out_cascade(
+                ice_status or {}, active_programs, installed_hardware,
+                exclude_ice=exclude_ice or name, exclude_ice_key=exclude_ice_key, _depth=_depth
+            )
+            state_ops.extend(cascade.get("state_ops", []))
+            state_ops.append({"op": "forced_jack_out",
+                              "cascade_results": cascade.get("cascade_results", []),
+                              "source": name})
+            formatted_parts.append(f"{name} forces unsafe Jack Out!")
+            if cascade.get("formatted"):
+                formatted_parts.append(f"Cascade: {cascade['formatted']}")
+
+    elif effect == "program_rez_damage":
+        # Handled in ice_attack_vs_program action type, not here
+        pass
+
+    return {
+        "effect": effect,
+        "state_ops": state_ops,
+        "formatted": " ".join(formatted_parts),
+        "annotations": annotations,
+    }
+
+
+def _resolve_jack_out_cascade(ice_status, active_programs=None, installed_hardware=None,
+                               exclude_ice=None, exclude_ice_key=None, _depth=0):
+    """Iterate rezzed Black ICE and resolve each effect for forced Jack Out cascade.
+
+    Only processes ICE with status "active" AND behavior "black" (bypassed ICE never activated).
+    Excludes the attacking Giant to prevent infinite recursion.
+    """
+    if _depth > 2:  # Safety: prevent deep recursion
+        return {"state_ops": [], "formatted": "", "cascade_results": []}
+
+    all_ops = []
+    cascade_results = []
+    formatted_parts = []
+
+    if not isinstance(ice_status, dict):
+        return {"state_ops": [], "formatted": "", "cascade_results": []}
+
+    excluded_name_consumed = False
+    # Iterate keys in sorted order so fallback exclusion-by-name is deterministic
+    # even when input dict insertion order differs.
+    for _key in sorted(ice_status.keys()):
+        _ice = ice_status.get(_key)
+        if not isinstance(_ice, dict):
+            continue
+        if _ice.get("status") != "active":
+            continue
+        if str(_ice.get("behavior", "")).lower() != "black":
+            continue
+        ice_name = _ice.get("name", "")
+        # Prefer exact instance exclusion by key. Fallback to excluding a single
+        # matching name to avoid dropping all duplicate ICE of the same type.
+        if exclude_ice_key and _key == exclude_ice_key:
+            continue
+        if exclude_ice and ice_name == exclude_ice and not exclude_ice_key and not excluded_name_consumed:
+            excluded_name_consumed = True
+            continue
+
+        block = _lookup_ice_type(ice_name)
+        if not block:
+            continue
+
+        # Roll brain damage if applicable
+        dmg_dice = block.get("damage_dice", 0)
+        bd_total = 0
+        if dmg_dice > 0:
+            bd_total = sum(_roll_d6() for _ in range(dmg_dice))
+            all_ops.append({"op": "brain_damage", "edgerunner": "",  # filled by caller
+                            "change": bd_total,
+                            "reason": f"Cascade: {ice_name} ({dmg_dice}d6)"})
+            formatted_parts.append(f"{ice_name} {dmg_dice}d6={bd_total} brain dmg")
+
+        # Resolve special effect (skip nested Giant to prevent infinite loop)
+        if block.get("effect") != "forced_jack_out":
+            fx = resolve_ice_effect(block, active_programs, installed_hardware,
+                                    ice_status, exclude_ice=exclude_ice,
+                                    exclude_ice_key=exclude_ice_key,
+                                    source_ice_key=_key,
+                                    _depth=_depth + 1)
+            all_ops.extend(fx.get("state_ops", []))
+            if fx.get("formatted"):
+                formatted_parts.append(fx["formatted"])
+
+        cascade_results.append({
+            "ice_name": ice_name,
+            "brain_damage": bd_total,
+            "effect": block.get("effect", ""),
+        })
+
+    return {
+        "state_ops": all_ops,
+        "formatted": " | ".join(formatted_parts),
+        "cascade_results": cascade_results,
+    }
+
+
+# ---------------------------------------------------------------------------
 # resolve_actions — batch resolver
 # ---------------------------------------------------------------------------
 
 def resolve_actions(actions: list, relationships: dict = None, factions: dict = None,
-                    sequential: bool = True, combatant_hp: dict = None) -> dict:
+                    sequential: bool = True, combatant_hp: dict = None,
+                    tar_stacks: int = 0, alert_level: int = 0,
+                    active_programs=None, installed_hardware=None,
+                    ice_status=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -909,6 +1115,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     results = []
     all_state_ops = []
     effective_hp = dict(combatant_hp) if combatant_hp else {}
+    _tar_consumed = False
 
     for action in actions:
         action_type = None
@@ -925,6 +1132,26 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         "skipped": True, "reason": "eliminated",
                     })
                     continue
+
+            # Copy action before mutation to avoid modifying caller's dict
+            if isinstance(action, dict) and (tar_stacks > 0 or alert_level >= 3) and action.get("net"):
+                action = dict(action)
+
+            # Apply TAR penalty to next NET check only (auto-enforced by backend)
+            if isinstance(action, dict) and tar_stacks > 0 and action.get("net") and not _tar_consumed:
+                _tar_penalty = tar_stacks * 2
+                if action_type == "skill_check":
+                    action["stat_value"] = action.get("stat_value", 0) - _tar_penalty
+                    _tar_consumed = True
+                    all_state_ops.append({"op": "tar_consumed"})
+                elif action_type == "opposed_check":
+                    action["attacker_stat"] = action.get("attacker_stat", 0) - _tar_penalty
+                    _tar_consumed = True
+                    all_state_ops.append({"op": "tar_consumed"})
+
+            # Apply alert-level DV penalty to NET skill checks (+2 at alert 3+)
+            if isinstance(action, dict) and alert_level >= 3 and action.get("net") and action_type == "skill_check":
+                action["dv"] = action.get("dv", 13) + 2
 
             if action_type == "skill_check":
                 actor_name = action.get("character", "")
@@ -1098,6 +1325,54 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     defender_label=action.get("defender_label", "Defender"),
                 )
                 result["character"] = action.get("character", "")
+                # Zap damage: on hit, roll Interface rank d6 for REZ damage
+                if action.get("zap") and result["success"]:
+                    _zap_dice = max(1, action.get("interface_rank", 1))
+                    _zap_total = sum(random.randint(1, 6) for _ in range(_zap_dice))
+                    result["zap_damage"] = _zap_total
+                    result["zap_dice"] = _zap_dice
+                    result["zap_note"] = f"Zap deals {_zap_total} REZ damage ({_zap_dice}d6)"
+                    result["formatted"] += f" — Zap {_zap_dice}d6 = {_zap_total} REZ dmg"
+                    _target_ice = action.get("target", "")
+                    _target_ice_key = None
+                    for _key_candidate in (
+                        action.get("target_ice_key"),
+                        action.get("target_key"),
+                        action.get("ice_key"),
+                        action.get("ice_status_key"),
+                    ):
+                        _target_ice_key = _normalize_ice_key_candidate(_key_candidate, ice_status)
+                        if _target_ice_key:
+                            break
+                    _target_node_hint = action.get("target_node")
+                    if not _target_ice_key and _target_ice and isinstance(ice_status, dict):
+                        _matching_keys = [
+                            _k for _k, _v in ice_status.items()
+                            if isinstance(_v, dict)
+                            and _v.get("status") == "active"
+                            and str(_v.get("name", "")).strip().lower() == str(_target_ice).strip().lower()
+                        ]
+                        if isinstance(_target_node_hint, str) and _target_node_hint:
+                            _hint_matches = [
+                                _k for _k in _matching_keys
+                                if _k == _target_node_hint or _k.startswith(f"{_target_node_hint}_")
+                            ]
+                            if len(_hint_matches) == 1:
+                                _target_ice_key = _hint_matches[0]
+                        if len(_matching_keys) == 1:
+                            _target_ice_key = _matching_keys[0]
+                    if _target_ice or _target_ice_key:
+                        _rez_op = {
+                            "op": "rez_damage",
+                            "target": _target_ice,
+                            "damage": _zap_total,
+                            "reason": f"Zap from {action.get('character', 'Netrunner')}",
+                        }
+                        if _target_ice_key:
+                            _rez_op["target_key"] = _target_ice_key
+                        elif isinstance(_target_node_hint, str) and _target_node_hint:
+                            _rez_op["target_node"] = _target_node_hint
+                        all_state_ops.append(_rez_op)
                 results.append(result)
 
             elif action_type == "program_attack":
@@ -1111,30 +1386,160 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_name=action.get("target", "ICE"),
                 )
                 result["character"] = action.get("character", "")
+                # Annotate result for model visibility (incremental mode)
+                _prog_name = action.get("program_name", "")
+                if _prog_name:
+                    result["program_deactivated"] = _prog_name
+                    result["deactivation_note"] = f"{_prog_name} deactivated after attack (RAW). Costs 1 NET Action to Reactivate."
+                    all_state_ops.append({
+                        "op": "program_deactivate",
+                        "program_name": _prog_name,
+                    })
                 results.append(result)
 
             elif action_type == "program_attack_vs_netrunner":
                 # Black ICE attacking the Netrunner — damage = brain damage (HP, no armor)
+                _ice_type_raw = action.get("ice_type")
+                _ice_block = _lookup_ice_type(_ice_type_raw)
+                # Override ATK and damage_dice from table if ICE type found
+                _patk = _ice_block["atk"] if _ice_block else action.get("program_atk", 0)
+                _pdmg = _ice_block["damage_dice"] if _ice_block else action.get("program_damage_dice", 1)
                 result = resolve_program_attack(
-                    interface_rank=action.get("interface_rank", 0),
-                    program_atk=action.get("program_atk", 0),
+                    interface_rank=0,  # ICE ATK is from stat block; Netrunner interface is not an attacker bonus.
+                    program_atk=_patk,
                     target_def=action.get("target_def", 0),
-                    program_damage_dice=action.get("program_damage_dice", 1),
+                    program_damage_dice=_pdmg,
                     target_rez=action.get("target_rez", 0),
                     program_name=action.get("program_name", "Black ICE"),
                     target_name=action.get("target", "Netrunner"),
+                    track_rez=False,
+                    damage_kind="brain damage",
                 )
                 result["character"] = action.get("character", "")
                 result["type"] = "program_attack_vs_netrunner"
+                if _ice_block:
+                    result["ice_type"] = _ice_block["name"]
                 results.append(result)
-                if result.get("hit") and result.get("damage_total", 0) > 0:
+                if result.get("hit"):
                     _nr_name = action.get("target", "")
+                    # Brain damage (if damage_dice > 0)
+                    if result.get("damage_total", 0) > 0:
+                        all_state_ops.append({
+                            "edgerunner": _nr_name,
+                            "op": "brain_damage",
+                            "change": result["damage_total"],
+                            "reason": f"Black ICE {_ice_block['name'] if _ice_block else action.get('program_name', 'ICE')} attack",
+                        })
+                    # ICE special effect
+                    if _ice_block:
+                        _is_forced_jack_out = _ice_block.get("effect") == "forced_jack_out"
+                        _is_movement_lock = _ice_block.get("effect") == "movement_lock"
+                        _forced_jack_out_already = any(
+                            isinstance(_op, dict) and _op.get("op") == "forced_jack_out"
+                            for _op in all_state_ops
+                        )
+                        if _is_forced_jack_out and _forced_jack_out_already:
+                            result["ice_effect"] = "Forced Jack Out already applied this sequence."
+                            continue
+                        _exclude_ice_key = None
+                        for _key_candidate in (
+                            action.get("ice_key"),
+                            action.get("ice_status_key"),
+                            action.get("source_ice_key"),
+                        ):
+                            _exclude_ice_key = _normalize_ice_key_candidate(_key_candidate, ice_status)
+                            if _exclude_ice_key:
+                                break
+                        # If caller did not pass an ICE instance key, infer it only when unique.
+                        _matching_keys = []
+                        if not _exclude_ice_key and isinstance(ice_status, dict):
+                            _matching_keys = [
+                                _k for _k, _v in ice_status.items()
+                                if isinstance(_v, dict)
+                                and _v.get("status") == "active"
+                                and str(_v.get("name", "")).strip().lower() == _ice_block["name"].lower()
+                            ]
+                            _source_node_hint = action.get("source_node") or action.get("ice_node") or action.get("node") or action.get("current_node")
+                            if isinstance(_source_node_hint, str) and _source_node_hint:
+                                _hint_matches = [
+                                    _k for _k in _matching_keys
+                                    if _k == _source_node_hint or _k.startswith(f"{_source_node_hint}_")
+                                ]
+                                if len(_hint_matches) == 1:
+                                    _exclude_ice_key = _hint_matches[0]
+                            if len(_matching_keys) == 1:
+                                _exclude_ice_key = _matching_keys[0]
+                        _requires_key_on_duplicate = _is_forced_jack_out or _is_movement_lock
+                        _source_ice_key_for_effect = _exclude_ice_key
+                        if _requires_key_on_duplicate and not _exclude_ice_key and len(_matching_keys) > 1:
+                            # Ambiguous duplicate ICE source with no disambiguator:
+                            # do not bind a guessed source key as authoritative.
+                            result["ice_effect_warning"] = (
+                                "Ambiguous source ICE; applying effect without instance binding."
+                            )
+                            _source_ice_key_for_effect = None
+                        _fx = resolve_ice_effect(
+                            _ice_block,
+                            active_programs=active_programs,
+                            installed_hardware=installed_hardware,
+                            ice_status=ice_status,
+                            exclude_ice=_ice_block.get("name"),
+                            exclude_ice_key=_exclude_ice_key,
+                            source_ice_key=_source_ice_key_for_effect,
+                        )
+                        # Fill in edgerunner name for cascade brain_damage ops before extending
+                        _fx_ops = _fx.get("state_ops", [])
+                        for _fxop in _fx_ops:
+                            if isinstance(_fxop, dict) and _fxop.get("op") == "brain_damage" and not _fxop.get("edgerunner"):
+                                _fxop["edgerunner"] = _nr_name
+                        all_state_ops.extend(_fx_ops)
+                        if _fx.get("formatted"):
+                            result["ice_effect"] = _fx["formatted"]
+                            result["formatted"] = result.get("formatted", "") + " — " + _fx["formatted"]
+                        result["ice_effect_ops"] = _fx.get("state_ops", [])
+
+            elif action_type == "ice_attack_vs_program":
+                # Anti-program ICE (Dragon/Killer/Sabertooth) attacking a program
+                _ice_type_raw = action.get("ice_type")
+                _ice_block = _lookup_ice_type(_ice_type_raw)
+                _iap_atk = _ice_block["atk"] if _ice_block else action.get("program_atk", 6)
+                _iap_dmg_dice = _ice_block["damage_dice"] if _ice_block else action.get("program_damage_dice", 4)
+                _target_prog = action.get("target_program", "Program")
+                _target_def = action.get("target_program_def", 0)
+                _target_rez = action.get("target_program_rez", 0)
+                result = resolve_program_attack(
+                    interface_rank=0,  # ICE doesn't use interface rank
+                    program_atk=_iap_atk,
+                    target_def=_target_def,
+                    program_damage_dice=_iap_dmg_dice,
+                    target_rez=_target_rez,
+                    program_name=_ice_block["name"] if _ice_block else action.get("character", "ICE"),
+                    target_name=_target_prog,
+                )
+                result["character"] = action.get("character", "")
+                result["type"] = "ice_attack_vs_program"
+                if _ice_block:
+                    result["ice_type"] = _ice_block["name"]
+                # Use actual current REZ from active_programs (may differ from model value if partially damaged)
+                _actual_rez = _target_rez
+                if isinstance(active_programs, list):
+                    for _p in active_programs:
+                        if isinstance(_p, dict) and _p.get("name") == _target_prog:
+                            _actual_rez = int(_p.get("rez", _target_rez))
+                            break
+                _destroyed = result.get("hit") and result.get("damage_total", 0) >= _actual_rez and _actual_rez > 0
+                if result.get("hit") and result.get("damage_total", 0) > 0:
                     all_state_ops.append({
-                        "edgerunner": _nr_name,
-                        "op": "brain_damage",
-                        "change": result["damage_total"],
-                        "reason": f"Black ICE {action.get('program_name', 'ICE')} attack",
+                        "op": "program_rez_damage",
+                        "program_name": _target_prog,
+                        "damage": result["damage_total"],
+                        "destroyed": _destroyed,
+                        "source": _ice_block["name"] if _ice_block else action.get("character", "ICE"),
                     })
+                    if _destroyed:
+                        result["program_destroyed"] = True
+                        result["formatted"] = result.get("formatted", "") + f" — {_target_prog} DESTROYED!"
+                results.append(result)
 
             elif action_type == "ambush":
                 # Stealth vs Perception opposed checks for each target
@@ -1188,7 +1593,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             logger.warning(f"resolve_actions: error resolving {action_type}: {e}")
             results.append({"type": action_type, "error": str(e), "character": _char})
 
-    return {"results": results, "state_ops": all_state_ops}
+    return {"results": results, "state_ops": all_state_ops, "tar_consumed": _tar_consumed}
 
 
 # ---------------------------------------------------------------------------
@@ -1215,6 +1620,8 @@ RESOLVE_MECHANICS_TOOL = {
         "- initiative: {type, character: 'all', combatants: [{name, ref}]}\n"
         "- opposed_check: {type, character, attacker_stat, defender_stat, attacker_label?, defender_label?}\n"
         "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
+        "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
+        "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}"
     ),
     "input_schema": {
@@ -1230,7 +1637,9 @@ RESOLVE_MECHANICS_TOOL = {
                             "type": "string",
                             "enum": ["skill_check", "ranged_attack", "melee_attack",
                                      "autofire", "death_save", "initiative",
-                                     "opposed_check", "program_attack", "ambush"],
+                                     "opposed_check", "program_attack",
+                                     "program_attack_vs_netrunner",
+                                     "ice_attack_vs_program", "ambush"],
                         },
                         "character": {"type": "string"},
                     },

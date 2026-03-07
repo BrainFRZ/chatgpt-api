@@ -2068,6 +2068,11 @@ def run_mode_pipeline(
     planning_schema: dict,
     game_state: dict = None,
     character_states: dict = None,
+    tar_stacks: int = 0,
+    alert_level: int = 0,
+    active_programs=None,
+    installed_hardware=None,
+    ice_status=None,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -2113,6 +2118,15 @@ def run_mode_pipeline(
     actions = planning_data.get("actions", [])
     resolved = {"results": [], "state_ops": []}
     if actions:
+        try:
+            _tar_stacks = int(tar_stacks)
+        except (TypeError, ValueError, OverflowError):
+            _tar_stacks = 0
+        try:
+            _alert_level = int(alert_level)
+        except (TypeError, ValueError, OverflowError):
+            _alert_level = 0
+
         # Separate initiative actions (resolve first for ordering)
         init_actions = [a for a in actions if a.get("type") == "initiative"]
         ambush_actions = [a for a in actions if a.get("type") == "ambush"]
@@ -2122,8 +2136,12 @@ def run_mode_pipeline(
         _rels = game_state.get("relationships") if isinstance(game_state, dict) else None
         _facs = game_state.get("factions") if isinstance(game_state, dict) else None
 
-        # Resolve ambush first if present
-        ambush_result = resolve_actions(ambush_actions, relationships=_rels, factions=_facs) if ambush_actions else {"results": [], "state_ops": []}
+        # Resolve ambush first if present. TAR can only be consumed once across
+        # the entire exchange, so carry the remaining stacks across phases.
+        _phase_tar = _tar_stacks
+        ambush_result = resolve_actions(ambush_actions, relationships=_rels, factions=_facs, tar_stacks=_phase_tar, alert_level=_alert_level, active_programs=active_programs, installed_hardware=installed_hardware, ice_status=ice_status) if ambush_actions else {"results": [], "state_ops": [], "tar_consumed": False}
+        if ambush_result.get("tar_consumed"):
+            _phase_tar = 0
 
         # Determine surprised combatants from ambush results
         _surprised_names = []
@@ -2137,7 +2155,9 @@ def run_mode_pipeline(
             if _surprised_names:
                 _ia["surprised"] = _surprised_names
 
-        init_result = resolve_actions(init_actions, relationships=_rels, factions=_facs) if init_actions else {"results": [], "state_ops": []}
+        init_result = resolve_actions(init_actions, relationships=_rels, factions=_facs, tar_stacks=_phase_tar, alert_level=_alert_level, active_programs=active_programs, installed_hardware=installed_hardware, ice_status=ice_status) if init_actions else {"results": [], "state_ops": [], "tar_consumed": False}
+        if init_result.get("tar_consumed"):
+            _phase_tar = 0
 
         # Sort combat_actions by initiative order if available
         if init_result["results"]:
@@ -2165,8 +2185,11 @@ def run_mode_pipeline(
         # Resolve combat actions sequentially with HP tracking
         combat_resolved = resolve_actions(
             combat_actions, relationships=_rels, factions=_facs,
-            sequential=True, combatant_hp=_combatant_hp
-        ) if combat_actions else {"results": [], "state_ops": []}
+            sequential=True, combatant_hp=_combatant_hp,
+            tar_stacks=_phase_tar, alert_level=_alert_level,
+            active_programs=active_programs, installed_hardware=installed_hardware,
+            ice_status=ice_status
+        ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results
         resolved = {

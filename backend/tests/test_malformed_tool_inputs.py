@@ -15,11 +15,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from game_systems.cpred import (
     apply_cpred_combat_state,
+    apply_hack_state as cpred_apply_hack_state,
+    init_hack_state as cpred_init_hack_state,
     apply_net_combat_state,
     init_net_combat_from_hack,
 )
 from game_systems.dnd5e_cyber import (
-    apply_hack_state,
+    apply_hack_state as cyber_apply_hack_state,
     apply_ship_combat_state,
     init_hack_state,
     apply_hack_writeback as cyber_apply_hack_writeback,
@@ -110,7 +112,7 @@ class TestMalformedToolInputs(unittest.TestCase):
         for tool_input in cases:
             with self.subTest(tool_input=tool_input):
                 apply_cpred_combat_state(_cpred_state(), tool_input, {"edgerunners": {}})
-                apply_hack_state(init_hack_state(), tool_input)
+                cyber_apply_hack_state(init_hack_state(), tool_input)
                 apply_ship_combat_state(_ship_state(), tool_input)
 
     def test_random_malformed_payloads_do_not_raise(self):
@@ -152,7 +154,7 @@ class TestMalformedToolInputs(unittest.TestCase):
                     for _ in range(2500):
                         tool_input = rand()
                         apply_cpred_combat_state(_cpred_state(), tool_input, {"edgerunners": {}})
-                        apply_hack_state(init_hack_state(), tool_input)
+                        cyber_apply_hack_state(init_hack_state(), tool_input)
                         apply_ship_combat_state(_ship_state(), tool_input)
         finally:
             logging.disable(logging.NOTSET)
@@ -312,6 +314,77 @@ class TestMalformedToolInputs(unittest.TestCase):
                         )
         finally:
             logging.disable(logging.NOTSET)
+
+    def test_random_malformed_net_combat_payloads_with_resolver_ops_do_not_raise(self):
+        """Exhaustive fuzz at apply_net_combat_state boundary with resolver state ops present."""
+        atoms = [None, 0, 1, -1, 3.2, "x", "", True, False, [], [1], ["x"], {}, {"a": 1}]
+
+        def rand(depth=0):
+            if depth > 2 or random.random() < 0.5:
+                return random.choice(atoms)
+            if random.choice(["list", "dict"]) == "list":
+                return [rand(depth + 1) for _ in range(random.randint(0, 3))]
+            d = {}
+            keys = [
+                "character_updates",
+                "cover_state",
+                "combat",
+                "combat_complete",
+                "hack_state",
+                "available_actions",
+                "net_complete",
+                "narrative_summary",
+            ]
+            for _ in range(random.randint(0, 7)):
+                d[random.choice(keys)] = rand(depth + 1)
+            return d
+
+        def rand_resolver_ops():
+            candidates = [
+                {"op": "tar_consumed"},
+                {"op": "brain_damage", "target": "V", "change": random.choice([-3, -2, -1, 0, 1, "bad", None, [], {}])},
+                {"op": "program_deactivate", "program_name": random.choice(["Sword", "Armor", "", None])},
+                {"op": "rez_damage", "target": random.choice(["Hellhound", "", None]), "damage": random.choice([0, 1, 3, 6, "bad"])},
+                {"op": random.choice(["unknown", None, 42])},
+                random.choice([None, 0, 1, "x", [], {}]),
+            ]
+            return [random.choice(candidates) for _ in range(random.randint(0, 5))]
+
+        logging.disable(logging.CRITICAL)
+        try:
+            for seed in (611, 887, 1091):
+                with self.subTest(seed=seed):
+                    random.seed(seed)
+                    for _ in range(3000):
+                        tool_input = rand()
+                        resolver_ops = rand_resolver_ops()
+                        apply_net_combat_state(
+                            _net_combat_pipeline_state(),
+                            tool_input,
+                            game_state=_net_game_state(),
+                            resolver_state_ops=resolver_ops,
+                        )
+        finally:
+            logging.disable(logging.NOTSET)
+
+    def test_regression_cpred_apply_hack_state_ignores_bad_brain_damage_change(self):
+        hs = cpred_init_hack_state(hacker_name="V")
+        cpred_apply_hack_state(
+            hs,
+            {"hack_state": {}},
+            resolver_state_ops=[{"op": "brain_damage", "change": "bad"}],
+        )
+        self.assertEqual(hs.get("brain_damage", 0), 0)
+
+    def test_regression_cpred_apply_net_combat_state_ignores_bad_brain_damage_change(self):
+        ps = _net_combat_pipeline_state()
+        apply_net_combat_state(
+            ps,
+            {"hack_state": {}},
+            game_state=_net_game_state(),
+            resolver_state_ops=[{"op": "brain_damage", "change": "bad"}],
+        )
+        self.assertEqual(ps["net_combat"].get("brain_damage", 0), 0)
 
     def test_random_malformed_net_combat_collapse_payloads_do_not_raise(self):
         atoms = [None, 0, 1, "", "txt", True, False, [], [1], {}, {"x": 1}]

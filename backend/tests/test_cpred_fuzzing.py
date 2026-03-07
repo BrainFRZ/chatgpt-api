@@ -6,6 +6,7 @@ performance limits, and property-based invariants with seeded randomness.
 
 Complements test_cpred_mechanics.py (happy-path unit tests).
 """
+import copy
 import json
 import random
 import sys
@@ -863,7 +864,7 @@ class TestResolveActionsFuzz(unittest.TestCase):
 
     def test_empty_actions(self):
         r = resolve_actions([])
-        self.assertEqual(r, {"results": [], "state_ops": []})
+        self.assertEqual(r, {"results": [], "state_ops": [], "tar_consumed": False})
 
     @patch(MOCK, return_value=5)
     def test_missing_type_key(self, _m):
@@ -1022,6 +1023,129 @@ class TestResolveActionsFuzz(unittest.TestCase):
         # Both should hit (total = 9+8+8=25 > DV 13)
         # State ops from both should be merged
         self.assertGreater(len(r["state_ops"]), 0)
+
+
+# ===========================================================================
+# 9b. TestResolveActionsUncommittedFuzz
+# ===========================================================================
+class TestResolveActionsUncommittedFuzz(unittest.TestCase):
+    """Seeded fuzzing for TAR/alert/zap/program-deactivation branches."""
+
+    def test_tar_consumed_once_seeded(self):
+        for seed in range(300):
+            rng = random.Random(seed)
+            tar_stacks = rng.randint(0, 4)
+            actions = []
+            expected_consumed = False
+            for i in range(rng.randint(1, 12)):
+                action_type = rng.choice(["skill_check", "opposed_check", "ranged_attack"])
+                if action_type == "skill_check":
+                    is_net = bool(rng.getrandbits(1))
+                    actions.append({
+                        "type": "skill_check",
+                        "character": f"N{i}",
+                        "stat_value": rng.randint(1, 10),
+                        "skill_value": rng.randint(0, 10),
+                        "dv": rng.randint(9, 21),
+                        "net": is_net,
+                    })
+                    if tar_stacks > 0 and is_net and not expected_consumed:
+                        expected_consumed = True
+                elif action_type == "opposed_check":
+                    is_net = bool(rng.getrandbits(1))
+                    actions.append({
+                        "type": "opposed_check",
+                        "character": f"N{i}",
+                        "attacker_stat": rng.randint(1, 10),
+                        "defender_stat": rng.randint(1, 10),
+                        "net": is_net,
+                    })
+                    if tar_stacks > 0 and is_net and not expected_consumed:
+                        expected_consumed = True
+                else:
+                    actions.append({
+                        "type": "ranged_attack",
+                        "character": f"N{i}",
+                        "stat_value": 8,
+                        "skill_value": 8,
+                        "weapon_type": "Pistol",
+                        "damage_dice": 2,
+                        "rof": 1,
+                        "target_sp": 0,
+                        "range_bracket": 0,
+                    })
+
+            result = resolve_actions(copy.deepcopy(actions), tar_stacks=tar_stacks, alert_level=rng.randint(0, 7))
+            consumed_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "tar_consumed"]
+            self.assertEqual(result["tar_consumed"], expected_consumed, f"seed={seed}")
+            self.assertEqual(bool(consumed_ops), expected_consumed, f"seed={seed}")
+            self.assertLessEqual(len(consumed_ops), 1, f"seed={seed}")
+
+    def test_alert_dv_penalty_seeded(self):
+        for seed in range(250):
+            rng = random.Random(seed)
+            base_dv = rng.randint(9, 21)
+            alert_level = rng.randint(0, 7)
+            result = resolve_actions([{
+                "type": "skill_check",
+                "character": "V",
+                "stat_value": 6,
+                "skill_value": 4,
+                "dv": base_dv,
+                "net": True,
+            }], alert_level=alert_level, tar_stacks=0)
+            expected_dv = base_dv + 2 if alert_level >= 3 else base_dv
+            self.assertEqual(result["results"][0]["dv"], expected_dv, f"seed={seed}")
+
+    def test_zap_damage_and_state_ops_seeded(self):
+        for seed in range(250):
+            rng = random.Random(seed)
+            interface_rank = rng.randint(1, 10)
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": 30,
+                "defender_stat": 1,
+                "attacker_label": "Attacker",
+                "defender_label": "Defender",
+                "zap": True,
+                "interface_rank": interface_rank,
+                "target": "Hellhound",
+            }])
+            out = result["results"][0]
+            # Opposed check can fail on exploding dice — only verify zap on hit
+            if out["success"]:
+                self.assertEqual(out["zap_dice"], interface_rank, f"seed={seed}")
+                self.assertGreaterEqual(out["zap_damage"], interface_rank, f"seed={seed}")
+                self.assertLessEqual(out["zap_damage"], interface_rank * 6, f"seed={seed}")
+                rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
+                self.assertEqual(len(rez_ops), 1, f"seed={seed}")
+                self.assertEqual(rez_ops[0]["target"], "Hellhound", f"seed={seed}")
+                self.assertEqual(rez_ops[0]["damage"], out["zap_damage"], f"seed={seed}")
+            else:
+                rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
+                self.assertEqual(len(rez_ops), 0, f"seed={seed}: no rez_damage on miss")
+
+    def test_program_attack_deactivation_seeded(self):
+        for seed in range(250):
+            rng = random.Random(seed)
+            program_name = f"Prog_{seed}"
+            result = resolve_actions([{
+                "type": "program_attack",
+                "character": "V",
+                "interface_rank": rng.randint(4, 10),
+                "program_atk": rng.randint(1, 8),
+                "target_def": rng.randint(1, 8),
+                "program_damage_dice": rng.randint(1, 6),
+                "target_rez": rng.randint(0, 12),
+                "program_name": program_name,
+                "target": "TargetICE",
+            }])
+            out = result["results"][0]
+            self.assertEqual(out.get("program_deactivated"), program_name, f"seed={seed}")
+            deact_ops = [op for op in result["state_ops"] if op.get("op") == "program_deactivate"]
+            self.assertEqual(len(deact_ops), 1, f"seed={seed}")
+            self.assertEqual(deact_ops[0]["program_name"], program_name, f"seed={seed}")
 
 
 # ===========================================================================
@@ -1530,7 +1654,7 @@ class TestToolSchema(unittest.TestCase):
 
     def test_type_enum_matches_resolve_actions(self):
         type_enum = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]["items"]["properties"]["type"]["enum"]
-        expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save", "initiative", "opposed_check", "program_attack", "ambush"}
+        expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save", "initiative", "opposed_check", "program_attack", "program_attack_vs_netrunner", "ice_attack_vs_program", "ambush"}
         self.assertEqual(set(type_enum), expected)
 
 

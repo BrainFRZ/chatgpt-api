@@ -1098,5 +1098,167 @@ class TestCrossProductFuzz(unittest.TestCase):
             logging.disable(logging.NOTSET)
 
 
+class TestUncommittedHackStateFuzz(unittest.TestCase):
+    """Seeded fuzzing for newly-added apply_hack_state branches."""
+
+    def test_resolver_ops_seeded(self):
+        for seed in range(250):
+            rng = random.Random(seed)
+            hs = cpred_init_hack_state(hacker_name="V", sr=rng.randint(2, 5), interface_rank=6)
+            hs["active_programs"] = [{"name": "Sword", "status": "active"}, {"name": "Armor", "status": "active"}]
+            hs["ice_status"] = {
+                "Core": {"name": "Hellhound", "behavior": "trace", "rez_current": 10, "rez_max": 10, "status": "active"}
+            }
+            tar_initial = rng.randint(0, 3)
+            include_tar_in_input = rng.choice([True, False])
+            tool_input = {
+                "hack_state": {
+                    "current_node": "Core",
+                    "nodes_visited": ["Gateway", "Core"],
+                    "revealed_nodes": ["Gateway"],
+                    "net_actions_used": 0,
+                }
+            }
+            if include_tar_in_input:
+                tool_input["hack_state"]["tar_stacks"] = tar_initial
+            rez_damage = rng.randint(0, 15)
+            resolver_ops = [
+                {"op": "program_deactivate", "program_name": "Sword"},
+                {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
+            ]
+            if rng.choice([True, False]):
+                resolver_ops.append({"op": "tar_consumed"})
+
+            before_rez = hs["ice_status"]["Core"]["rez_current"]
+            cpred_apply_hack_state(hs, tool_input, resolver_state_ops=resolver_ops)
+
+            self.assertIsInstance(hs.get("revealed_nodes"), list, f"seed={seed}")
+            self.assertEqual(hs["active_programs"][0]["status"], "deactivated", f"seed={seed}")
+            self.assertGreaterEqual(hs["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
+            self.assertLessEqual(hs["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
+            if any(op.get("op") == "tar_consumed" for op in resolver_ops):
+                self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
+            else:
+                if include_tar_in_input:
+                    self.assertEqual(hs["tar_stacks"], tar_initial, f"seed={seed}")
+                else:
+                    self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
+
+    def test_forced_disconnect_seeded(self):
+        for seed in range(220):
+            rng = random.Random(seed)
+            max_hp = rng.randint(10, 50)
+            current_hp = rng.randint(0, max_hp)
+            bd = rng.randint(1, 60)
+            hs = cpred_init_hack_state(hacker_name="V")
+            game_state = {"edgerunners": {"V": {"hp": {"current": current_hp, "max": max_hp}}}}
+            cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 0}}, resolver_state_ops=[
+                {"op": "brain_damage", "change": -bd}
+            ], game_state=game_state)
+            expected_disconnect = current_hp - bd <= 0
+            self.assertEqual(bool(hs.get("_forced_disconnect")), expected_disconnect, f"seed={seed}")
+            self.assertEqual(hs["active"], not expected_disconnect, f"seed={seed}")
+
+    def test_alert_autospawn_seeded(self):
+        for seed in range(180):
+            rng = random.Random(seed)
+            hs = cpred_init_hack_state(sr=rng.randint(2, 5), interface_rank=6)
+            hs["_prev_alert_level"] = rng.randint(0, 4)
+            new_alert = rng.randint(5, 8)
+            tool_input = {
+                "hack_state": {
+                    "alert_level": new_alert,
+                    "ice_status": {},
+                    "current_node": f"Node{seed}",
+                    "nodes_visited": ["Gateway"],
+                    "revealed_nodes": ["Gateway"],
+                    "net_actions_used": 0,
+                    "trace_progress": 0,
+                }
+            }
+            cpred_apply_hack_state(hs, tool_input, resolver_state_ops=[])
+            self.assertIn("Gateway_Trace", hs.get("ice_status", {}), f"seed={seed}")
+            if new_alert >= 7:
+                self.assertIn(f"Node{seed}_Convergence", hs.get("ice_status", {}), f"seed={seed}")
+
+
+class TestUncommittedNetCombatStateFuzz(unittest.TestCase):
+    """Seeded fuzzing for newly-added apply_net_combat_state branches."""
+
+    def test_forced_disconnect_seeded(self):
+        for seed in range(220):
+            rng = random.Random(seed)
+            nc = cpred_init_net_combat_state(netrunner_name="V")
+            pipeline_state = {
+                "net_combat": nc,
+                "combat": None,
+                "character_states": {},
+                "game_state": {"edgerunners": {"V": {"hp": {"current": rng.randint(0, 40), "max": 40}}}},
+            }
+            cpred_apply_net_combat_state(
+                pipeline_state,
+                {"hack_state": {"nodes_visited": ["Gateway"], "revealed_nodes": ["Gateway"]}},
+                game_state=pipeline_state["game_state"],
+            )
+            current_hp = pipeline_state["game_state"]["edgerunners"]["V"]["hp"]["current"]
+            self.assertEqual(bool(pipeline_state["net_combat"].get("_forced_disconnect")), current_hp < 0, f"seed={seed}")
+            self.assertEqual(bool(pipeline_state["net_combat"].get("net_complete")), current_hp < 0, f"seed={seed}")
+
+    def test_resolver_ops_seeded(self):
+        for seed in range(220):
+            rng = random.Random(seed)
+            nc = cpred_init_net_combat_state(netrunner_name="V", sr=rng.randint(2, 5))
+            nc["active_programs"] = [{"name": "Sword", "status": "active"}]
+            nc["ice_status"] = {
+                "Core": {"name": "Hellhound", "behavior": "black", "rez_current": 8, "rez_max": 8, "status": "active"}
+            }
+            tar_initial = rng.randint(0, 3)
+            include_tar_in_input = rng.choice([True, False])
+            pipeline_state = {
+                "net_combat": nc,
+                "combat": None,
+                "character_states": {},
+                "game_state": {"edgerunners": {"V": {"hp": {"current": 30, "max": 30}}}},
+            }
+            tool_input = {
+                "hack_state": {
+                    "nodes_visited": ["Gateway", "Core"],
+                    "revealed_nodes": ["Gateway"],
+                    "current_node": "Core",
+                    "alert_level": rng.randint(0, 8),
+                    "trace_progress": 0,
+                }
+            }
+            if include_tar_in_input:
+                tool_input["hack_state"]["tar_stacks"] = tar_initial
+            rez_damage = rng.randint(0, 20)
+            resolver_ops = [
+                {"op": "program_deactivate", "program_name": "Sword"},
+                {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
+            ]
+            if rng.choice([True, False]):
+                resolver_ops.append({"op": "tar_consumed"})
+
+            before_rez = nc["ice_status"]["Core"]["rez_current"]
+            cpred_apply_net_combat_state(
+                pipeline_state,
+                tool_input,
+                game_state=pipeline_state["game_state"],
+                resolver_state_ops=resolver_ops,
+            )
+            out = pipeline_state["net_combat"]
+            self.assertIsInstance(out.get("revealed_nodes"), list, f"seed={seed}")
+            self.assertEqual(out["active_programs"][0]["status"], "deactivated", f"seed={seed}")
+            self.assertGreaterEqual(out["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
+            self.assertLessEqual(out["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
+            if any(op.get("op") == "tar_consumed" for op in resolver_ops):
+                self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
+            else:
+                if include_tar_in_input:
+                    self.assertEqual(out["tar_stacks"], tar_initial, f"seed={seed}")
+                else:
+                    self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
+
+
 if __name__ == "__main__":
     unittest.main()

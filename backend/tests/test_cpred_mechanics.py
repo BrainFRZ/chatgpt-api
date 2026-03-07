@@ -22,6 +22,7 @@ from game_systems.cpred_mechanics import (
     resolve_initiative,
     resolve_opposed_check,
     resolve_program_attack,
+    resolve_ice_effect,
     next_combat_turn,
     resolve_actions,
     _roll_check_die,
@@ -518,6 +519,20 @@ class TestResolveActions(unittest.TestCase):
         death_ops = [op for op in result["state_ops"] if op.get("op") == "death_save"]
         self.assertEqual(len(death_ops), 1)
         self.assertEqual(death_ops[0]["edgerunner"], "Ganger")
+
+
+class TestResolveIceEffect(unittest.TestCase):
+    def test_program_destroy_targets_only_rezzed_programs(self):
+        ice_block = {"name": "Raven", "effect": "program_destroy"}
+        active_programs = [
+            {"name": "ADeact", "category": "attacker", "status": "deactivated"},
+            {"name": "ZActive", "category": "attacker", "status": "active"},
+        ]
+        with patch("game_systems.cpred_mechanics.random.choice", side_effect=lambda c: c[0]):
+            result = resolve_ice_effect(ice_block, active_programs=active_programs)
+        destroys = [op for op in result["state_ops"] if op.get("op") == "program_destroy"]
+        self.assertEqual(len(destroys), 1)
+        self.assertEqual(destroys[0]["program_name"], "ZActive")
 
     def test_invalid_ranged_attack_does_not_spend_luck(self):
         """Invalid ranged requests should not consume Luck."""
@@ -1150,6 +1165,40 @@ class TestBrainDamageStateOps(unittest.TestCase):
             }])
         bd_ops = [op for op in result["state_ops"] if op.get("op") == "brain_damage"]
         self.assertEqual(len(bd_ops), 0)
+
+    def test_black_ice_attack_does_not_use_netrunner_interface(self):
+        """interface_rank in action should not buff ICE attack rolls."""
+        with patch("game_systems.cpred_mechanics.random.randint", side_effect=[9, 2]):
+            result = resolve_actions([{
+                "type": "program_attack_vs_netrunner",
+                "character": "Hellhound",
+                "interface_rank": 10,  # defender stat; must not be applied to attacker
+                "program_atk": 1,
+                "target_def": 10,
+                "program_damage_dice": 2,
+                "target": "V",
+            }])
+        self.assertFalse(result["results"][0]["hit"])
+
+    def test_black_ice_hit_is_not_reported_as_derez(self):
+        """Netrunner hits should report brain damage, not REZ/derez semantics."""
+        with patch("game_systems.cpred_mechanics.random.randint", side_effect=[8, 3, 4, 5]):
+            result = resolve_actions([{
+                "type": "program_attack_vs_netrunner",
+                "character": "Hellhound",
+                "interface_rank": 0,
+                "program_atk": 6,
+                "target_def": 4,
+                "program_damage_dice": 2,
+                "target_rez": 0,
+                "program_name": "Hellhound",
+                "target": "V",
+            }])
+        hit_result = result["results"][0]
+        self.assertTrue(hit_result["hit"])
+        self.assertFalse(hit_result["derezzed"])
+        self.assertIn("brain damage", hit_result["formatted"])
+        self.assertNotIn("DEREZZED", hit_result["formatted"])
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import fcntl
 import uuid
 import hashlib
 import copy
+import inspect
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
@@ -2307,6 +2308,14 @@ def send_message(request: SendMessageRequest):
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+def _safe_int(val, default=0):
+    """Safe int cast — returns default on any conversion failure."""
+    try:
+        return int(val)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _tool_input_valid(tool_input: dict, tool_def: dict) -> bool:
     """Check that all required top-level fields from the tool schema are present."""
     schema = tool_def.get("input_schema") or {}
@@ -2354,6 +2363,24 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
         "output_tokens": ru.output_tokens,
     }
     return tool_input, retry_usage
+
+
+def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None, game_state=None):
+    """Call game-system apply_hack_state with only supported kwargs."""
+    kwargs = {}
+    try:
+        sig = inspect.signature(apply_fn)
+        params = sig.parameters
+        accepts_var_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        if accepts_var_kwargs or "resolver_state_ops" in params:
+            kwargs["resolver_state_ops"] = resolver_state_ops
+        if accepts_var_kwargs or "game_state" in params:
+            kwargs["game_state"] = game_state
+    except (TypeError, ValueError):
+        pass
+    return apply_fn(hack_state, tool_input, **kwargs)
 
 
 def _init_hack_from_trigger(gs, ht, character_states):
@@ -2463,8 +2490,9 @@ def _apply_combat_state(gs, pipeline_state, tool_input):
             if cond in conditions:
                 conditions.remove(cond)
 
+    _has_combat_field = "combat" in tool_input
     new_combat = tool_input.get("combat")
-    if tool_input.get("combat_complete") or new_combat is None:
+    if tool_input.get("combat_complete") or (_has_combat_field and new_combat is None):
         pipeline_state["combat"] = None
     elif isinstance(new_combat, dict):
         old_start = pipeline_state.get("combat", {}).get("start_message_id")
@@ -4196,6 +4224,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["hack_planning_schema"],
                     game_state=hack_ps.get("game_state"),
                     character_states=hack_ps.get("character_states"),
+                    tar_stacks=_safe_int(hack_state.get("tar_stacks", 0)) if isinstance(hack_state, dict) else 0,
+                    alert_level=_safe_int(hack_state.get("alert_level", 0)) if isinstance(hack_state, dict) else 0,
+                    active_programs=hack_state.get("active_programs") if isinstance(hack_state, dict) else None,
+                    installed_hardware=hack_state.get("installed_hardware") if isinstance(hack_state, dict) else None,
+                    ice_status=hack_state.get("ice_status") if isinstance(hack_state, dict) else None,
                 )
 
                 mode_result = None
@@ -4239,7 +4272,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     accumulated_thinking = hack_reasoning
 
                 # Apply hack state updates
-                gs["apply_hack_state"](hack_state, hack_json, resolver_state_ops=mode_result.state_ops)
+                _apply_hack_state_compat(
+                    gs["apply_hack_state"],
+                    hack_state,
+                    hack_json,
+                    resolver_state_ops=mode_result.state_ops,
+                    game_state=hack_ps.get("game_state"),
+                )
                 data["hack_state"] = hack_state
 
                 # Emit updated hack state
@@ -4448,6 +4487,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["combat_planning_schema"],
                     game_state=combat_ps.get("game_state"),
                     character_states=combat_ps.get("character_states"),
+                    tar_stacks=_safe_int((_net_combat or {}).get("tar_stacks", 0)) if isinstance(_net_combat, dict) and _net_combat.get("active") else 0,
+                    alert_level=_safe_int((_net_combat or {}).get("alert_level", 0)) if isinstance(_net_combat, dict) and _net_combat.get("active") else 0,
+                    active_programs=(_net_combat or {}).get("active_programs") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
+                    installed_hardware=(_net_combat or {}).get("installed_hardware") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
+                    ice_status=(_net_combat or {}).get("ice_status") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
                 )
 
                 mode_result = None
@@ -4706,6 +4750,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["net_combat_planning_schema"],
                     game_state=nc_ps.get("game_state"),
                     character_states=nc_ps.get("character_states"),
+                    tar_stacks=_safe_int(nc_state.get("tar_stacks", 0)) if isinstance(nc_state, dict) else 0,
+                    alert_level=_safe_int(nc_state.get("alert_level", 0)) if isinstance(nc_state, dict) else 0,
+                    active_programs=nc_state.get("active_programs") if isinstance(nc_state, dict) else None,
+                    installed_hardware=nc_state.get("installed_hardware") if isinstance(nc_state, dict) else None,
+                    ice_status=nc_state.get("ice_status") if isinstance(nc_state, dict) else None,
                 )
 
                 mode_result = None
@@ -4848,7 +4897,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         model=model_id, context_tokens=0)
 
                 branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
-                _nc_both_done = nc_json.get("combat_complete") and nc_json.get("net_complete")
+                _nc_combat_done = nc_json.get("combat_complete") or (
+                    "combat" in nc_json and nc_json.get("combat") is None
+                )
+                _nc_both_done = _nc_combat_done and nc_json.get("net_complete")
                 done_data = {
                     'assistant_message': assistant_message,
                     'tokens': tokens_str,
@@ -4916,11 +4968,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _mode_content = _mode_response.get('content', '')
                 _mode_reasoning = _mode_response.get('reasoning')
 
+                _mode_json_valid = True
                 try:
                     _mode_json = json.loads(_mode_content)
                 except json.JSONDecodeError:
                     logger.error(f"{_mode_label} mode: failed to parse JSON: {_mode_content[:200]}")
-                    _mode_json = {}
+                    _mode_json = {"narrative": _mode_content}
+                    _mode_json_valid = False
+                if not isinstance(_mode_json, dict):
+                    logger.error(f"{_mode_label} mode: parsed JSON must be object, got {type(_mode_json).__name__}")
+                    _mode_json = {"narrative": _mode_content}
+                    _mode_json_valid = False
 
                 narrative = _mode_json.get("narrative", _mode_content)
                 accumulated_content = narrative
@@ -4936,23 +4994,31 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Apply mode-specific state
                 if use_hack_mode:
                     hack_json = _mode_json
-                    gs["apply_hack_state"](hack_state, hack_json)
-                    data["hack_state"] = hack_state
-                    yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
-                    if hack_json.get("hack_complete"):
-                        yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
+                    if _mode_json_valid:
+                        _apply_hack_state_compat(
+                            gs["apply_hack_state"],
+                            hack_state,
+                            hack_json,
+                            game_state=hack_ps.get("game_state"),
+                        )
+                        data["hack_state"] = hack_state
+                        yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
+                        if hack_json.get("hack_complete"):
+                            yield f"event: hack_complete\ndata: {json.dumps({'summary': hack_state.get('narrative_summary', '')})}\n\n"
                 elif use_combat_mode:
                     combat_json = _mode_json
                     _cps = data.get("pipeline_state", {})
-                    _apply_combat_state(gs, _cps, combat_json)
-                    data["pipeline_state"] = _cps
-                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                    if _mode_json_valid:
+                        _apply_combat_state(gs, _cps, combat_json)
+                        data["pipeline_state"] = _cps
+                        yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                 else:
                     nc_json = _mode_json
                     _nps = data.get("pipeline_state", {})
-                    gs["apply_net_combat_state"](_nps, nc_json, game_state=_nps.get("game_state"))
-                    data["pipeline_state"] = _nps
-                    yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                    if _mode_json_valid:
+                        gs["apply_net_combat_state"](_nps, nc_json, game_state=_nps.get("game_state"))
+                        data["pipeline_state"] = _nps
+                        yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
 
                 usage = {
                     'input_tokens': _mode_response.get('input_tokens', 0),
@@ -5056,6 +5122,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     done_data['service_tier'] = service_tier
                 if _original_model:
                     done_data['original_model'] = _original_model
+                if use_hack_mode and _mode_json.get("hack_complete"):
+                    done_data['hack_complete'] = True
+                if use_combat_mode and (
+                    _mode_json.get("combat_complete")
+                    or ("combat" in _mode_json and _mode_json.get("combat") is None)
+                ):
+                    done_data['combat_complete'] = True
+                if use_net_combat_mode:
+                    _nc_done = False
+                    _nc_state = data.get("pipeline_state", {}).get("net_combat")
+                    if isinstance(_nc_state, dict):
+                        _nc_done = not _nc_state.get("active", True)
+                    elif _mode_json.get("combat_complete") and _mode_json.get("net_complete"):
+                        _nc_done = True
+                    if _nc_done:
+                        done_data['net_combat_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 await sync_manager.broadcast_to_chat(
@@ -5764,20 +5846,74 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                             _rm_request_params = copy.deepcopy(request_params)
                             _rm_iteration = 0
+                            _rm_max_iterations = 64
 
                             while True:
+                                if _rm_iteration >= _rm_max_iterations:
+                                    logger.warning("resolve_mechanics loop hit max iterations (%d) for %s", _rm_max_iterations, username)
+                                    break
                                 _rm_call = _find_rm_call(usage)
                                 if _rm_call is None:
                                     break  # No more resolve_mechanics — fall through to report_*_state
 
                                 _rm_input = _rm_call.get("input") or {}
-                                _rm_gs = (stateful_pipeline_state or {}).get("game_state", {})
+                                if not isinstance(_rm_input, dict):
+                                    logger.warning("resolve_mechanics tool input must be object, got %s", type(_rm_input).__name__)
+                                    _rm_input = {}
+                                # Source resolver context from active mode state to avoid
+                                # pulling empty stateful_pipeline_state in hack/net-combat modes.
+                                _rm_tar = 0
+                                _rm_alert = 0
+                                _rm_active_progs = None
+                                _rm_hw = None
+                                _rm_ice = None
+                                _rm_gs = {}
+                                _rm_active_state = None
+                                if use_hack_mode:
+                                    _rm_ps = data.get("pipeline_state", {})
+                                    _rm_gs = _rm_ps.get("game_state", {}) if isinstance(_rm_ps, dict) else {}
+                                    if isinstance(hack_state, dict) and hack_state.get("active"):
+                                        _rm_active_state = hack_state
+                                elif use_net_combat_mode:
+                                    _rm_ps = data.get("pipeline_state", {})
+                                    _rm_gs = _rm_ps.get("game_state", {}) if isinstance(_rm_ps, dict) else {}
+                                    _rm_nc_mode = _rm_ps.get("net_combat") if isinstance(_rm_ps, dict) else None
+                                    if isinstance(_rm_nc_mode, dict) and _rm_nc_mode.get("active"):
+                                        _rm_active_state = _rm_nc_mode
+                                    elif isinstance(nc_state, dict) and nc_state.get("active"):
+                                        _rm_active_state = nc_state
+                                else:
+                                    _rm_sps = stateful_pipeline_state or {}
+                                    _rm_gs = _rm_sps.get("game_state", {})
+                                    _rm_hs = _rm_sps.get("hack_state")
+                                    _rm_nc = _rm_sps.get("net_combat")
+                                    if isinstance(_rm_hs, dict) and _rm_hs.get("active"):
+                                        _rm_active_state = _rm_hs
+                                    elif isinstance(_rm_nc, dict) and _rm_nc.get("active"):
+                                        _rm_active_state = _rm_nc
+                                if isinstance(_rm_active_state, dict):
+                                    _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
+                                    _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
+                                    _rm_active_progs = _rm_active_state.get("active_programs")
+                                    _rm_hw = _rm_active_state.get("installed_hardware")
+                                    _rm_ice = _rm_active_state.get("ice_status")
+                                if not isinstance(_rm_gs, dict):
+                                    _rm_gs = {}
                                 _rm_result = _rm_resolve_actions(
                                     _rm_input.get("actions", []),
                                     relationships=_rm_gs.get("relationships"),
                                     factions=_rm_gs.get("factions"),
+                                    tar_stacks=_rm_tar,
+                                    alert_level=_rm_alert,
+                                    active_programs=_rm_active_progs,
+                                    installed_hardware=_rm_hw,
+                                    ice_status=_rm_ice,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
+                                # If TAR was consumed, zero it on live state so next call doesn't re-apply
+                                if _rm_result.get("tar_consumed"):
+                                    if isinstance(_rm_active_state, dict) and _rm_active_state.get("active"):
+                                        _rm_active_state["tar_stacks"] = 0
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call
@@ -5794,6 +5930,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                                 # Build continuation: assistant + tool_result
                                 _resolved_tool_use_id = _rm_call.get("id")
+                                if not _resolved_tool_use_id:
+                                    logger.warning("resolve_mechanics call missing tool_use_id; skipping continuation for %s", username)
+                                    break
                                 _rm_assistant = []
                                 for _blk in (usage.get('content_blocks') or []):
                                     if _blk.type == "thinking":
@@ -5832,6 +5971,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                                 # Stream continuation — model narrates this action, may call resolve_mechanics again
                                 _rm_stream = provider.send_request_stream(client, _rm_request_params)
+                                _rm_done_received = False
                                 for _rm_event in _rm_stream:
                                     if _rm_event.event_type == 'content_delta':
                                         accumulated_content += _rm_event.content
@@ -5851,6 +5991,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         )
                                     elif _rm_event.event_type == 'done':
                                         usage = _rm_event.usage
+                                        _rm_done_received = True
+                                if not _rm_done_received:
+                                    logger.warning("resolve_mechanics continuation ended without done event for %s", username)
+                                    break
 
                                 _rm_iteration += 1
 
@@ -5883,10 +6027,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Handle hack mode tool output (Claude hack mode)
                         hack_tool_input = None
                         if use_hack_mode and model_id.startswith("claude"):
+                            _hack_ps = data.get("pipeline_state", {})
+                            _hack_gs = _hack_ps.get("game_state") if isinstance(_hack_ps, dict) else None
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["hack_tool"]):
                                 _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
-                                gs["apply_hack_state"](hack_state, tool_input, resolver_state_ops=accumulated_rm_state_ops)
+                                _apply_hack_state_compat(
+                                    gs["apply_hack_state"],
+                                    hack_state,
+                                    tool_input,
+                                    resolver_state_ops=accumulated_rm_state_ops,
+                                    game_state=_hack_gs,
+                                )
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
                                 logger.info(f"Hack mode: applied hack state for {username}, "
@@ -5912,7 +6064,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
                                         _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
-                                        gs["apply_hack_state"](hack_state, retry_result, resolver_state_ops=accumulated_rm_state_ops)
+                                        _apply_hack_state_compat(
+                                            gs["apply_hack_state"],
+                                            hack_state,
+                                            retry_result,
+                                            resolver_state_ops=accumulated_rm_state_ops,
+                                            game_state=_hack_gs,
+                                        )
                                         data["hack_state"] = hack_state
                                         hack_tool_input = retry_result
                                         logger.info(f"Hack mode: retry succeeded for {username}")
@@ -6600,7 +6758,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
                             done_data['hack_complete'] = True
                         if use_net_combat_mode and net_combat_tool_input:
-                            if net_combat_tool_input.get("combat_complete") and net_combat_tool_input.get("net_complete"):
+                            _nc_combat_done = net_combat_tool_input.get("combat_complete") or (
+                                "combat" in net_combat_tool_input and net_combat_tool_input.get("combat") is None
+                            )
+                            if _nc_combat_done and net_combat_tool_input.get("net_complete"):
                                 done_data['net_combat_complete'] = True
                         if use_combat_mode and combat_tool_input:
                             if combat_tool_input.get("combat_complete") or combat_tool_input.get("combat") is None:

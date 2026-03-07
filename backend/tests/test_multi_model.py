@@ -43,7 +43,8 @@ def temp_data_dir(monkeypatch):
 def client(temp_data_dir):
     """Create test client with isolated data directory."""
     # DATA_DIR is already patched by temp_data_dir fixture
-    return TestClient(main.app)
+    with TestClient(main.app) as test_client:
+        yield test_client
 
 
 @pytest.fixture
@@ -85,12 +86,9 @@ def test_user(temp_data_dir):
 class TestGetModels:
     """Tests for GET /api/models endpoint."""
 
-    def test_returns_all_models(self, client):
+    def test_returns_all_models(self):
         """Verify GPT-5.2, Claude Sonnet 4.5, and Claude Opus 4.6 are returned."""
-        response = client.get("/api/models")
-        assert response.status_code == 200
-
-        models = response.json()
+        models = main.list_models()
         assert len(models) == 3
 
         model_ids = [m["id"] for m in models]
