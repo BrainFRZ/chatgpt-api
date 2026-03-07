@@ -17,6 +17,9 @@ import random
 import sys
 import unittest
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from game_systems.cpred import (
@@ -212,7 +215,9 @@ class TestRevealedNodes(unittest.TestCase):
 
 class TestCpredHackInjectionFuzz(unittest.TestCase):
 
-    def test_random_system_map_and_tier_combos_never_crash(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_system_map_and_tier_combos_never_crash(self, seed):
         """Fuzz system_map and tier on a valid base state — tests nudge code path."""
         map_values = [
             None, {}, _sample_system_map(),
@@ -221,21 +226,18 @@ class TestCpredHackInjectionFuzz(unittest.TestCase):
         ]
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (10, 42, 77, 200):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(
-                            tier=random.choice(TIER_VALUES + ["full_run", "full_run"]),
-                        )
-                        hs["system_map"] = random.choice(map_values)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
-                        # Verify nudge logic: CPRED always nudges when map is missing
-                        if hs["system_map"] and hs["system_map"] != 0:
-                            self.assertNotIn(NUDGE_MARKER, result)
-                        elif not hs.get("system_map"):
-                            self.assertIn(NUDGE_MARKER, result)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(
+                    tier=random.choice(TIER_VALUES + ["full_run", "full_run"]),
+                )
+                hs["system_map"] = random.choice(map_values)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
+                if hs["system_map"] and hs["system_map"] != 0:
+                    self.assertNotIn(NUDGE_MARKER, result)
+                elif not hs.get("system_map"):
+                    self.assertIn(NUDGE_MARKER, result)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -249,19 +251,19 @@ class TestCpredHackInjectionFuzz(unittest.TestCase):
                 result = cpred_build_hack_injection(hs)
                 self.assertIsInstance(result, str)
 
-    def test_fully_random_hack_state_never_crashes(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fully_random_hack_state_never_crashes(self, seed):
         """Fully random hack_state dicts should never crash build_hack_injection."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (10, 42, 77, 200):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = _rand_hack_state()
-                        if not isinstance(hs, dict):
-                            hs = {"tier": hs}
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = _rand_hack_state()
+                if not isinstance(hs, dict):
+                    hs = {"tier": hs}
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -293,30 +295,30 @@ class TestCpredInitNetCombatStateSr(unittest.TestCase):
         nc = cpred_init_net_combat_from_hack(hack)
         self.assertEqual(nc["sr"], 4)
 
-    def test_fuzz_init_net_combat_state_random_args(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_init_net_combat_state_random_args(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (31, 59):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        kwargs = {}
-                        if random.random() < 0.5:
-                            kwargs["netrunner_name"] = random.choice(ATOMS)
-                        if random.random() < 0.5:
-                            kwargs["target"] = random.choice(ATOMS)
-                        if random.random() < 0.5:
-                            kwargs["interface_rank"] = random.choice(ATOMS)
-                        if random.random() < 0.5:
-                            kwargs["cycles_max"] = random.choice(ATOMS)
-                        if random.random() < 0.5:
-                            kwargs["sr"] = random.choice(ATOMS)
-                        try:
-                            nc = cpred_init_net_combat_state(**kwargs)
-                            self.assertIsInstance(nc, dict)
-                            self.assertIn("sr", nc)
-                        except (TypeError, ValueError):
-                            pass  # expected for non-numeric interface_rank
+            random.seed(seed)
+            for _ in range(1000):
+                kwargs = {}
+                if random.random() < 0.5:
+                    kwargs["netrunner_name"] = random.choice(ATOMS)
+                if random.random() < 0.5:
+                    kwargs["target"] = random.choice(ATOMS)
+                if random.random() < 0.5:
+                    kwargs["interface_rank"] = random.choice(ATOMS)
+                if random.random() < 0.5:
+                    kwargs["cycles_max"] = random.choice(ATOMS)
+                if random.random() < 0.5:
+                    kwargs["sr"] = random.choice(ATOMS)
+                try:
+                    nc = cpred_init_net_combat_state(**kwargs)
+                    self.assertIsInstance(nc, dict)
+                    self.assertIn("sr", nc)
+                except (TypeError, ValueError):
+                    pass
         finally:
             logging.disable(logging.NOTSET)
 
@@ -385,7 +387,9 @@ class TestCpredNetCombatInjectionNudge(unittest.TestCase):
 
 class TestCpredNetCombatInjectionFuzz(unittest.TestCase):
 
-    def test_random_system_map_combos_never_crash(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_system_map_combos_never_crash(self, seed):
         """Fuzz system_map on a valid base net_combat state — tests nudge code path."""
         map_values = [
             None, {}, _sample_system_map(),
@@ -394,46 +398,43 @@ class TestCpredNetCombatInjectionFuzz(unittest.TestCase):
         ]
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (13, 67, 150):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        nc = cpred_init_net_combat_state(
-                            netrunner_name="V", target="Vault",
-                            sr=random.choice([1, 2, 3, 4, 5]),
-                        )
-                        nc["tier"] = random.choice(["full_run", "quick_hack", None, ""])
-                        nc["system_map"] = random.choice(map_values)
-                        nc["net_complete"] = random.choice([True, False])
-                        combat = _minimal_combat() if random.random() < 0.7 else None
-                        ps = _minimal_pipeline_state()
-                        result = cpred_build_net_combat_injection(combat, nc, ps)
-                        self.assertIsInstance(result, str)
-                        # Verify nudge logic — all CPRED tiers nudge when map is missing
-                        if nc.get("net_complete"):
-                            self.assertNotIn(NUDGE_MARKER, result)
-                        elif nc["system_map"] and nc["system_map"] != 0:
-                            self.assertNotIn(NUDGE_MARKER, result)
-                        else:
-                            self.assertIn(NUDGE_MARKER, result)
+            random.seed(seed)
+            for _ in range(2000):
+                nc = cpred_init_net_combat_state(
+                    netrunner_name="V", target="Vault",
+                    sr=random.choice([1, 2, 3, 4, 5]),
+                )
+                nc["tier"] = random.choice(["full_run", "quick_hack", None, ""])
+                nc["system_map"] = random.choice(map_values)
+                nc["net_complete"] = random.choice([True, False])
+                combat = _minimal_combat() if random.random() < 0.7 else None
+                ps = _minimal_pipeline_state()
+                result = cpred_build_net_combat_injection(combat, nc, ps)
+                self.assertIsInstance(result, str)
+                if nc.get("net_complete"):
+                    self.assertNotIn(NUDGE_MARKER, result)
+                elif nc["system_map"] and nc["system_map"] != 0:
+                    self.assertNotIn(NUDGE_MARKER, result)
+                else:
+                    self.assertIn(NUDGE_MARKER, result)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_fully_random_net_combat_never_crashes(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fully_random_net_combat_never_crashes(self, seed):
         """Fully random net_combat dicts should never crash build_net_combat_injection."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (13, 67, 150):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        nc = _rand_net_combat()
-                        if not isinstance(nc, dict):
-                            nc = {"active": True}
-                        combat = _minimal_combat() if random.random() < 0.7 else None
-                        ps = _minimal_pipeline_state()
-                        result = cpred_build_net_combat_injection(combat, nc, ps)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(2000):
+                nc = _rand_net_combat()
+                if not isinstance(nc, dict):
+                    nc = {"active": True}
+                combat = _minimal_combat() if random.random() < 0.7 else None
+                ps = _minimal_pipeline_state()
+                result = cpred_build_net_combat_injection(combat, nc, ps)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -470,7 +471,9 @@ class TestCyberHackInjectionNudge(unittest.TestCase):
 
 class TestCyberHackInjectionFuzz(unittest.TestCase):
 
-    def test_random_system_map_and_tier_combos_never_crash(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_system_map_and_tier_combos_never_crash(self, seed):
         """Fuzz system_map and tier on a valid base state — tests nudge code path."""
         map_values = [
             None, {}, _sample_system_map(),
@@ -480,20 +483,18 @@ class TestCyberHackInjectionFuzz(unittest.TestCase):
         cyber_tiers = ["full_sequence", "quick_hack", "", "unknown", None, "full_sequence"]
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (21, 55, 88):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cyber_init_hack_state(
-                            tier=random.choice(cyber_tiers) or "full_sequence",
-                        )
-                        hs["system_map"] = random.choice(map_values)
-                        result = cyber_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
-                        if hs["system_map"] and hs["system_map"] != 0:
-                            self.assertNotIn(NUDGE_MARKER, result)
-                        elif hs.get("tier") == "full_sequence" and not hs.get("system_map"):
-                            self.assertIn(NUDGE_MARKER, result)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cyber_init_hack_state(
+                    tier=random.choice(cyber_tiers) or "full_sequence",
+                )
+                hs["system_map"] = random.choice(map_values)
+                result = cyber_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
+                if hs["system_map"] and hs["system_map"] != 0:
+                    self.assertNotIn(NUDGE_MARKER, result)
+                elif hs.get("tier") == "full_sequence" and not hs.get("system_map"):
+                    self.assertIn(NUDGE_MARKER, result)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -506,19 +507,19 @@ class TestCyberHackInjectionFuzz(unittest.TestCase):
                 result = cyber_build_hack_injection(hs)
                 self.assertIsInstance(result, str)
 
-    def test_fully_random_hack_state_never_crashes(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fully_random_hack_state_never_crashes(self, seed):
         """Fully random hack_state dicts should never crash build_hack_injection."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (21, 55, 88):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = _rand_hack_state()
-                        if not isinstance(hs, dict):
-                            hs = {"tier": hs}
-                        result = cyber_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = _rand_hack_state()
+                if not isinstance(hs, dict):
+                    hs = {"tier": hs}
+                result = cyber_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -582,70 +583,66 @@ class TestApplyHackStateRevealedNodesFuzz(unittest.TestCase):
         cpred_apply_hack_state(hs, tool_input)
         self.assertEqual(hs["revealed_nodes"].count("Gateway"), 1)
 
-    def test_fuzz_revealed_nodes_in_tool_input_never_crash(self):
+    @settings(max_examples=40, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_revealed_nodes_in_tool_input_never_crash(self, seed):
         """Random revealed_nodes values in tool_input should never crash apply_hack_state."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (100, 200, 300):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        tool_input = {"hack_state": {}}
-                        if random.random() < 0.7:
-                            tool_input["hack_state"]["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
-                        if random.random() < 0.7:
-                            tool_input["hack_state"]["nodes_visited"] = random.choice(self.VISITED_VALUES)
-                        if random.random() < 0.5:
-                            tool_input["hack_state"]["current_node"] = random.choice(ATOMS)
-                        if random.random() < 0.5:
-                            tool_input["hack_state"]["alert_level"] = random.choice(ATOMS)
-                        cpred_apply_hack_state(hs, tool_input)
-                        # revealed_nodes should always be a list after apply
-                        self.assertIsInstance(hs.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier="full_run")
+                tool_input = {"hack_state": {}}
+                if random.random() < 0.7:
+                    tool_input["hack_state"]["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
+                if random.random() < 0.7:
+                    tool_input["hack_state"]["nodes_visited"] = random.choice(self.VISITED_VALUES)
+                if random.random() < 0.5:
+                    tool_input["hack_state"]["current_node"] = random.choice(ATOMS)
+                if random.random() < 0.5:
+                    tool_input["hack_state"]["alert_level"] = random.choice(ATOMS)
+                cpred_apply_hack_state(hs, tool_input)
+                self.assertIsInstance(hs.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_fuzz_pre_corrupted_state_never_crash(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_pre_corrupted_state_never_crash(self, seed):
         """Even if hack_state was pre-corrupted before apply, auto-merge should survive."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (101, 202):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
-                        # Pre-corrupt revealed_nodes and nodes_visited in the state
-                        hs["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
-                        hs["nodes_visited"] = random.choice(self.VISITED_VALUES)
-                        tool_input = {"hack_state": {
-                            "alert_level": random.choice([0, 1, 2, 3, None]),
-                        }}
-                        cpred_apply_hack_state(hs, tool_input)
-                        # Should not crash — revealed_nodes type depends on what was set
-                        self.assertIn("revealed_nodes", hs)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
+                hs["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
+                hs["nodes_visited"] = random.choice(self.VISITED_VALUES)
+                tool_input = {"hack_state": {
+                    "alert_level": random.choice([0, 1, 2, 3, None]),
+                }}
+                cpred_apply_hack_state(hs, tool_input)
+                self.assertIn("revealed_nodes", hs)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_fuzz_fully_random_tool_input_never_crash(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_fully_random_tool_input_never_crash(self, seed):
         """Fully random tool_input dicts should never crash apply_hack_state."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (111, 222, 333):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        # Build random tool_input
-                        tool_input = {}
-                        if random.random() < 0.8:
-                            tool_input["hack_state"] = _rand_hack_state()
-                        if random.random() < 0.3:
-                            tool_input["available_actions"] = random.choice(ATOMS)
-                        if random.random() < 0.3:
-                            tool_input["system_map"] = random.choice(ATOMS)
-                        cpred_apply_hack_state(hs, tool_input)
-                        self.assertIsInstance(hs, dict)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier="full_run")
+                tool_input = {}
+                if random.random() < 0.8:
+                    tool_input["hack_state"] = _rand_hack_state()
+                if random.random() < 0.3:
+                    tool_input["available_actions"] = random.choice(ATOMS)
+                if random.random() < 0.3:
+                    tool_input["system_map"] = random.choice(ATOMS)
+                cpred_apply_hack_state(hs, tool_input)
+                self.assertIsInstance(hs, dict)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -683,47 +680,47 @@ class TestApplyNetCombatStateRevealedNodesFuzz(unittest.TestCase):
         self.assertIn("DataNode1", nc["revealed_nodes"])
         self.assertIn("Gateway", nc["revealed_nodes"])
 
-    def test_fuzz_revealed_nodes_in_tool_input_never_crash(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_revealed_nodes_in_tool_input_never_crash(self, seed):
         """Random revealed_nodes values should never crash apply_net_combat_state."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (400, 500, 600):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = self._make_pipeline_state(nc)
-                        tool_input = {"hack_state": {}}
-                        if random.random() < 0.7:
-                            tool_input["hack_state"]["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
-                        if random.random() < 0.7:
-                            tool_input["hack_state"]["nodes_visited"] = random.choice(self.VISITED_VALUES)
-                        if random.random() < 0.5:
-                            tool_input["hack_state"]["current_node"] = random.choice(ATOMS)
-                        cpred_apply_net_combat_state(ps, tool_input)
-                        self.assertIsInstance(nc.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(2000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = self._make_pipeline_state(nc)
+                tool_input = {"hack_state": {}}
+                if random.random() < 0.7:
+                    tool_input["hack_state"]["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
+                if random.random() < 0.7:
+                    tool_input["hack_state"]["nodes_visited"] = random.choice(self.VISITED_VALUES)
+                if random.random() < 0.5:
+                    tool_input["hack_state"]["current_node"] = random.choice(ATOMS)
+                cpred_apply_net_combat_state(ps, tool_input)
+                self.assertIsInstance(nc.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_fuzz_fully_random_tool_input_never_crash(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_fully_random_tool_input_never_crash(self, seed):
         """Fully random tool_input dicts should never crash apply_net_combat_state."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (444, 555):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = self._make_pipeline_state(nc)
-                        tool_input = {}
-                        if random.random() < 0.8:
-                            tool_input["hack_state"] = _rand_net_combat()
-                        if random.random() < 0.3:
-                            tool_input["available_actions"] = random.choice(ATOMS)
-                        if random.random() < 0.3:
-                            tool_input["combat_complete"] = random.choice(ATOMS)
-                        cpred_apply_net_combat_state(ps, tool_input)
-                        self.assertIsInstance(nc, dict)
+            random.seed(seed)
+            for _ in range(2000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = self._make_pipeline_state(nc)
+                tool_input = {}
+                if random.random() < 0.8:
+                    tool_input["hack_state"] = _rand_net_combat()
+                if random.random() < 0.3:
+                    tool_input["available_actions"] = random.choice(ATOMS)
+                if random.random() < 0.3:
+                    tool_input["combat_complete"] = random.choice(ATOMS)
+                cpred_apply_net_combat_state(ps, tool_input)
+                self.assertIsInstance(nc, dict)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -752,28 +749,27 @@ class TestInitNetCombatFromHackRevealedNodesFuzz(unittest.TestCase):
                 nc = cpred_init_net_combat_from_hack(hs)
                 self.assertIsInstance(nc["revealed_nodes"], list)
 
-    def test_fuzz_random_hack_state_never_crash(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_random_hack_state_never_crash(self, seed):
         """Fully random hack_state dicts should never crash init_net_combat_from_hack."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (700, 800, 900):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
-                        # Randomize the fields that init_net_combat_from_hack reads
-                        for key in ["revealed_nodes", "nodes_visited", "ice_status",
-                                    "active_programs", "tar_stacks", "interface_rank",
-                                    "system_map", "brain_damage", "sr"]:
-                            if random.random() < 0.5:
-                                hs[key] = random.choice(ATOMS)
-                        try:
-                            nc = cpred_init_net_combat_from_hack(hs)
-                            self.assertIsInstance(nc, dict)
-                            self.assertIn("revealed_nodes", nc)
-                            self.assertIsInstance(nc["revealed_nodes"], list)
-                        except (TypeError, ValueError):
-                            pass  # expected for non-numeric interface_rank
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
+                for key in ["revealed_nodes", "nodes_visited", "ice_status",
+                            "active_programs", "tar_stacks", "interface_rank",
+                            "system_map", "brain_damage", "sr"]:
+                    if random.random() < 0.5:
+                        hs[key] = random.choice(ATOMS)
+                try:
+                    nc = cpred_init_net_combat_from_hack(hs)
+                    self.assertIsInstance(nc, dict)
+                    self.assertIn("revealed_nodes", nc)
+                    self.assertIsInstance(nc["revealed_nodes"], list)
+                except (TypeError, ValueError):
+                    pass
         finally:
             logging.disable(logging.NOTSET)
 
@@ -829,7 +825,9 @@ class TestInjectionBuildersRevealedNodesFuzz(unittest.TestCase):
                 result = cpred_build_net_combat_injection(combat, nc, ps)
                 self.assertIsInstance(result, str)
 
-    def test_fuzz_revealed_nodes_combined_with_random_system_map(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_revealed_nodes_combined_with_random_system_map(self, seed):
         """Fuzz both system_map and revealed_nodes simultaneously."""
         map_values = [
             None, {}, _sample_system_map(),
@@ -837,15 +835,13 @@ class TestInjectionBuildersRevealedNodesFuzz(unittest.TestCase):
         ]
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (1000, 2000):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(3000):
-                        hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
-                        hs["system_map"] = random.choice(map_values)
-                        hs["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(3000):
+                hs = cpred_init_hack_state(tier=random.choice(TIER_VALUES) or "full_run")
+                hs["system_map"] = random.choice(map_values)
+                hs["revealed_nodes"] = random.choice(self.REVEALED_VALUES)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 

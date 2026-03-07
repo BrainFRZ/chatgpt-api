@@ -9,12 +9,194 @@ Luck (session-spendable), Armor (head/body with ablation), eurobucks, critical i
 import copy
 import logging
 import random
+import re
 from datetime import date, timedelta
 
-from .cpred_tables import ICE_STAT_BLOCKS
+from .cpred_tables import ICE_STAT_BLOCKS, CYBERWARE_TABLE
 
 
 logger = logging.getLogger(__name__)
+
+
+# Pre-built lowercase lookup for cyberware ceiling costs
+_CYBERWARE_CEILING_LOOKUP = {k.lower(): v.get("ceiling_cost", 2) for k, v in CYBERWARE_TABLE.items()}
+
+# Aliases for common name variants the model may use
+_CYBERWARE_ALIASES = {
+    "cyberaudio": "cyberaudio suite",
+    "cybereyes": "cybereye",
+    "cyberarms": "cyberarm",
+    "cyberlegs": "cyberleg",
+}
+
+
+def _normalize_cyberware_name(value: str) -> str:
+    """Return a canonical lowercase cyberware key for costing/removal matching."""
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+
+    base = re.sub(r'\s*\(.*?\)\s*$', '', normalized).strip()
+    alias = _CYBERWARE_ALIASES.get(base) or _CYBERWARE_ALIASES.get(normalized)
+    if alias:
+        return alias
+
+    if base in _CYBERWARE_CEILING_LOOKUP:
+        return base
+    if normalized in _CYBERWARE_CEILING_LOOKUP:
+        return normalized
+    return base or normalized
+
+
+def _normalize_cyberware_entry_name(value: str) -> str:
+    """Return canonical entry identity for add de-duplication.
+
+    Parenthetical qualifiers are preserved so distinct instances like
+    "(Left)" and "(Right)" can coexist, while aliases/casing collapse.
+    """
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+
+    qualifier = ""
+    match = re.search(r'\s*(\(.*?\))\s*$', normalized)
+    if match:
+        qualifier = f" {match.group(1).strip()}"
+    base = re.sub(r'\s*\(.*?\)\s*$', '', normalized).strip()
+    if not base:
+        return ""
+
+    aliased_base = _CYBERWARE_ALIASES.get(base) or base
+    return f"{aliased_base}{qualifier}".strip()
+
+
+def _cyberware_has_qualifier(value: str) -> bool:
+    """Return True when a cyberware name includes a trailing qualifier, e.g. '(Right)'."""
+    if not isinstance(value, str):
+        return False
+    return re.search(r'\s*\(.*?\)\s*$', value.strip()) is not None
+
+
+def _cyberware_ceiling_cost(value: str) -> int:
+    """Return the humanity ceiling cost for a cyberware item (2 standard, 4 borgware, 0 medical)."""
+    normalized = _normalize_cyberware_name(value)
+    if not normalized:
+        return 0
+    if normalized in _CYBERWARE_CEILING_LOOKUP:
+        return _CYBERWARE_CEILING_LOOKUP[normalized]
+    return 2  # default for unknown/homebrew items
+
+
+def _normalize_cyberware_list(values):
+    """Return a cleaned cyberware list with non-empty string names only."""
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name:
+            cleaned.append(name)
+    return cleaned
+
+
+def _needs_humanity_baseline(er):
+    """True when humanity ceiling baseline metadata is missing."""
+    return not (
+        isinstance(er, dict)
+        and "_humanity_base_max" in er
+    )
+
+
+def _recompute_humanity_ceiling(er, reset_base=False, reset_base_max=False):
+    """Recompute humanity ceiling from baseline metadata and current cyberware list.
+
+    Baseline model:
+    - _humanity_base_max: humanity max at baseline time.
+    - _humanity_base_ceiling_total: total installed cyberware ceiling at baseline time.
+    Current humanity max is derived by applying only the delta from that baseline:
+      new_max = base_max + base_ceiling_total - current_ceiling_total
+    """
+    if not isinstance(er, dict):
+        return
+    humanity = er.get("humanity")
+    if not isinstance(humanity, dict):
+        return
+
+    try:
+        humanity_max = int(humanity.get("max", 0))
+    except (TypeError, ValueError, OverflowError):
+        humanity_max = 0
+    try:
+        humanity_current = int(humanity.get("current", 0))
+    except (TypeError, ValueError, OverflowError):
+        humanity_current = 0
+
+    if (reset_base and reset_base_max) or "_humanity_base_max" not in er:
+        er["_humanity_base_max"] = max(0, humanity_max)
+
+    try:
+        base_max = int(er.get("_humanity_base_max", humanity_max))
+    except (TypeError, ValueError, OverflowError):
+        base_max = humanity_max
+        er["_humanity_base_max"] = max(0, base_max)
+    base_max = max(0, base_max)
+
+    cyberware = _normalize_cyberware_list(er.get("cyberware_effects", []))
+    er["cyberware_effects"] = cyberware
+    total_ceiling = max(0, sum(_cyberware_ceiling_cost(cw) for cw in cyberware))
+
+    if reset_base:
+        er["_humanity_base_ceiling_total"] = total_ceiling
+    elif "_humanity_base_ceiling_total" not in er:
+        # Legacy compatibility: pre-baseline saves may have only _humanity_base_max
+        # from the old model (new_max = base_max - current_total).
+        # Treat that as base_ceiling_total=0 so behavior stays consistent.
+        if "_humanity_base_max" in er:
+            er["_humanity_base_ceiling_total"] = 0
+        else:
+            er["_humanity_base_ceiling_total"] = total_ceiling
+    try:
+        base_ceiling_total = int(er.get("_humanity_base_ceiling_total", total_ceiling))
+    except (TypeError, ValueError, OverflowError):
+        base_ceiling_total = total_ceiling
+        er["_humanity_base_ceiling_total"] = base_ceiling_total
+    base_ceiling_total = max(0, base_ceiling_total)
+
+    new_max = max(0, min(base_max, base_max + base_ceiling_total - total_ceiling))
+    humanity["max"] = new_max
+    humanity["current"] = max(0, min(humanity_current, new_max))
+    er["_humanity_ceiling_migrated"] = True
+
+
+def _apply_ceiling_migration(edgerunners):
+    """One-time pass: initialize baseline metadata for unmigrated edgerunners.
+
+    This migration is intentionally non-destructive: it preserves current humanity max
+    and establishes baseline metadata so future add/remove ops are delta-correct.
+    """
+    if not isinstance(edgerunners, dict):
+        return
+    for _, er in edgerunners.items():
+        if not isinstance(er, dict):
+            continue
+        if er.get("_humanity_ceiling_migrated"):
+            continue
+        if not er.get("cyberware_effects"):
+            continue
+        has_base_max = "_humanity_base_max" in er
+        _recompute_humanity_ceiling(
+            er,
+            # Legacy saves that already have _humanity_base_max should keep
+            # their historical semantics (base_ceiling_total defaults to 0).
+            reset_base=not has_base_max,
+            reset_base_max=not has_base_max,
+        )
 
 # ============================================================
 # Tier Derivation Helpers
@@ -308,6 +490,9 @@ def apply_game_state(game_state, agent_json, turn):
     """
     ops = agent_json.get("edgerunner_ops")
 
+    # --- Pre-ops ceiling migration (handles pre-existing cyberware) ---
+    _apply_ceiling_migration(game_state.get("edgerunners", {}))
+
     if ops:
         edgerunners = game_state.setdefault("edgerunners", {})
 
@@ -326,10 +511,49 @@ def apply_game_state(game_state, agent_json, turn):
 
             try:
                 if op == "set":
+                    prev_humanity_max = None
+                    try:
+                        prev_humanity_max = int((er.get("humanity") or {}).get("max"))
+                    except (TypeError, ValueError, OverflowError):
+                        prev_humanity_max = None
                     fields = copy.deepcopy(op_data.get("fields", {}))
                     for key, val in fields.items():
                         if key in er:
                             er[key] = val
+                    # Keep humanity ceiling baseline in sync for set operations that touch
+                    # humanity max and/or replace the cyberware list wholesale.
+                    humanity_set = fields.get("humanity")
+                    humanity_has_max = (
+                        isinstance(humanity_set, dict)
+                        and "max" in humanity_set
+                    )
+                    incoming_humanity_max = None
+                    if humanity_has_max:
+                        try:
+                            incoming_humanity_max = int(humanity_set.get("max"))
+                        except (TypeError, ValueError, OverflowError):
+                            incoming_humanity_max = None
+                    baseline_missing = _needs_humanity_baseline(er)
+                    humanity_max_changed = (
+                        humanity_has_max
+                        and incoming_humanity_max is not None
+                        and (
+                            prev_humanity_max is None
+                            or incoming_humanity_max != prev_humanity_max
+                        )
+                    )
+                    if "cyberware_effects" in fields or humanity_has_max:
+                        _recompute_humanity_ceiling(
+                            er,
+                            reset_base=(
+                                humanity_max_changed
+                                or baseline_missing
+                            ),
+                            reset_base_max=(
+                                humanity_has_max
+                                and (baseline_missing or humanity_max_changed)
+                            ),
+                        )
                     _update_seriously_wounded(er)
                     # Enforce housing_shared_with invariants if set via fields
                     if "housing_shared_with" in fields:
@@ -413,11 +637,45 @@ def apply_game_state(game_state, agent_json, turn):
                 elif op == "cyberware":
                     action = op_data.get("action", "add")
                     value = op_data.get("value")
+                    if isinstance(value, str):
+                        value = value.strip()
                     if value:
-                        if action == "add" and value not in er["cyberware_effects"]:
-                            er["cyberware_effects"].append(value)
-                        elif action == "remove" and value in er["cyberware_effects"]:
-                            er["cyberware_effects"].remove(value)
+                        if _needs_humanity_baseline(er):
+                            # Establish baseline before mutating list so first explicit
+                            # add/remove applies only the new delta.
+                            _recompute_humanity_ceiling(er, reset_base=True)
+                        if action == "add":
+                            add_key = _normalize_cyberware_entry_name(value)
+                            if add_key and all(
+                                _normalize_cyberware_entry_name(existing) != add_key
+                                for existing in er["cyberware_effects"]
+                            ):
+                                er["cyberware_effects"].append(value)
+                                _recompute_humanity_ceiling(er)
+                        elif action == "remove":
+                            removed = False
+                            remove_entry_key = _normalize_cyberware_entry_name(value)
+                            if remove_entry_key:
+                                for idx, existing in enumerate(er["cyberware_effects"]):
+                                    if _normalize_cyberware_entry_name(existing) == remove_entry_key:
+                                        er["cyberware_effects"].pop(idx)
+                                        _recompute_humanity_ceiling(er)
+                                        removed = True
+                                        break
+
+                            # Broad fallback (base/alias) is only safe for unqualified input.
+                            # If multiple qualified variants share the same base, do not guess.
+                            if not removed and not _cyberware_has_qualifier(value):
+                                remove_key = _normalize_cyberware_name(value)
+                                if remove_key:
+                                    candidate_indices = [
+                                        idx
+                                        for idx, existing in enumerate(er["cyberware_effects"])
+                                        if _normalize_cyberware_name(existing) == remove_key
+                                    ]
+                                    if len(candidate_indices) == 1:
+                                        er["cyberware_effects"].pop(candidate_indices[0])
+                                        _recompute_humanity_ceiling(er)
 
                 elif op == "weapon_set":
                     er["weapons"] = copy.deepcopy(op_data.get("weapons", []))
@@ -510,6 +768,9 @@ def apply_game_state(game_state, agent_json, turn):
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
                 continue
+
+    # --- Post-ops ceiling pass (catches cyberware added via 'set' op) ---
+    _apply_ceiling_migration(game_state.get("edgerunners", {}))
 
     # --- IP tracking ops ---
     ip_ops = agent_json.get("ip_ops")
@@ -1614,7 +1875,7 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "housing_shared_with", "value": "<owner name>", "reason": "Moving in with V"}
   Share another edgerunner's housing (cost split evenly, auto-clears own housing). Set value to null to stop sharing.
 - {"edgerunner": "<name>", "op": "cyberware", "action": "add|remove", "value": "<cyberware name>"}
-  Install or remove cyberware (pair with humanity ops).
+  Install or remove cyberware. The backend automatically adjusts humanity max (−2 per standard piece, −4 per borgware, 0 for medical). Pair with a humanity op for the HL roll (current loss) — do NOT manually adjust humanity max via set.
 - {"edgerunner": "<name>", "op": "weapon_set", "weapons": [{"name": "Heavy Pistol", "damage": "3d6", "current_ammo": 8, "max_ammo": 8, "skill": "Handgun", "type": "ranged"}, ...]}
   Replace full weapons list (use during bootstrap or re-equip).
 - {"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}
@@ -2515,7 +2776,7 @@ YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with viscer
 Call report_combat_state every exchange, then write your narrative response.
 
 RULES REFERENCE:
-The Combat Ruleset document is your authoritative source for detailed tables and edge cases. Consult it for DV tables (§3), damage resolution (§12), critical injury tables (§15), cover HP (§16), vehicle combat (§18). The rules summarized below are for quick reference — defer to the Ruleset when in doubt.
+DV tables, weapon/armor stats, damage resolution, critical injury tables, cover HP, and Solo Combat Awareness allocation are resolved automatically by the backend. The Combat Ruleset document covers vehicle combat (§18), conditions (§17), and procedural edge cases. The rules summarized below are for quick reference.
 
 KEY RULES:
 - Initiative: REF + d10. Highest goes first. Ties reroll.
@@ -3338,13 +3599,13 @@ HACK_CONTRACT = """## Hack Mode — NET Encounter
 You are running a live netrunning encounter. A Netrunner has jacked into a target system over the NET.
 
 ### Your Role
-- Adjudicate netrunning encounters using the Hacking Rulebook as your authoritative rules source
+- Adjudicate netrunning encounters using the Hacking Rulebook for procedures and the backend for stat lookups
 - Describe the NET as an abstract digital landscape — data streams as light, ICE as presence/resistance, not literal rooms
 - Call `report_hack_state` after EVERY exchange
 - Set `hack_complete: true` when the hack ends (objective achieved, jacked out, or forced disconnect)
 
 ### Rules Reference
-The Hacking Rulebook document is your authoritative source for all netrunning mechanics. Consult it for: Cyberdeck stats and Cycle counts (§2), Quick Hack structure (§3), Full Run architecture design (§4), ICE behavioral types and stat blocks (§5), Alert thresholds and escalation (§6), NET Actions, Interface Abilities, Boosted Actions, and Handling ICE options (§7). The operational summary below covers how to *run* hack mode in this app — defer to the Rulebook for rules details, DVs, and stat blocks.
+The Hacking Rulebook document covers netrunning procedures: Quick Hack structure (§3), Full Run architecture design (§4), ICE behavioral types (§5), Alert thresholds and escalation (§6), NET Actions, Interface Abilities, Boosted Actions, and Handling ICE options (§7). Cyberdeck stats, program stats, hardware stats, and Black ICE stat blocks are resolved by the backend automatically. The operational summary below covers how to *run* hack mode in this app.
 
 ### Dice Mechanics (reference — resolved by resolve_mechanics tool)
 - Flat check: Interface + d10 vs DV. Must BEAT the DV.
@@ -3806,6 +4067,53 @@ def _apply_ice_effect_ops(state, resolver_state_ops, game_state=None):
             continue
 
 
+def _mark_forced_disconnect(state, summary=None):
+    """Apply a consistent forced-disconnect state transition.
+
+    Hack-only state: immediate encounter end (active=False).
+    Net-combat state: mark net track complete, but keep encounter active until
+    both combat and net tracks are complete.
+    """
+    if summary and not state.get("narrative_summary"):
+        state["narrative_summary"] = summary
+    state["_forced_disconnect"] = True
+
+    if "net_complete" in state:
+        state["net_complete"] = True
+    else:
+        state["active"] = False
+
+
+def _has_unconscious_condition(character_name, game_state=None, pipeline_state=None):
+    """Return True if character has an active unconscious condition marker."""
+    target = str(character_name or "").strip()
+    if not target:
+        return False
+
+    def _contains_unconscious(values):
+        if not isinstance(values, list):
+            return False
+        for cond in values:
+            if isinstance(cond, str) and "unconscious" in cond.lower():
+                return True
+        return False
+
+    # Persistent game_state conditions
+    if isinstance(game_state, dict):
+        er = game_state.get("edgerunners", {}).get(target, {})
+        if _contains_unconscious(er.get("conditions", [])):
+            return True
+
+    # Live character_state conditions
+    if isinstance(pipeline_state, dict):
+        cs_entry = pipeline_state.get("character_states", {}).get(target, {})
+        data = cs_entry.get("data", cs_entry) if isinstance(cs_entry, dict) else {}
+        if _contains_unconscious(data.get("conditions", [])):
+            return True
+
+    return False
+
+
 def _apply_single_ice_op(state, op, op_type):
     """Apply a single ICE effect op. Raises on bad data — caller catches."""
     if op_type == "program_destroy":
@@ -3843,8 +4151,7 @@ def _apply_single_ice_op(state, op, op_type):
         state["net_action_penalty"] = state.get("net_action_penalty", 0) + op.get("penalty", 1)
 
     elif op_type == "forced_jack_out":
-        state["narrative_summary"] = state.get("narrative_summary") or "Forced Jack Out — unsafe disconnect."
-        state["_forced_disconnect"] = True
+        _mark_forced_disconnect(state, summary="Forced Jack Out — unsafe disconnect.")
 
     elif op_type == "program_rez_damage":
         prog_name = op.get("program_name", "")
@@ -4127,21 +4434,33 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
     except (TypeError, ValueError, OverflowError):
         pass
 
-    # --- Forced disconnect: brain damage >= Netrunner max HP ---
+    # --- Forced disconnect: flatline from brain damage OR unconscious condition ---
     try:
         brain_damage = int(hack_state.get("brain_damage", 0))
-        if brain_damage > 0 and hack_state.get("active") and isinstance(game_state, dict):
+        if hack_state.get("active"):
             hacker_name = hack_state.get("hacker_name", "")
-            er = game_state.get("edgerunners", {}).get(hacker_name, {})
-            max_hp = int(er.get("hp", {}).get("max", 0))
-            current_hp = int(er.get("hp", {}).get("current", 999))
-            if max_hp > 0 and current_hp - brain_damage <= 0:
-                hack_state["active"] = False
-                hack_state["narrative_summary"] = (
-                    hack_state.get("narrative_summary")
-                    or f"{hacker_name} flatlined from brain damage — forced disconnect."
+            unconscious = _has_unconscious_condition(
+                hacker_name,
+                game_state=game_state if isinstance(game_state, dict) else None,
+            )
+
+            flatlined = False
+            if brain_damage > 0 and isinstance(game_state, dict):
+                er = game_state.get("edgerunners", {}).get(hacker_name, {})
+                max_hp = int(er.get("hp", {}).get("max", 0))
+                current_hp = int(er.get("hp", {}).get("current", 999))
+                flatlined = max_hp > 0 and (current_hp - brain_damage < 0)
+
+            if flatlined:
+                _mark_forced_disconnect(
+                    hack_state,
+                    summary=f"{hacker_name} flatlined from brain damage — forced disconnect."
                 )
-                hack_state["_forced_disconnect"] = True
+            elif unconscious:
+                _mark_forced_disconnect(
+                    hack_state,
+                    summary=f"{hacker_name} is unconscious — forced disconnect."
+                )
     except (TypeError, ValueError, OverflowError):
         pass
 
@@ -5428,18 +5747,24 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     nc["combat_complete"] = tool_input.get("combat_complete", nc.get("combat_complete", False))
     nc["net_complete"] = tool_input.get("net_complete", nc.get("net_complete", False))
     if nc.get("_forced_disconnect"):
-        nc["net_complete"] = True
+        _mark_forced_disconnect(nc)
 
-    # --- Forced disconnect on flatline only (after completion flags so it can't be overwritten) ---
+    # --- Forced disconnect on flatline or unconscious (after completion flags) ---
     try:
         netrunner_name = nc.get("netrunner", "")
-        if netrunner_name and not nc.get("net_complete") and isinstance(game_state, dict):
-            er = game_state.get("edgerunners", {}).get(netrunner_name, {})
-            current_hp = int(er.get("hp", {}).get("current", 999))
-            # Mortally wounded at 0 HP does not auto-disconnect; flatline does.
-            if current_hp < 0:
-                nc["net_complete"] = True
-                nc["_forced_disconnect"] = True
+        if netrunner_name and not nc.get("net_complete"):
+            current_hp = 999
+            if isinstance(game_state, dict):
+                er = game_state.get("edgerunners", {}).get(netrunner_name, {})
+                current_hp = int(er.get("hp", {}).get("current", 999))
+            unconscious = _has_unconscious_condition(
+                netrunner_name,
+                game_state=game_state if isinstance(game_state, dict) else None,
+                pipeline_state=pipeline_state,
+            )
+            # Flatline (HP below 0) or unconscious state forces disconnect.
+            if current_hp < 0 or unconscious:
+                _mark_forced_disconnect(nc)
     except (TypeError, ValueError, OverflowError):
         pass
 
@@ -5738,7 +6063,7 @@ You decide:
 The backend will resolve all dice rolls deterministically. Do NOT roll dice or calculate outcomes.
 
 RULES REFERENCE:
-Consult the Combat Ruleset for DV tables (§3), damage rules (§12), critical injury tables (§15), cover (§16).
+DV tables, damage resolution, critical injury tables, and cover HP are resolved automatically by the backend. Consult the Combat Ruleset for vehicle combat (§18) and conditions (§17).
 
 KEY RULES:
 - Initiative: REF + d10. Highest first.

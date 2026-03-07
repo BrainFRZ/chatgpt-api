@@ -1201,5 +1201,297 @@ class TestBrainDamageStateOps(unittest.TestCase):
         self.assertNotIn("DEREZZED", hit_result["formatted"])
 
 
+class TestNewTableCompleteness(unittest.TestCase):
+    """Validate structural completeness of new reference tables."""
+
+    def test_program_stats_fields(self):
+        from game_systems.cpred_tables import PROGRAM_STATS
+        valid_categories = {"booster", "defender", "attacker"}
+        for name, p in PROGRAM_STATS.items():
+            self.assertIn(p["category"], valid_categories, f"{name} bad category")
+            for field in ("atk", "def", "rez", "effect", "cost"):
+                self.assertIn(field, p, f"{name} missing {field}")
+
+    def test_cyberdeck_stats(self):
+        from game_systems.cpred_tables import CYBERDECK_STATS
+        for quality in ("Poor", "Standard", "Excellent"):
+            self.assertIn(quality, CYBERDECK_STATS)
+            for field in ("slots", "cycles", "cost"):
+                self.assertIn(field, CYBERDECK_STATS[quality])
+
+    def test_cyberware_table_ceiling_costs(self):
+        from game_systems.cpred_tables import CYBERWARE_TABLE
+        for name, cw in CYBERWARE_TABLE.items():
+            self.assertIn("ceiling_cost", cw, f"{name} missing ceiling_cost")
+            if cw["category"] == "borgware":
+                self.assertEqual(cw["ceiling_cost"], 4, f"{name} borgware should be 4")
+        # Medical exempt
+        self.assertEqual(CYBERWARE_TABLE["Contraceptive Implant"]["ceiling_cost"], 0)
+
+    def test_skill_stat_map_valid_stats(self):
+        from game_systems.cpred_tables import SKILL_STAT_MAP, X2_SKILLS
+        valid_stats = {"INT", "WILL", "COOL", "EMP", "TECH", "REF", "DEX", "BODY", "MOVE", "LUCK"}
+        for skill, stat in SKILL_STAT_MAP.items():
+            self.assertIn(stat, valid_stats, f"{skill} has invalid stat {stat}")
+        # X2 skills should be a subset of the skill map
+        for skill in X2_SKILLS:
+            self.assertIn(skill, SKILL_STAT_MAP, f"X2 skill {skill} not in SKILL_STAT_MAP")
+
+    def test_netrunner_actions_per_rank(self):
+        from game_systems.cpred_tables import NETRUNNER_ACTIONS_PER_RANK
+        for rank in range(1, 11):
+            self.assertIn(rank, NETRUNNER_ACTIONS_PER_RANK, f"rank {rank} missing")
+
+    def test_ip_cost_tables(self):
+        from game_systems.cpred_tables import IP_COST_TABLES
+        for tier in ("typical", "difficult", "role"):
+            self.assertIn(tier, IP_COST_TABLES)
+            for level in range(1, 11):
+                self.assertIn(level, IP_COST_TABLES[tier], f"{tier} missing level {level}")
+
+
+class TestHumanityCeiling(unittest.TestCase):
+    """Test humanity ceiling enforcement on cyberware add/remove."""
+
+    def _make_er(self, humanity_current=60, humanity_max=60):
+        return {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": humanity_current, "max": humanity_max},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 5000,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+            "weapons": [],
+            "seriously_wounded": False,
+        }
+
+    def _apply(self, game_state, ops):
+        from game_systems.cpred import apply_game_state
+        agent_json = {"edgerunner_ops": ops}
+        apply_game_state(game_state, agent_json, 1)
+
+    def test_add_standard_cyberware_reduces_max(self):
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Neural Link"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+
+    def test_add_borgware_reduces_max_by_4(self):
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Linear Frame Sigma"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 56)
+
+    def test_add_medical_no_ceiling_change(self):
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Contraceptive Implant"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_add_alias_variant_deduplicated(self):
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cyberaudio Suite"}])
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "cyberaudio"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], ["Cyberaudio Suite"])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+
+    def test_add_parenthetical_variants_remain_distinct(self):
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cybereye (Left)"}])
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cybereye (Right)"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], ["Cybereye (Left)", "Cybereye (Right)"])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 56)
+
+    def test_current_clamped_when_max_drops(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=59, humanity_max=60)}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Neural Link"}])
+        # max is 58, current was 59, should clamp to 58
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 58)
+
+    def test_remove_restores_max(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Neural Link"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+        # Current should NOT auto-raise (therapy still required)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 50)
+
+    def test_remove_parenthetical_variant_restores_max(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Cybereye (Right)"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Cybereye"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_remove_alias_variant_restores_max(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Cyberaudio Suite"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "cyberaudio"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_remove_qualified_variant_removes_correct_entry(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=56)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Cybereye (Left)", "Cybereye (Right)"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Cybereye (Right)"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], ["Cybereye (Left)"])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+
+    def test_remove_unqualified_variant_with_multiple_matches_is_noop(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=56)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Cybereye (Left)", "Cybereye (Right)"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Cybereye"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], ["Cybereye (Left)", "Cybereye (Right)"])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 56)
+
+    def test_remove_unqualified_variant_with_single_match_removes(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Cybereye (Left)"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Cybereye"}])
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_remove_capped_at_base_max(self):
+        """Removing cyberware cannot push max above the original base."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=59)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Neural Link"}])
+        # 59 + 2 = 61, but base_max is 60, so capped to 60
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_therapy_capped_at_ceiling(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=50, humanity_max=58)}}
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        self._apply(gs, [{"edgerunner": "V", "op": "therapy", "change": 20}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 58)
+
+    def test_max_floor_at_zero(self):
+        """Humanity max cannot go below 0 even with many cyberware pieces."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=4, humanity_max=4)}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Linear Frame Sigma"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 0)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 0)
+
+    def test_name_matching_with_parenthetical(self):
+        """Cyberware names like 'Cybereye (Right)' should match 'Cybereye'."""
+        gs = {"edgerunners": {"V": self._make_er()}}
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cybereye (Right)"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+
+    def test_name_matching_alias(self):
+        """'Cyberaudio' should match 'Cyberaudio Suite'."""
+        from game_systems.cpred import _cyberware_ceiling_cost
+        self.assertEqual(_cyberware_ceiling_cost("Cyberaudio"), 2)
+
+    def test_migration_applies_ceiling_once(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=60, humanity_max=60)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link", "Linear Frame Sigma"]
+        self._apply(gs, [])  # no ops, just trigger migration
+        # Migration should preserve existing max and only establish a baseline.
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 60)
+        self.assertTrue(gs["edgerunners"]["V"]["_humanity_ceiling_migrated"])
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 6)
+        # Second call should NOT reduce again
+        self._apply(gs, [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_migration_then_add_no_double_count(self):
+        """Pre-existing cyberware migrated, then new cyberware added in same call."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=60, humanity_max=60)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link"]
+        # Migration preserves existing max, then add applies delta for the new install.
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cybereye"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+
+    def test_bootstrap_via_set_applies_ceiling(self):
+        """Cyberware added via 'set' op should get ceiling applied in the same call."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=60, humanity_max=60)}}
+        self._apply(gs, [{"edgerunner": "V", "op": "set", "fields": {
+            "humanity": {"current": 60, "max": 60},
+            "cyberware_effects": ["Neural Link", "Interface Plugs"],
+        }}])
+        # Set with explicit humanity max should rebase and preserve that max.
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 4)
+
+    def test_set_replaces_cyberware_and_recomputes_ceiling_for_migrated_character(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=56, humanity_max=56)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link", "Cybereye"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [{"edgerunner": "V", "op": "set", "fields": {
+            "cyberware_effects": ["Linear Frame Sigma"],
+        }}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 56)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 56)
+
+    def test_migration_ignores_non_string_cyberware_entries(self):
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=60, humanity_max=60)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = [None, "Neural Link", 123, ""]
+        self._apply(gs, [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["current"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["cyberware_effects"], ["Neural Link"])
+
+    def test_set_humanity_max_rebases_baseline_without_cyberware_set(self):
+        """Changing humanity max via set must update baseline used by later cyberware ops."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=56, humanity_max=56)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link", "Cybereye"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        gs["edgerunners"]["V"]["_humanity_base_ceiling_total"] = 4
+        self._apply(gs, [{"edgerunner": "V", "op": "set", "fields": {
+            "humanity": {"current": 80, "max": 80},
+        }}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 80)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 80)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 4)
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Interface Plugs"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 78)
+
+    def test_set_echo_humanity_max_does_not_rebase_baseline(self):
+        """Echoing unchanged humanity.max in set should not lower baseline metadata."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=40, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link"]
+        gs["edgerunners"]["V"]["_humanity_ceiling_migrated"] = True
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        gs["edgerunners"]["V"]["_humanity_base_ceiling_total"] = 0
+        self._apply(gs, [{"edgerunner": "V", "op": "set", "fields": {
+            "humanity": {"current": 40, "max": 58},
+        }}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 0)
+        self._apply(gs, [{"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Neural Link"}])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 60)
+
+    def test_migration_preserves_legacy_base_max_semantics(self):
+        """Legacy entries with only _humanity_base_max should not inflate on migration."""
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=40, humanity_max=58)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = ["Neural Link"]
+        gs["edgerunners"]["V"]["_humanity_base_max"] = 60
+        self._apply(gs, [])
+        self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 60)
+        self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

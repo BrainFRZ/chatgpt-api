@@ -23,6 +23,9 @@ import random
 import sys
 import unittest
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from game_systems.cpred import (
@@ -273,44 +276,43 @@ class TestMultiRoundApplyHackState(unittest.TestCase):
         result = cpred_build_hack_injection(hs)
         self.assertIsInstance(result, str)
 
-    def test_fuzz_multi_round_random_inputs(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_multi_round_random_inputs(self, seed):
         """3-10 random applies per state, 500 iterations."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (3001, 3002, 3003):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(500):
-                        hs = cpred_init_hack_state(tier=random.choice(["full_run", "quick_hack"]))
-                        rounds = random.randint(3, 10)
-                        for _ in range(rounds):
-                            ti = _rand_tool_input(HACK_FIELDS)
-                            cpred_apply_hack_state(hs, ti)
-                        # Must survive injection after N rounds
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(hs.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(500):
+                hs = cpred_init_hack_state(tier=random.choice(["full_run", "quick_hack"]))
+                rounds = random.randint(3, 10)
+                for _ in range(rounds):
+                    ti = _rand_tool_input(HACK_FIELDS)
+                    cpred_apply_hack_state(hs, ti)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(hs.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_fuzz_multi_round_with_system_map_injection(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_multi_round_with_system_map_injection(self, seed):
         """Multi-round with system_map set at random round."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (3010, 3011):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(500):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        map_round = random.randint(0, 7)
-                        for r in range(8):
-                            ti = _rand_tool_input(HACK_FIELDS)
-                            if r == map_round:
-                                ti["hack_state"] = ti.get("hack_state", {})
-                                ti["hack_state"]["system_map"] = random.choice(MALFORMED_SYSTEM_MAPS)
-                            cpred_apply_hack_state(hs, ti)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(500):
+                hs = cpred_init_hack_state(tier="full_run")
+                map_round = random.randint(0, 7)
+                for r in range(8):
+                    ti = _rand_tool_input(HACK_FIELDS)
+                    if r == map_round:
+                        ti["hack_state"] = ti.get("hack_state", {})
+                        ti["hack_state"]["system_map"] = random.choice(MALFORMED_SYSTEM_MAPS)
+                    cpred_apply_hack_state(hs, ti)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -318,23 +320,23 @@ class TestMultiRoundApplyHackState(unittest.TestCase):
 class TestMultiRoundApplyNetCombat(unittest.TestCase):
     """Apply N rounds of random tool_input to net_combat. No crashes allowed."""
 
-    def test_fuzz_multi_round_random_inputs(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_multi_round_random_inputs(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (4001, 4002, 4003):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(500):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = _minimal_pipeline_state(nc)
-                        rounds = random.randint(3, 10)
-                        for _ in range(rounds):
-                            ti = _rand_tool_input(HACK_FIELDS)
-                            cpred_apply_net_combat_state(ps, ti)
-                        combat = _minimal_combat()
-                        result = cpred_build_net_combat_injection(combat, nc, ps)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(nc.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(500):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = _minimal_pipeline_state(nc)
+                rounds = random.randint(3, 10)
+                for _ in range(rounds):
+                    ti = _rand_tool_input(HACK_FIELDS)
+                    cpred_apply_net_combat_state(ps, ti)
+                combat = _minimal_combat()
+                result = cpred_build_net_combat_injection(combat, nc, ps)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(nc.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -372,42 +374,37 @@ class TestFullLifecycle(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertIn("Target", result)
 
-    def test_fuzz_full_lifecycle(self):
+    @settings(max_examples=25, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_fuzz_full_lifecycle(self, seed):
         """Full lifecycle with random inputs at every stage."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (5001, 5002, 5003, 5004):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(300):
-                        # Phase 1: hack mode
-                        hs = cpred_init_hack_state(
-                            tier=random.choice(["full_run", "quick_hack"]),
-                            sr=random.choice([1, 2, 3, 4, 5]),
-                        )
-                        hack_rounds = random.randint(1, 6)
-                        for _ in range(hack_rounds):
-                            ti = _rand_tool_input(HACK_FIELDS)
-                            cpred_apply_hack_state(hs, ti)
-                        # Optionally inject system_map
-                        if random.random() < 0.5:
-                            hs["system_map"] = random.choice(MALFORMED_SYSTEM_MAPS)
-                        # Phase 2: transition
-                        try:
-                            nc = cpred_init_net_combat_from_hack(hs)
-                        except (TypeError, ValueError):
-                            continue  # bad interface_rank — expected
-                        ps = _minimal_pipeline_state(nc)
-                        # Phase 3: net_combat rounds
-                        nc_rounds = random.randint(1, 6)
-                        for _ in range(nc_rounds):
-                            ti = _rand_tool_input(HACK_FIELDS)
-                            cpred_apply_net_combat_state(ps, ti)
-                        # Phase 4: injection
-                        combat = _minimal_combat() if random.random() < 0.7 else None
-                        result = cpred_build_net_combat_injection(combat, nc, ps)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(nc.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(300):
+                hs = cpred_init_hack_state(
+                    tier=random.choice(["full_run", "quick_hack"]),
+                    sr=random.choice([1, 2, 3, 4, 5]),
+                )
+                hack_rounds = random.randint(1, 6)
+                for _ in range(hack_rounds):
+                    ti = _rand_tool_input(HACK_FIELDS)
+                    cpred_apply_hack_state(hs, ti)
+                if random.random() < 0.5:
+                    hs["system_map"] = random.choice(MALFORMED_SYSTEM_MAPS)
+                try:
+                    nc = cpred_init_net_combat_from_hack(hs)
+                except (TypeError, ValueError):
+                    continue
+                ps = _minimal_pipeline_state(nc)
+                nc_rounds = random.randint(1, 6)
+                for _ in range(nc_rounds):
+                    ti = _rand_tool_input(HACK_FIELDS)
+                    cpred_apply_net_combat_state(ps, ti)
+                combat = _minimal_combat() if random.random() < 0.7 else None
+                result = cpred_build_net_combat_injection(combat, nc, ps)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(nc.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -419,44 +416,44 @@ class TestFullLifecycle(unittest.TestCase):
 class TestRevealedNodesInvariants(unittest.TestCase):
     """After apply, key invariants must hold."""
 
-    def test_revealed_always_superset_of_visited(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_revealed_always_superset_of_visited(self, seed):
         """If both are lists, every visited node must be in revealed."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (6001, 6002):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        visited = [f"Node{i}" for i in range(random.randint(1, 8))]
-                        ti = {"hack_state": {
-                            "nodes_visited": visited,
-                            "revealed_nodes": random.choice([
-                                visited[:1], visited[:2], visited, [], None
-                            ]),
-                            "alert_level": 0,
-                        }}
-                        cpred_apply_hack_state(hs, ti)
-                        r = hs.get("revealed_nodes")
-                        v = hs.get("nodes_visited")
-                        if isinstance(r, list) and isinstance(v, list):
-                            for node in v:
-                                self.assertIn(node, r, f"visited {node} missing from revealed")
+            random.seed(seed)
+            for _ in range(1000):
+                hs = cpred_init_hack_state(tier="full_run")
+                visited = [f"Node{i}" for i in range(random.randint(1, 8))]
+                ti = {"hack_state": {
+                    "nodes_visited": visited,
+                    "revealed_nodes": random.choice([
+                        visited[:1], visited[:2], visited, [], None
+                    ]),
+                    "alert_level": 0,
+                }}
+                cpred_apply_hack_state(hs, ti)
+                r = hs.get("revealed_nodes")
+                v = hs.get("nodes_visited")
+                if isinstance(r, list) and isinstance(v, list):
+                    for node in v:
+                        self.assertIn(node, r, f"visited {node} missing from revealed")
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_revealed_always_list_after_apply(self):
+    @settings(max_examples=25, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_revealed_always_list_after_apply(self, seed):
         """revealed_nodes must always be a list after apply, no matter the input."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (6010, 6011, 6012):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        ti = {"hack_state": {"revealed_nodes": random.choice(ATOMS + MALFORMED_REVEALED_NODES)}}
-                        cpred_apply_hack_state(hs, ti)
-                        self.assertIsInstance(hs["revealed_nodes"], list)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier="full_run")
+                ti = {"hack_state": {"revealed_nodes": random.choice(ATOMS + MALFORMED_REVEALED_NODES)}}
+                cpred_apply_hack_state(hs, ti)
+                self.assertIsInstance(hs["revealed_nodes"], list)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -476,44 +473,44 @@ class TestRevealedNodesInvariants(unittest.TestCase):
                                     f"revealed shrank at round {i}")
             prev_size = current_size
 
-    def test_net_combat_revealed_always_list_after_apply(self):
+    @settings(max_examples=25, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_net_combat_revealed_always_list_after_apply(self, seed):
         """Same invariant for net_combat."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (6020, 6021, 6022):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = _minimal_pipeline_state(nc)
-                        ti = {"hack_state": {"revealed_nodes": random.choice(ATOMS + MALFORMED_REVEALED_NODES)}}
-                        cpred_apply_net_combat_state(ps, ti)
-                        self.assertIsInstance(nc["revealed_nodes"], list)
+            random.seed(seed)
+            for _ in range(2000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = _minimal_pipeline_state(nc)
+                ti = {"hack_state": {"revealed_nodes": random.choice(ATOMS + MALFORMED_REVEALED_NODES)}}
+                cpred_apply_net_combat_state(ps, ti)
+                self.assertIsInstance(nc["revealed_nodes"], list)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_net_combat_revealed_superset_of_visited(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_net_combat_revealed_superset_of_visited(self, seed):
         """net_combat: visited ⊆ revealed."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (6030, 6031):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = _minimal_pipeline_state(nc)
-                        visited = [f"Node{i}" for i in range(random.randint(1, 8))]
-                        ti = {"hack_state": {
-                            "nodes_visited": visited,
-                            "revealed_nodes": visited[:1],
-                            "alert_level": 0,
-                        }}
-                        cpred_apply_net_combat_state(ps, ti)
-                        r = nc.get("revealed_nodes")
-                        v = nc.get("nodes_visited")
-                        if isinstance(r, list) and isinstance(v, list):
-                            for node in v:
-                                self.assertIn(node, r)
+            random.seed(seed)
+            for _ in range(1000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = _minimal_pipeline_state(nc)
+                visited = [f"Node{i}" for i in range(random.randint(1, 8))]
+                ti = {"hack_state": {
+                    "nodes_visited": visited,
+                    "revealed_nodes": visited[:1],
+                    "alert_level": 0,
+                }}
+                cpred_apply_net_combat_state(ps, ti)
+                r = nc.get("revealed_nodes")
+                v = nc.get("nodes_visited")
+                if isinstance(r, list) and isinstance(v, list):
+                    for node in v:
+                        self.assertIn(node, r)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -720,46 +717,46 @@ class TestMalformedActivePrograms(unittest.TestCase):
 class TestAllFieldsCorrupted(unittest.TestCase):
     """Set every field to garbage simultaneously."""
 
-    def test_hack_all_fields_garbage(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_hack_all_fields_garbage(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (9001, 9002, 9003):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        ti = {"hack_state": {}}
-                        for field in HACK_FIELDS:
-                            ti["hack_state"][field] = random.choice(
-                                ATOMS + EXTREME_STRINGS[:5] + BOUNDARY_NUMS[:5]
-                                + MALFORMED_REVEALED_NODES[:5]
-                            )
-                        cpred_apply_hack_state(hs, ti)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(hs.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(1000):
+                hs = cpred_init_hack_state(tier="full_run")
+                ti = {"hack_state": {}}
+                for field in HACK_FIELDS:
+                    ti["hack_state"][field] = random.choice(
+                        ATOMS + EXTREME_STRINGS[:5] + BOUNDARY_NUMS[:5]
+                        + MALFORMED_REVEALED_NODES[:5]
+                    )
+                cpred_apply_hack_state(hs, ti)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(hs.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_net_combat_all_fields_garbage(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_net_combat_all_fields_garbage(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (9010, 9011, 9012):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = _minimal_pipeline_state(nc)
-                        ti = {"hack_state": {}}
-                        for field in HACK_FIELDS:
-                            ti["hack_state"][field] = random.choice(
-                                ATOMS + EXTREME_STRINGS[:5] + BOUNDARY_NUMS[:5]
-                                + MALFORMED_REVEALED_NODES[:5]
-                            )
-                        cpred_apply_net_combat_state(ps, ti)
-                        result = cpred_build_net_combat_injection(_minimal_combat(), nc, ps)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(nc.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(1000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = _minimal_pipeline_state(nc)
+                ti = {"hack_state": {}}
+                for field in HACK_FIELDS:
+                    ti["hack_state"][field] = random.choice(
+                        ATOMS + EXTREME_STRINGS[:5] + BOUNDARY_NUMS[:5]
+                        + MALFORMED_REVEALED_NODES[:5]
+                    )
+                cpred_apply_net_combat_state(ps, ti)
+                result = cpred_build_net_combat_injection(_minimal_combat(), nc, ps)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(nc.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -821,64 +818,59 @@ class TestBoundaryNumericValues(unittest.TestCase):
 class TestJsonSerializationRoundTrip(unittest.TestCase):
     """After any apply, the state must survive json.dumps (critical for SSE)."""
 
-    def test_hack_state_serializable_after_random_apply(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_hack_state_serializable_after_random_apply(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (10001, 10002, 10003):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        ti = _rand_tool_input(HACK_FIELDS)
-                        cpred_apply_hack_state(hs, ti)
-                        # Must be JSON-serializable
-                        try:
-                            serialized = json.dumps(hs)
-                            self.assertIsInstance(serialized, str)
-                            # Round-trip
-                            deserialized = json.loads(serialized)
-                            self.assertIsInstance(deserialized, dict)
-                        except (TypeError, ValueError, OverflowError):
-                            # Acceptable: float('nan'), float('inf'), etc. are not JSON-safe
-                            # Verify the issue is actually a non-serializable value
-                            pass
+            random.seed(seed)
+            for _ in range(1000):
+                hs = cpred_init_hack_state(tier="full_run")
+                ti = _rand_tool_input(HACK_FIELDS)
+                cpred_apply_hack_state(hs, ti)
+                try:
+                    serialized = json.dumps(hs)
+                    self.assertIsInstance(serialized, str)
+                    deserialized = json.loads(serialized)
+                    self.assertIsInstance(deserialized, dict)
+                except (TypeError, ValueError, OverflowError):
+                    pass
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_net_combat_serializable_after_random_apply(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_net_combat_serializable_after_random_apply(self, seed):
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (10010, 10011, 10012):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
-                        ps = _minimal_pipeline_state(nc)
-                        ti = _rand_tool_input(HACK_FIELDS)
-                        cpred_apply_net_combat_state(ps, ti)
-                        try:
-                            serialized = json.dumps(nc)
-                            self.assertIsInstance(serialized, str)
-                        except (TypeError, ValueError, OverflowError):
-                            pass
+            random.seed(seed)
+            for _ in range(1000):
+                nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
+                ps = _minimal_pipeline_state(nc)
+                ti = _rand_tool_input(HACK_FIELDS)
+                cpred_apply_net_combat_state(ps, ti)
+                try:
+                    serialized = json.dumps(nc)
+                    self.assertIsInstance(serialized, str)
+                except (TypeError, ValueError, OverflowError):
+                    pass
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_injection_output_always_string_after_any_state(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_injection_output_always_string_after_any_state(self, seed):
         """Injection output is always a string, even with non-serializable state."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (10020, 10021):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(1000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        # Set fields to potentially non-serializable values
-                        for field in HACK_FIELDS:
-                            if random.random() < 0.3:
-                                hs[field] = random.choice(ATOMS + BOUNDARY_NUMS)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
+            random.seed(seed)
+            for _ in range(1000):
+                hs = cpred_init_hack_state(tier="full_run")
+                for field in HACK_FIELDS:
+                    if random.random() < 0.3:
+                        hs[field] = random.choice(ATOMS + BOUNDARY_NUMS)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -1069,31 +1061,31 @@ class TestCrossProductFuzz(unittest.TestCase):
         finally:
             logging.disable(logging.NOTSET)
 
-    def test_apply_then_inject_quad_corruption(self):
+    @settings(max_examples=20, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_apply_then_inject_quad_corruption(self, seed):
         """Apply with all four dimensions corrupted, then inject."""
         logging.disable(logging.CRITICAL)
         try:
-            for seed in (11010, 11011):
-                random.seed(seed)
-                with self.subTest(seed=seed):
-                    for _ in range(2000):
-                        hs = cpred_init_hack_state(tier="full_run")
-                        ti = {"hack_state": {
-                            "revealed_nodes": random.choice(MALFORMED_REVEALED_NODES),
-                            "nodes_visited": random.choice(MALFORMED_REVEALED_NODES),
-                            "ice_status": random.choice(MALFORMED_ICE_STATUS),
-                            "active_programs": random.choice(MALFORMED_ACTIVE_PROGRAMS),
-                            "system_map": random.choice(MALFORMED_SYSTEM_MAPS[:10]),
-                            "alert_level": random.choice(ATOMS),
-                            "current_node": random.choice(ATOMS + EXTREME_STRINGS[:3]),
-                            "brain_damage": random.choice(ATOMS),
-                            "tar_stacks": random.choice(ATOMS),
-                            "trace_progress": random.choice(ATOMS),
-                        }}
-                        cpred_apply_hack_state(hs, ti)
-                        result = cpred_build_hack_injection(hs)
-                        self.assertIsInstance(result, str)
-                        self.assertIsInstance(hs.get("revealed_nodes"), list)
+            random.seed(seed)
+            for _ in range(2000):
+                hs = cpred_init_hack_state(tier="full_run")
+                ti = {"hack_state": {
+                    "revealed_nodes": random.choice(MALFORMED_REVEALED_NODES),
+                    "nodes_visited": random.choice(MALFORMED_REVEALED_NODES),
+                    "ice_status": random.choice(MALFORMED_ICE_STATUS),
+                    "active_programs": random.choice(MALFORMED_ACTIVE_PROGRAMS),
+                    "system_map": random.choice(MALFORMED_SYSTEM_MAPS[:10]),
+                    "alert_level": random.choice(ATOMS),
+                    "current_node": random.choice(ATOMS + EXTREME_STRINGS[:3]),
+                    "brain_damage": random.choice(ATOMS),
+                    "tar_stacks": random.choice(ATOMS),
+                    "trace_progress": random.choice(ATOMS),
+                }}
+                cpred_apply_hack_state(hs, ti)
+                result = cpred_build_hack_injection(hs)
+                self.assertIsInstance(result, str)
+                self.assertIsInstance(hs.get("revealed_nodes"), list)
         finally:
             logging.disable(logging.NOTSET)
 
@@ -1101,163 +1093,168 @@ class TestCrossProductFuzz(unittest.TestCase):
 class TestUncommittedHackStateFuzz(unittest.TestCase):
     """Seeded fuzzing for newly-added apply_hack_state branches."""
 
-    def test_resolver_ops_seeded(self):
-        for seed in range(250):
-            rng = random.Random(seed)
-            hs = cpred_init_hack_state(hacker_name="V", sr=rng.randint(2, 5), interface_rank=6)
-            hs["active_programs"] = [{"name": "Sword", "status": "active"}, {"name": "Armor", "status": "active"}]
-            hs["ice_status"] = {
-                "Core": {"name": "Hellhound", "behavior": "trace", "rez_current": 10, "rez_max": 10, "status": "active"}
+    @settings(max_examples=250, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_resolver_ops_seeded(self, seed):
+        rng = random.Random(seed)
+        hs = cpred_init_hack_state(hacker_name="V", sr=rng.randint(2, 5), interface_rank=6)
+        hs["active_programs"] = [{"name": "Sword", "status": "active"}, {"name": "Armor", "status": "active"}]
+        hs["ice_status"] = {
+            "Core": {"name": "Hellhound", "behavior": "trace", "rez_current": 10, "rez_max": 10, "status": "active"}
+        }
+        tar_initial = rng.randint(0, 3)
+        include_tar_in_input = rng.choice([True, False])
+        tool_input = {
+            "hack_state": {
+                "current_node": "Core",
+                "nodes_visited": ["Gateway", "Core"],
+                "revealed_nodes": ["Gateway"],
+                "net_actions_used": 0,
             }
-            tar_initial = rng.randint(0, 3)
-            include_tar_in_input = rng.choice([True, False])
-            tool_input = {
-                "hack_state": {
-                    "current_node": "Core",
-                    "nodes_visited": ["Gateway", "Core"],
-                    "revealed_nodes": ["Gateway"],
-                    "net_actions_used": 0,
-                }
-            }
+        }
+        if include_tar_in_input:
+            tool_input["hack_state"]["tar_stacks"] = tar_initial
+        rez_damage = rng.randint(0, 15)
+        resolver_ops = [
+            {"op": "program_deactivate", "program_name": "Sword"},
+            {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
+        ]
+        if rng.choice([True, False]):
+            resolver_ops.append({"op": "tar_consumed"})
+
+        before_rez = hs["ice_status"]["Core"]["rez_current"]
+        cpred_apply_hack_state(hs, tool_input, resolver_state_ops=resolver_ops)
+
+        self.assertIsInstance(hs.get("revealed_nodes"), list, f"seed={seed}")
+        self.assertEqual(hs["active_programs"][0]["status"], "deactivated", f"seed={seed}")
+        self.assertGreaterEqual(hs["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
+        self.assertLessEqual(hs["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
+        if any(op.get("op") == "tar_consumed" for op in resolver_ops):
+            self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
+        else:
             if include_tar_in_input:
-                tool_input["hack_state"]["tar_stacks"] = tar_initial
-            rez_damage = rng.randint(0, 15)
-            resolver_ops = [
-                {"op": "program_deactivate", "program_name": "Sword"},
-                {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
-            ]
-            if rng.choice([True, False]):
-                resolver_ops.append({"op": "tar_consumed"})
-
-            before_rez = hs["ice_status"]["Core"]["rez_current"]
-            cpred_apply_hack_state(hs, tool_input, resolver_state_ops=resolver_ops)
-
-            self.assertIsInstance(hs.get("revealed_nodes"), list, f"seed={seed}")
-            self.assertEqual(hs["active_programs"][0]["status"], "deactivated", f"seed={seed}")
-            self.assertGreaterEqual(hs["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
-            self.assertLessEqual(hs["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
-            if any(op.get("op") == "tar_consumed" for op in resolver_ops):
-                self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
+                self.assertEqual(hs["tar_stacks"], tar_initial, f"seed={seed}")
             else:
-                if include_tar_in_input:
-                    self.assertEqual(hs["tar_stacks"], tar_initial, f"seed={seed}")
-                else:
-                    self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
+                self.assertEqual(hs["tar_stacks"], 0, f"seed={seed}")
 
-    def test_forced_disconnect_seeded(self):
-        for seed in range(220):
-            rng = random.Random(seed)
-            max_hp = rng.randint(10, 50)
-            current_hp = rng.randint(0, max_hp)
-            bd = rng.randint(1, 60)
-            hs = cpred_init_hack_state(hacker_name="V")
-            game_state = {"edgerunners": {"V": {"hp": {"current": current_hp, "max": max_hp}}}}
-            cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 0}}, resolver_state_ops=[
-                {"op": "brain_damage", "change": -bd}
-            ], game_state=game_state)
-            expected_disconnect = current_hp - bd <= 0
-            self.assertEqual(bool(hs.get("_forced_disconnect")), expected_disconnect, f"seed={seed}")
-            self.assertEqual(hs["active"], not expected_disconnect, f"seed={seed}")
+    @settings(max_examples=220, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_forced_disconnect_seeded(self, seed):
+        rng = random.Random(seed)
+        max_hp = rng.randint(10, 50)
+        current_hp = rng.randint(0, max_hp)
+        bd = rng.randint(1, 60)
+        hs = cpred_init_hack_state(hacker_name="V")
+        game_state = {"edgerunners": {"V": {"hp": {"current": current_hp, "max": max_hp}}}}
+        cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 0}}, resolver_state_ops=[
+            {"op": "brain_damage", "change": -bd}
+        ], game_state=game_state)
+        expected_disconnect = current_hp - bd < 0
+        self.assertEqual(bool(hs.get("_forced_disconnect")), expected_disconnect, f"seed={seed}")
+        self.assertEqual(hs["active"], not expected_disconnect, f"seed={seed}")
 
-    def test_alert_autospawn_seeded(self):
-        for seed in range(180):
-            rng = random.Random(seed)
-            hs = cpred_init_hack_state(sr=rng.randint(2, 5), interface_rank=6)
-            hs["_prev_alert_level"] = rng.randint(0, 4)
-            new_alert = rng.randint(5, 8)
-            tool_input = {
-                "hack_state": {
-                    "alert_level": new_alert,
-                    "ice_status": {},
-                    "current_node": f"Node{seed}",
-                    "nodes_visited": ["Gateway"],
-                    "revealed_nodes": ["Gateway"],
-                    "net_actions_used": 0,
-                    "trace_progress": 0,
-                }
+    @settings(max_examples=180, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_alert_autospawn_seeded(self, seed):
+        rng = random.Random(seed)
+        hs = cpred_init_hack_state(sr=rng.randint(2, 5), interface_rank=6)
+        hs["_prev_alert_level"] = rng.randint(0, 4)
+        new_alert = rng.randint(5, 8)
+        tool_input = {
+            "hack_state": {
+                "alert_level": new_alert,
+                "ice_status": {},
+                "current_node": f"Node{seed}",
+                "nodes_visited": ["Gateway"],
+                "revealed_nodes": ["Gateway"],
+                "net_actions_used": 0,
+                "trace_progress": 0,
             }
-            cpred_apply_hack_state(hs, tool_input, resolver_state_ops=[])
-            self.assertIn("Gateway_Trace", hs.get("ice_status", {}), f"seed={seed}")
-            if new_alert >= 7:
-                self.assertIn(f"Node{seed}_Convergence", hs.get("ice_status", {}), f"seed={seed}")
+        }
+        cpred_apply_hack_state(hs, tool_input, resolver_state_ops=[])
+        self.assertIn("Gateway_Trace", hs.get("ice_status", {}), f"seed={seed}")
+        if new_alert >= 7:
+            self.assertIn(f"Node{seed}_Convergence", hs.get("ice_status", {}), f"seed={seed}")
 
 
 class TestUncommittedNetCombatStateFuzz(unittest.TestCase):
     """Seeded fuzzing for newly-added apply_net_combat_state branches."""
 
-    def test_forced_disconnect_seeded(self):
-        for seed in range(220):
-            rng = random.Random(seed)
-            nc = cpred_init_net_combat_state(netrunner_name="V")
-            pipeline_state = {
-                "net_combat": nc,
-                "combat": None,
-                "character_states": {},
-                "game_state": {"edgerunners": {"V": {"hp": {"current": rng.randint(0, 40), "max": 40}}}},
-            }
-            cpred_apply_net_combat_state(
-                pipeline_state,
-                {"hack_state": {"nodes_visited": ["Gateway"], "revealed_nodes": ["Gateway"]}},
-                game_state=pipeline_state["game_state"],
-            )
-            current_hp = pipeline_state["game_state"]["edgerunners"]["V"]["hp"]["current"]
-            self.assertEqual(bool(pipeline_state["net_combat"].get("_forced_disconnect")), current_hp < 0, f"seed={seed}")
-            self.assertEqual(bool(pipeline_state["net_combat"].get("net_complete")), current_hp < 0, f"seed={seed}")
+    @settings(max_examples=220, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_forced_disconnect_seeded(self, seed):
+        rng = random.Random(seed)
+        nc = cpred_init_net_combat_state(netrunner_name="V")
+        pipeline_state = {
+            "net_combat": nc,
+            "combat": None,
+            "character_states": {},
+            "game_state": {"edgerunners": {"V": {"hp": {"current": rng.randint(0, 40), "max": 40}}}},
+        }
+        cpred_apply_net_combat_state(
+            pipeline_state,
+            {"hack_state": {"nodes_visited": ["Gateway"], "revealed_nodes": ["Gateway"]}},
+            game_state=pipeline_state["game_state"],
+        )
+        current_hp = pipeline_state["game_state"]["edgerunners"]["V"]["hp"]["current"]
+        self.assertEqual(bool(pipeline_state["net_combat"].get("_forced_disconnect")), current_hp < 0, f"seed={seed}")
+        self.assertEqual(bool(pipeline_state["net_combat"].get("net_complete")), current_hp < 0, f"seed={seed}")
 
-    def test_resolver_ops_seeded(self):
-        for seed in range(220):
-            rng = random.Random(seed)
-            nc = cpred_init_net_combat_state(netrunner_name="V", sr=rng.randint(2, 5))
-            nc["active_programs"] = [{"name": "Sword", "status": "active"}]
-            nc["ice_status"] = {
-                "Core": {"name": "Hellhound", "behavior": "black", "rez_current": 8, "rez_max": 8, "status": "active"}
+    @settings(max_examples=220, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_resolver_ops_seeded(self, seed):
+        rng = random.Random(seed)
+        nc = cpred_init_net_combat_state(netrunner_name="V", sr=rng.randint(2, 5))
+        nc["active_programs"] = [{"name": "Sword", "status": "active"}]
+        nc["ice_status"] = {
+            "Core": {"name": "Hellhound", "behavior": "black", "rez_current": 8, "rez_max": 8, "status": "active"}
+        }
+        tar_initial = rng.randint(0, 3)
+        include_tar_in_input = rng.choice([True, False])
+        pipeline_state = {
+            "net_combat": nc,
+            "combat": None,
+            "character_states": {},
+            "game_state": {"edgerunners": {"V": {"hp": {"current": 30, "max": 30}}}},
+        }
+        tool_input = {
+            "hack_state": {
+                "nodes_visited": ["Gateway", "Core"],
+                "revealed_nodes": ["Gateway"],
+                "current_node": "Core",
+                "alert_level": rng.randint(0, 8),
+                "trace_progress": 0,
             }
-            tar_initial = rng.randint(0, 3)
-            include_tar_in_input = rng.choice([True, False])
-            pipeline_state = {
-                "net_combat": nc,
-                "combat": None,
-                "character_states": {},
-                "game_state": {"edgerunners": {"V": {"hp": {"current": 30, "max": 30}}}},
-            }
-            tool_input = {
-                "hack_state": {
-                    "nodes_visited": ["Gateway", "Core"],
-                    "revealed_nodes": ["Gateway"],
-                    "current_node": "Core",
-                    "alert_level": rng.randint(0, 8),
-                    "trace_progress": 0,
-                }
-            }
+        }
+        if include_tar_in_input:
+            tool_input["hack_state"]["tar_stacks"] = tar_initial
+        rez_damage = rng.randint(0, 20)
+        resolver_ops = [
+            {"op": "program_deactivate", "program_name": "Sword"},
+            {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
+        ]
+        if rng.choice([True, False]):
+            resolver_ops.append({"op": "tar_consumed"})
+
+        before_rez = nc["ice_status"]["Core"]["rez_current"]
+        cpred_apply_net_combat_state(
+            pipeline_state,
+            tool_input,
+            game_state=pipeline_state["game_state"],
+            resolver_state_ops=resolver_ops,
+        )
+        out = pipeline_state["net_combat"]
+        self.assertIsInstance(out.get("revealed_nodes"), list, f"seed={seed}")
+        self.assertEqual(out["active_programs"][0]["status"], "deactivated", f"seed={seed}")
+        self.assertGreaterEqual(out["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
+        self.assertLessEqual(out["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
+        if any(op.get("op") == "tar_consumed" for op in resolver_ops):
+            self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
+        else:
             if include_tar_in_input:
-                tool_input["hack_state"]["tar_stacks"] = tar_initial
-            rez_damage = rng.randint(0, 20)
-            resolver_ops = [
-                {"op": "program_deactivate", "program_name": "Sword"},
-                {"op": "rez_damage", "target": "Hellhound", "damage": rez_damage},
-            ]
-            if rng.choice([True, False]):
-                resolver_ops.append({"op": "tar_consumed"})
-
-            before_rez = nc["ice_status"]["Core"]["rez_current"]
-            cpred_apply_net_combat_state(
-                pipeline_state,
-                tool_input,
-                game_state=pipeline_state["game_state"],
-                resolver_state_ops=resolver_ops,
-            )
-            out = pipeline_state["net_combat"]
-            self.assertIsInstance(out.get("revealed_nodes"), list, f"seed={seed}")
-            self.assertEqual(out["active_programs"][0]["status"], "deactivated", f"seed={seed}")
-            self.assertGreaterEqual(out["ice_status"]["Core"]["rez_current"], 0, f"seed={seed}")
-            self.assertLessEqual(out["ice_status"]["Core"]["rez_current"], before_rez, f"seed={seed}")
-            if any(op.get("op") == "tar_consumed" for op in resolver_ops):
-                self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
+                self.assertEqual(out["tar_stacks"], tar_initial, f"seed={seed}")
             else:
-                if include_tar_in_input:
-                    self.assertEqual(out["tar_stacks"], tar_initial, f"seed={seed}")
-                else:
-                    self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
+                self.assertEqual(out["tar_stacks"], 0, f"seed={seed}")
 
 
 if __name__ == "__main__":

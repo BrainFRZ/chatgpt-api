@@ -15,8 +15,18 @@ import time
 import unittest
 from unittest.mock import patch
 
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from game_systems.cpred import (
+    apply_game_state,
+    _cyberware_ceiling_cost,
+    _normalize_cyberware_name,
+    _normalize_cyberware_entry_name,
+    _cyberware_has_qualifier,
+)
 from game_systems.cpred_mechanics import (
     resolve_check,
     resolve_damage,
@@ -30,7 +40,7 @@ from game_systems.cpred_mechanics import (
     resolve_actions,
     RESOLVE_MECHANICS_TOOL,
 )
-from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE
+from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE, CYBERWARE_TABLE
 
 MOCK = "game_systems.cpred_mechanics.random.randint"
 
@@ -1046,121 +1056,124 @@ class TestResolveActionsFuzz(unittest.TestCase):
 class TestResolveActionsUncommittedFuzz(unittest.TestCase):
     """Seeded fuzzing for TAR/alert/zap/program-deactivation branches."""
 
-    def test_tar_consumed_once_seeded(self):
-        for seed in range(300):
-            rng = random.Random(seed)
-            tar_stacks = rng.randint(0, 4)
-            actions = []
-            expected_consumed = False
-            for i in range(rng.randint(1, 12)):
-                action_type = rng.choice(["skill_check", "opposed_check", "ranged_attack"])
-                if action_type == "skill_check":
-                    is_net = bool(rng.getrandbits(1))
-                    actions.append({
-                        "type": "skill_check",
-                        "character": f"N{i}",
-                        "stat_value": rng.randint(1, 10),
-                        "skill_value": rng.randint(0, 10),
-                        "dv": rng.randint(9, 21),
-                        "net": is_net,
-                    })
-                    if tar_stacks > 0 and is_net and not expected_consumed:
-                        expected_consumed = True
-                elif action_type == "opposed_check":
-                    is_net = bool(rng.getrandbits(1))
-                    actions.append({
-                        "type": "opposed_check",
-                        "character": f"N{i}",
-                        "attacker_stat": rng.randint(1, 10),
-                        "defender_stat": rng.randint(1, 10),
-                        "net": is_net,
-                    })
-                    if tar_stacks > 0 and is_net and not expected_consumed:
-                        expected_consumed = True
-                else:
-                    actions.append({
-                        "type": "ranged_attack",
-                        "character": f"N{i}",
-                        "stat_value": 8,
-                        "skill_value": 8,
-                        "weapon_type": "Pistol",
-                        "damage_dice": 2,
-                        "rof": 1,
-                        "target_sp": 0,
-                        "range_bracket": 0,
-                    })
-
-            result = resolve_actions(copy.deepcopy(actions), tar_stacks=tar_stacks, alert_level=rng.randint(0, 7))
-            consumed_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "tar_consumed"]
-            self.assertEqual(result["tar_consumed"], expected_consumed, f"seed={seed}")
-            self.assertEqual(bool(consumed_ops), expected_consumed, f"seed={seed}")
-            self.assertLessEqual(len(consumed_ops), 1, f"seed={seed}")
-
-    def test_alert_dv_penalty_seeded(self):
-        for seed in range(250):
-            rng = random.Random(seed)
-            base_dv = rng.randint(9, 21)
-            alert_level = rng.randint(0, 7)
-            result = resolve_actions([{
-                "type": "skill_check",
-                "character": "V",
-                "stat_value": 6,
-                "skill_value": 4,
-                "dv": base_dv,
-                "net": True,
-            }], alert_level=alert_level, tar_stacks=0)
-            expected_dv = base_dv + 2 if alert_level >= 3 else base_dv
-            self.assertEqual(result["results"][0]["dv"], expected_dv, f"seed={seed}")
-
-    def test_zap_damage_and_state_ops_seeded(self):
-        for seed in range(250):
-            rng = random.Random(seed)
-            interface_rank = rng.randint(1, 10)
-            result = resolve_actions([{
-                "type": "opposed_check",
-                "character": "V",
-                "attacker_stat": 30,
-                "defender_stat": 1,
-                "attacker_label": "Attacker",
-                "defender_label": "Defender",
-                "zap": True,
-                "interface_rank": interface_rank,
-                "target": "Hellhound",
-            }])
-            out = result["results"][0]
-            # Opposed check can fail on exploding dice — only verify zap on hit
-            if out["success"]:
-                self.assertEqual(out["zap_dice"], interface_rank, f"seed={seed}")
-                self.assertGreaterEqual(out["zap_damage"], interface_rank, f"seed={seed}")
-                self.assertLessEqual(out["zap_damage"], interface_rank * 6, f"seed={seed}")
-                rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
-                self.assertEqual(len(rez_ops), 1, f"seed={seed}")
-                self.assertEqual(rez_ops[0]["target"], "Hellhound", f"seed={seed}")
-                self.assertEqual(rez_ops[0]["damage"], out["zap_damage"], f"seed={seed}")
+    @settings(max_examples=300, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_tar_consumed_once_seeded(self, seed):
+        rng = random.Random(seed)
+        tar_stacks = rng.randint(0, 4)
+        actions = []
+        expected_consumed = False
+        for i in range(rng.randint(1, 12)):
+            action_type = rng.choice(["skill_check", "opposed_check", "ranged_attack"])
+            if action_type == "skill_check":
+                is_net = bool(rng.getrandbits(1))
+                actions.append({
+                    "type": "skill_check",
+                    "character": f"N{i}",
+                    "stat_value": rng.randint(1, 10),
+                    "skill_value": rng.randint(0, 10),
+                    "dv": rng.randint(9, 21),
+                    "net": is_net,
+                })
+                if tar_stacks > 0 and is_net and not expected_consumed:
+                    expected_consumed = True
+            elif action_type == "opposed_check":
+                is_net = bool(rng.getrandbits(1))
+                actions.append({
+                    "type": "opposed_check",
+                    "character": f"N{i}",
+                    "attacker_stat": rng.randint(1, 10),
+                    "defender_stat": rng.randint(1, 10),
+                    "net": is_net,
+                })
+                if tar_stacks > 0 and is_net and not expected_consumed:
+                    expected_consumed = True
             else:
-                rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
-                self.assertEqual(len(rez_ops), 0, f"seed={seed}: no rez_damage on miss")
+                actions.append({
+                    "type": "ranged_attack",
+                    "character": f"N{i}",
+                    "stat_value": 8,
+                    "skill_value": 8,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 2,
+                    "rof": 1,
+                    "target_sp": 0,
+                    "range_bracket": 0,
+                })
 
-    def test_program_attack_deactivation_seeded(self):
-        for seed in range(250):
-            rng = random.Random(seed)
-            program_name = f"Prog_{seed}"
-            result = resolve_actions([{
-                "type": "program_attack",
-                "character": "V",
-                "interface_rank": rng.randint(4, 10),
-                "program_atk": rng.randint(1, 8),
-                "target_def": rng.randint(1, 8),
-                "program_damage_dice": rng.randint(1, 6),
-                "target_rez": rng.randint(0, 12),
-                "program_name": program_name,
-                "target": "TargetICE",
-            }])
-            out = result["results"][0]
-            self.assertEqual(out.get("program_deactivated"), program_name, f"seed={seed}")
-            deact_ops = [op for op in result["state_ops"] if op.get("op") == "program_deactivate"]
-            self.assertEqual(len(deact_ops), 1, f"seed={seed}")
-            self.assertEqual(deact_ops[0]["program_name"], program_name, f"seed={seed}")
+        result = resolve_actions(copy.deepcopy(actions), tar_stacks=tar_stacks, alert_level=rng.randint(0, 7))
+        consumed_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "tar_consumed"]
+        self.assertEqual(result["tar_consumed"], expected_consumed, f"seed={seed}")
+        self.assertEqual(bool(consumed_ops), expected_consumed, f"seed={seed}")
+        self.assertLessEqual(len(consumed_ops), 1, f"seed={seed}")
+
+    @settings(max_examples=250, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_alert_dv_penalty_seeded(self, seed):
+        rng = random.Random(seed)
+        base_dv = rng.randint(9, 21)
+        alert_level = rng.randint(0, 7)
+        result = resolve_actions([{
+            "type": "skill_check",
+            "character": "V",
+            "stat_value": 6,
+            "skill_value": 4,
+            "dv": base_dv,
+            "net": True,
+        }], alert_level=alert_level, tar_stacks=0)
+        expected_dv = base_dv + 2 if alert_level >= 3 else base_dv
+        self.assertEqual(result["results"][0]["dv"], expected_dv, f"seed={seed}")
+
+    @settings(max_examples=250, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_zap_damage_and_state_ops_seeded(self, seed):
+        rng = random.Random(seed)
+        interface_rank = rng.randint(1, 10)
+        result = resolve_actions([{
+            "type": "opposed_check",
+            "character": "V",
+            "attacker_stat": 30,
+            "defender_stat": 1,
+            "attacker_label": "Attacker",
+            "defender_label": "Defender",
+            "zap": True,
+            "interface_rank": interface_rank,
+            "target": "Hellhound",
+        }])
+        out = result["results"][0]
+        if out["success"]:
+            self.assertEqual(out["zap_dice"], interface_rank, f"seed={seed}")
+            self.assertGreaterEqual(out["zap_damage"], interface_rank, f"seed={seed}")
+            self.assertLessEqual(out["zap_damage"], interface_rank * 6, f"seed={seed}")
+            rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
+            self.assertEqual(len(rez_ops), 1, f"seed={seed}")
+            self.assertEqual(rez_ops[0]["target"], "Hellhound", f"seed={seed}")
+            self.assertEqual(rez_ops[0]["damage"], out["zap_damage"], f"seed={seed}")
+        else:
+            rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
+            self.assertEqual(len(rez_ops), 0, f"seed={seed}: no rez_damage on miss")
+
+    @settings(max_examples=250, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_program_attack_deactivation_seeded(self, seed):
+        rng = random.Random(seed)
+        program_name = f"Prog_{seed}"
+        result = resolve_actions([{
+            "type": "program_attack",
+            "character": "V",
+            "interface_rank": rng.randint(4, 10),
+            "program_atk": rng.randint(1, 8),
+            "target_def": rng.randint(1, 8),
+            "program_damage_dice": rng.randint(1, 6),
+            "target_rez": rng.randint(0, 12),
+            "program_name": program_name,
+            "target": "TargetICE",
+        }])
+        out = result["results"][0]
+        self.assertEqual(out.get("program_deactivated"), program_name, f"seed={seed}")
+        deact_ops = [op for op in result["state_ops"] if op.get("op") == "program_deactivate"]
+        self.assertEqual(len(deact_ops), 1, f"seed={seed}")
+        self.assertEqual(deact_ops[0]["program_name"], program_name, f"seed={seed}")
 
 
 # ===========================================================================
@@ -1169,103 +1182,106 @@ class TestResolveActionsUncommittedFuzz(unittest.TestCase):
 class TestOpposedCheckUncommittedFuzz(unittest.TestCase):
     """Seeded fuzz coverage for expanded opposed_check inputs."""
 
-    def test_seeded_opposed_check_totals_margin_and_tie_rule(self):
-        for seed in range(500):
-            rng = random.Random(seed)
-            attacker_stat = rng.randint(-10, 20)
-            defender_stat = rng.randint(-10, 20)
-            attacker_skill = rng.randint(-5, 12)
-            defender_skill = rng.randint(-5, 12)
-            luck_spent = rng.randint(-4, 12)
-            rel_bonus = rng.randint(-20, 20)
-            wounded_attacker = bool(rng.getrandbits(1))
-            wounded_defender = bool(rng.getrandbits(1))
+    @settings(max_examples=500, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_seeded_opposed_check_totals_margin_and_tie_rule(self, seed):
+        rng = random.Random(seed)
+        attacker_stat = rng.randint(-10, 20)
+        defender_stat = rng.randint(-10, 20)
+        attacker_skill = rng.randint(-5, 12)
+        defender_skill = rng.randint(-5, 12)
+        luck_spent = rng.randint(-4, 12)
+        rel_bonus = rng.randint(-20, 20)
+        wounded_attacker = bool(rng.getrandbits(1))
+        wounded_defender = bool(rng.getrandbits(1))
 
-            result = resolve_opposed_check(
-                attacker_stat=attacker_stat,
-                defender_stat=defender_stat,
-                attacker_label="COOL",
-                defender_label="WILL",
-                attacker_skill=attacker_skill,
-                defender_skill=defender_skill,
-                attacker_skill_label="Persuasion",
-                defender_skill_label="Concentration",
-                seriously_wounded_attacker=wounded_attacker,
-                seriously_wounded_defender=wounded_defender,
-                luck_spent=luck_spent,
-                rel_bonus=rel_bonus,
-            )
+        result = resolve_opposed_check(
+            attacker_stat=attacker_stat,
+            defender_stat=defender_stat,
+            attacker_label="COOL",
+            defender_label="WILL",
+            attacker_skill=attacker_skill,
+            defender_skill=defender_skill,
+            attacker_skill_label="Persuasion",
+            defender_skill_label="Concentration",
+            seriously_wounded_attacker=wounded_attacker,
+            seriously_wounded_defender=wounded_defender,
+            luck_spent=luck_spent,
+            rel_bonus=rel_bonus,
+        )
 
-            expected_atk = result["attacker_roll"]["die"]["total"] + attacker_stat + attacker_skill
-            if wounded_attacker:
-                expected_atk -= 2
-            expected_atk += max(0, luck_spent)
-            expected_atk += max(-5, min(5, rel_bonus))
+        expected_atk = result["attacker_roll"]["die"]["total"] + attacker_stat + attacker_skill
+        if wounded_attacker:
+            expected_atk -= 2
+        expected_atk += max(0, luck_spent)
+        expected_atk += max(-5, min(5, rel_bonus))
 
-            expected_def = result["defender_roll"]["die"]["total"] + defender_stat + defender_skill
-            if wounded_defender:
-                expected_def -= 2
+        expected_def = result["defender_roll"]["die"]["total"] + defender_stat + defender_skill
+        if wounded_defender:
+            expected_def -= 2
 
-            self.assertEqual(result["attacker_total"], expected_atk, f"seed={seed}")
-            self.assertEqual(result["defender_total"], expected_def, f"seed={seed}")
-            self.assertEqual(result["margin"], expected_atk - expected_def, f"seed={seed}")
-            self.assertEqual(result["success"], expected_atk > expected_def, f"seed={seed}")
-            if expected_atk == expected_def:
-                self.assertFalse(result["success"], f"seed={seed}: ties must fail for attacker")
+        self.assertEqual(result["attacker_total"], expected_atk, f"seed={seed}")
+        self.assertEqual(result["defender_total"], expected_def, f"seed={seed}")
+        self.assertEqual(result["margin"], expected_atk - expected_def, f"seed={seed}")
+        self.assertEqual(result["success"], expected_atk > expected_def, f"seed={seed}")
+        if expected_atk == expected_def:
+            self.assertFalse(result["success"], f"seed={seed}: ties must fail for attacker")
 
-    def test_seeded_resolve_actions_opposed_luck_state_op(self):
-        for seed in range(350):
-            rng = random.Random(seed)
-            luck_spent = rng.randint(-5, 10)
-            action = {
-                "type": "opposed_check",
-                "character": "V",
-                "attacker_stat": rng.randint(1, 10),
-                "attacker_skill": rng.randint(0, 10),
-                "defender_stat": rng.randint(1, 10),
-                "defender_skill": rng.randint(0, 10),
-                "luck_spent": luck_spent,
-            }
+    @settings(max_examples=350, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_seeded_resolve_actions_opposed_luck_state_op(self, seed):
+        rng = random.Random(seed)
+        luck_spent = rng.randint(-5, 10)
+        action = {
+            "type": "opposed_check",
+            "character": "V",
+            "attacker_stat": rng.randint(1, 10),
+            "attacker_skill": rng.randint(0, 10),
+            "defender_stat": rng.randint(1, 10),
+            "defender_skill": rng.randint(0, 10),
+            "luck_spent": luck_spent,
+        }
 
-            result = resolve_actions([action])
-            self.assertEqual(len(result["results"]), 1, f"seed={seed}")
-            out = result["results"][0]
-            self.assertNotIn("error", out, f"seed={seed}")
-            luck_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "luck"]
+        result = resolve_actions([action])
+        self.assertEqual(len(result["results"]), 1, f"seed={seed}")
+        out = result["results"][0]
+        self.assertNotIn("error", out, f"seed={seed}")
+        luck_ops = [op for op in result["state_ops"] if isinstance(op, dict) and op.get("op") == "luck"]
 
-            if luck_spent > 0:
-                self.assertEqual(len(luck_ops), 1, f"seed={seed}")
-                self.assertEqual(luck_ops[0]["edgerunner"], "V", f"seed={seed}")
-                self.assertEqual(luck_ops[0]["change"], -luck_spent, f"seed={seed}")
-            else:
-                self.assertEqual(len(luck_ops), 0, f"seed={seed}")
+        if luck_spent > 0:
+            self.assertEqual(len(luck_ops), 1, f"seed={seed}")
+            self.assertEqual(luck_ops[0]["edgerunner"], "V", f"seed={seed}")
+            self.assertEqual(luck_ops[0]["change"], -luck_spent, f"seed={seed}")
+        else:
+            self.assertEqual(len(luck_ops), 0, f"seed={seed}")
 
-    def test_seeded_resolve_actions_opposed_rel_bonus_autocompute(self):
-        for seed in range(200):
-            rng = random.Random(seed)
-            action = {
-                "type": "opposed_check",
-                "character": "V",
-                "attacker_stat": rng.randint(1, 10),
-                "attacker_skill": rng.randint(0, 10),
-                "defender_stat": rng.randint(1, 10),
-                "defender_skill": rng.randint(0, 10),
-                "luck_spent": rng.randint(0, 5),
-                "target": "Rogue",
-                "check_context": "social",
-            }
-            relationships = {"Rogue": {"rs": 95, "roms": 95}}
-            factions = {"Rogue": {"fr": 90}}
+    @settings(max_examples=200, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_seeded_resolve_actions_opposed_rel_bonus_autocompute(self, seed):
+        rng = random.Random(seed)
+        action = {
+            "type": "opposed_check",
+            "character": "V",
+            "attacker_stat": rng.randint(1, 10),
+            "attacker_skill": rng.randint(0, 10),
+            "defender_stat": rng.randint(1, 10),
+            "defender_skill": rng.randint(0, 10),
+            "luck_spent": rng.randint(0, 5),
+            "target": "Rogue",
+            "check_context": "social",
+        }
+        relationships = {"Rogue": {"rs": 95, "roms": 95}}
+        factions = {"Rogue": {"fr": 90}}
 
-            result = resolve_actions([action], relationships=relationships, factions=factions)
-            out = result["results"][0]
-            self.assertNotIn("error", out, f"seed={seed}")
+        result = resolve_actions([action], relationships=relationships, factions=factions)
+        out = result["results"][0]
+        self.assertNotIn("error", out, f"seed={seed}")
 
-            base = out["attacker_roll"]["die"]["total"] + action["attacker_stat"] + action["attacker_skill"]
-            bonus_from_flags = 0
-            bonus_from_flags += max(0, action["luck_spent"])
-            applied_rel = out["attacker_total"] - base - bonus_from_flags
-            self.assertEqual(applied_rel, 5, f"seed={seed}")
+        base = out["attacker_roll"]["die"]["total"] + action["attacker_stat"] + action["attacker_skill"]
+        bonus_from_flags = 0
+        bonus_from_flags += max(0, action["luck_spent"])
+        applied_rel = out["attacker_total"] - base - bonus_from_flags
+        self.assertEqual(applied_rel, 5, f"seed={seed}")
 
     def test_opposed_check_skill_labels_render_even_for_zero_skill(self):
         result = resolve_opposed_check(
@@ -1618,7 +1634,7 @@ class TestResolvePipelineMechanicsFuzz(unittest.TestCase):
 # 11. TestPropertyBased — Seeded random invariant checks
 # ===========================================================================
 class TestPropertyBased(unittest.TestCase):
-    """Property-based tests using seeded randomness (no mocks)."""
+    """Property-based tests powered by Hypothesis."""
 
     def test_seed_determinism(self):
         """Same seed should produce identical results."""
@@ -1628,137 +1644,298 @@ class TestPropertyBased(unittest.TestCase):
         r2 = resolve_check(6, 4, 15)
         self.assertEqual(r1, r2)
 
-    def test_success_iff_total_gt_dv(self):
-        """Core invariant: success == (total > dv)."""
-        for seed in range(100):
-            random.seed(seed)
-            stat = random.randint(0, 10)
-            skill = random.randint(0, 10)
-            dv = random.randint(5, 25)
-            r = resolve_check(stat, skill, dv)
-            self.assertEqual(r["success"], r["total"] > r["dv"],
-                             f"Invariant violated at seed {seed}: total={r['total']}, dv={r['dv']}")
+    @settings(max_examples=250, deadline=None)
+    @given(
+        stat=st.integers(min_value=0, max_value=10),
+        skill=st.integers(min_value=0, max_value=10),
+        dv=st.integers(min_value=5, max_value=25),
+    )
+    def test_success_iff_total_gt_dv(self, stat, skill, dv):
+        r = resolve_check(stat, skill, dv)
+        self.assertEqual(r["success"], r["total"] > r["dv"])
 
-    def test_hp_damage_geq_zero(self):
-        """HP damage should never be negative."""
-        for seed in range(100):
-            random.seed(seed)
-            dice = random.randint(1, 10)
-            sp = random.randint(0, 20)
-            r = resolve_damage(dice, "body", sp)
-            self.assertGreaterEqual(r["hp_damage"], 0,
-                                    f"Negative hp_damage at seed {seed}")
+    @settings(max_examples=250, deadline=None)
+    @given(
+        dice=st.integers(min_value=1, max_value=12),
+        sp=st.integers(min_value=-10, max_value=40),
+    )
+    def test_hp_damage_geq_zero(self, dice, sp):
+        r = resolve_damage(dice, "body", sp)
+        self.assertGreaterEqual(r["hp_damage"], 0)
 
-    def test_crit_iff_two_sixes_and_not_rubber(self):
-        """Crit should trigger iff 2+ sixes rolled AND not rubber ammo."""
-        for seed in range(100):
-            random.seed(seed)
-            dice = random.randint(2, 8)
-            r = resolve_damage(dice, "body", 0, is_rubber=False)
-            sixes = sum(1 for d in r["dice"] if d == 6)
-            self.assertEqual(r["crit"], sixes >= 2,
-                             f"Crit mismatch at seed {seed}: sixes={sixes}, crit={r['crit']}")
+    @settings(max_examples=250, deadline=None)
+    @given(dice=st.integers(min_value=2, max_value=10))
+    def test_crit_iff_two_sixes_and_not_rubber(self, dice):
+        r = resolve_damage(dice, "body", 0, is_rubber=False)
+        sixes = sum(1 for d in r["dice"] if d == 6)
+        self.assertEqual(r["crit"], sixes >= 2)
 
-    def test_ablation_only_on_penetration(self):
-        """Ablation > 0 only when damage_past_sp > 0."""
-        for seed in range(100):
-            random.seed(seed)
-            dice = random.randint(1, 6)
-            sp = random.randint(0, 15)
-            r = resolve_damage(dice, "body", sp)
-            if r["ablation"] > 0:
-                self.assertGreater(r["damage_past_sp"], 0,
-                                    f"Ablation without penetration at seed {seed}")
+    @settings(max_examples=250, deadline=None)
+    @given(
+        dice=st.integers(min_value=1, max_value=10),
+        sp=st.integers(min_value=0, max_value=20),
+    )
+    def test_ablation_only_on_penetration(self, dice, sp):
+        r = resolve_damage(dice, "body", sp)
+        if r["ablation"] > 0:
+            self.assertGreater(r["damage_past_sp"], 0)
 
-    def test_rubber_no_crit_no_ablation(self):
-        """Rubber ammo should never produce crits or ablation."""
-        for seed in range(100):
-            random.seed(seed)
-            dice = random.randint(2, 10)
-            r = resolve_damage(dice, "body", 0, is_rubber=True)
-            self.assertFalse(r["crit"], f"Rubber crit at seed {seed}")
-            self.assertEqual(r["ablation"], 0, f"Rubber ablation at seed {seed}")
+    @settings(max_examples=250, deadline=None)
+    @given(dice=st.integers(min_value=2, max_value=12))
+    def test_rubber_no_crit_no_ablation(self, dice):
+        r = resolve_damage(dice, "body", 0, is_rubber=True)
+        self.assertFalse(r["crit"])
+        self.assertEqual(r["ablation"], 0)
 
-    def test_ranged_attacks_equal_rof(self):
-        """Number of attacks should equal ROF."""
-        for seed in range(50):
-            random.seed(seed)
-            rof = random.randint(1, 5)
-            r = resolve_ranged_attack(6, 4, "SMG", 2, rof, 5, 0)
-            if "error" not in r:
-                self.assertEqual(len(r["attacks"]), rof,
-                                 f"Attack count mismatch at seed {seed}")
+    @settings(max_examples=200, deadline=None)
+    @given(rof=st.integers(min_value=1, max_value=8))
+    def test_ranged_attacks_equal_rof(self, rof):
+        r = resolve_ranged_attack(6, 4, "SMG", 2, rof, 5, 0)
+        if "error" not in r:
+            self.assertEqual(len(r["attacks"]), rof)
 
     def test_melee_tie_never_hits(self):
         """Equal rolls should always result in miss."""
-        for seed in range(100):
-            with patch(MOCK, return_value=5):
-                r = resolve_melee_attack(5, 5, 5, 5, 2, 1, 5)
-                self.assertFalse(r["attacks"][0]["hit"],
-                                 f"Tie hit at seed {seed}")
+        with patch(MOCK, return_value=5):
+            r = resolve_melee_attack(5, 5, 5, 5, 2, 1, 5)
+            self.assertFalse(r["attacks"][0]["hit"])
 
-    def test_natural_10_always_fails_death_save(self):
-        """Natural 10 should always fail regardless of body_stat."""
-        for body in range(1, 50):
-            with patch(MOCK, return_value=10):
-                r = resolve_death_save(body, 0)
-                self.assertFalse(r["survived"],
-                                 f"Natural 10 survived with body={body}")
+    @settings(max_examples=120, deadline=None)
+    @given(body=st.integers(min_value=1, max_value=200))
+    def test_natural_10_always_fails_death_save(self, body):
+        with patch(MOCK, return_value=10):
+            r = resolve_death_save(body, 0)
+            self.assertFalse(r["survived"])
 
-    def test_relationship_bonus_capped_to_5_with_nonneg_inputs(self):
-        """When inputs are non-negative, RS bonus is capped to +5 while Luck is uncapped."""
-        for seed in range(100):
-            random.seed(seed)
-            luck = random.randint(0, 20)
-            rel = random.randint(0, 20)
-            with patch(MOCK, return_value=5):
-                r = resolve_check(0, 0, 0, luck_spent=luck, rel_bonus=rel)
-                bonus = r["total"] - 5  # subtract the die roll
-                self.assertEqual(bonus, luck + min(rel, 5),
-                                 f"Unexpected bonus {bonus} with luck={luck}, rel={rel}")
+    @settings(max_examples=250, deadline=None)
+    @given(
+        luck=st.integers(min_value=0, max_value=100),
+        rel=st.integers(min_value=0, max_value=100),
+    )
+    def test_relationship_bonus_capped_to_5_with_nonneg_inputs(self, luck, rel):
+        with patch(MOCK, return_value=5):
+            r = resolve_check(0, 0, 0, luck_spent=luck, rel_bonus=rel)
+            bonus = r["total"] - 5
+            self.assertEqual(bonus, luck + min(rel, 5))
 
-    def test_initiative_output_count_matches_input(self):
-        """Output should have same count as input combatants."""
-        for seed in range(20):
-            random.seed(seed)
-            n = random.randint(1, 20)
-            combatants = [{"name": f"NPC_{i}", "ref": random.randint(1, 10)} for i in range(n)]
-            r = resolve_initiative(combatants)
-            self.assertEqual(len(r), n, f"Count mismatch at seed {seed}")
+    @settings(max_examples=120, deadline=None)
+    @given(
+        refs=st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=25),
+    )
+    def test_initiative_output_count_matches_input(self, refs):
+        combatants = [{"name": f"NPC_{i}", "ref": ref} for i, ref in enumerate(refs)]
+        r = resolve_initiative(combatants)
+        self.assertEqual(len(r), len(combatants))
 
-    def test_initiative_all_names_present(self):
-        """All input names should appear in output."""
-        for seed in range(20):
-            random.seed(seed)
-            n = random.randint(1, 15)
-            combatants = [{"name": f"NPC_{i}", "ref": random.randint(1, 10)} for i in range(n)]
-            r = resolve_initiative(combatants)
-            input_names = {c["name"] for c in combatants}
-            output_names = {e["name"] for e in r}
-            self.assertEqual(input_names, output_names, f"Names mismatch at seed {seed}")
+    @settings(max_examples=120, deadline=None)
+    @given(
+        refs=st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=25),
+    )
+    def test_initiative_all_names_present(self, refs):
+        combatants = [{"name": f"NPC_{i}", "ref": ref} for i, ref in enumerate(refs)]
+        r = resolve_initiative(combatants)
+        input_names = {c["name"] for c in combatants}
+        output_names = {e["name"] for e in r}
+        self.assertEqual(input_names, output_names)
 
-    def test_resolve_actions_results_count_matches(self):
-        """Number of results should equal number of input actions."""
-        for seed in range(50):
-            random.seed(seed)
-            n = random.randint(1, 10)
-            actions = [{"type": "skill_check", "character": f"V_{i}",
-                         "stat_value": random.randint(1, 10),
-                         "skill_value": random.randint(1, 10),
-                         "dv": random.randint(9, 25)}
-                        for i in range(n)]
-            r = resolve_actions(actions)
-            self.assertEqual(len(r["results"]), n, f"Count mismatch at seed {seed}")
+    @settings(max_examples=120, deadline=None)
+    @given(
+        checks=st.lists(
+            st.tuples(
+                st.integers(min_value=1, max_value=10),
+                st.integers(min_value=1, max_value=10),
+                st.integers(min_value=9, max_value=25),
+            ),
+            min_size=1,
+            max_size=20,
+        )
+    )
+    def test_resolve_actions_results_count_matches(self, checks):
+        actions = [
+            {
+                "type": "skill_check",
+                "character": f"V_{i}",
+                "stat_value": stat,
+                "skill_value": skill,
+                "dv": dv,
+            }
+            for i, (stat, skill, dv) in enumerate(checks)
+        ]
+        r = resolve_actions(actions)
+        self.assertEqual(len(r["results"]), len(actions))
 
-    def test_formatted_contains_total(self):
-        """Formatted string should contain the total value."""
-        for seed in range(100):
-            random.seed(seed)
-            stat = random.randint(0, 10)
-            skill = random.randint(0, 10)
-            r = resolve_check(stat, skill, 15)
-            self.assertIn(str(r["total"]), r["formatted"],
-                          f"Total {r['total']} not in formatted at seed {seed}")
+    @settings(max_examples=250, deadline=None)
+    @given(
+        stat=st.integers(min_value=0, max_value=10),
+        skill=st.integers(min_value=0, max_value=10),
+    )
+    def test_formatted_contains_total(self, stat, skill):
+        r = resolve_check(stat, skill, 15)
+        self.assertIn(str(r["total"]), r["formatted"])
+
+
+# ===========================================================================
+# 12. TestHumanityCeilingHypothesis
+# ===========================================================================
+class TestHumanityCeilingHypothesis(unittest.TestCase):
+    """Hypothesis fuzz tests for humanity ceiling and cyberware normalization."""
+
+    def _make_er(self, humanity_current=60, humanity_max=60):
+        return {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": humanity_current, "max": humanity_max},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 5000,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+            "weapons": [],
+            "seriously_wounded": False,
+        }
+
+    def _apply(self, game_state, ops):
+        apply_game_state(game_state, {"edgerunner_ops": ops}, 1)
+
+    def test_ceiling_cost_normalization_exhaustive(self):
+        for name, spec in CYBERWARE_TABLE.items():
+            expected = spec["ceiling_cost"]
+            self.assertEqual(_cyberware_ceiling_cost(name), expected)
+            self.assertEqual(_cyberware_ceiling_cost(f"  {name}  "), expected)
+            self.assertEqual(_cyberware_ceiling_cost(f"{name} (Right)"), expected)
+
+        self.assertEqual(_cyberware_ceiling_cost("cyberaudio"), 2)
+        self.assertEqual(_cyberware_ceiling_cost("cybereyes"), 2)
+        self.assertEqual(_cyberware_ceiling_cost("cyberarms"), 2)
+        self.assertEqual(_cyberware_ceiling_cost("cyberlegs"), 2)
+
+    @settings(max_examples=300, deadline=None)
+    @given(
+        raw=st.text(
+            min_size=1,
+            max_size=30,
+            alphabet=st.sampled_from(list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-+/")),
+        )
+    )
+    def test_unknown_cyberware_defaults_to_two(self, raw):
+        value = raw.strip()
+        assume(value)
+        normalized = value.lower()
+        base = normalized.split("(")[0].strip()
+        known = {k.lower() for k in CYBERWARE_TABLE}
+        aliases = {"cyberaudio", "cybereyes", "cyberarms", "cyberlegs"}
+        assume(normalized not in known)
+        assume(base not in known)
+        assume(normalized not in aliases)
+        assume(base not in aliases)
+        self.assertEqual(_cyberware_ceiling_cost(value), 2)
+
+    @settings(max_examples=180, deadline=None)
+    @given(
+        base_max=st.integers(min_value=10, max_value=120),
+        current=st.integers(min_value=0, max_value=180),
+        picks=st.lists(
+            st.tuples(
+                st.sampled_from(list(CYBERWARE_TABLE.keys()) + ["cyberaudio", "cybereyes", "cyberarms", "cyberlegs"]),
+                st.sampled_from(["", " (Left)", " (Right)", " (Mk.II)"]),
+            ),
+            min_size=1,
+            max_size=25,
+        ),
+    )
+    def test_migration_is_idempotent(self, base_max, current, picks):
+        values = [name + suffix for name, suffix in picks]
+        expected_reduction = sum(_cyberware_ceiling_cost(v) for v in values if isinstance(v, str) and v.strip())
+        expected_max = base_max
+        expected_cur = min(current, expected_max)
+
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=current, humanity_max=base_max)}}
+        gs["edgerunners"]["V"]["cyberware_effects"] = list(values)
+
+        self._apply(gs, [])
+        er = gs["edgerunners"]["V"]
+        self.assertEqual(er["humanity"]["max"], expected_max)
+        self.assertEqual(er["humanity"]["current"], expected_cur)
+        self.assertTrue(er.get("_humanity_ceiling_migrated"))
+        self.assertEqual(er.get("_humanity_base_max"), base_max)
+        self.assertEqual(er.get("_humanity_base_ceiling_total"), expected_reduction)
+
+        snapshot = copy.deepcopy(er)
+        self._apply(gs, [])
+        self.assertEqual(gs["edgerunners"]["V"], snapshot)
+
+    @settings(max_examples=160, deadline=None)
+    @given(
+        base=st.integers(min_value=20, max_value=120),
+        cur=st.integers(min_value=0, max_value=120),
+        ops=st.lists(
+            st.tuples(
+                st.sampled_from(["add", "remove"]),
+                st.tuples(
+                    st.sampled_from(
+                        list(CYBERWARE_TABLE.keys()) +
+                        ["cyberaudio", "cybereyes", "cyberarms", "cyberlegs",
+                         "Homebrew Rig", "Prototype Armature", "Streetware X"]
+                    ),
+                    st.sampled_from(["", " (Left)", " (Right)", " (Mk.II)"]),
+                ),
+            ),
+            min_size=1,
+            max_size=120,
+        ),
+    )
+    def test_add_remove_sequence_matches_model(self, base, cur, ops):
+        cur = min(cur, base)
+        gs = {"edgerunners": {"V": self._make_er(humanity_current=cur, humanity_max=base)}}
+        er = gs["edgerunners"]["V"]
+        er["_humanity_ceiling_migrated"] = True
+        er["_humanity_base_max"] = base
+        er["_humanity_base_ceiling_total"] = 0
+
+        model_effects = []
+        model_max = base
+        model_cur = cur
+
+        for action, value_tuple in ops:
+            value = value_tuple[0] + value_tuple[1]
+            payload = {"edgerunner": "V", "op": "cyberware", "action": action, "value": value}
+            self._apply(gs, [payload])
+
+            if action == "add":
+                add_key = _normalize_cyberware_entry_name(value)
+                if add_key and all(_normalize_cyberware_entry_name(v) != add_key for v in model_effects):
+                    model_effects.append(value)
+            else:
+                removed = False
+                remove_entry_key = _normalize_cyberware_entry_name(value)
+                if remove_entry_key:
+                    for idx, existing in enumerate(model_effects):
+                        if _normalize_cyberware_entry_name(existing) == remove_entry_key:
+                            model_effects.pop(idx)
+                            removed = True
+                            break
+
+                if not removed and not _cyberware_has_qualifier(value):
+                    remove_key = _normalize_cyberware_name(value)
+                    candidate_indices = [
+                        idx for idx, existing in enumerate(model_effects)
+                        if _normalize_cyberware_name(existing) == remove_key
+                    ]
+                    if len(candidate_indices) == 1:
+                        model_effects.pop(candidate_indices[0])
+
+            total_ceiling = sum(_cyberware_ceiling_cost(v) for v in model_effects)
+            model_max = max(0, min(base, base - total_ceiling))
+            if model_cur > model_max:
+                model_cur = model_max
+
+            out = gs["edgerunners"]["V"]
+            self.assertEqual(out["cyberware_effects"], model_effects)
+            self.assertEqual(out["humanity"]["max"], model_max)
+            self.assertEqual(out["humanity"]["current"], model_cur)
+            self.assertLessEqual(out["humanity"]["max"], base)
+            self.assertGreaterEqual(out["humanity"]["max"], 0)
+            self.assertLessEqual(out["humanity"]["current"], out["humanity"]["max"])
 
 
 # ===========================================================================

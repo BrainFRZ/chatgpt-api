@@ -259,3 +259,208 @@ ICE_STAT_BLOCKS = {
 # p.204: Brain damage bypasses armor, cannot cause Critical Injuries
 # p.345: AP ammo is standard/basic for Grenades and Rockets
 # p.412: Boosterganger BODY and Death Save changed to 2
+
+# ---------------------------------------------------------------------------
+# Program stats (CRB p. 204, Hacking Rulebook §2)
+# ---------------------------------------------------------------------------
+PROGRAM_STATS = {
+    "Eraser":           {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Cloak",                          "cost": 20},
+    "SeeYa":            {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Pathfinder",                     "cost": 20},
+    "Speedy Gonzalvez": {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Speed",                          "cost": 100},
+    "Worm":             {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Backdoor",                       "cost": 50},
+    "Armor":            {"category": "defender", "atk": 0, "def": 0, "rez": 7, "effect": "Reduce brain dmg by 4",             "cost": 50},
+    "Flak":             {"category": "defender", "atk": 0, "def": 0, "rez": 7, "effect": "Enemy non-Black-ICE ATK → 0",       "cost": 50},
+    "Shield":           {"category": "defender", "atk": 0, "def": 0, "rez": 7, "effect": "Block first brain dmg then derez",  "cost": 20},
+    "Banhammer":        {"category": "attacker", "atk": 1, "def": 0, "rez": 0, "effect": "3d6 REZ non-Black; 2d6 Black",     "cost": 50},
+    "Sword":            {"category": "attacker", "atk": 1, "def": 0, "rez": 0, "effect": "3d6 REZ Black; 2d6 non-Black",     "cost": 50},
+    "DeckKRASH":        {"category": "attacker", "atk": 0, "def": 0, "rez": 0, "effect": "Unsafe jack out",                   "cost": 100},
+    "Hellbolt":         {"category": "attacker", "atk": 2, "def": 0, "rez": 0, "effect": "2d6 brain + deck fire",             "cost": 100},
+    "Nervescrub":       {"category": "attacker", "atk": 0, "def": 0, "rez": 0, "effect": "INT/REF/DEX -1d6 1hr",             "cost": 100},
+    "Poison Flatline":  {"category": "attacker", "atk": 0, "def": 0, "rez": 0, "effect": "Destroy random non-Black program", "cost": 100},
+    "Superglue":        {"category": "attacker", "atk": 2, "def": 0, "rez": 0, "effect": "No move/jack out 1d6 rounds",      "cost": 100},
+    "Vrizzbolt":        {"category": "attacker", "atk": 1, "def": 0, "rez": 0, "effect": "1d6 brain; -1 NET Action",         "cost": 50},
+}
+
+# ---------------------------------------------------------------------------
+# Cyberdeck stats (CRB p. 204, Hacking Rulebook §2)
+# ---------------------------------------------------------------------------
+CYBERDECK_STATS = {
+    "Poor":      {"slots": 5, "cycles": 2, "cost": 100},
+    "Standard":  {"slots": 7, "cycles": 3, "cost": 500},
+    "Excellent": {"slots": 9, "cycles": 4, "cost": 1000},
+}
+
+# ---------------------------------------------------------------------------
+# Hardware stats (CRB p. 204, Hacking Rulebook §2)
+# ---------------------------------------------------------------------------
+HARDWARE_STATS = {
+    "Backup Drive":       {"slots": 2, "effect": "Save destroyed programs; re-install as Meat Action"},
+    "DNA Lock":           {"slots": 2, "effect": "DV17 Electronics/Security Tech to use deck"},
+    "Hardened Circuitry": {"slots": 1, "effect": "Deck immune to EMP"},
+    "Insulated Wiring":   {"slots": 1, "effect": "Deck+user immune to fire from Programs"},
+    "KRASH Barrier":      {"slots": 2, "effect": "Immune to forced unsafe Jack Out"},
+    "Range Upgrade":      {"slots": 1, "effect": "Access points from 8m (default 6m)"},
+}
+
+# ---------------------------------------------------------------------------
+# Cyberware master table (CRB pp. 110-117, §9.1)
+# ceiling_cost: 2 = standard, 4 = borgware, 0 = medical exempt
+# ---------------------------------------------------------------------------
+CYBERWARE_TABLE = {
+    # --- Neuralware (Foundational: Neural Link) ---
+    "Neural Link":          {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": True,  "option_slots": 5, "requires": None,         "description": "Required for Neuralware/Subdermal Grips"},
+    "Braindance Recorder":  {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Neural Link", "description": "Record experiences to Memory Chip"},
+    "Chipware Socket":      {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Neural Link", "description": "Slot for one piece of Chipware"},
+    "Interface Plugs":      {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Neural Link", "description": "Connect to Smartguns/Vehicles"},
+    "Kerenzikov":           {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Neural Link", "description": "+2 Initiative"},
+    "Sandevistan":          {"category": "neuralware", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Neural Link", "description": "Action: +3 Initiative 1 min (1 hr cooldown)"},
+    "Pain Editor":          {"category": "neuralware", "install": "N/A",       "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Chipware Socket", "description": "Chipware. Ignore Seriously Wounded penalties"},
+    "Skill Chip":           {"category": "neuralware", "install": "N/A",       "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Chipware Socket", "description": "Chipware. Sets Skill to Level 3"},
+    # --- Cyberoptics (Foundational: Cybereye) ---
+    "Cybereye":             {"category": "cyberoptic", "install": "Clinic",    "cost": 100,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": True,  "option_slots": 3, "requires": None,         "description": "Artificial eye"},
+    "Anti-Dazzle":          {"category": "cyberoptic", "install": "Mall",      "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "Immune to flashes/flashbangs. Pair required"},
+    "Dartgun (Eye)":        {"category": "cyberoptic", "install": "Clinic",    "cost": 500,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "1-shot exotic weapon in eye (3 slots)"},
+    "Image Enhance":        {"category": "cyberoptic", "install": "Mall",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "+2 Perception, Lip Reading, Conceal/Reveal. Pair"},
+    "Infrared/UV":          {"category": "cyberoptic", "install": "Mall",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "Ignore darkness/smoke penalties. Pair (2 slots ea)"},
+    "Targeting Scope":      {"category": "cyberoptic", "install": "Clinic",    "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "+1 Aimed Shots"},
+    "Virtuality":           {"category": "cyberoptic", "install": "Mall",      "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cybereye",   "description": "Projects NET imagery over reality. Pair"},
+    # --- Cyberaudio (Foundational: Cyberaudio Suite) ---
+    "Cyberaudio Suite":     {"category": "cyberaudio", "install": "Clinic",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": True,  "option_slots": 3, "requires": None,         "description": "Internalized audio system"},
+    "Amplified Hearing":    {"category": "cyberaudio", "install": "Mall",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberaudio Suite", "description": "+2 hearing-based Perception"},
+    "Internal Agent":       {"category": "cyberaudio", "install": "Mall",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberaudio Suite", "description": "Fully functional Agent; voice-controlled"},
+    "Level Damper":         {"category": "cyberaudio", "install": "Mall",      "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberaudio Suite", "description": "Immune to deafness from loud noises"},
+    "Voice Stress Analyzer":{"category": "cyberaudio", "install": "Mall",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberaudio Suite", "description": "+2 Human Perception and Interrogation"},
+    # --- Internal Body Cyberware ---
+    "AudioVox":             {"category": "internal_body", "install": "Clinic",  "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Voice synth. +2 Acting and Play Instrument (Singing)"},
+    "Contraceptive Implant":{"category": "internal_body", "install": "Mall",    "cost": 10,    "hl_fixed": 0,  "hl_dice": "N/A", "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Prevents pregnancy"},
+    "Enhanced Antibodies":  {"category": "internal_body", "install": "Mall",    "cost": 500,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Heal BODY x2 per day resting"},
+    "Cybersnake":           {"category": "internal_body", "install": "Hospital","cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Esophagus weapon (4d6, 1 ROF). Concealable"},
+    "Gills":                {"category": "internal_body", "install": "Hospital","cost": 1000,  "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Breathe underwater"},
+    "Grafted Muscle/Bone Lace": {"category": "internal_body", "install": "Hospital","cost": 1000, "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "BODY +2 (max 10). Changes HP/Wound stats"},
+    "Independent Air Supply":{"category": "internal_body", "install": "Hospital","cost": 1000,  "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "30 min oxygen. 1 hr refill"},
+    "Midnight Lady / Mr. Studd": {"category": "internal_body", "install": "Clinic","cost": 100, "hl_fixed": 7, "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Sexual implants"},
+    "Nasal Filters":        {"category": "internal_body", "install": "Clinic",  "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Immune to toxic gases/fumes"},
+    "Radar/Sonar Implant":  {"category": "internal_body", "install": "Clinic",  "cost": 1000,  "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Scan terrain 50m. Detects moving objects"},
+    "Toxin Binders":        {"category": "internal_body", "install": "Clinic",  "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "+2 Resist Torture/Drugs"},
+    "Vampyres":             {"category": "internal_body", "install": "Clinic",  "cost": 500,   "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Mouth fangs (1d6, 2 ROF). Store Poison/Biotoxin"},
+    # --- External Body Cyberware ---
+    "Hidden Holster":       {"category": "external_body", "install": "Clinic",  "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Conceal weapon inside body without roll"},
+    "Skin Weave":           {"category": "external_body", "install": "Hospital","cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Armor SP7. Ablates. Heals 1 SP/day"},
+    "Subdermal Armor":      {"category": "external_body", "install": "Hospital","cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Armor SP11. Ablates. Heals 1 SP/day"},
+    "Subdermal Pocket":     {"category": "external_body", "install": "Clinic",  "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "2x4 inch hidden storage"},
+    # --- Cyberlimbs ---
+    "Cyberarm":             {"category": "cyberlimb", "install": "Hospital",    "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": True,  "option_slots": 4, "requires": None, "description": "Replacement arm. Includes Standard Hand"},
+    "Cyberleg":             {"category": "cyberlimb", "install": "Hospital",    "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": True,  "option_slots": 3, "requires": None, "description": "Replacement leg. Includes Standard Foot"},
+    "Standard Hand":        {"category": "cyberlimb", "install": "Clinic",      "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Replacement hand. No slot cost"},
+    "Standard Foot":        {"category": "cyberlimb", "install": "Clinic",      "cost": 100,   "hl_fixed": 2,  "hl_dice": "1d6/2", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": None, "description": "Replacement foot. No slot cost"},
+    "Big Knucks":           {"category": "cyberlimb", "install": "Clinic",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "2d6 Melee. Concealable"},
+    "Grapple Hand":         {"category": "cyberlimb", "install": "Clinic",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "30m grapple line"},
+    "Popup Grenade Launcher":{"category": "cyberlimb", "install": "Clinic",     "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "1-shot GL. 2 slots"},
+    "Popup Melee Weapon":   {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "Light/Med/Heavy Melee. 2 slots"},
+    "Popup Shield":         {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "Bulletproof shield in arm. 3 slots"},
+    "Popup Ranged Weapon":  {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "One-handed ranged weapon. 2 slots"},
+    "Rippers":              {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "Carbo-glass claws (2d6). Concealable"},
+    "Slice 'N Dice":        {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "Monofilament whip (2d6)"},
+    "Tool Hand":            {"category": "cyberlimb", "install": "Clinic",      "cost": 100,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "Fingers = screwdriver, wrench, drill"},
+    "Wolvers":              {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 7,  "hl_dice": "2d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberarm", "description": "3d6 Melee. Concealable"},
+    "Jump Booster":         {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberleg", "description": "Negate jump movement penalty. Pair"},
+    "Skate Foot":           {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberleg", "description": "+6m MOVE with Run Action. Pair"},
+    "Talon Foot":           {"category": "cyberlimb", "install": "Clinic",      "cost": 500,   "hl_fixed": 3,  "hl_dice": "1d6", "ceiling_cost": 2, "foundational": False, "option_slots": 0, "requires": "Cyberleg", "description": "Light Melee Weapon in foot"},
+    # --- Borgware ---
+    "Artificial Shoulder Mount": {"category": "borgware", "install": "Hospital","cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Mount 2 extra Cyberarms under first set"},
+    "Linear Frame Sigma":   {"category": "borgware", "install": "Hospital",     "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": "Grafted Muscle/Bone Lace", "description": "BODY to 12. Req BODY 6"},
+    "Linear Frame Beta":    {"category": "borgware", "install": "Hospital",     "cost": 5000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": "Grafted Muscle/Bone Lace", "description": "BODY to 14. Req BODY 8 + 2x Grafted"},
+    "MultiOptic Mount":     {"category": "borgware", "install": "Hospital",     "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Mount up to 5 additional Cybereyes"},
+    "Sensor Array":         {"category": "borgware", "install": "Clinic",       "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Install 5 additional Cyberaudio options"},
+}
+
+# ---------------------------------------------------------------------------
+# Skills by governing stat + x2 skills (CRB §4, pp. 88-117)
+# ---------------------------------------------------------------------------
+SKILL_STAT_MAP = {
+    # Awareness (INT)
+    "Conceal/Reveal Object": "INT", "Lip Reading": "INT", "Perception": "INT", "Tracking": "INT",
+    # Body (DEX / WILL)
+    "Athletics": "DEX", "Contortionist": "DEX", "Dance": "DEX", "Stealth": "DEX",
+    "Concentration": "WILL", "Endurance": "WILL", "Resist Torture/Drugs": "WILL",
+    # Control (REF)
+    "Drive Land Vehicle": "REF", "Pilot Air Vehicle": "REF", "Pilot Sea Vehicle": "REF", "Riding": "REF",
+    # Education (INT)
+    "Accounting": "INT", "Animal Handling": "INT", "Bureaucracy": "INT", "Business": "INT",
+    "Composition": "INT", "Criminology": "INT", "Cryptography": "INT", "Deduction": "INT",
+    "Education": "INT", "Gamble": "INT", "Language": "INT", "Library Search": "INT",
+    "Local Expert": "INT", "Science": "INT", "Tactics": "INT", "Wilderness Survival": "INT",
+    # Fighting (DEX)
+    "Brawling": "DEX", "Evasion": "DEX", "Martial Arts": "DEX", "Melee Weapon": "DEX",
+    # Performance (COOL / TECH)
+    "Acting": "COOL", "Play Instrument": "TECH", "Paint/Draw/Sculpt": "TECH",
+    "Photography/Film": "TECH", "Forgery": "TECH",
+    # Ranged Weapon (REF)
+    "Archery": "REF", "Autofire": "REF", "Handgun": "REF", "Heavy Weapons": "REF", "Shoulder Arms": "REF",
+    # Social (COOL / EMP)
+    "Bribery": "COOL", "Conversation": "EMP", "Human Perception": "EMP",
+    "Interrogation": "COOL", "Personal Grooming": "COOL", "Persuasion": "COOL",
+    "Streetwise": "COOL", "Trading": "COOL", "Wardrobe & Style": "COOL",
+    # Technique (TECH)
+    "Air Vehicle Tech": "TECH", "Basic Tech": "TECH", "Cybertech": "TECH",
+    "Demolitions": "TECH", "Electronics/Security Tech": "TECH", "First Aid": "TECH",
+    "Land Vehicle Tech": "TECH", "Paramedic": "TECH", "Pick Lock": "TECH",
+    "Pick Pocket": "TECH", "Sea Vehicle Tech": "TECH", "Weaponstech": "TECH",
+}
+
+X2_SKILLS = {
+    "Martial Arts", "Pilot Air Vehicle", "Autofire", "Heavy Weapons",
+    "Demolitions", "Electronics/Security Tech", "Paramedic",
+}
+
+# ---------------------------------------------------------------------------
+# Price categories (CRB §10)
+# ---------------------------------------------------------------------------
+PRICE_CATEGORIES = {
+    "Cheap": 10, "Everyday": 20, "Costly": 50, "Premium": 100,
+    "Expensive": 500, "Very Expensive": 1000, "Luxury": 5000, "Super Luxury": 10000,
+}
+
+# ---------------------------------------------------------------------------
+# Job pay per person (CRB §10)
+# ---------------------------------------------------------------------------
+JOB_PAY = {"Easy": 500, "Typical": 1000, "Dangerous": 2000}
+
+# ---------------------------------------------------------------------------
+# Healing / therapy (CRB §8)
+# ---------------------------------------------------------------------------
+HEALING_TABLE = {
+    "stabilization_dv": {"lightly": 10, "seriously": 13, "mortally": 15},
+    "hospital_costs": {10: 50, 13: 100, 15: 500, 17: 1000},
+    "therapy": {
+        "standard": {"cost": 500, "recovery": "2d6", "dv": 15},
+        "extreme":  {"cost": 1000, "recovery": "4d6", "dv": 17},
+        "addiction": {"cost": 1000, "dv": 15},
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Solo Combat Awareness allocation (CRB §14 / Combat Ruleset §14)
+# ---------------------------------------------------------------------------
+SOLO_ALLOCATION = {
+    "damage_deflection": {2: -1, 4: -2, 6: -3, 8: -4, 10: -5},
+    "fumble_recovery": 4,
+    "initiative_reaction": 1,
+    "precision_attack": {3: 1, 6: 2, 9: 3},
+    "spot_weakness": 1,
+    "threat_detection": 1,
+}
+
+# ---------------------------------------------------------------------------
+# Netrunner actions per Interface rank (CRB §6.3)
+# ---------------------------------------------------------------------------
+NETRUNNER_ACTIONS_PER_RANK = {1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 4, 8: 4, 9: 4, 10: 5}
+
+# ---------------------------------------------------------------------------
+# IP cost tables (CRB §7)
+# ---------------------------------------------------------------------------
+IP_COST_TABLES = {
+    "typical":   {i: i * 20 for i in range(1, 11)},
+    "difficult": {i: i * 40 for i in range(1, 11)},
+    "role":      {i: i * 60 for i in range(1, 11)},
+}

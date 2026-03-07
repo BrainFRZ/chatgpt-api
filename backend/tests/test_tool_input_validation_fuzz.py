@@ -15,6 +15,9 @@ import random
 import sys
 import unittest
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from main import _tool_input_valid
@@ -256,61 +259,63 @@ class TestDropOneRequiredField(unittest.TestCase):
 class TestRandomFuzzAllSchemas(unittest.TestCase):
     """Random fuzzing: feed thousands of random payloads to _tool_input_valid."""
 
-    def test_random_payloads_never_raise(self):
+    @settings(max_examples=60, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_payloads_never_raise(self, seed):
         """_tool_input_valid must never raise, regardless of input shape."""
-        for seed in (42, 137, 256):
-            random.seed(seed)
-            for label, tool_def in ALL_TOOL_SCHEMAS.items():
-                with self.subTest(seed=seed, tool=label):
-                    for _ in range(1000):
-                        payload = _rand_payload()
-                        if isinstance(payload, dict):
-                            # Should return bool, never raise
-                            result = _tool_input_valid(payload, tool_def)
-                            self.assertIsInstance(result, bool)
+        random.seed(seed)
+        for label, tool_def in ALL_TOOL_SCHEMAS.items():
+            for _ in range(1000):
+                payload = _rand_payload()
+                if isinstance(payload, dict):
+                    result = _tool_input_valid(payload, tool_def)
+                    self.assertIsInstance(result, bool, f"seed={seed} tool={label}")
 
-    def test_random_payloads_with_some_required_fields(self):
+    @settings(max_examples=60, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_payloads_with_some_required_fields(self, seed):
         """Payloads that have *some* required fields but not all should fail."""
-        for seed in (71, 199):
-            random.seed(seed)
-            for label, tool_def in ALL_TOOL_SCHEMAS.items():
-                factory = VALID_PAYLOADS.get(label)
-                if not factory:
-                    continue
-                required = tool_def.get("input_schema", {}).get("required", [])
-                if len(required) < 2:
-                    continue
-                with self.subTest(seed=seed, tool=label):
-                    for _ in range(500):
-                        # Start from valid, then drop a random subset
-                        payload = factory()
-                        drop_count = random.randint(1, len(required) - 1)
-                        to_drop = random.sample(required, drop_count)
-                        for k in to_drop:
-                            del payload[k]
-                        self.assertFalse(_tool_input_valid(payload, tool_def))
+        random.seed(seed)
+        for label, tool_def in ALL_TOOL_SCHEMAS.items():
+            factory = VALID_PAYLOADS.get(label)
+            if not factory:
+                continue
+            required = tool_def.get("input_schema", {}).get("required", [])
+            if len(required) < 2:
+                continue
+            for _ in range(500):
+                payload = factory()
+                drop_count = random.randint(1, len(required) - 1)
+                to_drop = random.sample(required, drop_count)
+                for k in to_drop:
+                    del payload[k]
+                self.assertFalse(_tool_input_valid(payload, tool_def), f"seed={seed} tool={label}")
 
-    def test_random_payloads_acceptance_rate(self):
+    @settings(max_examples=30, deadline=None)
+    @given(seed=st.integers(min_value=0, max_value=999_999))
+    def test_random_payloads_acceptance_rate(self, seed):
         """Pure random payloads should almost never pass validation (sanity check).
 
         With 4-9 required fields and random keys, the odds of all required fields
         appearing with non-None values is negligible.  This test asserts <5% pass rate.
         """
+        random.seed(seed)
         for label, tool_def in ALL_TOOL_SCHEMAS.items():
             required = tool_def.get("input_schema", {}).get("required", [])
             if not required:
                 continue
-            random.seed(999)
             passes = 0
             n = 2000
             for _ in range(n):
                 payload = _rand_payload()
                 if isinstance(payload, dict) and _tool_input_valid(payload, tool_def):
                     passes += 1
-            with self.subTest(tool=label):
-                rate = passes / n
-                self.assertLess(rate, 0.05,
-                    f"{label}: {rate:.1%} of random payloads passed (expected <5%)")
+            rate = passes / n
+            self.assertLess(
+                rate,
+                0.05,
+                f"{label}: {rate:.1%} of random payloads passed (expected <5%), seed={seed}",
+            )
 
 
 class TestNearMissPayloads(unittest.TestCase):
