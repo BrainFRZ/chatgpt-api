@@ -1793,10 +1793,47 @@ class TestResolveVehicleWeakPoint(unittest.TestCase):
             damage_dice=5, vehicle_sp=13, vehicle_name="Enemy AV",
             range_bracket=2, target_moving=True,
         )
-        # DV for AR at range 2 = 15, +8 aimed = 23. Roll 9+8+6=23. Must BEAT DV -> 23 > 23 fails
-        # Actually for this mock ALL randint calls return 9, so d10=9 for check, then d6=9 would be clamped...
-        # The d10 check: 9+8+6=23 vs DV23 -> tied -> FAIL (must beat)
+        # Ruleset §18: moving weak point = flat DV13 + aimed −8 = DV21.
+        # Roll 9+8+6=23 > 21 → HIT.
+        self.assertTrue(r["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_moving_target_miss_flat_dv21(self, _m):
+        """Moving weak point DV is flat 21 regardless of weapon/range."""
+        r = resolve_vehicle_weak_point(
+            stat_value=6, skill_value=4, weapon_type="Pistol",
+            damage_dice=2, vehicle_sp=0, vehicle_name="Bike",
+            range_bracket=0, target_moving=True,
+        )
+        # Roll 5+6+4=15 vs DV21 → MISS.  Old bug would have used
+        # Pistol range-0 DV13 + 8 = DV21 too (coincidence), so also test
+        # a range bracket where old DV would have differed.
         self.assertFalse(r["hit"])
+
+    @patch(MOCK, return_value=5)
+    def test_moving_target_uses_flat_dv_not_range_table(self, _m):
+        """Confirm DV doesn't scale with range — always flat DV21."""
+        # Sniper at bracket 4 (51-100m): range DV=15, old code would give 15+8=23.
+        # Fixed code: flat 13+8=21. Roll 5+8+8=21, must BEAT → 21>21 fails.
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=8, weapon_type="Sniper Rifle",
+            damage_dice=5, vehicle_sp=0, vehicle_name="Van",
+            range_bracket=4, target_moving=True,
+        )
+        # With old range-based DV: DV23, 21 < 23 → miss.
+        # With fixed flat DV21: 21 > 21 → still miss (tied).
+        self.assertFalse(r["hit"])
+        # Now test that at bracket 5 (101-200m, sniper DV=16), where old code
+        # would give DV24 but correct is still DV21:
+        r2 = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Sniper Rifle",
+            damage_dice=5, vehicle_sp=0, vehicle_name="Van",
+            range_bracket=5, target_moving=True,
+        )
+        # Roll 5+8+6=19 vs DV21 → miss under both systems, but DV in result
+        # should be 21 not 24.
+        self.assertFalse(r2["hit"])
+        self.assertEqual(r2["attack_roll"]["dv"], 21)
 
     @patch(MOCK, return_value=4)
     def test_stationary_auto_hit(self, _m):

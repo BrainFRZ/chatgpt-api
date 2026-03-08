@@ -500,6 +500,7 @@ DRIVING_CHECK_DVS = {
 RAMMING_DAMAGE_DICE = 6   # 6d6
 RAMMING_NOS_BONUS_DICE = 2  # +2d6 when NOS-boosted with Combat Plow
 PEDESTRIAN_DODGE_DV = 13  # DEX + Evasion
+VEHICLE_WEAK_POINT_MOVING_DV = 13  # flat DV13 for moving vehicle weak point (+ aimed shot −8 = DV21)
 SPIKE_STRIP_DV = 17       # DV17 Drive Land Vehicle
 SPIKE_STRIP_DAMAGE_DICE = 4  # 4d6, treated as weak point (doubled past SP)
 

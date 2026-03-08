@@ -22,6 +22,7 @@ from .cpred_tables import (
     RAMMING_DAMAGE_DICE,
     RAMMING_NOS_BONUS_DICE,
     PEDESTRIAN_DODGE_DV,
+    VEHICLE_WEAK_POINT_MOVING_DV,
     SPIKE_STRIP_DV,
     SPIKE_STRIP_DAMAGE_DICE,
 )
@@ -1595,11 +1596,13 @@ def resolve_vehicle_weak_point(
         }
 
     # Attack roll (only if target is moving)
+    # Ruleset §18: moving weak point = flat DV13 + aimed shot −8 = DV21,
+    # NOT the range-based DV table.  Range validation above already rejected
+    # weapons that can't reach this bracket; the hit DV is always 21.
     attack_roll = None
     hit = True
     if target_moving:
-        base_dv = dvs[range_bracket]
-        aimed_dv = base_dv + AIMED_SHOT_DV_PENALTY
+        aimed_dv = VEHICLE_WEAK_POINT_MOVING_DV + AIMED_SHOT_DV_PENALTY
         attack_roll = resolve_check(
             stat_value=stat_value,
             skill_value=skill_value,
