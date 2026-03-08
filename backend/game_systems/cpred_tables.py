@@ -464,3 +464,64 @@ IP_COST_TABLES = {
     "difficult": {i: i * 40 for i in range(1, 11)},
     "role":      {i: i * 60 for i in range(1, 11)},
 }
+
+# ---------------------------------------------------------------------------
+# Vehicle stats (CRB §18 / Combat Ruleset §18)
+# SP defaults to 0; Armored Chassis upgrade sets SP=13 at bootstrap.
+# Heavy Chassis adds +20 SDP at bootstrap.
+# ---------------------------------------------------------------------------
+VEHICLE_STATS = {
+    "roadbike":         {"name": "Roadbike",              "sdp": 35,  "sp": 0, "seats": 2, "move_min": 20, "move_max": 30, "type": "land"},
+    "superbike":        {"name": "Superbike",             "sdp": 35,  "sp": 0, "seats": 2, "move_min": 40, "move_max": 60, "type": "land"},
+    "jetski":           {"name": "Jetski",                "sdp": 35,  "sp": 0, "seats": 2, "move_min": 20, "move_max": 40, "type": "sea"},
+    "gyrocopter":       {"name": "Gyrocopter",            "sdp": 35,  "sp": 0, "seats": 2, "move_min": 30, "move_max": 50, "type": "air"},
+    "compact":          {"name": "Compact Groundcar",     "sdp": 50,  "sp": 0, "seats": 4, "move_min": 20, "move_max": 30, "type": "land"},
+    "high_performance": {"name": "High Perf. Groundcar",  "sdp": 50,  "sp": 0, "seats": 2, "move_min": 40, "move_max": 60, "type": "land"},
+    "super_groundcar":  {"name": "Super Groundcar",       "sdp": 50,  "sp": 0, "seats": 2, "move_min": 50, "move_max": 60, "type": "land"},
+    "speedboat":        {"name": "Speedboat",             "sdp": 50,  "sp": 0, "seats": 4, "move_min": 30, "move_max": 40, "type": "sea"},
+    "helicopter":       {"name": "Helicopter",            "sdp": 55,  "sp": 0, "seats": 4, "move_min": 30, "move_max": 40, "type": "air"},
+    "av_9":             {"name": "AV-9 Aerodyne",         "sdp": 60,  "sp": 0, "seats": 4, "move_min": 20, "move_max": 40, "type": "air"},
+    "av_4":             {"name": "AV-4 Aerodyne",         "sdp": 100, "sp": 0, "seats": 6, "move_min": 20, "move_max": 40, "type": "air"},
+    "yacht":            {"name": "Yacht",                 "sdp": 100, "sp": 0, "seats": 6, "move_min": 10, "move_max": 20, "type": "sea"},
+    "aerozep":          {"name": "Aerozep",               "sdp": 100, "sp": 0, "seats": 4, "move_min": 10, "move_max": 20, "type": "air"},
+}
+
+DRIVING_CHECK_DVS = {
+    "maintain_control": 10,
+    "swerve": 13,
+    "sharp_turn": 13,
+    "emergency_stop": 13,
+    "bootleg_turn": 17,
+    "do_a_jump": 17,
+    "landing": 13,
+    "aerobatic_maneuver": 17,
+}
+
+RAMMING_DAMAGE_DICE = 6   # 6d6
+RAMMING_NOS_BONUS_DICE = 2  # +2d6 when NOS-boosted with Combat Plow
+PEDESTRIAN_DODGE_DV = 13  # DEX + Evasion
+SPIKE_STRIP_DV = 17       # DV17 Drive Land Vehicle
+SPIKE_STRIP_DAMAGE_DICE = 4  # 4d6, treated as weak point (doubled past SP)
+
+VEHICLE_UPGRADES = {
+    # Universal
+    "armored_chassis":       {"name": "Armored Chassis",       "sp": 13, "sdp_bonus": 0,  "rank": 5},
+    "bulletproof_glass_thin":{"name": "Bulletproof Glass (Thin)","cover_hp": 15, "rank": 1},
+    "bulletproof_glass_thick":{"name": "Bulletproof Glass (Thick)","cover_hp": 30, "rank": 1},
+    "nos":                   {"name": "NOS",                   "rank": 1},
+    "onboard_flamethrower":  {"name": "Onboard Flamethrower",  "rank": 1},
+    "onboard_machine_gun":   {"name": "Onboard Machine Gun",   "rank": 1},
+    "seating_upgrade":       {"name": "Seating Upgrade",       "seats_bonus": 2, "rank": 1},
+    # Land & Sea
+    "onboard_melee_weapon":  {"name": "Onboard Melee Weapon",  "rank": 1},
+    # All except Bikes/Jetskis/Gyrocopters
+    "heavy_chassis":         {"name": "Heavy Chassis",         "sdp_bonus": 20, "rank": 1},
+    "onboard_rocket_pod":    {"name": "Onboard Rocket Pod",    "rank": 5},
+    "heavy_weapon_mount":    {"name": "Vehicle Heavy Weapon Mount", "rank": 5},
+    # Land & Sea except Bikes/Jetskis
+    "combat_plow":           {"name": "Combat Plow",           "rank": 1},
+    # Groundcars only
+    "deployable_spike_strip":{"name": "Deployable Spike Strip","rank": 1},
+    # Bikes only
+    "enhanced_interface":    {"name": "Enhanced Interface Plug Integration", "rank": 5},
+}

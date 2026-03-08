@@ -16,6 +16,7 @@ from typing import Optional, Iterator
 
 from providers import ParsedResponse, StreamEvent, Pricing
 from providers.openai_provider import OpenAIProvider, FLEX_PRICING, STANDARD_PRICING
+from combat_state import replace_combat_dict_preserving_backend_keys
 
 logger = logging.getLogger(__name__)
 
@@ -1802,7 +1803,7 @@ def run_pipeline(
 
     # Persist combat state (initiative tracker) from Events
     if "combat" in events_data:
-        pipeline_state["combat"] = events_data["combat"]
+        _replace_combat_dict(pipeline_state, events_data["combat"])
 
     new_pipeline_state = pipeline_state
 
@@ -2068,6 +2069,7 @@ def run_mode_pipeline(
     planning_schema: dict,
     game_state: dict = None,
     character_states: dict = None,
+    pipeline_state: dict = None,
     tar_stacks: int = 0,
     alert_level: int = 0,
     active_programs=None,
@@ -2182,10 +2184,33 @@ def run_mode_pipeline(
                         _combatant_hp[_cs_name] = _v["current"]
                         break
 
-        # Resolve combat actions sequentially with HP tracking
+        # Extract vehicle SDP/SP from combat state for sequential tracking
+        _combatant_vehicle_sdp = {}
+        _raw_combat = pipeline_state.get("combat") if isinstance(pipeline_state, dict) else None
+        _combat_vehicles = _raw_combat.get("vehicles", {}) if isinstance(_raw_combat, dict) else {}
+        if isinstance(_combat_vehicles, dict):
+            for _vn, _vd in _combat_vehicles.items():
+                if not isinstance(_vd, dict):
+                    continue
+                # Include destroyed vehicles too so resolve_actions can emit skipped
+                # results with narration-visible reasons/notifications.
+                _is_destroyed = _vd.get("status") == "destroyed"
+                try:
+                    _sdp_current = int(_vd.get("sdp_current", 0))
+                except (TypeError, ValueError, OverflowError):
+                    _sdp_current = 0
+                try:
+                    _sp_current = int(_vd.get("sp", 0))
+                except (TypeError, ValueError, OverflowError):
+                    _sp_current = 0
+                _combatant_vehicle_sdp[_vn] = 0 if _is_destroyed else max(0, _sdp_current)
+                _combatant_vehicle_sdp[_vn + ":sp"] = max(0, _sp_current)
+
+        # Resolve combat actions sequentially with HP and vehicle SDP tracking
         combat_resolved = resolve_actions(
             combat_actions, relationships=_rels, factions=_facs,
             sequential=True, combatant_hp=_combatant_hp,
+            combatant_vehicle_sdp=_combatant_vehicle_sdp,
             tar_stacks=_phase_tar, alert_level=_alert_level,
             active_programs=active_programs, installed_hardware=installed_hardware,
             ice_status=ice_status
@@ -3137,6 +3162,17 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
     return result
 
 
+def _replace_combat_dict(pipeline_state: dict, new_combat) -> None:
+    """Replace pipeline_state['combat'] while preserving backend-owned keys.
+
+    The model's combat dict only contains initiative data (round, initiative_order,
+    current_turn). Backend-owned keys like vehicles, cover, context, and
+    start_message_id must survive replacement. Any new backend-owned key added
+    here is automatically preserved at ALL replacement sites.
+    """
+    replace_combat_dict_preserving_backend_keys(pipeline_state, new_combat)
+
+
 def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int, game_system: dict = None) -> dict:
     """Apply parsed state updates to pipeline_state using existing apply_* functions."""
     if not isinstance(parsed, dict):
@@ -3187,7 +3223,7 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             pipeline_state.get("character_states", {}))
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
-        pipeline_state["combat"] = parsed["combat"]
+        _replace_combat_dict(pipeline_state, parsed["combat"])
     # Persist sex_scene state from tool report
     if "sex_scene" in parsed:
         pipeline_state["sex_scene"] = parsed["sex_scene"]

@@ -38,9 +38,21 @@ from game_systems.cpred_mechanics import (
     next_combat_turn,
     resolve_opposed_check,
     resolve_actions,
+    resolve_driving_check,
+    resolve_ramming,
+    resolve_vehicle_weak_point,
+    resolve_spike_strip,
     RESOLVE_MECHANICS_TOOL,
 )
 from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE, CYBERWARE_TABLE
+from game_systems.cpred_combat import _replace_combat_dict as _replace_cpred_combat_dict
+from main import (
+    _convert_state_ops_to_vehicle_updates,
+    _inject_resolver_ops_stateful,
+    _merge_vehicle_updates,
+    _replace_combat_dict_legacy,
+)
+from pipeline import _replace_combat_dict
 
 MOCK = "game_systems.cpred_mechanics.random.randint"
 
@@ -1965,8 +1977,415 @@ class TestToolSchema(unittest.TestCase):
 
     def test_type_enum_matches_resolve_actions(self):
         type_enum = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]["items"]["properties"]["type"]["enum"]
-        expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save", "initiative", "opposed_check", "program_attack", "program_attack_vs_netrunner", "ice_attack_vs_program", "ambush"}
+        expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save",
+                    "initiative", "opposed_check", "program_attack",
+                    "program_attack_vs_netrunner", "ice_attack_vs_program", "ambush",
+                    "driving_check", "ramming", "vehicle_weak_point", "spike_strip"}
         self.assertEqual(set(type_enum), expected)
+
+
+# ===========================================================================
+# Vehicle Combat Fuzz Tests
+# ===========================================================================
+MANEUVERS = list(["maintain_control", "swerve", "sharp_turn", "emergency_stop",
+                  "bootleg_turn", "do_a_jump", "landing", "aerobatic_maneuver", "unknown_stunt"])
+
+
+class TestResolveDrivingCheckFuzz(unittest.TestCase):
+    """Property-based tests for resolve_driving_check."""
+
+    REQUIRED_KEYS = {"die", "stat_value", "skill_value", "modifiers", "total", "dv",
+                     "success", "formatted", "type", "maneuver", "control_lost", "on_outcome"}
+
+    @given(
+        stat=st.integers(-10, 20),
+        skill=st.integers(-10, 20),
+        maneuver=st.sampled_from(MANEUVERS),
+        sw=st.booleans(),
+        luck=st.integers(0, 10),
+    )
+    @settings(max_examples=50)
+    def test_always_returns_required_keys(self, stat, skill, maneuver, sw, luck):
+        r = resolve_driving_check(stat, skill, maneuver, sw, luck)
+        self.assertTrue(self.REQUIRED_KEYS.issubset(r.keys()), f"Missing keys: {self.REQUIRED_KEYS - r.keys()}")
+        self.assertEqual(r["type"], "driving_check")
+        self.assertEqual(r["control_lost"], not r["success"])
+        self.assertIsInstance(r["formatted"], str)
+
+
+class TestResolveRammingFuzz(unittest.TestCase):
+    """Property-based tests for resolve_ramming."""
+
+    @given(
+        vsdp=st.integers(1, 200),
+        vsp=st.integers(0, 20),
+        thp=st.integers(1, 100),
+        tsp=st.integers(0, 20),
+        is_veh=st.booleans(),
+        tsdp=st.integers(1, 200),
+        n_occ=st.integers(0, 3),
+        n_tocc=st.integers(0, 3),
+        plow=st.booleans(),
+        nos=st.booleans(),
+    )
+    @settings(max_examples=80)
+    def test_ramming_invariants(self, vsdp, vsp, thp, tsp, is_veh, tsdp, n_occ, n_tocc, plow, nos):
+        occupants = [{"name": f"Occ{i}"} for i in range(n_occ)]
+        target_occupants = [{"name": f"TOcc{i}"} for i in range(n_tocc)]
+        r = resolve_ramming(
+            vehicle_name="A", target_name="B",
+            vehicle_sdp_current=vsdp, vehicle_sp=vsp,
+            target_hp_current=thp, target_sp=tsp,
+            target_is_vehicle=is_veh, target_sdp_current=tsdp,
+            occupants=occupants, target_occupants=target_occupants,
+            combat_plow=plow, nos_boosted=nos,
+        )
+        self.assertEqual(r["type"], "ramming")
+        self.assertFalse(r["dodged"])
+        self.assertGreaterEqual(r["ram_damage_total"], 0)
+        self.assertGreaterEqual(r["target_damage"], 0)
+        self.assertGreaterEqual(r["vehicle_damage"], 0)
+        self.assertIsInstance(r["state_ops"], list)
+        self.assertIsInstance(r["formatted"], str)
+        self.assertIn("on_outcome", r)
+
+        # Combat Plow: no self-damage, no attacker Whiplash
+        if plow:
+            self.assertEqual(r["vehicle_damage"], 0)
+            attacker_sdp_ops = [op for op in r["state_ops"]
+                               if op.get("op") == "vehicle_sdp" and op.get("vehicle") == "A"]
+            self.assertEqual(len(attacker_sdp_ops), 0)
+            attacker_ci = [op for op in r["state_ops"]
+                          if op.get("op") == "critical_injury" and op["edgerunner"].startswith("Occ")]
+            self.assertEqual(len(attacker_ci), 0)
+
+        # NOS + Combat Plow: 8d6
+        if plow and nos:
+            self.assertEqual(r["ram_damage_dice"], 8)
+        elif not plow or not nos:
+            self.assertEqual(r["ram_damage_dice"], 6)
+
+        # Target occupants get Whiplash only for vehicle targets.
+        target_ci = [op for op in r["state_ops"]
+                    if op.get("op") == "critical_injury" and op["edgerunner"].startswith("TOcc")]
+        if is_veh:
+            self.assertEqual(len(target_ci), n_tocc)
+        else:
+            self.assertEqual(len(target_ci), 0)
+
+        # Verify canonical crit injury format on all Whiplash ops
+        all_ci = [op for op in r["state_ops"] if op.get("op") == "critical_injury"]
+        for ci in all_ci:
+            self.assertEqual(ci.get("action"), "add")
+            self.assertEqual(ci.get("name"), "Whiplash")
+            self.assertIn("reason", ci)
+            self.assertIn("location", ci)
+
+
+class TestResolveRammingPedestrianDodgeFuzz(unittest.TestCase):
+    """Property-based tests for ramming with pedestrian_dodge=True."""
+
+    @given(
+        vsdp=st.integers(1, 200),
+        vsp=st.integers(0, 20),
+        thp=st.integers(1, 100),
+        tsp=st.integers(0, 20),
+        ped_dex=st.integers(1, 10),
+        ped_eva=st.integers(0, 10),
+        plow=st.booleans(),
+    )
+    @settings(max_examples=60)
+    def test_pedestrian_dodge_invariants(self, vsdp, vsp, thp, tsp, ped_dex, ped_eva, plow):
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=vsdp, vehicle_sp=vsp,
+            target_hp_current=thp, target_sp=tsp,
+            pedestrian_dodge=True, pedestrian_dex=ped_dex, pedestrian_evasion=ped_eva,
+            combat_plow=plow,
+        )
+        self.assertEqual(r["type"], "ramming")
+        self.assertIn("on_outcome", r)
+        self.assertIsInstance(r["state_ops"], list)
+        self.assertIsInstance(r["formatted"], str)
+        # All return paths must have these keys
+        for key in ("ram_damage_dice", "ram_damage_total", "vehicle_damage",
+                     "target_damage", "vehicle_stopped", "target_ablation", "vehicle_ablation"):
+            self.assertIn(key, r, f"Missing key {key}")
+        if r["dodged"]:
+            self.assertEqual(r["ram_damage_total"], 0)
+            self.assertEqual(r["target_damage"], 0)
+            self.assertEqual(r["vehicle_damage"], 0)
+            self.assertEqual(len(r["state_ops"]), 0)
+        else:
+            self.assertGreaterEqual(r["ram_damage_total"], 0)
+
+
+class TestResolveVehicleWeakPointFuzz(unittest.TestCase):
+    """Property-based tests for resolve_vehicle_weak_point."""
+
+    @given(
+        stat=st.integers(1, 15),
+        skill=st.integers(0, 12),
+        dmg_dice=st.integers(1, 8),
+        vsp=st.integers(0, 20),
+        moving=st.booleans(),
+        ap=st.booleans(),
+    )
+    @settings(max_examples=60)
+    def test_weak_point_invariants(self, stat, skill, dmg_dice, vsp, moving, ap):
+        r = resolve_vehicle_weak_point(
+            stat_value=stat, skill_value=skill, weapon_type="Pistol",
+            damage_dice=dmg_dice, vehicle_sp=vsp, vehicle_name="Car",
+            range_bracket=0, target_moving=moving, is_ap=ap,
+        )
+        self.assertEqual(r["type"], "vehicle_weak_point")
+        self.assertIsInstance(r["hit"], bool)
+        self.assertIsInstance(r["state_ops"], list)
+        self.assertIsInstance(r["formatted"], str)
+        self.assertIn("on_outcome", r)
+
+        if r["hit"]:
+            self.assertGreaterEqual(r["raw_damage"], 0)
+            self.assertGreaterEqual(r["damage_past_sp"], 0)
+            self.assertEqual(r["doubled_damage"], r["damage_past_sp"] * 2)
+            if r["damage_past_sp"] > 0:
+                expected_ablation = 2 if ap else 1
+                self.assertEqual(r["ablation"], expected_ablation)
+            else:
+                self.assertEqual(r["ablation"], 0)
+
+        if not moving:
+            self.assertTrue(r["hit"])
+            self.assertIsNone(r["attack_roll"])
+
+
+class TestResolveSpikeStripFuzz(unittest.TestCase):
+    """Property-based tests for resolve_spike_strip."""
+
+    @given(
+        stat=st.integers(1, 12),
+        skill=st.integers(0, 10),
+        vsp=st.integers(0, 20),
+        sw=st.booleans(),
+    )
+    @settings(max_examples=50)
+    def test_spike_strip_invariants(self, stat, skill, vsp, sw):
+        r = resolve_spike_strip(
+            target_driver_name="Enemy", stat_value=stat, skill_value=skill,
+            target_vehicle_name="Car", target_vehicle_sp=vsp,
+            seriously_wounded=sw,
+        )
+        self.assertEqual(r["type"], "spike_strip")
+        self.assertIsInstance(r["hit"], bool)
+        self.assertIsInstance(r["state_ops"], list)
+        self.assertIsInstance(r["formatted"], str)
+        self.assertIsInstance(r["check_result"], dict)
+        self.assertIn("on_outcome", r)
+
+        if r["hit"]:
+            self.assertGreaterEqual(r["raw_damage"], 0)
+            self.assertEqual(r["doubled_damage"], r["damage_past_sp"] * 2)
+        else:
+            self.assertEqual(len(r["state_ops"]), 0)
+
+
+class TestSequentialVehicleSDPFuzz(unittest.TestCase):
+    """Property-based tests for combatant_vehicle_sdp tracking in resolve_actions."""
+
+    @given(
+        sp=st.integers(0, 20),
+        sdp=st.integers(1, 100),
+        damage_dice=st.integers(1, 8),
+    )
+    @settings(max_examples=50)
+    def test_two_weak_point_shots_tracked(self, sp, sdp, damage_dice):
+        """Two weak-point shots against the same vehicle: second uses updated SP."""
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V", "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": damage_dice,
+                "vehicle_sp": sp, "vehicle_name": "Target",
+                "range_bracket": 1, "target_moving": False,
+            },
+            {
+                "type": "vehicle_weak_point",
+                "character": "Jackie", "stat_value": 7, "skill_value": 5,
+                "weapon_type": "Assault Rifle", "damage_dice": damage_dice,
+                "vehicle_sp": sp, "vehicle_name": "Target",
+                "range_bracket": 1, "target_moving": False,
+            },
+        ]
+        vehicle_sdp = {"Target": sdp, "Target:sp": sp}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        results = result["results"]
+        self.assertEqual(len(results), 2)
+        # First always auto-hits (stationary)
+        self.assertTrue(results[0]["hit"])
+        # Second either hits or is skipped (if first shot destroyed the vehicle)
+        if results[1].get("skipped"):
+            self.assertEqual(results[1]["reason"], "vehicle_destroyed")
+        else:
+            self.assertTrue(results[1]["hit"])
+            # When not skipped, second shot's effective_sp should be <= first's (ablation)
+            self.assertLessEqual(results[1]["effective_sp"], results[0]["effective_sp"])
+        # State ops should be valid
+        for op in result["state_ops"]:
+            self.assertIsInstance(op, dict)
+            if op.get("op") in ("vehicle_sdp", "vehicle_sp"):
+                self.assertEqual(op["vehicle"], "Target")
+
+    @given(
+        sp=st.integers(0, 15),
+        sdp=st.integers(0, 30),
+    )
+    @settings(max_examples=30)
+    def test_destroyed_vehicle_skips_ramming(self, sp, sdp):
+        """A vehicle at 0 SDP should be skipped for ramming actions."""
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V", "vehicle_name": "Wreck",
+                "target": "Enemy", "vehicle_sdp_current": 0,
+                "vehicle_sp": sp, "target_hp_current": 30,
+                "target_sp": 5,
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": sp}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        results = result["results"]
+        self.assertEqual(len(results), 1)
+        # Should be skipped due to vehicle_destroyed
+        self.assertTrue(results[0].get("skipped", False))
+        self.assertEqual(results[0].get("reason"), "vehicle_destroyed")
+
+
+NAME_CHARS = st.characters(whitelist_categories=("Ll", "Lu", "Nd"), min_codepoint=48, max_codepoint=122)
+NAME = st.text(NAME_CHARS, min_size=1, max_size=8)
+
+
+@st.composite
+def _vehicle_update(draw):
+    d = {}
+    if draw(st.booleans()):
+        d["name"] = draw(NAME)
+    if draw(st.booleans()):
+        d["sdp_delta"] = draw(st.integers(min_value=-200, max_value=200))
+    if draw(st.booleans()):
+        d["sp_delta"] = draw(st.integers(min_value=-20, max_value=20))
+    if draw(st.booleans()):
+        d["occupants"] = draw(st.lists(NAME, min_size=0, max_size=4))
+    if draw(st.booleans()):
+        d["status"] = draw(st.sampled_from(["active", "disabled", "destroyed"]))
+    return d
+
+
+@st.composite
+def _state_op(draw):
+    op = draw(st.sampled_from(["vehicle_sdp", "vehicle_sp", "hp", "luck", "noise"]))
+    entry = {"op": op}
+    if draw(st.booleans()):
+        entry["vehicle"] = draw(NAME)
+    entry["change"] = draw(st.one_of(st.integers(-50, 50), st.text(min_size=0, max_size=4), st.none()))
+    if draw(st.booleans()):
+        entry["edgerunner"] = draw(NAME)
+    return entry
+
+
+class TestMainPipelineMergeAndReplaceFuzz(unittest.TestCase):
+    @settings(max_examples=250, deadline=None)
+    @given(
+        existing=st.lists(st.one_of(_vehicle_update(), st.integers(), st.text()), min_size=0, max_size=20),
+        resolver=st.lists(st.one_of(_vehicle_update(), st.integers(), st.text()), min_size=0, max_size=20),
+    )
+    def test_merge_vehicle_updates_no_crash_and_unique_names(self, existing, resolver):
+        merged = _merge_vehicle_updates(copy.deepcopy(existing), copy.deepcopy(resolver))
+        names = [u.get("name") for u in merged if isinstance(u, dict) and u.get("name")]
+        self.assertEqual(len(names), len(set(names)))
+
+    @settings(max_examples=250, deadline=None)
+    @given(state_ops=st.lists(_state_op(), min_size=0, max_size=40))
+    def test_convert_state_ops_to_vehicle_updates_stable(self, state_ops):
+        out = _convert_state_ops_to_vehicle_updates(copy.deepcopy(state_ops))
+        self.assertIsInstance(out, list)
+        for upd in out:
+            self.assertIsInstance(upd, dict)
+            self.assertTrue(upd.get("name"))
+            if "sdp_delta" in upd:
+                self.assertIsInstance(upd["sdp_delta"], int)
+            if "sp_delta" in upd:
+                self.assertIsInstance(upd["sp_delta"], int)
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        existing_ops=st.lists(
+            st.dictionaries(
+                keys=st.sampled_from(["op", "edgerunner", "change", "value"]),
+                values=st.one_of(st.text(min_size=0, max_size=8), st.integers(-10, 10)),
+                min_size=1,
+                max_size=4,
+            ),
+            min_size=0,
+            max_size=20,
+        ),
+        state_ops=st.lists(_state_op(), min_size=0, max_size=30),
+    )
+    def test_inject_resolver_ops_stateful_behavior(self, existing_ops, state_ops):
+        calls = []
+
+        def fake_apply_vehicle_updates(combat, updates):
+            calls.append(copy.deepcopy(updates))
+
+        tool_input = {"edgerunner_ops": copy.deepcopy(existing_ops)}
+        pipeline_state = {"combat": {"vehicles": {"Car": {"sdp_current": 50, "sp": 10}}}}
+        gs = {"apply_vehicle_updates": fake_apply_vehicle_updates}
+        _inject_resolver_ops_stateful(tool_input, copy.deepcopy(state_ops), pipeline_state, gs)
+
+        dice_ops = {"hp", "armor", "critical_injury", "luck", "ammo", "vehicle_sdp", "vehicle_sp"}
+        for op in tool_input.get("edgerunner_ops", []):
+            if isinstance(op, dict) and op.get("op") in dice_ops:
+                self.assertIn(op, state_ops)
+        expected_vehicle_updates = _convert_state_ops_to_vehicle_updates(state_ops)
+        if expected_vehicle_updates:
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], expected_vehicle_updates)
+        else:
+            self.assertEqual(len(calls), 0)
+
+    @settings(max_examples=250, deadline=None)
+    @given(
+        old=st.dictionaries(
+            keys=st.sampled_from(["vehicles", "cover", "context", "start_message_id", "round", "initiative_order"]),
+            values=st.one_of(
+                st.integers(-10, 200),
+                st.text(min_size=0, max_size=20),
+                st.dictionaries(st.text(min_size=1, max_size=5), st.integers(0, 100), max_size=4),
+                st.lists(st.text(min_size=1, max_size=5), max_size=6),
+            ),
+            max_size=6,
+        ),
+        new=st.dictionaries(
+            keys=st.sampled_from(["vehicles", "cover", "context", "start_message_id", "round", "initiative_order"]),
+            values=st.one_of(
+                st.integers(-10, 200),
+                st.text(min_size=0, max_size=20),
+                st.dictionaries(st.text(min_size=1, max_size=5), st.integers(0, 100), max_size=4),
+                st.lists(st.text(min_size=1, max_size=5), max_size=6),
+            ),
+            max_size=6,
+        ),
+    )
+    def test_replace_combat_dict_preserves_backend_owned_keys(self, old, new):
+        for replacer in (_replace_combat_dict, _replace_combat_dict_legacy, _replace_cpred_combat_dict):
+            ps = {"combat": copy.deepcopy(old)}
+            incoming = copy.deepcopy(new)
+            replacer(ps, incoming)
+            for key in ("vehicles", "cover", "context", "start_message_id"):
+                # Backend-owned keys are persisted from prior state whenever available.
+                if old.get(key) is not None:
+                    self.assertEqual(ps["combat"].get(key), old[key])
+                elif key in new:
+                    self.assertEqual(ps["combat"].get(key), new[key])
 
 
 if __name__ == "__main__":

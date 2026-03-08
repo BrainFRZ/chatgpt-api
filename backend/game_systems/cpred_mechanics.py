@@ -18,6 +18,12 @@ from .cpred_tables import (
     AUTOFIRE_DV_TABLE,
     AIMED_SHOT_DV_PENALTY,
     ICE_STAT_BLOCKS,
+    DRIVING_CHECK_DVS,
+    RAMMING_DAMAGE_DICE,
+    RAMMING_NOS_BONUS_DICE,
+    PEDESTRIAN_DODGE_DV,
+    SPIKE_STRIP_DV,
+    SPIKE_STRIP_DAMAGE_DICE,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +90,7 @@ def _critical_injury_state_op(edgerunner: str, injury: dict, reason: str) -> dic
 
 def _luck_spend_state_op(edgerunner: str, luck_spent: int, reason: str) -> Optional[dict]:
     """Emit a Luck spend op for positive Luck usage."""
-    spend = max(0, int(luck_spent))
+    spend = _to_int(luck_spent, 0, minimum=0)
     if spend <= 0:
         return None
     return {
@@ -102,6 +108,64 @@ def _iter_critical_injuries(damage: dict) -> list:
         return [ci for ci in injuries if isinstance(ci, dict)]
     injury = damage.get("crit_injury")
     return [injury] if isinstance(injury, dict) else []
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    """Best-effort boolean coercion for tool inputs."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "y", "on"):
+            return True
+        if v in ("false", "0", "no", "n", "off", ""):
+            return False
+    return default
+
+
+def _norm_name(value) -> str:
+    """Normalize free-text entity names used as tracking keys."""
+    return str(value or "").strip()
+
+
+def _norm_vehicle_track_key(name: str, sp: bool = False) -> str:
+    """Canonical vehicle tracking key (case-insensitive, trimmed)."""
+    base = _norm_name(name).casefold()
+    if not base:
+        return ""
+    return f"{base}:sp" if sp else base
+
+
+def _norm_hp_track_key(name: str) -> str:
+    """Canonical HP tracking key (case-insensitive, trimmed)."""
+    return _norm_name(name).casefold()
+
+
+def _normalize_ranged_weapon_type(weapon_type: str) -> str:
+    """Best-effort normalize weapon type names for DV table lookups."""
+    raw = _norm_name(weapon_type)
+    if not raw:
+        return raw
+    if raw in RANGED_DV_TABLE:
+        return raw
+    raw_cf = raw.casefold()
+    for key in RANGED_DV_TABLE.keys():
+        if isinstance(key, str) and key.casefold() == raw_cf:
+            return key
+    return raw
+
+
+def _to_int(value, default: int = 0, minimum: Optional[int] = None) -> int:
+    """Best-effort integer coercion with optional lower bound."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    return parsed
 
 
 def _lookup_crit_injury(hit_location: str) -> dict:
@@ -1132,6 +1196,631 @@ def _resolve_jack_out_cascade(ice_status, active_programs=None, installed_hardwa
 
 
 # ---------------------------------------------------------------------------
+# Vehicle combat resolvers
+# ---------------------------------------------------------------------------
+
+def resolve_driving_check(
+    stat_value: int,
+    skill_value: int,
+    maneuver: str = "maintain_control",
+    seriously_wounded: bool = False,
+    luck_spent: int = 0,
+    on_hit: str = "",
+    on_miss: str = "",
+) -> dict:
+    """Resolve a driving/piloting check against the maneuver DV.
+
+    Uses the standard resolve_check flow.
+    """
+    stat_value = _to_int(stat_value, 0)
+    skill_value = _to_int(skill_value, 0)
+    luck_spent = _to_int(luck_spent, 0, minimum=0)
+    seriously_wounded = _as_bool(seriously_wounded, False)
+    maneuver = str(maneuver or "").strip().lower()
+    if maneuver not in DRIVING_CHECK_DVS:
+        return {
+            "die": None,
+            "stat_value": stat_value,
+            "skill_value": skill_value,
+            "modifiers": [],
+            "total": None,
+            "dv": None,
+            "success": False,
+            "type": "driving_check",
+            "maneuver": maneuver,
+            "control_lost": True,
+            "state_ops": [],
+            "on_outcome": on_miss,
+            "error": f"Unknown driving maneuver: {maneuver}",
+            "formatted": f"[Driving Check] Unknown maneuver '{maneuver}'",
+        }
+    dv = DRIVING_CHECK_DVS[maneuver]
+    result = resolve_check(
+        stat_value=stat_value,
+        skill_value=skill_value,
+        dv=dv,
+        seriously_wounded=seriously_wounded,
+        luck_spent=luck_spent,
+    )
+    result["type"] = "driving_check"
+    result["maneuver"] = maneuver
+    result["control_lost"] = not result["success"]
+    result["state_ops"] = []
+    result["on_outcome"] = on_hit if result["success"] else on_miss
+    label = maneuver.replace("_", " ").title()
+    result["formatted"] = f"[{label}] {result['formatted']}"
+    return result
+
+
+def resolve_ramming(
+    vehicle_name: str,
+    target_name: str,
+    vehicle_sdp_current: int,
+    vehicle_sp: int,
+    target_hp_current: Optional[int],
+    target_sp: int,
+    target_is_vehicle: bool = False,
+    target_sdp_current: Optional[int] = None,
+    occupants: list = None,
+    target_occupants: list = None,
+    pedestrian_dodge: bool = False,
+    pedestrian_dex: int = 0,
+    pedestrian_evasion: int = 0,
+    seriously_wounded_pedestrian: bool = False,
+    combat_plow: bool = False,
+    nos_boosted: bool = False,
+    on_hit: str = "",
+    on_miss: str = "",
+) -> dict:
+    """Resolve a ramming action (vehicle vs vehicle or vehicle vs pedestrian).
+
+    6d6 base damage (8d6 with Combat Plow + NOS). Same damage applied to both sides
+    unless Combat Plow negates attacker damage. Whiplash critical injury for occupants.
+    """
+    occupants = occupants or []
+    target_occupants = target_occupants or []
+    state_ops = []
+    target_is_vehicle = _as_bool(target_is_vehicle, False)
+    pedestrian_dodge = _as_bool(pedestrian_dodge, False)
+    seriously_wounded_pedestrian = _as_bool(seriously_wounded_pedestrian, False)
+    pedestrian_dex = _to_int(pedestrian_dex, 0)
+    pedestrian_evasion = _to_int(pedestrian_evasion, 0)
+    combat_plow = _as_bool(combat_plow, False)
+    nos_boosted = _as_bool(nos_boosted, False)
+    target_name = str(target_name or "").strip()
+    vehicle_name = str(vehicle_name or "").strip()
+    try:
+        vehicle_sp = max(0, int(vehicle_sp))
+    except (TypeError, ValueError, OverflowError):
+        vehicle_sp = 0
+    try:
+        vehicle_sdp_current = max(0, int(vehicle_sdp_current))
+    except (TypeError, ValueError, OverflowError):
+        vehicle_sdp_current = None
+    try:
+        target_sp = max(0, int(target_sp))
+    except (TypeError, ValueError, OverflowError):
+        target_sp = 0
+    target_sdp_current = _to_int(target_sdp_current, None) if target_sdp_current is not None else None
+    target_hp_current = _to_int(target_hp_current, None) if target_hp_current is not None else None
+
+    if not vehicle_name:
+        return {
+            "type": "ramming",
+            "dodged": False,
+            "state_ops": [],
+            "error": "Ramming requires vehicle_name",
+            "formatted": "Ramming: missing vehicle_name",
+            "on_outcome": on_miss,
+        }
+    if not target_name:
+        return {
+            "type": "ramming",
+            "dodged": False,
+            "state_ops": [],
+            "error": "Ramming requires target name",
+            "formatted": "Ramming: missing target",
+            "on_outcome": on_miss,
+        }
+    if isinstance(vehicle_sdp_current, int) and vehicle_sdp_current <= 0:
+        _note = f"Action skipped: {vehicle_name} is already destroyed."
+        return {
+            "type": "ramming",
+            "skipped": True,
+            "reason": "vehicle_destroyed",
+            "vehicle_name": vehicle_name,
+            "target": target_name,
+            "state_ops": [],
+            "formatted": _note,
+            "notification": _note,
+            "on_outcome": on_miss,
+        }
+
+    # Pedestrian dodge attempt
+    dodge_result = None
+    if pedestrian_dodge and not target_is_vehicle:
+        dodge_result = resolve_check(
+            stat_value=pedestrian_dex,
+            skill_value=pedestrian_evasion,
+            dv=PEDESTRIAN_DODGE_DV,
+            seriously_wounded=seriously_wounded_pedestrian,
+        )
+        if dodge_result["success"]:
+            return {
+                "type": "ramming",
+                "dodge_result": dodge_result,
+                "dodged": True,
+                "combat_plow": combat_plow,
+                "nos_boosted": nos_boosted,
+                "ram_damage_dice": 0,
+                "ram_damage_total": 0,
+                "vehicle_damage": 0,
+                "target_damage": 0,
+                "vehicle_stopped": False,
+                "target_ablation": 0,
+                "vehicle_ablation": 0,
+                "state_ops": [],
+                "formatted": f"Ram {target_name} — dodge {dodge_result['formatted']} — DODGED!",
+                "on_outcome": on_miss,
+            }
+
+    # Determine ram dice
+    ram_dice = RAMMING_DAMAGE_DICE
+    if combat_plow and nos_boosted:
+        ram_dice = RAMMING_DAMAGE_DICE + RAMMING_NOS_BONUS_DICE
+
+    # Roll ram damage
+    dice = [_roll_d6() for _ in range(ram_dice)]
+    ram_damage_total = sum(dice)
+    dice_str = ",".join(str(d) for d in dice)
+
+    # --- Apply damage to target ---
+    target_effective_sp = target_sp
+    target_damage_past_sp = max(0, ram_damage_total - target_effective_sp)
+    target_ablation = 1 if target_damage_past_sp > 0 else 0
+
+    if target_is_vehicle:
+        # Damage to target vehicle SDP
+        if target_damage_past_sp > 0:
+            state_ops.append({
+                "op": "vehicle_sdp",
+                "vehicle": target_name,
+                "change": -target_damage_past_sp,
+                "reason": f"Rammed by {vehicle_name}",
+            })
+        if target_ablation > 0:
+            state_ops.append({
+                "op": "vehicle_sp",
+                "vehicle": target_name,
+                "change": -target_ablation,
+                "reason": f"Ramming ablation from {vehicle_name}",
+            })
+    else:
+        # Damage to pedestrian HP
+        if target_damage_past_sp > 0:
+            state_ops.append({
+                "op": "hp",
+                "edgerunner": target_name,
+                "change": -target_damage_past_sp,
+                "reason": f"Rammed by {vehicle_name}",
+            })
+        if target_ablation > 0:
+            state_ops.append({
+                "op": "armor",
+                "edgerunner": target_name,
+                "location": "body",
+                "change": -target_ablation,
+                "reason": f"Ramming ablation from {vehicle_name}",
+            })
+
+    # --- Apply damage to ramming vehicle (negated by Combat Plow) ---
+    vehicle_damage_past_sp = 0
+    vehicle_ablation = 0
+    if not combat_plow:
+        vehicle_damage_past_sp = max(0, ram_damage_total - vehicle_sp)
+        vehicle_ablation = 1 if vehicle_damage_past_sp > 0 else 0
+        if vehicle_damage_past_sp > 0:
+            state_ops.append({
+                "op": "vehicle_sdp",
+                "vehicle": vehicle_name,
+                "change": -vehicle_damage_past_sp,
+                "reason": f"Ramming {target_name}",
+            })
+        if vehicle_ablation > 0:
+            state_ops.append({
+                "op": "vehicle_sp",
+                "vehicle": vehicle_name,
+                "change": -vehicle_ablation,
+                "reason": f"Ramming ablation vs {target_name}",
+            })
+
+    # --- Whiplash critical injuries ---
+    _whiplash = {
+        "name": "Whiplash",
+        "effect": "No additional effect beyond Death Save penalty.",
+        "dv_mod": 1,
+        "location": "head",
+    }
+
+    # Target occupants get Whiplash when the target is a vehicle.
+    if target_is_vehicle:
+        for occ in target_occupants:
+            occ_name = occ.get("name", "") if isinstance(occ, dict) else str(occ)
+            if occ_name:
+                state_ops.append(_critical_injury_state_op(occ_name, _whiplash, f"Rammed by {vehicle_name}"))
+
+    # Pedestrian target gets Whiplash too
+    if not target_is_vehicle and target_name:
+        state_ops.append(_critical_injury_state_op(target_name, _whiplash, f"Rammed by {vehicle_name}"))
+
+    # Attacker occupants get Whiplash only if no Combat Plow
+    if not combat_plow:
+        for occ in occupants:
+            occ_name = occ.get("name", "") if isinstance(occ, dict) else str(occ)
+            if occ_name:
+                state_ops.append(_critical_injury_state_op(occ_name, _whiplash, f"Ramming {target_name}"))
+
+    # Vehicle stops if it didn't destroy the target.
+    # When target durability wasn't provided, return None (unknown).
+    if target_is_vehicle:
+        vehicle_stopped = (target_sdp_current - target_damage_past_sp > 0) if isinstance(target_sdp_current, int) else None
+    else:
+        vehicle_stopped = (target_hp_current - target_damage_past_sp > 0) if isinstance(target_hp_current, int) else None
+
+    formatted_parts = [f"Ram {target_name}: {ram_dice}d6[**{dice_str}**] = {ram_damage_total}"]
+    if dodge_result:
+        formatted_parts.insert(0, f"Dodge: {dodge_result['formatted']}")
+    formatted_parts.append(f"→ target SP {target_effective_sp}, {target_damage_past_sp} past armor")
+    if not combat_plow:
+        formatted_parts.append(f"→ attacker SP {vehicle_sp}, {vehicle_damage_past_sp} self-damage")
+    else:
+        formatted_parts.append("→ Combat Plow: no self-damage")
+    if vehicle_stopped is True:
+        formatted_parts.append("→ vehicle STOPPED (target survived)")
+
+    return {
+        "type": "ramming",
+        "dodge_result": dodge_result,
+        "dodged": False,
+        "combat_plow": combat_plow,
+        "nos_boosted": nos_boosted,
+        "ram_damage_dice": ram_dice,
+        "ram_damage_total": ram_damage_total,
+        "vehicle_damage": vehicle_damage_past_sp,
+        "target_damage": target_damage_past_sp,
+        "vehicle_stopped": vehicle_stopped,
+        "target_ablation": target_ablation,
+        "vehicle_ablation": vehicle_ablation,
+        "state_ops": state_ops,
+        "formatted": " | ".join(formatted_parts),
+        "on_outcome": on_hit,
+    }
+
+
+def resolve_vehicle_weak_point(
+    stat_value: int,
+    skill_value: int,
+    weapon_type: str,
+    damage_dice: int,
+    vehicle_sp: int,
+    vehicle_name: str,
+    range_bracket: int = 0,
+    target_moving: bool = True,
+    seriously_wounded: bool = False,
+    luck_spent: int = 0,
+    is_ap: bool = False,
+    weapon_name: str = "",
+    character_name: str = "",
+    on_hit: str = "",
+    on_miss: str = "",
+) -> dict:
+    """Resolve a weak point shot against a vehicle.
+
+    Aimed shot penalty (+8 DV) if target is moving. Auto-hit if stationary.
+    Damage past SP is doubled. SP ablates by 1 (2 for AP).
+    """
+    state_ops = []
+    target_moving = _as_bool(target_moving, True)
+    seriously_wounded = _as_bool(seriously_wounded, False)
+    is_ap = _as_bool(is_ap, False)
+    stat_value = _to_int(stat_value, 0)
+    skill_value = _to_int(skill_value, 0)
+    damage_dice = _to_int(damage_dice, 2, minimum=1)
+    luck_spent = _to_int(luck_spent, 0, minimum=0)
+    vehicle_name = _norm_name(vehicle_name)
+    try:
+        range_bracket = int(range_bracket)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            _err_sp = max(0, int(vehicle_sp))
+        except (TypeError, ValueError, OverflowError):
+            _err_sp = 0
+        return {
+            "type": "vehicle_weak_point",
+            "attack_roll": None,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": _err_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "vehicle_name": vehicle_name,
+            "state_ops": [],
+            "error": f"Invalid range bracket: {range_bracket}",
+            "formatted": f"Weak point shot at {vehicle_name or 'vehicle'}: invalid range bracket",
+            "on_outcome": on_miss,
+        }
+    try:
+        vehicle_sp = max(0, int(vehicle_sp))
+    except (TypeError, ValueError, OverflowError):
+        vehicle_sp = 0
+    if not vehicle_name:
+        return {
+            "type": "vehicle_weak_point",
+            "attack_roll": None,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "vehicle_name": "",
+            "state_ops": [],
+            "error": "Vehicle weak point shot requires vehicle_name",
+            "formatted": "Vehicle weak point shot: missing vehicle_name",
+            "on_outcome": on_miss,
+        }
+
+    # Validate ranged weapon/range compatibility for both moving and stationary targets.
+    weapon_type = _normalize_ranged_weapon_type(weapon_type)
+    dvs = RANGED_DV_TABLE.get(weapon_type)
+    if not dvs or range_bracket < 0 or range_bracket >= len(dvs) or dvs[range_bracket] is None:
+        return {
+            "type": "vehicle_weak_point",
+            "attack_roll": None,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "vehicle_name": vehicle_name,
+            "state_ops": [],
+            "error": f"Weapon '{weapon_type}' cannot fire at range bracket {range_bracket}",
+            "formatted": (
+                f"Weak point shot at {vehicle_name}: Weapon '{weapon_type}' "
+                f"cannot fire at range bracket {range_bracket}"
+            ),
+            "on_outcome": on_miss,
+        }
+
+    # Attack roll (only if target is moving)
+    attack_roll = None
+    hit = True
+    if target_moving:
+        base_dv = dvs[range_bracket]
+        aimed_dv = base_dv + AIMED_SHOT_DV_PENALTY
+        attack_roll = resolve_check(
+            stat_value=stat_value,
+            skill_value=skill_value,
+            dv=aimed_dv,
+            seriously_wounded=seriously_wounded,
+            luck_spent=luck_spent,
+        )
+        hit = attack_roll["success"]
+
+    if not hit:
+        return {
+            "type": "vehicle_weak_point",
+            "attack_roll": attack_roll,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "vehicle_name": vehicle_name,
+            "state_ops": [],
+            "formatted": f"Weak point shot at {vehicle_name}: {attack_roll['formatted']} — MISS",
+            "on_outcome": on_miss,
+        }
+
+    # Roll damage
+    damage_dice = max(1, damage_dice)
+    dice = [_roll_d6() for _ in range(damage_dice)]
+    raw_damage = sum(dice)
+    dice_str = ",".join(str(d) for d in dice)
+
+    effective_sp = vehicle_sp
+    damage_past_sp = max(0, raw_damage - effective_sp)
+    doubled_damage = damage_past_sp * 2  # Weak point: doubled past SP
+    ablation = 2 if is_ap else 1
+    if damage_past_sp == 0:
+        ablation = 0
+
+    total_sdp_damage = doubled_damage
+
+    if total_sdp_damage > 0:
+        state_ops.append({
+            "op": "vehicle_sdp",
+            "vehicle": vehicle_name,
+            "change": -total_sdp_damage,
+            "reason": f"Weak point shot by {character_name or 'attacker'}",
+        })
+    if ablation > 0:
+        state_ops.append({
+            "op": "vehicle_sp",
+            "vehicle": vehicle_name,
+            "change": -ablation,
+            "reason": f"Ablation from weak point shot by {character_name or 'attacker'}",
+        })
+
+    fmt_parts = []
+    if attack_roll:
+        fmt_parts.append(f"Weak point at {vehicle_name}: {attack_roll['formatted']}")
+    else:
+        fmt_parts.append(f"Weak point at {vehicle_name} (stationary, auto-hit)")
+    fmt_parts.append(f"Damage: {damage_dice}d6[**{dice_str}**] = {raw_damage} → SP {effective_sp}")
+    if damage_past_sp > 0:
+        fmt_parts.append(f"{damage_past_sp} past SP ×2 = {doubled_damage} SDP damage")
+    else:
+        fmt_parts.append("blocked by armor")
+    if ablation > 0:
+        fmt_parts.append(f"SP ablation -{ablation}")
+
+    return {
+        "type": "vehicle_weak_point",
+        "attack_roll": attack_roll,
+        "hit": True,
+        "raw_damage": raw_damage,
+        "effective_sp": effective_sp,
+        "damage_past_sp": damage_past_sp,
+        "doubled_damage": doubled_damage,
+        "ablation": ablation,
+        "vehicle_name": vehicle_name,
+        "state_ops": state_ops,
+        "formatted": " | ".join(fmt_parts),
+        "on_outcome": on_hit,
+    }
+
+
+def resolve_spike_strip(
+    target_driver_name: str,
+    stat_value: int,
+    skill_value: int,
+    target_vehicle_name: str,
+    target_vehicle_sp: int,
+    target_vehicle_type: str = "land",
+    seriously_wounded: bool = False,
+    on_hit: str = "",
+    on_miss: str = "",
+) -> dict:
+    """Resolve a spike strip: target driver rolls DV17 Drive Land Vehicle.
+
+    On failure, 4d6 weak point damage (doubled past SP, ablation).
+
+    Note: semantics are inverted from attack resolvers — the *target* makes the
+    check, so check success = strip avoided (on_miss), check failure = strip hit
+    (on_hit). The result["hit"] field reflects whether the strip dealt damage.
+    """
+    target_vehicle_name = str(target_vehicle_name or "").strip()
+    target_driver_name = _norm_name(target_driver_name)
+    stat_value = _to_int(stat_value, 0)
+    skill_value = _to_int(skill_value, 0)
+    seriously_wounded = _as_bool(seriously_wounded, False)
+    try:
+        target_vehicle_sp = max(0, int(target_vehicle_sp))
+    except (TypeError, ValueError, OverflowError):
+        target_vehicle_sp = 0
+    if not target_vehicle_name:
+        return {
+            "type": "spike_strip",
+            "check_result": None,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": target_vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "target_vehicle_name": "",
+            "state_ops": [],
+            "on_outcome": on_miss,
+            "error": "Spike strip requires target_vehicle_name",
+            "formatted": "Spike strip: missing target_vehicle_name",
+        }
+    if str(target_vehicle_type or "").strip().lower() != "land":
+        return {
+            "type": "spike_strip",
+            "check_result": None,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": target_vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "target_vehicle_name": target_vehicle_name,
+            "state_ops": [],
+            "on_outcome": on_miss,
+            "error": f"Spike strips can only target land vehicles (got: {target_vehicle_type})",
+            "formatted": f"Spike strip vs {target_driver_name}: INVALID TARGET ({target_vehicle_type}) — land vehicles only",
+        }
+
+    state_ops = []
+
+    check = resolve_check(
+        stat_value=stat_value,
+        skill_value=skill_value,
+        dv=SPIKE_STRIP_DV,
+        seriously_wounded=seriously_wounded,
+    )
+
+    if check["success"]:
+        return {
+            "type": "spike_strip",
+            "check_result": check,
+            "hit": False,
+            "raw_damage": 0,
+            "effective_sp": target_vehicle_sp,
+            "damage_past_sp": 0,
+            "doubled_damage": 0,
+            "ablation": 0,
+            "target_vehicle_name": target_vehicle_name,
+            "state_ops": [],
+            "formatted": f"Spike strip vs {target_driver_name}: {check['formatted']} — AVOIDED",
+            "on_outcome": on_miss,
+        }
+
+    # Failed — roll damage
+    dice = [_roll_d6() for _ in range(SPIKE_STRIP_DAMAGE_DICE)]
+    raw_damage = sum(dice)
+    dice_str = ",".join(str(d) for d in dice)
+
+    effective_sp = target_vehicle_sp
+    damage_past_sp = max(0, raw_damage - effective_sp)
+    doubled_damage = damage_past_sp * 2  # weak point: doubled
+    ablation = 1 if damage_past_sp > 0 else 0
+
+    if doubled_damage > 0:
+        state_ops.append({
+            "op": "vehicle_sdp",
+            "vehicle": target_vehicle_name,
+            "change": -doubled_damage,
+            "reason": f"Spike strip hit on {target_vehicle_name}",
+        })
+    if ablation > 0:
+        state_ops.append({
+            "op": "vehicle_sp",
+            "vehicle": target_vehicle_name,
+            "change": -ablation,
+            "reason": f"Spike strip ablation on {target_vehicle_name}",
+        })
+
+    fmt_parts = [f"Spike strip vs {target_driver_name}: {check['formatted']} — HIT!"]
+    fmt_parts.append(f"Damage: {SPIKE_STRIP_DAMAGE_DICE}d6[**{dice_str}**] = {raw_damage} → SP {effective_sp}")
+    if damage_past_sp > 0:
+        fmt_parts.append(f"{damage_past_sp} past SP ×2 = {doubled_damage} SDP damage")
+    else:
+        fmt_parts.append("blocked by armor")
+    if ablation > 0:
+        fmt_parts.append(f"SP ablation -{ablation}")
+
+    return {
+        "type": "spike_strip",
+        "check_result": check,
+        "hit": True,
+        "raw_damage": raw_damage,
+        "effective_sp": effective_sp,
+        "damage_past_sp": damage_past_sp,
+        "doubled_damage": doubled_damage,
+        "ablation": ablation,
+        "target_vehicle_name": target_vehicle_name,
+        "state_ops": state_ops,
+        "formatted": " | ".join(fmt_parts),
+        "on_outcome": on_hit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # resolve_actions — batch resolver
 # ---------------------------------------------------------------------------
 
@@ -1139,7 +1828,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     sequential: bool = True, combatant_hp: dict = None,
                     tar_stacks: int = 0, alert_level: int = 0,
                     active_programs=None, installed_hardware=None,
-                    ice_status=None) -> dict:
+                    ice_status=None, combatant_vehicle_sdp: dict = None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -1151,13 +1840,62 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     - Before each action, check if actor's effective_hp <= 0 → skip (eliminated)
     - Pass current target HP to sub-resolvers for accurate rubber ammo capping
 
+    When combatant_vehicle_sdp is provided, tracks running vehicle SDP/SP
+    so sequential actions against the same vehicle use fresh values.
+
     Returns {"results": [...], "state_ops": [...]}.
     """
     from .cpred import compute_rel_bonus
 
     results = []
     all_state_ops = []
-    effective_hp = dict(combatant_hp) if combatant_hp else {}
+    effective_hp = {}
+    if isinstance(combatant_hp, dict):
+        for _k, _v in list(combatant_hp.items()):
+            if not isinstance(_k, str):
+                continue
+            _hk = _norm_hp_track_key(_k)
+            if not _hk:
+                continue
+            try:
+                _parsed = max(0, int(_v))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if _hk in effective_hp:
+                effective_hp[_hk] = min(effective_hp[_hk], _parsed)
+            else:
+                effective_hp[_hk] = _parsed
+    effective_armor_sp = {}
+    effective_vehicle_sdp = dict(combatant_vehicle_sdp) if isinstance(combatant_vehicle_sdp, dict) else {}
+    if effective_vehicle_sdp:
+        _normalized_vehicle_sdp = {}
+        for _k, _v in list(effective_vehicle_sdp.items()):
+            if not isinstance(_k, str):
+                continue
+            _norm_key = _norm_name(_k).casefold()
+            if not _norm_key:
+                continue
+            if _norm_key.endswith(":sp"):
+                _norm_key = _norm_vehicle_track_key(_norm_key[:-3], sp=True)
+                try:
+                    _parsed = max(0, int(_v))
+                except (TypeError, ValueError, OverflowError):
+                    _parsed = 0
+                _normalized_vehicle_sdp[_norm_key] = _parsed
+            else:
+                if _v is None:
+                    _parsed = None
+                else:
+                    try:
+                        _parsed = max(0, int(_v))
+                    except (TypeError, ValueError, OverflowError):
+                        _parsed = None
+                if _norm_key in _normalized_vehicle_sdp and isinstance(_normalized_vehicle_sdp[_norm_key], int) and isinstance(_parsed, int):
+                    _normalized_vehicle_sdp[_norm_key] = min(_normalized_vehicle_sdp[_norm_key], _parsed)
+                else:
+                    _normalized_vehicle_sdp[_norm_key] = _parsed
+        effective_vehicle_sdp = _normalized_vehicle_sdp
+    vehicle_tracking_enabled = combatant_vehicle_sdp is not None
     _tar_consumed = False
 
     for action in actions:
@@ -1165,17 +1903,252 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
         _ops_before = len(all_state_ops)
         try:
             action_type = action.get("type") if isinstance(action, dict) else None
+            if isinstance(action, dict):
+                action = dict(action)
+                for _k in ("vehicle_name", "target", "target_vehicle_name"):
+                    if _k in action:
+                        action[_k] = _norm_name(action.get(_k))
+                if action_type == "ramming":
+                    _raw_target_is_vehicle = action.get("target_is_vehicle", False)
+                    _default_tiv = (
+                        isinstance(_raw_target_is_vehicle, str)
+                        and bool(str(_raw_target_is_vehicle).strip())
+                    )
+                    action["target_is_vehicle"] = _as_bool(_raw_target_is_vehicle, _default_tiv)
+                if action_type == "driving_check" and not str(action.get("vehicle_name", "")).strip() and not (sequential and vehicle_tracking_enabled):
+                    results.append({
+                        "type": action_type,
+                        "character": action.get("character", ""),
+                        "error": "Driving check requires vehicle_name",
+                    })
+                    continue
+                if action_type == "vehicle_weak_point" and not str(action.get("vehicle_name", "")).strip():
+                    results.append({
+                        "type": action_type,
+                        "character": action.get("character", ""),
+                        "error": "Vehicle weak point shot requires vehicle_name",
+                    })
+                    continue
+                if action_type == "spike_strip" and not str(action.get("target_vehicle_name", "")).strip():
+                    results.append({
+                        "type": action_type,
+                        "character": action.get("character", ""),
+                        "error": "Spike strip requires target_vehicle_name",
+                    })
+                    continue
+                if action_type == "ramming":
+                    if not str(action.get("vehicle_name", "")).strip():
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "error": "Ramming requires vehicle_name",
+                        })
+                        continue
+                    if not str(action.get("target", "")).strip():
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "error": "Ramming requires target",
+                        })
+                        continue
+
+            # Seed vehicle tracking for newly introduced vehicles in this same batch.
+            if sequential and vehicle_tracking_enabled and isinstance(action, dict):
+                def _to_nonneg_int(_value, _default):
+                    try:
+                        return max(0, int(_value))
+                    except (TypeError, ValueError, OverflowError):
+                        return _default
+
+                def _seed_vehicle_entry(_name, _sdp_value=None, _sp_value=None):
+                    _vk = _norm_vehicle_track_key(_name)
+                    if not _vk:
+                        return
+                    _parsed_sdp = _to_nonneg_int(_sdp_value, None)
+                    if _vk not in effective_vehicle_sdp:
+                        # Unknown SDP remains None so downstream logic can preserve "unknown"
+                        # outcomes (e.g., vehicle_stopped=None) instead of fabricating certainty.
+                        effective_vehicle_sdp[_vk] = max(0, _parsed_sdp) if isinstance(_parsed_sdp, int) else None
+                    elif effective_vehicle_sdp[_vk] is None and isinstance(_parsed_sdp, int):
+                        # Upgrade unknown tracking entry once a concrete SDP appears later.
+                        effective_vehicle_sdp[_vk] = max(0, _parsed_sdp)
+                    _sp_key = _norm_vehicle_track_key(_name, sp=True)
+                    if _sp_key not in effective_vehicle_sdp:
+                        effective_vehicle_sdp[_sp_key] = _to_nonneg_int(_sp_value, 0)
+
+                if action_type == "ramming":
+                    _seed_vehicle_entry(
+                        action.get("vehicle_name", ""),
+                        action.get("vehicle_sdp_current"),
+                        action.get("vehicle_sp"),
+                    )
+                    if _as_bool(action.get("target_is_vehicle", False), False):
+                        _seed_vehicle_entry(
+                            action.get("target", ""),
+                            action.get("target_sdp_current"),
+                            action.get("target_sp"),
+                        )
+                elif action_type == "driving_check":
+                    _seed_vehicle_entry(
+                        action.get("vehicle_name", ""),
+                        action.get("vehicle_sdp_current"),
+                        action.get("vehicle_sp"),
+                    )
+                elif action_type == "vehicle_weak_point":
+                    _seed_vehicle_entry(
+                        action.get("vehicle_name", ""),
+                        action.get("vehicle_sdp_current"),
+                        action.get("vehicle_sp"),
+                    )
+                elif action_type == "spike_strip":
+                    _seed_vehicle_entry(
+                        action.get("target_vehicle_name", ""),
+                        action.get("target_vehicle_sdp_current"),
+                        action.get("target_vehicle_sp"),
+                    )
+            if sequential and isinstance(action, dict) and action_type == "ramming":
+                if not _as_bool(action.get("target_is_vehicle", False), False):
+                    _ped = _norm_name(action.get("target", "")).casefold()
+                    if _ped and _ped not in effective_armor_sp:
+                        try:
+                            effective_armor_sp[_ped] = max(0, int(action.get("target_sp", 0)))
+                        except (TypeError, ValueError, OverflowError):
+                            effective_armor_sp[_ped] = 0
 
             # Sequential elimination: skip actors at 0 HP
             if sequential and effective_hp and action_type not in ("initiative", "ambush"):
                 actor_name = action.get("character", "") if isinstance(action, dict) else ""
-                if actor_name and actor_name in effective_hp and effective_hp[actor_name] <= 0:
+                actor_key = _norm_hp_track_key(actor_name)
+                if actor_key and actor_key in effective_hp and effective_hp[actor_key] <= 0:
                     results.append({
                         "type": action_type, "character": actor_name,
                         "skipped": True, "reason": "eliminated",
                     })
                     continue
 
+            # Sequential vehicle elimination: skip actions by/against destroyed vehicles
+            if sequential and vehicle_tracking_enabled and action_type in ("ramming", "driving_check", "vehicle_weak_point", "spike_strip"):
+                # Attacker's vehicle (ramming, driving_check)
+                _act_vname = action.get("vehicle_name", "") if isinstance(action, dict) else ""
+                # Target vehicle (vehicle_weak_point, spike_strip)
+                if not _act_vname and action_type == "spike_strip":
+                    _act_vname = action.get("target_vehicle_name", "") if isinstance(action, dict) else ""
+                _act_vkey = _norm_vehicle_track_key(_act_vname)
+                if action_type == "driving_check" and not _act_vname:
+                    _tracked = [k for k in effective_vehicle_sdp.keys()
+                                if isinstance(k, str) and not k.endswith(":sp")]
+                    if len(_tracked) == 1:
+                        _act_vname = _tracked[0]
+                        _act_vkey = _norm_vehicle_track_key(_act_vname)
+                    else:
+                        _skip_note = "Driving check skipped: vehicle_name is required for sequential vehicle tracking."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "skipped": True,
+                            "reason": "vehicle_name_required",
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
+                if _act_vkey and _act_vkey in effective_vehicle_sdp and isinstance(effective_vehicle_sdp[_act_vkey], int) and effective_vehicle_sdp[_act_vkey] <= 0:
+                    _skip_note = f"Action skipped: {_act_vname} is already destroyed."
+                    results.append({
+                        "type": action_type,
+                        "character": action.get("character", ""),
+                        "skipped": True,
+                        "reason": "vehicle_destroyed",
+                        "vehicle_name": _act_vname,
+                        "notification": _skip_note,
+                        "formatted": _skip_note,
+                    })
+                    continue
+                if action_type == "ramming" and _as_bool(action.get("target_is_vehicle", False), False):
+                    _target_vname = action.get("target", "") if isinstance(action, dict) else ""
+                    _target_vkey = _norm_vehicle_track_key(_target_vname)
+                    if _target_vkey and _target_vkey in effective_vehicle_sdp and isinstance(effective_vehicle_sdp[_target_vkey], int) and effective_vehicle_sdp[_target_vkey] <= 0:
+                        _skip_note = f"Ramming skipped: target vehicle {_target_vname} is already destroyed."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "target": _target_vname,
+                            "skipped": True,
+                            "reason": "target_vehicle_destroyed",
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
+            # Baseline destroyed-vehicle guard even when no tracking map is provided.
+            if sequential and action_type in ("ramming", "driving_check", "vehicle_weak_point", "spike_strip"):
+                def _as_nonneg_int_or_none(_v):
+                    try:
+                        return max(0, int(_v))
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+
+                def _is_destroyed_vehicle(_name, _fallback_sdp=None):
+                    _vk = _norm_vehicle_track_key(_name)
+                    if vehicle_tracking_enabled and _vk in effective_vehicle_sdp and isinstance(effective_vehicle_sdp[_vk], int):
+                        return effective_vehicle_sdp[_vk] <= 0
+                    _parsed = _as_nonneg_int_or_none(_fallback_sdp)
+                    return isinstance(_parsed, int) and _parsed <= 0
+
+                if action_type in ("ramming", "driving_check"):
+                    _act_name = action.get("vehicle_name", "") if isinstance(action, dict) else ""
+                    if _act_name and _is_destroyed_vehicle(_act_name, action.get("vehicle_sdp_current")):
+                        _skip_note = f"Action skipped: {_act_name} is already destroyed."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "skipped": True,
+                            "reason": "vehicle_destroyed",
+                            "vehicle_name": _act_name,
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
+                elif action_type == "vehicle_weak_point":
+                    _target_name = action.get("vehicle_name", "") if isinstance(action, dict) else ""
+                    if _target_name and _is_destroyed_vehicle(_target_name, action.get("vehicle_sdp_current")):
+                        _skip_note = f"Action skipped: {_target_name} is already destroyed."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "skipped": True,
+                            "reason": "vehicle_destroyed",
+                            "vehicle_name": _target_name,
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
+                elif action_type == "spike_strip":
+                    _target_name = action.get("target_vehicle_name", "") if isinstance(action, dict) else ""
+                    if _target_name and _is_destroyed_vehicle(_target_name, action.get("target_vehicle_sdp_current")):
+                        _skip_note = f"Action skipped: {_target_name} is already destroyed."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "skipped": True,
+                            "reason": "vehicle_destroyed",
+                            "vehicle_name": _target_name,
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
+                if action_type == "ramming" and _as_bool(action.get("target_is_vehicle", False), False):
+                    _target_name = action.get("target", "") if isinstance(action, dict) else ""
+                    if _target_name and _is_destroyed_vehicle(_target_name, action.get("target_sdp_current")):
+                        _skip_note = f"Ramming skipped: target vehicle {_target_name} is already destroyed."
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "target": _target_name,
+                            "skipped": True,
+                            "reason": "target_vehicle_destroyed",
+                            "notification": _skip_note,
+                            "formatted": _skip_note,
+                        })
+                        continue
             # Copy action before mutation to avoid modifying caller's dict
             if isinstance(action, dict) and (tar_stacks > 0 or alert_level >= 3) and action.get("net"):
                 action = dict(action)
@@ -1239,8 +2212,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         )
                 # Use tracked HP for target when sequential
                 _ra_target_hp = action.get("target_hp_current")
-                if sequential and _ra_target_name in effective_hp:
-                    _ra_target_hp = effective_hp[_ra_target_name]
+                _ra_target_key = _norm_hp_track_key(_ra_target_name)
+                if sequential and _ra_target_key in effective_hp:
+                    _ra_target_hp = effective_hp[_ra_target_key]
                 result = resolve_ranged_attack(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -1250,7 +2224,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_sp=action.get("target_sp", 0),
                     range_bracket=action.get("range_bracket", 0),
                     hit_location=action.get("hit_location", "body"),
-                    is_ap=action.get("is_ap", False),
+                    is_ap=_as_bool(action.get("is_ap", False), False),
                     is_rubber=action.get("is_rubber", False),
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
@@ -1359,6 +2333,14 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "op": "death_save",
                     "reason": f"Death Save round {int(action.get('death_save_count', 0)) + 1}",
                 })
+                # Auto-set "dead" condition on failed Death Save (RAW backstop)
+                if not result.get("survived"):
+                    all_state_ops.append({
+                        "edgerunner": actor_name,
+                        "op": "add_condition",
+                        "condition": "dead",
+                        "reason": "Failed Death Save",
+                    })
 
             elif action_type == "opposed_check":
                 actor_name = action.get("character", "")
@@ -1649,16 +2631,163 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 )
                 results.append({"type": "initiative", "order": result})
 
+            elif action_type == "driving_check":
+                actor_name = action.get("character", "")
+                result = resolve_driving_check(
+                    stat_value=action.get("stat_value", 0),
+                    skill_value=action.get("skill_value", 0),
+                    maneuver=action.get("maneuver", "maintain_control"),
+                    seriously_wounded=action.get("seriously_wounded", False),
+                    luck_spent=action.get("luck_spent", 0),
+                    on_hit=action.get("on_hit", ""),
+                    on_miss=action.get("on_miss", ""),
+                )
+                result["character"] = actor_name
+                results.append(result)
+                luck_op = _luck_spend_state_op(
+                    edgerunner=actor_name,
+                    luck_spent=action.get("luck_spent", 0),
+                    reason="Luck spent on driving check",
+                )
+                if luck_op and not result.get("error"):
+                    all_state_ops.append(luck_op)
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "ramming":
+                actor_name = action.get("character", "")
+                _ram_vname = action.get("vehicle_name", "")
+                _ram_tname = action.get("target", "")
+                _ram_tis_v = _as_bool(action.get("target_is_vehicle", False), False)
+                # Use sequential-tracked values when available
+                _ram_vkey = _norm_vehicle_track_key(_ram_vname)
+                _ram_tkey = _norm_vehicle_track_key(_ram_tname)
+                if sequential and vehicle_tracking_enabled:
+                    _ram_vsdp = effective_vehicle_sdp.get(_ram_vkey, action.get("vehicle_sdp_current"))
+                    _ram_vsp = effective_vehicle_sdp.get(_norm_vehicle_track_key(_ram_vname, sp=True), action.get("vehicle_sp", 0))
+                    _ram_tsdp = effective_vehicle_sdp.get(_ram_tkey, action.get("target_sdp_current")) if _ram_tis_v else action.get("target_sdp_current")
+                    _ram_tsp = effective_vehicle_sdp.get(_norm_vehicle_track_key(_ram_tname, sp=True), action.get("target_sp", 0)) if _ram_tis_v else action.get("target_sp", 0)
+                else:
+                    _ram_vsdp = action.get("vehicle_sdp_current")
+                    _ram_vsp = action.get("vehicle_sp", 0)
+                    _ram_tsdp = action.get("target_sdp_current") if _ram_tis_v else action.get("target_sdp_current")
+                    _ram_tsp = action.get("target_sp", 0)
+                _ram_tname_key = _norm_hp_track_key(_ram_tname)
+                if sequential and not _ram_tis_v and _ram_tname_key in effective_armor_sp:
+                    _ram_tsp = effective_armor_sp[_ram_tname_key]
+                _ram_thp = effective_hp.get(_ram_tname_key, action.get("target_hp_current")) if not _ram_tis_v else action.get("target_hp_current")
+                result = resolve_ramming(
+                    vehicle_name=_ram_vname,
+                    target_name=_ram_tname,
+                    vehicle_sdp_current=_ram_vsdp,
+                    vehicle_sp=_ram_vsp,
+                    target_hp_current=_ram_thp,
+                    target_sp=_ram_tsp,
+                    target_is_vehicle=_ram_tis_v,
+                    target_sdp_current=_ram_tsdp,
+                    occupants=action.get("occupants", []),
+                    target_occupants=action.get("target_occupants", []),
+                    pedestrian_dodge=_as_bool(action.get("pedestrian_dodge", False), False),
+                    pedestrian_dex=action.get("pedestrian_dex", 0),
+                    pedestrian_evasion=action.get("pedestrian_evasion", 0),
+                    seriously_wounded_pedestrian=_as_bool(action.get("seriously_wounded_pedestrian", False), False),
+                    combat_plow=_as_bool(action.get("combat_plow", False), False),
+                    nos_boosted=_as_bool(action.get("nos_boosted", False), False),
+                    on_hit=action.get("on_hit", ""),
+                    on_miss=action.get("on_miss", ""),
+                )
+                result["character"] = actor_name
+                results.append(result)
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "vehicle_weak_point":
+                actor_name = action.get("character", "")
+                _wp_vname = action.get("vehicle_name", "")
+                # Use sequential-tracked SP when available
+                _wp_vsp = (
+                    effective_vehicle_sdp.get(_norm_vehicle_track_key(_wp_vname, sp=True), action.get("vehicle_sp", 0))
+                    if (sequential and vehicle_tracking_enabled)
+                    else action.get("vehicle_sp", 0)
+                )
+                result = resolve_vehicle_weak_point(
+                    stat_value=action.get("stat_value", 0),
+                    skill_value=action.get("skill_value", 0),
+                    weapon_type=action.get("weapon_type", "Pistol"),
+                    damage_dice=action.get("damage_dice", 2),
+                    vehicle_sp=_wp_vsp,
+                    vehicle_name=_wp_vname,
+                    range_bracket=action.get("range_bracket", 0),
+                    target_moving=_as_bool(action.get("target_moving", True), True),
+                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
+                    luck_spent=action.get("luck_spent", 0),
+                    is_ap=_as_bool(action.get("is_ap", False), False),
+                    weapon_name=action.get("weapon_name", ""),
+                    character_name=actor_name,
+                    on_hit=action.get("on_hit", ""),
+                    on_miss=action.get("on_miss", ""),
+                )
+                result["character"] = actor_name
+                results.append(result)
+                luck_op = _luck_spend_state_op(
+                    edgerunner=actor_name,
+                    luck_spent=action.get("luck_spent", 0),
+                    reason="Luck spent on vehicle weak point shot",
+                )
+                if luck_op and not result.get("error") and result.get("attack_roll") is not None:
+                    all_state_ops.append(luck_op)
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "spike_strip":
+                _ss_vname = action.get("target_vehicle_name", "")
+                # Use sequential-tracked SP when available
+                _ss_vsp = (
+                    effective_vehicle_sdp.get(_norm_vehicle_track_key(_ss_vname, sp=True), action.get("target_vehicle_sp", 0))
+                    if (sequential and vehicle_tracking_enabled)
+                    else action.get("target_vehicle_sp", 0)
+                )
+                result = resolve_spike_strip(
+                    target_driver_name=action.get("target_driver", ""),
+                    stat_value=action.get("target_stat_value", 0),
+                    skill_value=action.get("target_skill_value", 0),
+                    target_vehicle_name=_ss_vname,
+                    target_vehicle_sp=_ss_vsp,
+                    target_vehicle_type=action.get("target_vehicle_type", "land"),
+                    seriously_wounded=_as_bool(action.get("seriously_wounded_target", False), False),
+                    on_hit=action.get("on_hit", ""),
+                    on_miss=action.get("on_miss", ""),
+                )
+                result["character"] = action.get("character", "")
+                results.append(result)
+                all_state_ops.extend(result.get("state_ops", []))
+
             else:
                 results.append({"type": action_type, "error": f"Unknown action type: {action_type}"})
 
             # Sequential HP tracking: update effective_hp from new state_ops
-            if sequential and effective_hp:
+            if sequential:
                 for _op in all_state_ops[_ops_before:]:
-                    if isinstance(_op, dict) and _op.get("op") == "hp":
-                        _t = _op.get("edgerunner", "")
+                    if not isinstance(_op, dict):
+                        continue
+                    _op_type = _op.get("op")
+                    if _op_type == "hp" and effective_hp:
+                        _t = _norm_hp_track_key(_op.get("edgerunner", ""))
                         if _t in effective_hp:
                             effective_hp[_t] = max(0, effective_hp[_t] + int(_op.get("change", 0)))
+                    elif _op_type == "vehicle_sdp" and vehicle_tracking_enabled:
+                        _vn = _norm_vehicle_track_key(_op.get("vehicle", ""))
+                        if _vn in effective_vehicle_sdp and isinstance(effective_vehicle_sdp[_vn], int):
+                            effective_vehicle_sdp[_vn] = max(0, effective_vehicle_sdp[_vn] + int(_op.get("change", 0)))
+                    elif _op_type == "vehicle_sp" and vehicle_tracking_enabled:
+                        _vn = _norm_vehicle_track_key(_op.get("vehicle", ""))
+                        _sp_key = _norm_vehicle_track_key(_op.get("vehicle", ""), sp=True)
+                        if _sp_key in effective_vehicle_sdp:
+                            effective_vehicle_sdp[_sp_key] = max(0, effective_vehicle_sdp[_sp_key] + int(_op.get("change", 0)))
+                    elif _op_type == "armor" and effective_armor_sp:
+                        _t = _norm_name(_op.get("edgerunner", "")).casefold()
+                        if _t in effective_armor_sp:
+                            try:
+                                effective_armor_sp[_t] = max(0, int(effective_armor_sp[_t]) + int(_op.get("change", 0)))
+                            except (TypeError, ValueError, OverflowError):
+                                continue
 
         except Exception as e:
             _char = action.get("character", "") if isinstance(action, dict) else ""
@@ -1698,7 +2827,11 @@ RESOLVE_MECHANICS_TOOL = {
         "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
-        "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}"
+        "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}\n"
+        "- driving_check: {type, character, vehicle_name, stat_value (REF), skill_value, maneuver (maintain_control/swerve/sharp_turn/emergency_stop/bootleg_turn/do_a_jump/landing/aerobatic_maneuver), seriously_wounded?, luck_spent?, on_hit?, on_miss?}\n"
+        "- ramming: {type, character (driver), vehicle_name, target, vehicle_sdp_current, vehicle_sp, target_hp_current, target_sp, target_is_vehicle?, target_sdp_current?, occupants: [{name}], target_occupants?: [{name}], pedestrian_dodge?, pedestrian_dex? (DEX stat), pedestrian_evasion? (Evasion skill), seriously_wounded_pedestrian?, combat_plow?, nos_boosted?, on_hit?, on_miss?}\n"
+        "- vehicle_weak_point: {type, character, stat_value, skill_value, weapon_type, damage_dice, vehicle_sp, vehicle_name, range_bracket, target_moving?, seriously_wounded?, luck_spent?, is_ap?, weapon_name?, on_hit?, on_miss?}\n"
+        "- spike_strip: {type, character (deployer), target_driver, target_stat_value (REF), target_skill_value (Drive Land Vehicle), target_vehicle_name, target_vehicle_sp, target_vehicle_type (land only), seriously_wounded_target?, on_hit?, on_miss?}"
     ),
     "input_schema": {
         "type": "object",
@@ -1715,7 +2848,9 @@ RESOLVE_MECHANICS_TOOL = {
                                      "autofire", "death_save", "initiative",
                                      "opposed_check", "program_attack",
                                      "program_attack_vs_netrunner",
-                                     "ice_attack_vs_program", "ambush"],
+                                     "ice_attack_vs_program", "ambush",
+                                     "driving_check", "ramming",
+                                     "vehicle_weak_point", "spike_strip"],
                         },
                         "character": {"type": "string"},
                     },

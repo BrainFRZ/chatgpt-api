@@ -25,6 +25,10 @@ from game_systems.cpred_mechanics import (
     resolve_ice_effect,
     next_combat_turn,
     resolve_actions,
+    resolve_driving_check,
+    resolve_ramming,
+    resolve_vehicle_weak_point,
+    resolve_spike_strip,
     _roll_check_die,
 )
 from game_systems.cpred_tables import (
@@ -34,6 +38,7 @@ from game_systems.cpred_tables import (
     AUTOFIRE_DV_TABLE,
     calculate_hp,
 )
+from game_systems.cpred import _apply_vehicle_updates, _format_vehicle_lines, apply_cpred_combat_state, GAME_SYSTEM
 
 
 class TestResolveCheck(unittest.TestCase):
@@ -1491,6 +1496,2584 @@ class TestHumanityCeiling(unittest.TestCase):
         self.assertEqual(gs["edgerunners"]["V"]["humanity"]["max"], 58)
         self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_max"], 60)
         self.assertEqual(gs["edgerunners"]["V"]["_humanity_base_ceiling_total"], 0)
+
+
+MOCK = "game_systems.cpred_mechanics.random.randint"
+
+
+class TestResolveDrivingCheck(unittest.TestCase):
+    """Tests for driving check resolution."""
+
+    @patch(MOCK, return_value=7)
+    def test_maintain_control_success(self, _m):
+        r = resolve_driving_check(stat_value=6, skill_value=4, maneuver="maintain_control")
+        self.assertTrue(r["success"])  # 7+6+4=17 > DV10
+        self.assertFalse(r["control_lost"])
+        self.assertEqual(r["maneuver"], "maintain_control")
+
+    @patch(MOCK, return_value=2)
+    def test_bootleg_turn_failure(self, _m):
+        r = resolve_driving_check(stat_value=5, skill_value=4, maneuver="bootleg_turn")
+        self.assertFalse(r["success"])  # 2+5+4=11 < DV17
+        self.assertTrue(r["control_lost"])
+
+    @patch(MOCK, return_value=5)
+    def test_unknown_maneuver_returns_error(self, _m):
+        r = resolve_driving_check(stat_value=4, skill_value=4, maneuver="barrel_roll")
+        self.assertIn("error", r)
+        self.assertFalse(r["success"])
+        self.assertIsNone(r["dv"])
+
+    @patch(MOCK, return_value=5)
+    def test_luck_modifies_result(self, _m):
+        r = resolve_driving_check(stat_value=4, skill_value=4, maneuver="swerve", luck_spent=2)
+        # 5+4+4+2=15 > DV13
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_maneuver_is_case_insensitive_and_trimmed(self, _m):
+        r = resolve_driving_check(stat_value=4, skill_value=4, maneuver="  SwErVe  ", luck_spent=2)
+        self.assertTrue(r["success"])
+        self.assertEqual(r["maneuver"], "swerve")
+
+    @patch(MOCK, return_value=5)
+    def test_string_numeric_inputs_are_coerced(self, _m):
+        r = resolve_driving_check(stat_value="4", skill_value="4", maneuver="swerve", luck_spent="2")
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=3)
+    def test_seriously_wounded_penalty(self, _m):
+        r = resolve_driving_check(stat_value=6, skill_value=4, maneuver="swerve", seriously_wounded=True)
+        # 3+6+4-2=11 < DV13
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, return_value=7)
+    def test_on_outcome_success(self, _m):
+        r = resolve_driving_check(stat_value=6, skill_value=4, maneuver="maintain_control",
+                                  on_hit="kept control", on_miss="spun out")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["on_outcome"], "kept control")
+
+    @patch(MOCK, return_value=2)
+    def test_on_outcome_failure(self, _m):
+        r = resolve_driving_check(stat_value=5, skill_value=4, maneuver="bootleg_turn",
+                                  on_hit="pulled it off", on_miss="crashed")
+        self.assertFalse(r["success"])
+        self.assertEqual(r["on_outcome"], "crashed")
+
+
+class TestResolveRamming(unittest.TestCase):
+    """Tests for ramming resolution."""
+
+    @patch(MOCK, return_value=3)
+    def test_ram_pedestrian_no_dodge(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Ganger",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=25, target_sp=7,
+            pedestrian_dodge=False,
+        )
+        self.assertFalse(r["dodged"])
+        # 6d6 all 3s = 18
+        self.assertEqual(r["ram_damage_total"], 18)
+        # Target: 18 - 7 SP = 11 damage
+        self.assertEqual(r["target_damage"], 11)
+        # Vehicle: 18 - 0 SP = 18 self-damage
+        self.assertEqual(r["vehicle_damage"], 18)
+        # state_ops: hp for target, vehicle_sdp for vehicle, critical_injuries for target + occupants
+        hp_ops = [op for op in r["state_ops"] if op.get("op") == "hp"]
+        self.assertEqual(len(hp_ops), 1)
+        self.assertEqual(hp_ops[0]["change"], -11)
+        # Target gets Whiplash with canonical crit injury format
+        ci_ops = [op for op in r["state_ops"] if op.get("op") == "critical_injury"]
+        target_whips = [op for op in ci_ops if op["edgerunner"] == "Ganger"]
+        self.assertEqual(len(target_whips), 1)
+        # Verify canonical fields from _critical_injury_state_op
+        w = target_whips[0]
+        self.assertEqual(w["action"], "add")
+        self.assertEqual(w["name"], "Whiplash")
+        self.assertIn("reason", w)
+
+    @patch(MOCK, return_value=4)
+    def test_ram_pedestrian_dodge_success(self, _m):
+        """Pedestrian successfully dodges — should be early return."""
+        # DEX+Evasion=14, DV=13, roll=4 -> 4+14=18 > 13 = success
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Ganger",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=25, target_sp=7,
+            pedestrian_dodge=True, pedestrian_dex=8, pedestrian_evasion=6,
+        )
+        self.assertTrue(r["dodged"])
+        self.assertEqual(len(r["state_ops"]), 0)
+
+    @patch(MOCK, return_value=3)
+    def test_ram_vehicle_vs_vehicle(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Enemy Car",
+            vehicle_sdp_current=50, vehicle_sp=13,
+            target_hp_current=0, target_sp=13,
+            target_is_vehicle=True, target_sdp_current=50,
+            occupants=[{"name": "V"}], target_occupants=[{"name": "Enemy"}],
+        )
+        # 6d6 all 3s = 18
+        self.assertEqual(r["ram_damage_total"], 18)
+        # Target: 18 - 13 = 5 SDP damage
+        self.assertEqual(r["target_damage"], 5)
+        # Vehicle: 18 - 13 = 5 SDP self-damage
+        self.assertEqual(r["vehicle_damage"], 5)
+        # All occupants get Whiplash (V and Enemy)
+        ci_ops = [op for op in r["state_ops"] if op.get("op") == "critical_injury"]
+        self.assertEqual(len(ci_ops), 2)
+        ci_names = {op["edgerunner"] for op in ci_ops}
+        self.assertEqual(ci_names, {"V", "Enemy"})
+
+    @patch(MOCK, return_value=3)
+    def test_combat_plow_no_self_damage(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Enemy Car",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=0, target_sp=0,
+            target_is_vehicle=True, target_sdp_current=50,
+            occupants=[{"name": "V"}], target_occupants=[{"name": "Enemy"}],
+            combat_plow=True,
+        )
+        # Attacker takes NO SDP damage
+        self.assertEqual(r["vehicle_damage"], 0)
+        # No vehicle_sdp op for attacker
+        attacker_sdp_ops = [op for op in r["state_ops"]
+                           if op.get("op") == "vehicle_sdp" and op.get("vehicle") == "V's Car"]
+        self.assertEqual(len(attacker_sdp_ops), 0)
+        # Attacker occupants do NOT get Whiplash
+        ci_ops = [op for op in r["state_ops"] if op.get("op") == "critical_injury"]
+        attacker_ci = [op for op in ci_ops if op["edgerunner"] == "V"]
+        self.assertEqual(len(attacker_ci), 0)
+        # Target still takes damage and Whiplash
+        target_ci = [op for op in ci_ops if op["edgerunner"] == "Enemy"]
+        self.assertEqual(len(target_ci), 1)
+
+    @patch(MOCK, return_value=4)
+    def test_combat_plow_nos_boosted(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Enemy",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=0, target_sp=0,
+            target_is_vehicle=True, target_sdp_current=50,
+            combat_plow=True, nos_boosted=True,
+        )
+        # 8d6 all 4s = 32
+        self.assertEqual(r["ram_damage_dice"], 8)
+        self.assertEqual(r["ram_damage_total"], 32)
+
+    @patch(MOCK, return_value=3)
+    def test_vehicle_stopped_when_target_survives(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Tank",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=0, target_sp=0,
+            target_is_vehicle=True, target_sdp_current=100,
+        )
+        # 18 < 100 SDP, target survives
+        self.assertTrue(r["vehicle_stopped"])
+
+    @patch(MOCK, return_value=6)
+    def test_vehicle_not_stopped_when_target_destroyed(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Bike",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=0, target_sp=0,
+            target_is_vehicle=True, target_sdp_current=35,
+        )
+        # 6d6 all 6s = 36 > 35 SDP
+        self.assertFalse(r["vehicle_stopped"])
+
+    @patch(MOCK, return_value=6)
+    def test_vehicle_stopped_computed_from_string_target_sdp(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Car",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=0, target_sp=0,
+            target_is_vehicle=True, target_sdp_current="50",
+        )
+        self.assertTrue(r["vehicle_stopped"])
+
+    @patch(MOCK, return_value=8)
+    def test_string_false_seriously_wounded_pedestrian_is_coerced(self, _m):
+        r_false = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=20, target_sp=0,
+            pedestrian_dodge=True, pedestrian_dex=4, pedestrian_evasion=2,
+            seriously_wounded_pedestrian=False,
+        )
+        r_str_false = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=20, target_sp=0,
+            pedestrian_dodge=True, pedestrian_dex=4, pedestrian_evasion=2,
+            seriously_wounded_pedestrian="false",
+        )
+        self.assertEqual(r_false["dodged"], r_str_false["dodged"])
+
+    @patch(MOCK, return_value=3)
+    def test_sp_ablation_both_sides(self, _m):
+        r = resolve_ramming(
+            vehicle_name="V's Car", target_name="Enemy Car",
+            vehicle_sdp_current=50, vehicle_sp=5,
+            target_hp_current=0, target_sp=10,
+            target_is_vehicle=True, target_sdp_current=50,
+        )
+        # Both sides penetrate (18 > 10, 18 > 5) -> ablation for both
+        sp_ops = [op for op in r["state_ops"] if op.get("op") == "vehicle_sp"]
+        self.assertEqual(len(sp_ops), 2)  # one for target, one for attacker
+
+    @patch(MOCK, return_value=3)
+    def test_on_outcome_hit(self, _m):
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=25, target_sp=0,
+            on_hit="target sent flying", on_miss="target dodged",
+        )
+        self.assertFalse(r["dodged"])
+        self.assertEqual(r["on_outcome"], "target sent flying")
+
+    @patch(MOCK, return_value=3)
+    def test_negative_vehicle_sp_is_clamped(self, _m):
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=-5,
+            target_hp_current=25, target_sp=0,
+        )
+        self.assertEqual(r["vehicle_damage"], 18)
+
+    @patch(MOCK, return_value=3)
+    def test_pedestrian_ramming_emits_armor_ablation_op(self, _m):
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=25, target_sp=7,
+        )
+        self.assertEqual(r["target_ablation"], 1)
+        armor_ops = [op for op in r["state_ops"] if op.get("op") == "armor" and op.get("edgerunner") == "Ped"]
+        self.assertEqual(len(armor_ops), 1)
+        self.assertEqual(armor_ops[0]["change"], -1)
+
+    @patch(MOCK, return_value=9)
+    def test_on_outcome_dodged(self, _m):
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=25, target_sp=0,
+            pedestrian_dodge=True, pedestrian_dex=8, pedestrian_evasion=6,
+            on_hit="target sent flying", on_miss="target dodged",
+        )
+        self.assertTrue(r["dodged"])
+        self.assertEqual(r["on_outcome"], "target dodged")
+
+    @patch(MOCK, return_value=3)
+    def test_destroyed_attacker_vehicle_skips(self, _m):
+        r = resolve_ramming(
+            vehicle_name="Wreck", target_name="Ped",
+            vehicle_sdp_current=0, vehicle_sp=0,
+            target_hp_current=20, target_sp=0,
+        )
+        self.assertTrue(r.get("skipped"))
+        self.assertEqual(r.get("reason"), "vehicle_destroyed")
+        self.assertEqual(r["state_ops"], [])
+
+
+class TestResolveVehicleWeakPoint(unittest.TestCase):
+    """Tests for vehicle weak point shot resolution."""
+
+    @patch(MOCK, return_value=9)
+    def test_moving_target_hit(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Assault Rifle",
+            damage_dice=5, vehicle_sp=13, vehicle_name="Enemy AV",
+            range_bracket=2, target_moving=True,
+        )
+        # DV for AR at range 2 = 15, +8 aimed = 23. Roll 9+8+6=23. Must BEAT DV -> 23 > 23 fails
+        # Actually for this mock ALL randint calls return 9, so d10=9 for check, then d6=9 would be clamped...
+        # The d10 check: 9+8+6=23 vs DV23 -> tied -> FAIL (must beat)
+        self.assertFalse(r["hit"])
+
+    @patch(MOCK, return_value=4)
+    def test_stationary_auto_hit(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Assault Rifle",
+            damage_dice=5, vehicle_sp=13, vehicle_name="Parked Car",
+            target_moving=False,
+        )
+        self.assertTrue(r["hit"])
+        self.assertIsNone(r["attack_roll"])
+        # 5d6 all 4s = 20, SP 13, past = 7, doubled = 14
+        self.assertEqual(r["raw_damage"], 20)
+        self.assertEqual(r["damage_past_sp"], 7)
+        self.assertEqual(r["doubled_damage"], 14)
+
+    @patch(MOCK, return_value=4)
+    def test_ap_ammo_ablation(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Assault Rifle",
+            damage_dice=5, vehicle_sp=13, vehicle_name="Car",
+            target_moving=False, is_ap=True,
+        )
+        self.assertEqual(r["ablation"], 2)
+
+    @patch(MOCK, return_value=4)
+    def test_string_false_is_ap_treated_as_non_ap(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Assault Rifle",
+            damage_dice=5, vehicle_sp=13, vehicle_name="Car",
+            target_moving=False, is_ap="false",
+        )
+        self.assertEqual(r["ablation"], 1)
+
+    @patch(MOCK, return_value=4)
+    def test_weapon_type_is_case_insensitive_and_trimmed(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="  assault rifle  ",
+            damage_dice=5, vehicle_sp=13, vehicle_name="Car",
+            target_moving=False,
+        )
+        self.assertTrue(r["hit"])
+        self.assertNotIn("error", r)
+
+    @patch(MOCK, return_value=6)
+    def test_ramming_string_numeric_dodge_stats_do_not_error(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "Ped",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 0,
+            "target_hp_current": 20,
+            "target_sp": 0,
+            "pedestrian_dodge": True,
+            "pedestrian_dex": "8",
+            "pedestrian_evasion": "6",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 0})
+        self.assertEqual(r["results"][0]["type"], "ramming")
+        self.assertNotIn("error", r["results"][0])
+
+    @patch(MOCK, return_value=4)
+    def test_damage_blocked_by_armor(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Pistol",
+            damage_dice=2, vehicle_sp=13, vehicle_name="Tank",
+            target_moving=False,
+        )
+        # 2d6 all 4s = 8 < 13 SP -> 0 past, doubled = 0
+        self.assertEqual(r["damage_past_sp"], 0)
+        self.assertEqual(r["doubled_damage"], 0)
+        self.assertEqual(r["ablation"], 0)
+
+    @patch(MOCK, return_value=4)
+    def test_on_outcome_hit(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Pistol",
+            damage_dice=3, vehicle_sp=5, vehicle_name="Car",
+            target_moving=False, on_hit="car explodes", on_miss="missed",
+        )
+        self.assertTrue(r["hit"])
+        self.assertEqual(r["on_outcome"], "car explodes")
+
+    @patch(MOCK, return_value=4)
+    def test_state_ops_on_hit(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8, skill_value=6, weapon_type="Assault Rifle",
+            damage_dice=5, vehicle_sp=10, vehicle_name="Van",
+            target_moving=False, character_name="V",
+        )
+        # 5d6 all 4s = 20, SP 10, past = 10, doubled = 20
+        sdp_ops = [op for op in r["state_ops"] if op.get("op") == "vehicle_sdp"]
+        self.assertEqual(len(sdp_ops), 1)
+        self.assertEqual(sdp_ops[0]["change"], -20)
+        sp_ops = [op for op in r["state_ops"] if op.get("op") == "vehicle_sp"]
+        self.assertEqual(len(sp_ops), 1)
+        self.assertEqual(sp_ops[0]["change"], -1)
+
+    @patch(MOCK, return_value=10)
+    def test_invalid_weapon_range_returns_error(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=10, skill_value=10, weapon_type="Invalid Weapon",
+            damage_dice=6, vehicle_sp=0, vehicle_name="Car",
+            range_bracket=0, target_moving=True,
+        )
+        self.assertFalse(r["hit"])
+        self.assertIn("error", r)
+        self.assertIn("cannot fire at range bracket", r["error"])
+        self.assertEqual(r["state_ops"], [])
+
+    @patch(MOCK, return_value=6)
+    def test_stationary_target_invalid_range_still_errors(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8,
+            skill_value=8,
+            weapon_type="Pistol",
+            damage_dice=4,
+            vehicle_sp=10,
+            vehicle_name="Parked Car",
+            range_bracket=7,  # Pistol has no DV at this bracket
+            target_moving=False,
+        )
+        self.assertFalse(r["hit"])
+        self.assertIn("error", r)
+        self.assertEqual(r["state_ops"], [])
+
+    @patch(MOCK, return_value=6)
+    def test_invalid_range_type_returns_error_not_exception(self, _m):
+        r = resolve_vehicle_weak_point(
+            stat_value=8,
+            skill_value=8,
+            weapon_type="Pistol",
+            damage_dice=4,
+            vehicle_sp=10,
+            vehicle_name="Parked Car",
+            range_bracket="far",
+            target_moving=False,
+        )
+        self.assertFalse(r["hit"])
+        self.assertIn("error", r)
+        self.assertIn("Invalid range bracket", r["error"])
+
+
+class TestResolveSpikeStrip(unittest.TestCase):
+    """Tests for spike strip resolution."""
+
+    @patch(MOCK, return_value=8)
+    def test_driver_succeeds_check(self, _m):
+        r = resolve_spike_strip(
+            target_driver_name="Enemy Driver",
+            stat_value=6, skill_value=6,
+            target_vehicle_name="Enemy Car", target_vehicle_sp=13,
+        )
+        # 8+6+6=20 > DV17 = success
+        self.assertTrue(r["check_result"]["success"])
+        self.assertFalse(r["hit"])
+        self.assertEqual(len(r["state_ops"]), 0)
+
+    @patch(MOCK, return_value=3)
+    def test_driver_fails_check(self, _m):
+        r = resolve_spike_strip(
+            target_driver_name="Enemy Driver",
+            stat_value=5, skill_value=4,
+            target_vehicle_name="Enemy Car", target_vehicle_sp=10,
+        )
+        # 3+5+4=12 < DV17 = fail
+        self.assertFalse(r["check_result"]["success"])
+        self.assertTrue(r["hit"])
+        # 4d6 all 3s = 12, SP 10, past = 2, doubled = 4
+        self.assertEqual(r["raw_damage"], 12)
+        self.assertEqual(r["damage_past_sp"], 2)
+        self.assertEqual(r["doubled_damage"], 4)
+        self.assertEqual(r["ablation"], 1)
+        sdp_ops = [op for op in r["state_ops"] if op.get("op") == "vehicle_sdp"]
+        self.assertEqual(len(sdp_ops), 1)
+        self.assertEqual(sdp_ops[0]["change"], -4)
+
+    @patch(MOCK, return_value=8)
+    def test_on_outcome_avoided(self, _m):
+        r = resolve_spike_strip(
+            target_driver_name="Driver", stat_value=6, skill_value=6,
+            target_vehicle_name="Car", target_vehicle_sp=10,
+            on_hit="tires shredded", on_miss="swerved clear",
+        )
+        self.assertFalse(r["hit"])
+        self.assertEqual(r["on_outcome"], "swerved clear")
+
+    @patch(MOCK, return_value=2)
+    def test_on_outcome_hit(self, _m):
+        r = resolve_spike_strip(
+            target_driver_name="Driver", stat_value=4, skill_value=3,
+            target_vehicle_name="Car", target_vehicle_sp=5,
+            on_hit="tires shredded", on_miss="swerved clear",
+        )
+        self.assertTrue(r["hit"])
+        self.assertEqual(r["on_outcome"], "tires shredded")
+
+    @patch(MOCK, return_value=8)
+    def test_non_land_vehicle_rejected(self, _m):
+        r = resolve_spike_strip(
+            target_driver_name="Pilot", stat_value=8, skill_value=8,
+            target_vehicle_name="AV-4", target_vehicle_sp=13,
+            target_vehicle_type="air",
+        )
+        self.assertFalse(r["hit"])
+        self.assertIn("error", r)
+        self.assertIn("land vehicles only", r["formatted"])
+        self.assertEqual(r["state_ops"], [])
+
+
+class TestResolveActionsVehicle(unittest.TestCase):
+    """Tests that vehicle action types dispatch through resolve_actions()."""
+
+    @patch(MOCK, return_value=7)
+    def test_driving_check_dispatches(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check", "character": "V",
+            "vehicle_name": "Car",
+            "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+        }])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["results"][0]["type"], "driving_check")
+        self.assertTrue(r["results"][0]["success"])
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_dispatches(self, _m):
+        r = resolve_actions([{
+            "type": "ramming", "character": "V",
+            "vehicle_name": "Car", "target": "Bike",
+            "vehicle_sdp_current": 50, "vehicle_sp": 0,
+            "target_hp_current": 0, "target_sp": 0,
+            "target_is_vehicle": True, "target_sdp_current": 35,
+        }])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["results"][0]["type"], "ramming")
+        # state_ops should have vehicle_sdp ops
+        vsdp_ops = [op for op in r["state_ops"] if op.get("op") == "vehicle_sdp"]
+        self.assertGreater(len(vsdp_ops), 0)
+
+    @patch(MOCK, return_value=4)
+    def test_vehicle_weak_point_dispatches(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point", "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "Car",
+            "target_moving": False,
+        }])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["results"][0]["type"], "vehicle_weak_point")
+
+    @patch(MOCK, return_value=3)
+    def test_spike_strip_dispatches(self, _m):
+        r = resolve_actions([{
+            "type": "spike_strip", "character": "V",
+            "target_driver": "Enemy", "target_stat_value": 5,
+            "target_skill_value": 4, "target_vehicle_name": "Enemy Car",
+            "target_vehicle_sp": 10,
+        }])
+        self.assertEqual(len(r["results"]), 1)
+        self.assertEqual(r["results"][0]["type"], "spike_strip")
+
+    @patch(MOCK, return_value=7)
+    def test_invalid_vehicle_weak_point_does_not_spend_luck(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Invalid Weapon", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "Car",
+            "range_bracket": 0, "target_moving": True,
+            "luck_spent": 2,
+        }])
+        self.assertIn("error", r["results"][0])
+        luck_ops = [op for op in r["state_ops"] if op.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+    @patch(MOCK, return_value=6)
+    def test_stationary_vehicle_weak_point_does_not_spend_luck(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "Car",
+            "target_moving": False,
+            "luck_spent": 2,
+        }])
+        self.assertTrue(r["results"][0]["hit"])
+        self.assertIsNone(r["results"][0]["attack_roll"])
+        luck_ops = [op for op in r["state_ops"] if op.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+    @patch(MOCK, return_value=7)
+    def test_invalid_driving_check_does_not_spend_luck(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check", "character": "V",
+            "vehicle_name": "Car",
+            "stat_value": 6, "skill_value": 4, "maneuver": "unknown_stunt",
+            "luck_spent": 2,
+        }])
+        self.assertIn("error", r["results"][0])
+        luck_ops = [op for op in r["state_ops"] if op.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+    @patch(MOCK, return_value=7)
+    def test_non_numeric_luck_spent_does_not_duplicate_driving_result(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check", "character": "V",
+            "vehicle_name": "Car",
+            "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            "luck_spent": "abc",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 10})
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+        luck_ops = [op for op in r["state_ops"] if op.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+    @patch(MOCK, return_value=7)
+    def test_non_numeric_luck_spent_does_not_duplicate_weak_point_result(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "Car",
+            "range_bracket": 0, "target_moving": True,
+            "luck_spent": "abc",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 10})
+        self.assertEqual(len(r["results"]), 1)
+        self.assertNotIn("error", r["results"][0])
+        luck_ops = [op for op in r["state_ops"] if op.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_dispatch_without_target_vehicle_sdp_does_not_error(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "Enemy Car",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 10,
+            "target_is_vehicle": True,
+            # target_sdp_current intentionally omitted
+            "target_sp": 10,
+        }], sequential=False)
+        self.assertEqual(r["results"][0]["type"], "ramming")
+        self.assertNotIn("error", r["results"][0])
+        self.assertIsNone(r["results"][0]["vehicle_stopped"])
+
+    @patch(MOCK, return_value=6)
+    def test_vehicle_weak_point_requires_vehicle_name(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "",
+            "target_moving": False,
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertEqual(r["state_ops"], [])
+
+    @patch(MOCK, return_value=6)
+    def test_spike_strip_requires_target_vehicle_name(self, _m):
+        r = resolve_actions([{
+            "type": "spike_strip",
+            "character": "V",
+            "target_driver": "Enemy",
+            "target_stat_value": 5, "target_skill_value": 4,
+            "target_vehicle_name": "",
+            "target_vehicle_sp": 10,
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertEqual(r["state_ops"], [])
+
+    @patch(MOCK, return_value=6)
+    def test_ramming_requires_target_name(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "",
+            "vehicle_sdp_current": 50, "vehicle_sp": 0,
+            "target_is_vehicle": True, "target_sp": 0,
+        }])
+        self.assertIn("error", r["results"][0])
+        self.assertEqual(r["state_ops"], [])
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_string_false_target_is_vehicle_treated_as_false(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "Ped",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 0,
+            "target_hp_current": 20,
+            "target_sp": 0,
+            "target_is_vehicle": "false",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 0})
+        hp_ops = [op for op in r["state_ops"] if op.get("op") == "hp" and op.get("edgerunner") == "Ped"]
+        self.assertGreater(len(hp_ops), 0)
+        self.assertFalse(any(op.get("op") == "vehicle_sdp" and op.get("vehicle") == "Ped" for op in r["state_ops"]))
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_string_false_target_not_skipped_as_destroyed_vehicle(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "Ped",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 0,
+            "target_hp_current": 20,
+            "target_sp": 0,
+            "target_is_vehicle": "false",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 0, "Ped": 0, "Ped:sp": 0})
+        self.assertFalse(r["results"][0].get("skipped", False))
+        self.assertNotEqual(r["results"][0].get("reason"), "target_vehicle_destroyed")
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_unknown_string_target_is_vehicle_defaults_true(self, _m):
+        r = resolve_actions([{
+            "type": "ramming",
+            "character": "V",
+            "vehicle_name": "Car",
+            "target": "Wreck",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 0,
+            "target_sdp_current": 20,
+            "target_sp": 0,
+            "target_is_vehicle": "vehicle",
+        }], sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 0, "Wreck": 20, "Wreck:sp": 0})
+        self.assertTrue(any(op.get("op") == "vehicle_sdp" and op.get("vehicle") == "Wreck" for op in r["state_ops"]))
+        self.assertFalse(any(op.get("op") == "hp" and op.get("edgerunner") == "Wreck" for op in r["state_ops"]))
+
+    @patch(MOCK, return_value=6)
+    def test_vehicle_names_are_stripped_for_sequential_tracking(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check",
+            "character": "V",
+            "vehicle_name": " Wreck ",
+            "stat_value": 8,
+            "skill_value": 8,
+            "maneuver": "maintain_control",
+        }], sequential=True, combatant_vehicle_sdp={"Wreck": 0, "Wreck:sp": 0})
+        self.assertTrue(r["results"][0].get("skipped"))
+        self.assertEqual(r["results"][0].get("reason"), "vehicle_destroyed")
+
+    @patch(MOCK, return_value=6)
+    def test_weak_point_string_false_target_moving_treated_as_stationary(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 3,
+            "vehicle_sp": 5, "vehicle_name": "Car",
+            "target_moving": "false",
+        }])
+        self.assertTrue(r["results"][0]["hit"])
+        self.assertIsNone(r["results"][0]["attack_roll"])
+
+
+class TestApplyVehicleUpdates(unittest.TestCase):
+    """Tests for _apply_vehicle_updates bootstrap and upgrade application."""
+
+    def test_bootstrap_basic(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "V's Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 30, "occupants": ["V"], "driver": "V",
+                "upgrades": [],
+            },
+        }])
+        v = combat["vehicles"]["V's Car"]
+        self.assertEqual(v["sdp_max"], 50)
+        self.assertEqual(v["sdp_current"], 50)
+        self.assertEqual(v["sp"], 0)
+        self.assertEqual(v["status"], "active")
+
+    def test_bootstrap_armored_chassis_applies_sp(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Tank",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": [], "driver": "V",
+                "upgrades": ["armored_chassis"],
+            },
+        }])
+        v = combat["vehicles"]["Tank"]
+        self.assertEqual(v["sp"], 13)  # Armored Chassis sets SP to 13
+
+    def test_bootstrap_heavy_chassis_adds_sdp(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Truck",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": [], "driver": "V",
+                "upgrades": ["heavy_chassis"],
+            },
+        }])
+        v = combat["vehicles"]["Truck"]
+        self.assertEqual(v["sdp_max"], 70)  # 50 + 20
+        self.assertEqual(v["sdp_current"], 70)
+
+    def test_bootstrap_both_upgrades(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "APC",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 100, "sp": 0,
+                "combat_move": 20, "occupants": ["V", "Jackie"],
+                "driver": "V",
+                "upgrades": ["armored_chassis", "heavy_chassis"],
+            },
+        }])
+        v = combat["vehicles"]["APC"]
+        self.assertEqual(v["sp"], 13)
+        self.assertEqual(v["sdp_max"], 120)  # 100 + 20
+        self.assertEqual(v["sdp_current"], 120)
+
+    def test_re_bootstrap_ignored(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 30, "sp": 10,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 100, "sp": 0,
+                "combat_move": 20, "occupants": [], "driver": "V",
+                "upgrades": [],
+            },
+        }])
+        # Should NOT re-bootstrap — SDP should remain 30, not reset to 100
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 30)
+
+    def test_sdp_delta_applies(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 13,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sdp_delta": -15}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 35)
+
+    def test_sdp_delta_applies_case_insensitive_vehicle_name(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 13,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "car", "sdp_delta": -15}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 35)
+
+    def test_auto_destroy_on_zero_sdp(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 5, "sp": 0,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sdp_delta": -10}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 0)
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "destroyed")
+
+    def test_explicit_destroyed_status_sets_sdp_to_zero(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 10, "sp": 5,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "status": "destroyed"}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 0)
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "destroyed")
+
+
+class TestApplyVehicleUpdatesEdgeCases(unittest.TestCase):
+    """Edge cases for _apply_vehicle_updates: clamping, judgment validation, matching SP."""
+
+    def test_sdp_clamps_to_zero(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 10, "sp": 0, "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sdp_delta": -999}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 0)
+
+    def test_sdp_clamps_to_max(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 40, "sp": 0, "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sdp_delta": 999}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 50)
+
+    def test_sp_clamps_to_zero(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 3, "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sp_delta": -10}])
+        self.assertEqual(combat["vehicles"]["Car"]["sp"], 0)
+
+    def test_occupants_type_validated(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "occupants": ["V"], "driver": "V", "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "occupants": "not_a_list"}])
+        self.assertEqual(combat["vehicles"]["Car"]["occupants"], ["V"])  # unchanged
+
+    def test_driver_accepts_none(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "occupants": [], "driver": "V", "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "driver": None}])
+        self.assertIsNone(combat["vehicles"]["Car"]["driver"])
+
+    def test_driver_rejects_non_string_non_object(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "occupants": [], "driver": "V", "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "driver": ["bad"]}])
+        self.assertIsNone(combat["vehicles"]["Car"]["driver"])
+
+    def test_occupants_drop_non_string_scalars(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "occupants": ["V"], "driver": "V", "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "occupants": [123, True, {"name": "Ok"}, "Also"]}])
+        self.assertEqual(combat["vehicles"]["Car"]["occupants"], ["Ok", "Also"])
+
+    def test_status_rejects_invalid(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "status": "on_fire"}])
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "active")  # unchanged
+
+    def test_status_accepts_disabled(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 50, "sp": 0,
+                                        "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "status": "disabled"}])
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "disabled")
+
+    def test_armored_chassis_applies_when_sp_matches(self):
+        """Armored chassis (sp=13) should apply even if model sends sp=13."""
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Tank",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 13,
+                "combat_move": 20, "occupants": [], "driver": "V",
+                "upgrades": ["armored_chassis"],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Tank"]["sp"], 13)
+
+    def test_unknown_vehicle_sdp_delta_ignored(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{"name": "Ghost", "sdp_delta": -10}])
+        self.assertNotIn("Ghost", combat["vehicles"])
+
+    def test_vehicle_update_name_is_trimmed(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 40, "sp": 0, "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": " Car ", "sdp_delta": -10}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 30)
+
+    def test_status_destroyed_preserved_when_sdp_positive(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 40, "sp": 0, "status": "active"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "status": "destroyed"}])
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "destroyed")
+
+    def test_repair_reactivates_destroyed_vehicle(self):
+        combat = {"vehicles": {"Car": {"sdp_max": 50, "sdp_current": 40, "sp": 0, "status": "destroyed"}}}
+        _apply_vehicle_updates(combat, [{"name": "Car", "sdp_delta": 5}])
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "active")
+
+    def test_bootstrap_driver_dict_normalized_to_name(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": ["V"],
+                "driver": {"name": "V"},
+                "upgrades": [],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Car"]["driver"], "V")
+
+    def test_bootstrap_non_list_upgrades_ignored(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": ["V"], "driver": "V",
+                "upgrades": "armored_chassis",
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Car"]["upgrades"], [])
+
+    def test_bootstrap_upgrade_key_is_trimmed_and_normalized(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": ["V"], "driver": "V",
+                "upgrades": [" armored_chassis "],
+            },
+        }])
+        self.assertIn("armored_chassis", combat["vehicles"]["Car"]["upgrades"])
+        self.assertEqual(combat["vehicles"]["Car"]["sp"], 13)
+
+    def test_bootstrap_upgrade_human_name_normalized_to_key(self):
+        combat = {}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0,
+                "combat_move": 20, "occupants": ["V"], "driver": "V",
+                "upgrades": ["Armored Chassis"],
+            },
+        }])
+        self.assertIn("armored_chassis", combat["vehicles"]["Car"]["upgrades"])
+        self.assertEqual(combat["vehicles"]["Car"]["sp"], 13)
+
+
+class TestCombatCompleteVehicleOrdering(unittest.TestCase):
+    """Vehicle updates must apply BEFORE combat state is cleared."""
+
+    def test_vehicle_updates_applied_on_combat_complete(self):
+        """Resolver damage on final combat turn should still be applied."""
+        pipeline_state = {
+            "combat": {
+                "round": 3,
+                "vehicles": {
+                    "Car": {"sdp_max": 50, "sdp_current": 50, "sp": 13, "status": "active",
+                             "occupants": ["V"], "driver": "V", "upgrades": []},
+                },
+            },
+            "character_states": {},
+        }
+        tool_input = {
+            "narrative": "Final blow",
+            "rolls": "",
+            "character_updates": [],
+            "cover_state": [],
+            "combat": None,
+            "combat_complete": True,
+            "vehicle_updates": [{"name": "Car", "sdp_delta": -20}],
+        }
+        # Before the fix, vehicle_updates were silently dropped when combat_complete=True
+        apply_cpred_combat_state(pipeline_state, tool_input, game_state={"edgerunners": {}})
+        # Combat should be cleared
+        self.assertIsNone(pipeline_state["combat"])
+        # But the vehicle damage should have been applied before clearing
+        # (We can't check the vehicle state after clearing, but we can verify
+        # the function didn't crash and the combat was cleared properly)
+
+    def test_vehicle_updates_applied_before_clearing(self):
+        """Verify vehicle SDP actually changes when combat_complete=True."""
+        # We need to verify the update actually ran, so we'll check
+        # via a side channel: if sdp hits 0, status should be destroyed
+        pipeline_state = {
+            "combat": {
+                "round": 5,
+                "vehicles": {
+                    "Bike": {"sdp_max": 35, "sdp_current": 5, "sp": 0, "status": "active",
+                              "occupants": ["Enemy"], "driver": "Enemy", "upgrades": []},
+                },
+            },
+            "character_states": {},
+        }
+        # Save a reference to the vehicles dict before apply
+        vehicles_ref = pipeline_state["combat"]["vehicles"]
+        tool_input = {
+            "narrative": "Bike destroyed",
+            "rolls": "",
+            "character_updates": [],
+            "cover_state": [],
+            "combat": None,
+            "combat_complete": True,
+            "vehicle_updates": [{"name": "Bike", "sdp_delta": -10}],
+        }
+        apply_cpred_combat_state(pipeline_state, tool_input, game_state={"edgerunners": {}})
+        # Combat cleared
+        self.assertIsNone(pipeline_state["combat"])
+        # But the vehicle was updated before clearing (verify via our saved reference)
+        self.assertEqual(vehicles_ref["Bike"]["sdp_current"], 0)
+        self.assertEqual(vehicles_ref["Bike"]["status"], "destroyed")
+
+
+class TestFormatVehicleLines(unittest.TestCase):
+    """Tests for _format_vehicle_lines display helper."""
+
+    def test_empty_vehicles(self):
+        self.assertEqual(_format_vehicle_lines({}), [])
+        self.assertEqual(_format_vehicle_lines(None), [])
+
+    def test_basic_vehicle(self):
+        vehicles = {"Car": {
+            "sdp_current": 40, "sdp_max": 50, "sp": 13,
+            "combat_move": 30, "driver": "V", "occupants": ["V", "Jackie"],
+            "upgrades": ["armored_chassis"], "status": "active",
+        }}
+        lines = _format_vehicle_lines(vehicles)
+        self.assertEqual(len(lines), 2)  # header + 1 vehicle
+        self.assertIn("Vehicles:", lines[0])
+        self.assertIn("SDP 40/50", lines[1])
+        self.assertIn("SP 13", lines[1])
+        self.assertIn("Driver: V", lines[1])
+        self.assertIn("Passengers: Jackie", lines[1])
+        self.assertIn("armored_chassis", lines[1])
+
+    def test_destroyed_vehicle(self):
+        vehicles = {"Wreck": {"status": "destroyed"}}
+        lines = _format_vehicle_lines(vehicles)
+        self.assertIn("DESTROYED", lines[1])
+
+    def test_driver_none(self):
+        vehicles = {"Car": {
+            "sdp_current": 50, "sdp_max": 50, "sp": 0,
+            "combat_move": 20, "driver": None, "occupants": ["V"],
+            "upgrades": [], "status": "active",
+        }}
+        lines = _format_vehicle_lines(vehicles)
+        self.assertIn("Driver: ?", lines[1])
+        self.assertIn("Passengers: V", lines[1])
+
+    def test_no_passengers(self):
+        vehicles = {"Bike": {
+            "sdp_current": 35, "sdp_max": 35, "sp": 0,
+            "combat_move": 40, "driver": "V", "occupants": ["V"],
+            "upgrades": [], "status": "active",
+        }}
+        lines = _format_vehicle_lines(vehicles)
+        self.assertNotIn("Passengers", lines[1])
+
+
+class TestResolveActionsVehicleOnOutcome(unittest.TestCase):
+    """Tests that on_outcome passes through resolve_actions dispatcher."""
+
+    @patch(MOCK, return_value=9)
+    def test_driving_check_on_outcome_success(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check", "character": "V",
+            "vehicle_name": "Car",
+            "stat_value": 6, "skill_value": 4, "maneuver": "maintain_control",
+            "on_hit": "Maintained control", "on_miss": "Lost it",
+        }])
+        self.assertEqual(r["results"][0]["on_outcome"], "Maintained control")
+
+    @patch(MOCK, return_value=1)
+    def test_driving_check_on_outcome_failure(self, _m):
+        r = resolve_actions([{
+            "type": "driving_check", "character": "V",
+            "vehicle_name": "Car",
+            "stat_value": 2, "skill_value": 1, "maneuver": "bootleg_turn",
+            "on_hit": "Nailed it", "on_miss": "Spun out",
+        }])
+        self.assertEqual(r["results"][0]["on_outcome"], "Spun out")
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_on_outcome_through_dispatcher(self, _m):
+        r = resolve_actions([{
+            "type": "ramming", "character": "V",
+            "vehicle_name": "Car", "target": "Pedestrian",
+            "vehicle_sdp_current": 50, "vehicle_sp": 0,
+            "target_hp_current": 30, "target_sp": 0,
+            "on_hit": "Crushed", "on_miss": "Dodged",
+        }])
+        self.assertEqual(r["results"][0]["on_outcome"], "Crushed")
+
+    @patch(MOCK, return_value=4)
+    def test_weak_point_on_outcome_through_dispatcher(self, _m):
+        r = resolve_actions([{
+            "type": "vehicle_weak_point", "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Pistol", "damage_dice": 2,
+            "vehicle_sp": 0, "vehicle_name": "Car",
+            "target_moving": False,
+            "on_hit": "Shredded", "on_miss": "Whiffed",
+        }])
+        self.assertEqual(r["results"][0]["on_outcome"], "Shredded")
+
+    @patch(MOCK, return_value=3)
+    def test_spike_strip_on_outcome_through_dispatcher(self, _m):
+        r = resolve_actions([{
+            "type": "spike_strip", "character": "V",
+            "target_driver": "Enemy", "target_stat_value": 3,
+            "target_skill_value": 2, "target_vehicle_name": "Car",
+            "target_vehicle_sp": 0,
+            "on_hit": "Tires shredded", "on_miss": "Avoided",
+        }])
+        self.assertEqual(r["results"][0]["on_outcome"], "Tires shredded")
+
+
+class TestReturnKeyConsistency(unittest.TestCase):
+    """Verify all return paths include the same keys for each resolver."""
+
+    @patch(MOCK, return_value=3)
+    def test_ramming_dodged_has_all_keys(self, _m):
+        from game_systems.cpred_mechanics import resolve_ramming
+        r = resolve_ramming(
+            vehicle_name="Car", target_name="Ped",
+            vehicle_sdp_current=50, vehicle_sp=0,
+            target_hp_current=30, target_sp=0,
+            pedestrian_dodge=True, pedestrian_dex=10, pedestrian_evasion=10,
+        )
+        # Dodged path should still have all numeric keys
+        for key in ("ram_damage_dice", "ram_damage_total", "vehicle_damage",
+                     "target_damage", "vehicle_stopped", "target_ablation", "vehicle_ablation"):
+            self.assertIn(key, r, f"Missing key {key} in dodged return")
+
+    @patch(MOCK, return_value=1)
+    def test_weak_point_miss_has_all_keys(self, _m):
+        from game_systems.cpred_mechanics import resolve_vehicle_weak_point
+        r = resolve_vehicle_weak_point(
+            stat_value=2, skill_value=1, weapon_type="Pistol",
+            damage_dice=2, vehicle_sp=10, vehicle_name="Car",
+            target_moving=True,
+        )
+        for key in ("raw_damage", "effective_sp", "damage_past_sp", "doubled_damage", "ablation"):
+            self.assertIn(key, r, f"Missing key {key} in miss return")
+
+    @patch(MOCK, return_value=10)
+    def test_spike_strip_avoided_has_all_keys(self, _m):
+        from game_systems.cpred_mechanics import resolve_spike_strip
+        r = resolve_spike_strip(
+            target_driver_name="Enemy", stat_value=8, skill_value=8,
+            target_vehicle_name="Car", target_vehicle_sp=10,
+        )
+        for key in ("raw_damage", "effective_sp", "damage_past_sp", "doubled_damage", "ablation"):
+            self.assertIn(key, r, f"Missing key {key} in avoided return")
+
+
+class TestSequentialVehicleSDP(unittest.TestCase):
+    """Tests for sequential vehicle SDP/SP tracking in resolve_actions."""
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_two_weak_point_shots_use_updated_sp(self, _m):
+        """Second weak-point shot should use SP reduced by first shot's ablation.
+
+        With randint=6: 5d6 = 30 damage. SP 10 → 20 past SP → doubled = 40 SDP damage.
+        Ablation = 1, so SP drops to 9. Second shot should see effective_sp = 9.
+        """
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V",
+                "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10, "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+            {
+                "type": "vehicle_weak_point",
+                "character": "Jackie",
+                "stat_value": 7, "skill_value": 5,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10,  # model provides stale value — should be overridden
+                "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+        ]
+        vehicle_sdp = {"Target Car": 100, "Target Car:sp": 10}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        results = result["results"]
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0]["hit"])
+        self.assertTrue(results[1]["hit"])
+        # First shot uses SP 10
+        self.assertEqual(results[0]["effective_sp"], 10)
+        # Second shot uses tracked SP (10 - 1 ablation = 9)
+        self.assertLess(results[1]["effective_sp"], 10)
+        self.assertEqual(results[1]["effective_sp"], 9)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_without_combatant_vehicle_sdp_both_use_stale_sp(self, _m):
+        """Without combatant_vehicle_sdp, both actions use the model's stale SP value."""
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V",
+                "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10, "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+            {
+                "type": "vehicle_weak_point",
+                "character": "Jackie",
+                "stat_value": 7, "skill_value": 5,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10, "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+        ]
+        result = resolve_actions(actions, sequential=True)
+        results = result["results"]
+        # Without tracking, both use the action's stale SP 10
+        self.assertEqual(results[0]["effective_sp"], 10)
+        self.assertEqual(results[1]["effective_sp"], 10)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_non_sequential_ignores_vehicle_tracking_map_for_sp(self, _m):
+        actions = [{
+            "type": "vehicle_weak_point",
+            "character": "V",
+            "stat_value": 8, "skill_value": 6,
+            "weapon_type": "Assault Rifle", "damage_dice": 5,
+            "vehicle_sp": 99, "vehicle_name": "Car",
+            "range_bracket": 1, "target_moving": False,
+        }]
+        result = resolve_actions(actions, sequential=False, combatant_vehicle_sdp={"car:sp": 0})
+        self.assertEqual(result["results"][0]["effective_sp"], 99)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=3)
+    def test_sequential_ramming_tracks_pedestrian_armor_ablation(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": "Ped",
+                "target_hp_current": 100,
+                "target_sp": 10,
+                "target_is_vehicle": False,
+            },
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": "Ped",
+                "target_hp_current": 100,
+                "target_sp": 10,
+                "target_is_vehicle": False,
+            },
+        ]
+        out = resolve_actions(actions, sequential=True, combatant_hp={"Ped": 100})
+        self.assertEqual(out["results"][0]["target_damage"], 8)
+        self.assertEqual(out["results"][1]["target_damage"], 9)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=3)
+    def test_sequential_ramming_pedestrian_armor_tracking_is_case_insensitive(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": "Ped",
+                "target_hp_current": 100,
+                "target_sp": 10,
+                "target_is_vehicle": False,
+            },
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": " ped ",
+                "target_hp_current": 100,
+                "target_sp": 10,
+                "target_is_vehicle": False,
+            },
+        ]
+        out = resolve_actions(actions, sequential=True, combatant_hp={"Ped": 100})
+        self.assertEqual(out["results"][0]["target_damage"], 8)
+        self.assertEqual(out["results"][1]["target_damage"], 9)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=3)
+    def test_sequential_ramming_pedestrian_hp_tracking_is_case_insensitive(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": "Ped",
+                "target_hp_current": 10,
+                "target_sp": 0,
+                "target_is_vehicle": False,
+            },
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target": " ped ",
+                "target_hp_current": 10,
+                "target_sp": 0,
+                "target_is_vehicle": False,
+            },
+        ]
+        out = resolve_actions(actions, sequential=True, combatant_hp={"Ped": 10})
+        self.assertFalse(out["results"][0]["vehicle_stopped"])
+        self.assertFalse(out["results"][1]["vehicle_stopped"])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_empty_vehicle_tracking_dict_seeds_from_actions(self, _m):
+        """An empty combatant_vehicle_sdp should still seed and track per-action vehicles."""
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V",
+                "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10, "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+            {
+                "type": "vehicle_weak_point",
+                "character": "Jackie",
+                "stat_value": 7, "skill_value": 5,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 10,  # stale, should be overridden to 9
+                "vehicle_name": "Target Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+        ]
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp={})
+        results = result["results"]
+        self.assertEqual(results[0]["effective_sp"], 10)
+        self.assertEqual(results[1]["effective_sp"], 9)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_spike_strip_uses_tracked_sp(self, _m):
+        """Spike strip should use sequential-tracked SP, not stale action value."""
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V",
+                "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 5, "vehicle_name": "Enemy Car",
+                "range_bracket": 1, "target_moving": False,
+            },
+            {
+                "type": "spike_strip",
+                "character": "Jackie",
+                "target_driver": "Ganger",
+                "target_stat_value": 4, "target_skill_value": 2,
+                "target_vehicle_name": "Enemy Car",
+                "target_vehicle_sp": 5,  # stale — should be 4 after first action's ablation
+            },
+        ]
+        vehicle_sdp = {"Enemy Car": 50, "Enemy Car:sp": 5}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        results = result["results"]
+        self.assertEqual(len(results), 2)
+        # First shot ablates SP by 1 (5→4)
+        # Spike strip should use tracked SP 4, not stale 5
+        if results[1].get("hit"):
+            self.assertEqual(results[1]["effective_sp"], 4)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_unknown_target_vehicle_sdp_keeps_vehicle_stopped_unknown(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V",
+                "vehicle_name": "Car",
+                "target": "Unknown Car",
+                "vehicle_sdp_current": 50,
+                "vehicle_sp": 0,
+                "target_is_vehicle": True,
+                "target_sp": 0,
+                # target_sdp_current intentionally omitted
+            },
+        ]
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp={"Car": 50, "Car:sp": 0})
+        self.assertIsNone(result["results"][0]["vehicle_stopped"])
+
+
+class TestVehicleElimination(unittest.TestCase):
+    """Tests that destroyed vehicles skip actions in sequential resolution."""
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_ramming(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V", "vehicle_name": "Wreck",
+                "target": "Enemy", "vehicle_sdp_current": 0,
+                "vehicle_sp": 0, "target_hp_current": 30, "target_sp": 5,
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertIn("notification", result["results"][0])
+        self.assertIn("already destroyed", result["results"][0]["notification"])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_ramming_with_empty_tracking_dict(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V", "vehicle_name": "Wreck",
+                "target": "Enemy", "vehicle_sdp_current": 0,
+                "vehicle_sp": 0, "target_hp_current": 30, "target_sp": 5,
+            },
+        ]
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp={})
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_ramming_without_tracking_map(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V", "vehicle_name": "Wreck",
+                "target": "Enemy", "vehicle_sdp_current": 0,
+                "vehicle_sp": 0, "target_hp_current": 30, "target_sp": 5,
+            },
+        ]
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=None)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_ramming_skips_when_target_vehicle_already_destroyed(self, _m):
+        actions = [
+            {
+                "type": "ramming",
+                "character": "V", "vehicle_name": "Runner",
+                "target": "Wreck", "target_is_vehicle": True,
+                "vehicle_sdp_current": 30, "vehicle_sp": 8,
+                "target_sdp_current": 0, "target_sp": 0,
+            },
+        ]
+        vehicle_sdp = {"Runner": 30, "Runner:sp": 8, "Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "target_vehicle_destroyed")
+        self.assertIn("notification", result["results"][0])
+        self.assertIn("Wreck", result["results"][0]["notification"])
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_driving_check(self, _m):
+        actions = [
+            {
+                "type": "driving_check",
+                "character": "V", "vehicle_name": "Wreck",
+                "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_driving_check_with_untrimmed_tracking_key(self, _m):
+        actions = [
+            {
+                "type": "driving_check",
+                "character": "V", "vehicle_name": "Car",
+                "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            },
+        ]
+        vehicle_sdp = {"Car ": 0, "Car :sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_driving_check_with_case_mismatched_tracking_key(self, _m):
+        actions = [
+            {
+                "type": "driving_check",
+                "character": "V", "vehicle_name": "wreck",
+                "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            },
+        ]
+        vehicle_sdp = {"WRECK": 0, "WRECK:SP": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_vehicle_skips_driving_check_without_vehicle_name(self, _m):
+        actions = [
+            {
+                "type": "driving_check",
+                "character": "V",
+                "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_active_vehicle_not_skipped(self, _m):
+        actions = [
+            {
+                "type": "driving_check",
+                "character": "V", "vehicle_name": "Car",
+                "stat_value": 6, "skill_value": 4, "maneuver": "swerve",
+            },
+        ]
+        vehicle_sdp = {"Car": 50, "Car:sp": 10}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertFalse(result["results"][0].get("skipped", False))
+
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_target_vehicle_skips_weak_point(self, _m):
+        """vehicle_weak_point against a destroyed vehicle should be skipped."""
+        actions = [
+            {
+                "type": "vehicle_weak_point",
+                "character": "V", "stat_value": 8, "skill_value": 6,
+                "weapon_type": "Assault Rifle", "damage_dice": 5,
+                "vehicle_sp": 0, "vehicle_name": "Wreck",
+                "range_bracket": 1, "target_moving": False,
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=6)
+    def test_destroyed_target_vehicle_skips_spike_strip(self, _m):
+        """spike_strip against a destroyed vehicle should be skipped."""
+        actions = [
+            {
+                "type": "spike_strip",
+                "character": "V", "target_driver": "Enemy",
+                "target_stat_value": 6, "target_skill_value": 4,
+                "target_vehicle_name": "Wreck", "target_vehicle_sp": 0,
+            },
+        ]
+        vehicle_sdp = {"Wreck": 0, "Wreck:sp": 0}
+        result = resolve_actions(actions, sequential=True, combatant_vehicle_sdp=vehicle_sdp)
+        self.assertTrue(result["results"][0]["skipped"])
+        self.assertEqual(result["results"][0]["reason"], "vehicle_destroyed")
+        self.assertEqual(result["state_ops"], [])
+
+
+class TestDrivingCheckStateOps(unittest.TestCase):
+    """Tests that resolve_driving_check returns explicit state_ops key."""
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=5)
+    def test_driving_check_has_state_ops(self, _m):
+        r = resolve_driving_check(stat_value=6, skill_value=4, maneuver="swerve")
+        self.assertIn("state_ops", r)
+        self.assertEqual(r["state_ops"], [])
+
+
+class TestFormatVehicleLinesExtended(unittest.TestCase):
+    """Tests for disabled status and type display in _format_vehicle_lines."""
+
+    def test_disabled_vehicle_shows_disabled_with_details(self):
+        vehicles = {"Truck": {
+            "status": "disabled", "sdp_current": 20, "sdp_max": 50,
+            "sp": 5, "combat_move": 0, "type": "land",
+            "driver": "V", "occupants": ["V", "Jackie"], "upgrades": [],
+        }}
+        lines = _format_vehicle_lines(vehicles)
+        joined = " ".join(lines)
+        self.assertIn("DISABLED", joined)
+        # Disabled vehicles SHOULD show SDP and occupants (people are still inside)
+        self.assertIn("SDP 20/50", joined)
+        self.assertIn("Jackie", joined)
+
+    def test_active_vehicle_shows_type(self):
+        vehicles = {
+            "AV-4": {
+                "status": "active",
+                "type": "air",
+                "sdp_current": 100,
+                "sdp_max": 100,
+                "sp": 13,
+                "combat_move": 30,
+                "driver": "V",
+                "occupants": ["V"],
+                "upgrades": [],
+            }
+        }
+        lines = _format_vehicle_lines(vehicles)
+        joined = " ".join(lines)
+        self.assertIn("air", joined)
+
+    def test_cover_hp_displayed(self):
+        vehicles = {
+            "Sedan": {
+                "status": "active",
+                "type": "land",
+                "sdp_current": 50,
+                "sdp_max": 50,
+                "sp": 13,
+                "combat_move": 25,
+                "driver": "V",
+                "occupants": ["V"],
+                "upgrades": ["armored_chassis", "bulletproof_glass_thick"],
+                "cover_hp": 30,
+            }
+        }
+        lines = _format_vehicle_lines(vehicles)
+        joined = " ".join(lines)
+        self.assertIn("Glass: 30HP", joined)
+
+
+class TestApplyVehicleUpdatesBootstrapUpgrades(unittest.TestCase):
+    """Tests for bulletproof glass and seating upgrade auto-application at bootstrap."""
+
+    def test_bulletproof_glass_thin_sets_cover_hp(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Sedan",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V",
+                "upgrades": ["bulletproof_glass_thin"],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Sedan"]["cover_hp"], 15)
+
+    def test_bulletproof_glass_thick_sets_cover_hp(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V",
+                "upgrades": ["bulletproof_glass_thick"],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Car"]["cover_hp"], 30)
+
+    def test_seating_upgrade_adds_to_base_seats(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "AV-4",
+            "set_vehicle_stats": {
+                "type": "air", "sdp_max": 100, "sp": 0, "combat_move": 30,
+                "occupants": ["V"], "driver": "V",
+                "upgrades": ["seating_upgrade"],
+            },
+        }])
+        # AV-4 Aerodyne base seats = 6, + seating_upgrade bonus 2 = 8
+        self.assertEqual(combat["vehicles"]["AV-4"]["seats"], 8)
+
+    def test_no_cover_hp_without_bulletproof_glass(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Bike",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 35, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V",
+                "upgrades": [],
+            },
+        }])
+        self.assertNotIn("cover_hp", combat["vehicles"]["Bike"])
+
+
+class TestMergeVehicleUpdates(unittest.TestCase):
+    """Tests for _merge_vehicle_updates helper in main.py."""
+
+    def test_merge_new_vehicle(self):
+        from main import _merge_vehicle_updates
+        existing = [{"name": "Car A", "status": "active"}]
+        resolver = [{"name": "Car B", "sdp_delta": -10}]
+        result = _merge_vehicle_updates(existing, resolver)
+        names = [r["name"] for r in result]
+        self.assertIn("Car A", names)
+        self.assertIn("Car B", names)
+
+    def test_merge_additive_deltas(self):
+        from main import _merge_vehicle_updates
+        existing = [{"name": "Car", "sdp_delta": -5, "occupants": ["V"]}]
+        resolver = [{"name": "Car", "sdp_delta": -10, "sp_delta": -1}]
+        result = _merge_vehicle_updates(existing, resolver)
+        car = [r for r in result if r["name"] == "Car"][0]
+        self.assertEqual(car["sdp_delta"], -15)
+        self.assertEqual(car["sp_delta"], -1)
+        # Preserves model judgment fields
+        self.assertEqual(car["occupants"], ["V"])
+
+    def test_merge_empty_lists(self):
+        from main import _merge_vehicle_updates
+        self.assertEqual(_merge_vehicle_updates([], []), [])
+        self.assertEqual(_merge_vehicle_updates(None, None), [])
+
+    def test_merge_case_insensitive_vehicle_names(self):
+        from main import _merge_vehicle_updates
+        existing = [{"name": "Car", "sdp_delta": -5}]
+        resolver = [{"name": "car", "sdp_delta": -10, "sp_delta": -1}]
+        result = _merge_vehicle_updates(existing, resolver)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "Car")
+        self.assertEqual(result[0]["sdp_delta"], -15)
+        self.assertEqual(result[0]["sp_delta"], -1)
+
+    def test_merge_existing_casefold_duplicates_do_not_drop_updates(self):
+        from main import _merge_vehicle_updates
+        existing = [
+            {"name": "Car", "sdp_delta": -2, "occupants": ["V"]},
+            {"name": "car", "sdp_delta": -3, "status": "disabled"},
+        ]
+        resolver = [{"name": "CAR", "sdp_delta": -5, "sp_delta": -1}]
+        result = _merge_vehicle_updates(existing, resolver)
+        self.assertEqual(len(result), 1)
+        merged = result[0]
+        self.assertEqual(merged["name"], "Car")
+        self.assertEqual(merged["sdp_delta"], -10)
+        self.assertEqual(merged["sp_delta"], -1)
+        self.assertEqual(merged["occupants"], ["V"])
+        self.assertEqual(merged["status"], "disabled")
+
+
+class TestBuildVehicleReferenceTable(unittest.TestCase):
+    """Smoke tests for _build_vehicle_reference_table()."""
+
+    def test_table_generates_without_error(self):
+        from game_systems.cpred_combat import _build_vehicle_reference_table
+        table = _build_vehicle_reference_table()
+        self.assertIn("Vehicle", table)  # header column
+        self.assertIn("Type", table)     # land/air/sea column
+        self.assertIn("SDP", table)
+
+    def test_all_vehicle_stats_entries_present(self):
+        from game_systems.cpred_combat import _build_vehicle_reference_table
+        from game_systems.cpred_tables import VEHICLE_STATS
+        table = _build_vehicle_reference_table()
+        for v in VEHICLE_STATS.values():
+            self.assertIn(v["name"], table, f"Missing vehicle {v['name']} in reference table")
+
+    def test_table_has_correct_column_count(self):
+        from game_systems.cpred_combat import _build_vehicle_reference_table
+        table = _build_vehicle_reference_table()
+        # Each data row should have 7 pipe-separated columns (6 pipes + outer pipes)
+        data_lines = [l for l in table.split("\n") if l.startswith("|") and "---" not in l]
+        for line in data_lines:
+            pipes = line.count("|")
+            self.assertEqual(pipes, 7, f"Wrong column count in: {line}")
+
+
+class TestSeatsBaseValue(unittest.TestCase):
+    """Tests that base seats are correctly looked up from VEHICLE_STATS at bootstrap."""
+
+    def test_compact_groundcar_gets_4_seats(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Player Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V", "upgrades": [],
+            },
+        }])
+        # Compact Groundcar: sdp=50, type=land → seats=4
+        self.assertEqual(combat["vehicles"]["Player Car"]["seats"], 4)
+
+    def test_seating_upgrade_adds_to_base(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Player Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V", "upgrades": ["seating_upgrade"],
+            },
+        }])
+        # Base 4 + upgrade 2 = 6
+        self.assertEqual(combat["vehicles"]["Player Car"]["seats"], 6)
+
+    def test_bike_gets_2_seats(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "V's Bike",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 35, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V", "upgrades": [],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["V's Bike"]["seats"], 2)
+
+    def test_unknown_vehicle_fallback_2_seats(self):
+        """Custom vehicle with non-matching sdp+type falls back to 2 seats."""
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Custom Tank",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 999, "sp": 0, "combat_move": 10,
+                "occupants": ["V"], "driver": "V", "upgrades": [],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Custom Tank"]["seats"], 2)
+
+    def test_name_substring_match_high_perf(self):
+        """Name substring match prefers High Perf. Groundcar over Compact Groundcar."""
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "High Perf. Groundcar",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 50,
+                "occupants": ["V"], "driver": "V", "upgrades": [],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["High Perf. Groundcar"]["seats"], 2)
+
+    def test_explicit_seats_in_set_vehicle_stats(self):
+        """Model can provide seats directly, bypassing lookup."""
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Custom Ride",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 25,
+                "occupants": ["V"], "driver": "V", "upgrades": [],
+                "seats": 8,
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Custom Ride"]["seats"], 8)
+
+
+class TestVehicleStatePreservedAcrossCombatUpdate(unittest.TestCase):
+    """Tests that vehicle state survives combat dict replacement in apply_single_agent_state_updates."""
+
+    def test_vehicles_preserved_when_combat_replaced(self):
+        from pipeline import apply_single_agent_state_updates
+        ps = {
+            "combat": {
+                "round": 1,
+                "initiative_order": ["V"],
+                "current_turn": "V",
+                "vehicles": {
+                    "AV-4": {"sdp_current": 80, "sdp_max": 100, "sp": 13, "status": "active"},
+                },
+            },
+            "pacing": "combat",
+            "callback_ledger": [],
+            "npc_memories": {},
+            "scene_state": {},
+            "character_states": {},
+            "turn_counter": 1,
+        }
+        parsed = {
+            "combat": {"round": 2, "initiative_order": ["V", "Enemy"], "current_turn": "Enemy"},
+        }
+        apply_single_agent_state_updates(ps, parsed, 2)
+        # Combat dict replaced with new initiative data
+        self.assertEqual(ps["combat"]["round"], 2)
+        # But vehicles should be preserved
+        self.assertIn("vehicles", ps["combat"])
+        self.assertEqual(ps["combat"]["vehicles"]["AV-4"]["sdp_current"], 80)
+
+    def test_vehicles_not_injected_when_no_old_vehicles(self):
+        from pipeline import apply_single_agent_state_updates
+        ps = {
+            "combat": {"round": 1, "initiative_order": ["V"], "current_turn": "V"},
+            "pacing": "combat",
+            "callback_ledger": [],
+            "npc_memories": {},
+            "scene_state": {},
+            "character_states": {},
+            "turn_counter": 1,
+        }
+        parsed = {
+            "combat": {"round": 2, "initiative_order": ["V"], "current_turn": "V"},
+        }
+        apply_single_agent_state_updates(ps, parsed, 2)
+        self.assertNotIn("vehicles", ps["combat"])
+
+
+class TestInjectResolverOpsStateful(unittest.TestCase):
+    """Tests for _inject_resolver_ops_stateful helper in main.py."""
+
+    def test_strips_dice_dependent_ops_from_model_edgerunner_ops(self):
+        from main import _inject_resolver_ops_stateful
+        tool_input = {
+            "edgerunner_ops": [
+                {"op": "hp", "edgerunner": "V", "change": -10},  # model guessed
+                {"op": "pacing", "value": "combat"},  # non-dice, should survive
+            ]
+        }
+        state_ops = [{"op": "hp", "edgerunner": "V", "change": -7}]  # resolver authoritative
+        _inject_resolver_ops_stateful(tool_input, state_ops, {}, {})
+        ops = tool_input["edgerunner_ops"]
+        # Model's guessed hp op stripped, pacing survives, resolver hp added
+        op_types = [o["op"] for o in ops]
+        self.assertEqual(op_types.count("pacing"), 1)
+        self.assertEqual(op_types.count("hp"), 1)
+        hp_op = [o for o in ops if o["op"] == "hp"][0]
+        self.assertEqual(hp_op["change"], -7)  # resolver's value, not model's
+
+    def test_no_ops_is_noop(self):
+        from main import _inject_resolver_ops_stateful
+        tool_input = {"edgerunner_ops": [{"op": "pacing", "value": "combat"}]}
+        _inject_resolver_ops_stateful(tool_input, [], {}, {})
+        # Empty state_ops → early return, original ops untouched
+        self.assertEqual(len(tool_input["edgerunner_ops"]), 1)
+
+    def test_vehicle_ops_applied_to_combat(self):
+        from main import _inject_resolver_ops_stateful
+        from game_systems.cpred import _apply_vehicle_updates
+        combat = {"vehicles": {
+            "Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"},
+        }}
+        pipeline_state = {"combat": combat}
+        gs = {"apply_vehicle_updates": _apply_vehicle_updates}
+        state_ops = [{"op": "vehicle_sdp", "vehicle": "Car", "change": -15}]
+        _inject_resolver_ops_stateful({}, state_ops, pipeline_state, gs)
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 35)
+
+    def test_vehicle_ops_deferred_when_combat_missing(self):
+        from main import _inject_resolver_ops_stateful, _apply_deferred_stateful_vehicle_updates
+        from game_systems.cpred import _apply_vehicle_updates
+        tool_input = {}
+        state_ops = [{"op": "vehicle_sdp", "vehicle": "Car", "change": -15}]
+        pipeline_state = {}
+        gs = {"apply_vehicle_updates": _apply_vehicle_updates}
+        _inject_resolver_ops_stateful(tool_input, state_ops, pipeline_state, gs)
+        self.assertIn("_resolver_vehicle_updates", tool_input)
+        pipeline_state["combat"] = {"vehicles": {"Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"}}}
+        _apply_deferred_stateful_vehicle_updates(tool_input, pipeline_state, gs)
+        self.assertEqual(pipeline_state["combat"]["vehicles"]["Car"]["sdp_current"], 35)
+        self.assertNotIn("_resolver_vehicle_updates", tool_input)
+
+    def test_vehicle_ops_fallback_applied_when_hook_missing(self):
+        from main import _inject_resolver_ops_stateful
+        combat = {"vehicles": {
+            "Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"},
+        }}
+        pipeline_state = {"combat": combat}
+        state_ops = [{"op": "vehicle_sdp", "vehicle": "Car", "change": -15}]
+        _inject_resolver_ops_stateful({}, state_ops, pipeline_state, gs={})
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 35)
+
+
+class TestStripAndMergeResolverOps(unittest.TestCase):
+    """Regression tests for resolver-authoritative strip behavior in main.py."""
+
+    def test_strips_even_when_resolver_state_ops_empty(self):
+        from main import _strip_and_merge_resolver_ops
+        tool_input = {
+            "character_updates": [{"name": "V", "hp_delta": -99, "luck_delta": -4}],
+            "vehicle_updates": [{"name": "Car", "sdp_delta": -20, "sp_delta": -2}],
+        }
+        _strip_and_merge_resolver_ops(tool_input, [])
+        self.assertNotIn("hp_delta", tool_input["character_updates"][0])
+        self.assertNotIn("luck_delta", tool_input["character_updates"][0])
+        self.assertNotIn("sdp_delta", tool_input["vehicle_updates"][0])
+        self.assertNotIn("sp_delta", tool_input["vehicle_updates"][0])
+
+    def test_strips_model_ammo_consumed_before_merge(self):
+        from main import _strip_and_merge_resolver_ops
+        tool_input = {
+            "character_updates": [{
+                "name": "V",
+                "ammo_consumed": [{"weapon_name": "Heavy Pistol", "rounds_consumed": 999}],
+            }],
+        }
+        state_ops = [{
+            "op": "ammo",
+            "edgerunner": "V",
+            "weapon_name": "Heavy Pistol",
+            "rounds_consumed": 3,
+        }]
+        _strip_and_merge_resolver_ops(tool_input, state_ops)
+        ammo_consumed = tool_input["character_updates"][0].get("ammo_consumed", [])
+        self.assertEqual(len(ammo_consumed), 1)
+        self.assertEqual(ammo_consumed[0]["rounds_consumed"], 3)
+
+
+class TestLegacyApplyCombatStateVehicleUpdates(unittest.TestCase):
+    """Regression tests for legacy _apply_combat_state vehicle handling."""
+
+    def test_legacy_apply_combat_state_applies_vehicle_updates(self):
+        from main import _apply_combat_state
+        pipeline_state = {
+            "combat": {
+                "round": 1,
+                "initiative_order": ["V"],
+                "current_turn": "V",
+                "vehicles": {"Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"}},
+            },
+            "character_states": {},
+        }
+        _apply_combat_state({}, pipeline_state, {"vehicle_updates": [{"name": "Car", "sdp_delta": -5}]})
+        self.assertEqual(pipeline_state["combat"]["vehicles"]["Car"]["sdp_current"], 45)
+
+    def test_legacy_apply_combat_state_applies_vehicle_updates_before_clear(self):
+        from main import _apply_combat_state
+        calls = []
+
+        def _capture_apply_vehicle_updates(combat_dict, vehicle_updates):
+            calls.append([dict(upd) for upd in vehicle_updates])
+            combat_dict["vehicles"]["Car"]["sdp_current"] += int(vehicle_updates[0].get("sdp_delta", 0))
+
+        pipeline_state = {
+            "combat": {
+                "round": 1,
+                "initiative_order": ["V"],
+                "current_turn": "V",
+                "vehicles": {"Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"}},
+            },
+            "character_states": {},
+        }
+        _apply_combat_state(
+            {"apply_vehicle_updates": _capture_apply_vehicle_updates},
+            pipeline_state,
+            {
+                "combat_complete": True,
+                "vehicle_updates": [{"name": "Car", "sdp_delta": -5}],
+            },
+        )
+        self.assertEqual(calls, [[{"name": "Car", "sdp_delta": -5}]])
+        self.assertIsNone(pipeline_state["combat"])
+
+
+class TestVehiclePreservationInApplyCombatState(unittest.TestCase):
+    """Tests that apply_cpred_combat_state and apply_net_combat_state preserve vehicles."""
+
+    def test_apply_cpred_combat_state_preserves_vehicles(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {
+            "combat": {
+                "round": 1, "initiative_order": ["V"],
+                "vehicles": {"AV-4": {"sdp_current": 80, "sp": 13, "status": "active"}},
+            },
+        }
+        tool_input = {
+            "combat": {"round": 2, "initiative_order": ["V", "Enemy"]},
+        }
+        apply_cpred_combat_state(ps, tool_input)
+        self.assertEqual(ps["combat"]["round"], 2)
+        self.assertIn("vehicles", ps["combat"])
+        self.assertEqual(ps["combat"]["vehicles"]["AV-4"]["sdp_current"], 80)
+
+    def test_apply_net_combat_state_preserves_vehicles(self):
+        from game_systems.cpred import apply_net_combat_state
+        ps = {
+            "combat": {
+                "round": 1, "initiative_order": ["V"],
+                "vehicles": {"Bike": {"sdp_current": 30, "sp": 0, "status": "active"}},
+            },
+            "net_combat": {"active": True},
+        }
+        tool_input = {
+            "combat": {"round": 2, "initiative_order": ["V"]},
+        }
+        apply_net_combat_state(ps, tool_input)
+        self.assertEqual(ps["combat"]["round"], 2)
+        self.assertIn("vehicles", ps["combat"])
+        self.assertEqual(ps["combat"]["vehicles"]["Bike"]["sdp_current"], 30)
+
+    def test_apply_cpred_combat_state_bootstraps_vehicle_with_new_combat(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {}
+        tool_input = {
+            "combat": {"round": 1, "initiative_order": ["V"], "current_turn": "V"},
+            "vehicle_updates": [{
+                "name": "Car",
+                "set_vehicle_stats": {
+                    "type": "land", "sdp_max": 50, "sp": 0,
+                    "combat_move": 20, "occupants": ["V"], "driver": "V",
+                    "upgrades": [],
+                },
+            }],
+        }
+        apply_cpred_combat_state(ps, tool_input, game_state={"edgerunners": {}})
+        self.assertIn("vehicles", ps["combat"])
+        self.assertIn("Car", ps["combat"]["vehicles"])
+        self.assertEqual(ps["combat"]["vehicles"]["Car"]["sdp_current"], 50)
+
+    def test_apply_cpred_combat_state_vehicle_delta_survives_combat_payload_vehicles(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {
+            "combat": {
+                "round": 1, "initiative_order": ["V"], "current_turn": "V",
+                "vehicles": {"Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"}},
+            },
+        }
+        tool_input = {
+            "vehicle_updates": [{"name": "Car", "sdp_delta": -15}],
+            "combat": {"round": 2, "initiative_order": ["V"], "current_turn": "V", "vehicles": {}},
+        }
+        apply_cpred_combat_state(ps, tool_input, game_state={"edgerunners": {}})
+        self.assertIn("Car", ps["combat"]["vehicles"])
+        self.assertEqual(ps["combat"]["vehicles"]["Car"]["sdp_current"], 35)
+
+    def test_apply_cpred_combat_state_preserves_cover_on_new_combat(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {}
+        tool_input = {
+            "combat": {"round": 1, "initiative_order": ["V"], "current_turn": "V"},
+            "cover_state": [{"name": "V", "in_cover": True, "cover_type": "Concrete", "cover_hp": 20}],
+        }
+        apply_cpred_combat_state(ps, tool_input, game_state={"edgerunners": {}})
+        self.assertTrue(ps["combat"]["cover"]["V"]["in_cover"])
+        self.assertEqual(ps["combat"]["cover"]["V"]["cover_hp"], 20)
+
+    def test_apply_cpred_combat_state_replaces_cover_snapshot(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {
+            "combat": {
+                "round": 1,
+                "initiative_order": ["V", "Enemy"],
+                "current_turn": "V",
+                "cover": {"OldEnemy": {"in_cover": True, "cover_type": "Wall", "cover_hp": 15}},
+            },
+        }
+        tool_input = {
+            "cover_state": [{"name": "V", "in_cover": True, "cover_type": "Concrete", "cover_hp": 20}],
+        }
+        apply_cpred_combat_state(ps, tool_input, game_state={"edgerunners": {}})
+        self.assertIn("V", ps["combat"]["cover"])
+        self.assertNotIn("OldEnemy", ps["combat"]["cover"])
+
+    def test_apply_cpred_combat_state_malformed_cover_does_not_clear_existing(self):
+        from game_systems.cpred import apply_cpred_combat_state
+        ps = {
+            "combat": {
+                "round": 1,
+                "initiative_order": ["V"],
+                "current_turn": "V",
+                "cover": {"V": {"in_cover": True, "cover_type": "Wall", "cover_hp": 15}},
+            },
+        }
+        tool_input = {"cover_state": [{"bad": "entry"}]}
+        apply_cpred_combat_state(ps, tool_input, game_state={"edgerunners": {}})
+        self.assertIn("V", ps["combat"]["cover"])
+
+
+class TestMainCombatCompletionSemantics(unittest.TestCase):
+    """Regression tests for explicit combat completion signaling in main.py."""
+
+    def test_is_combat_marked_complete_requires_explicit_none_or_flag(self):
+        from main import _is_combat_marked_complete
+
+        self.assertFalse(_is_combat_marked_complete({}))
+        self.assertFalse(_is_combat_marked_complete({"combat": {"round": 1}}))
+        self.assertTrue(_is_combat_marked_complete({"combat": None}))
+        self.assertTrue(_is_combat_marked_complete({"combat_complete": True}))
+
+
+class TestApplyVehicleUpdatesFallback(unittest.TestCase):
+    """Regression tests for fallback vehicle status normalization."""
+
+    def test_positive_sdp_does_not_force_active_status(self):
+        from main import _apply_vehicle_updates_fallback
+
+        combat = {"vehicles": {"Car": {"sdp_current": 5, "sdp_max": 50, "sp": 0, "status": "destroyed"}}}
+        _apply_vehicle_updates_fallback(combat, [{"name": "Car", "sdp_delta": 1}])
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "destroyed")
+
+    def test_unknown_vehicle_without_deltas_is_ignored(self):
+        from main import _apply_vehicle_updates_fallback
+
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates_fallback(combat, [{"name": "Ghost"}])
+        self.assertNotIn("Ghost", combat["vehicles"])
+
+    def test_unknown_vehicle_with_set_vehicle_stats_bootstraps(self):
+        from main import _apply_vehicle_updates_fallback
+
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates_fallback(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {"type": "land", "sdp_max": 50, "sp": 10, "combat_move": 20},
+            "driver": "V",
+            "status": "active",
+        }])
+        self.assertIn("Car", combat["vehicles"])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 50)
+        self.assertEqual(combat["vehicles"]["Car"]["sp"], 10)
+        self.assertEqual(combat["vehicles"]["Car"]["status"], "active")
+
+    def test_existing_vehicle_name_match_is_case_insensitive(self):
+        from main import _apply_vehicle_updates_fallback
+
+        combat = {"vehicles": {"Car": {"sdp_current": 50, "sdp_max": 50, "sp": 10, "status": "active"}}}
+        _apply_vehicle_updates_fallback(combat, [{"name": " car ", "sdp_delta": -5, "sp_delta": -2}])
+        self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 45)
+        self.assertEqual(combat["vehicles"]["Car"]["sp"], 8)
+        self.assertNotIn(" car ", combat["vehicles"])
+
+    def test_bootstrap_normalizes_occupants_and_driver(self):
+        from main import _apply_vehicle_updates_fallback
+
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates_fallback(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land",
+                "sdp_max": 50,
+                "sp": 10,
+                "combat_move": 20,
+                "occupants": [{"name": " V "}, " Jackie ", {"name": ""}, 1],
+                "driver": {"name": " V "},
+                "upgrades": [],
+            },
+        }])
+        self.assertEqual(combat["vehicles"]["Car"]["occupants"], ["V", "Jackie"])
+        self.assertEqual(combat["vehicles"]["Car"]["driver"], "V")
+
+
+class TestResolveMechanicsTrackingHelpers(unittest.TestCase):
+    """Regression tests for resolver tracking extraction and TAR persistence."""
+
+    def test_extract_resolve_mechanics_tracking_state(self):
+        from main import _extract_resolve_mechanics_tracking_state
+        pipeline_state = {
+            "game_state": {"edgerunners": {"V": {"hp": {"current": 32}}}},
+            "character_states": {
+                "Enemy": {"data": {"vitals": [{"label": "HP", "current": 17, "max": 30}]}},
+            },
+            "combat": {"vehicles": {"Car": {"sdp_current": 40, "sp": 10, "status": "active"}}},
+        }
+        hp_map, vehicle_map = _extract_resolve_mechanics_tracking_state(pipeline_state)
+        self.assertEqual(hp_map["V"], 32)
+        self.assertEqual(hp_map["Enemy"], 17)
+        self.assertEqual(vehicle_map["Car"], 40)
+        self.assertEqual(vehicle_map["Car:sp"], 10)
+
+    def test_extract_resolve_mechanics_tracking_state_canonicalizes_vehicle_case(self):
+        from main import _extract_resolve_mechanics_tracking_state
+        pipeline_state = {
+            "combat": {
+                "vehicles": {
+                    "Car": {"sdp_current": 40, "sp": 10, "status": "active"},
+                    " car ": {"sdp_current": 30, "sp": 8, "status": "active"},
+                },
+            },
+        }
+        _, vehicle_map = _extract_resolve_mechanics_tracking_state(pipeline_state)
+        self.assertEqual(vehicle_map.get("Car"), 30)
+        self.assertEqual(vehicle_map.get("Car:sp"), 8)
+
+    def test_convert_state_ops_to_vehicle_updates_ignores_non_delta_vehicle_ops(self):
+        from main import _convert_state_ops_to_vehicle_updates
+        out = _convert_state_ops_to_vehicle_updates([
+            {"op": "vehicle_status", "vehicle": "Ghost", "value": "disabled"},
+            {"op": "vehicle_sdp", "vehicle": "Car", "change": -5},
+        ])
+        self.assertEqual(out, [{"name": "Car", "sdp_delta": -5}])
+
+    def test_convert_state_ops_to_vehicle_updates_merges_case_insensitively(self):
+        from main import _convert_state_ops_to_vehicle_updates
+        out = _convert_state_ops_to_vehicle_updates([
+            {"op": "vehicle_sdp", "vehicle": "Hellhound", "change": -5},
+            {"op": "vehicle_sdp", "vehicle": "hellhound", "change": -3},
+            {"op": "vehicle_sp", "vehicle": "HELLHOUND", "change": -1},
+        ])
+        self.assertEqual(out, [{"name": "Hellhound", "sdp_delta": -8, "sp_delta": -1}])
+
+    def test_apply_tar_consumed_state_ops_zeroes_active_tar(self):
+        from main import _apply_tar_consumed_state_ops
+        pipeline_state = {"net_combat": {"active": True, "tar_stacks": 3}}
+        _apply_tar_consumed_state_ops(pipeline_state, [{"op": "tar_consumed"}])
+        self.assertEqual(pipeline_state["net_combat"]["tar_stacks"], 0)
+
+    def test_deferred_vehicle_updates_not_lost_when_combat_still_missing(self):
+        from main import _inject_resolver_ops_stateful, _apply_deferred_stateful_vehicle_updates
+        tool_input = {}
+        _inject_resolver_ops_stateful(
+            tool_input,
+            [{"op": "vehicle_sdp", "vehicle": "Car", "change": -5}],
+            pipeline_state={},
+            gs={},
+        )
+        self.assertIn("_resolver_vehicle_updates", tool_input)
+        _apply_deferred_stateful_vehicle_updates(tool_input, pipeline_state={}, gs={})
+        self.assertIn("_resolver_vehicle_updates", tool_input)
+
+    def test_advance_tracking_maps_from_state_ops(self):
+        from main import _advance_tracking_maps_from_state_ops
+        hp_map = {"V": 20}
+        vehicle_map = {"Car": 30, "Car:sp": 5}
+        _advance_tracking_maps_from_state_ops(
+            hp_map,
+            vehicle_map,
+            [
+                {"op": "hp", "edgerunner": "V", "change": -7},
+                {"op": "vehicle_sdp", "vehicle": "Car", "change": -12},
+                {"op": "vehicle_sp", "vehicle": "Car", "change": -2},
+            ],
+        )
+        self.assertEqual(hp_map["V"], 13)
+        self.assertEqual(vehicle_map["Car"], 18)
+        self.assertEqual(vehicle_map["Car:sp"], 3)
+
+    def test_advance_tracking_maps_case_mismatch_does_not_split_keys(self):
+        from main import _advance_tracking_maps_from_state_ops
+        vehicle_map = {"Car": 30, "Car:sp": 5}
+        _advance_tracking_maps_from_state_ops(
+            {},
+            vehicle_map,
+            [
+                {"op": "vehicle_sdp", "vehicle": "car", "change": -2},
+                {"op": "vehicle_sp", "vehicle": "car", "change": -1},
+            ],
+        )
+        self.assertEqual(vehicle_map["Car"], 28)
+        self.assertEqual(vehicle_map["Car:sp"], 4)
+        self.assertNotIn("car", vehicle_map)
+        self.assertNotIn("car:sp", vehicle_map)
+
+    def test_seed_vehicle_tracking_map_from_actions(self):
+        from main import _seed_vehicle_tracking_map_from_actions
+        vehicle_map = {}
+        _seed_vehicle_tracking_map_from_actions(vehicle_map, [{
+            "type": "vehicle_weak_point",
+            "vehicle_name": "Enemy Car",
+            "vehicle_sdp_current": 50,
+            "vehicle_sp": 10,
+        }])
+        self.assertEqual(vehicle_map["Enemy Car"], 50)
+        self.assertEqual(vehicle_map["Enemy Car:sp"], 10)
+
+    def test_seed_vehicle_tracking_map_case_mismatch_reuses_existing_key(self):
+        from main import _seed_vehicle_tracking_map_from_actions
+        vehicle_map = {"Car": 0, "Car:sp": 0}
+        _seed_vehicle_tracking_map_from_actions(vehicle_map, [{
+            "type": "driving_check",
+            "vehicle_name": "car",
+        }])
+        self.assertIn("Car", vehicle_map)
+        self.assertIn("Car:sp", vehicle_map)
+        self.assertNotIn("car", vehicle_map)
+        self.assertNotIn("car:sp", vehicle_map)
+
+    def test_seed_hp_tracking_map_from_actions(self):
+        from main import _seed_hp_tracking_map_from_actions
+        hp_map = {}
+        _seed_hp_tracking_map_from_actions(hp_map, [{
+            "type": "ramming",
+            "target": "Ped",
+            "target_hp_current": 17,
+        }])
+        self.assertEqual(hp_map["Ped"], 17)
+
+    def test_seed_hp_tracking_map_case_mismatch_reuses_existing_key(self):
+        from main import _seed_hp_tracking_map_from_actions
+        hp_map = {"Ped": 9}
+        _seed_hp_tracking_map_from_actions(hp_map, [{
+            "type": "ramming",
+            "target": " ped ",
+            "target_hp_current": 17,
+        }])
+        self.assertEqual(hp_map, {"Ped": 9})
+
+    def test_advance_tracking_maps_hp_case_mismatch_updates_existing_key(self):
+        from main import _advance_tracking_maps_from_state_ops
+        hp_map = {"Ped": 20}
+        _advance_tracking_maps_from_state_ops(
+            hp_map,
+            {},
+            [{"op": "hp", "edgerunner": " ped ", "change": -7}],
+        )
+        self.assertEqual(hp_map, {"Ped": 13})
+
+    def test_is_net_combat_marked_complete_prefers_pipeline_state(self):
+        from main import _is_net_combat_marked_complete
+        self.assertTrue(
+            _is_net_combat_marked_complete(
+                {"combat_complete": True, "net_complete": False},
+                {"net_combat": {"active": False, "combat_complete": True, "net_complete": True}},
+            )
+        )
+
+
+class TestVehicleSchemaExposure(unittest.TestCase):
+    """Tool schemas should expose vehicle_updates for combat reporting."""
+
+    def test_cpred_combat_and_net_combat_schemas_include_vehicle_updates(self):
+        from game_systems.cpred import (
+            REPORT_CPRED_COMBAT_STATE_TOOL,
+            REPORT_NET_COMBAT_STATE_TOOL,
+            COMBAT_PLANNING_SCHEMA,
+            NET_COMBAT_PLANNING_SCHEMA,
+        )
+        combat_props = REPORT_CPRED_COMBAT_STATE_TOOL["input_schema"]["properties"]
+        net_props = REPORT_NET_COMBAT_STATE_TOOL["input_schema"]["properties"]
+        planning_props = COMBAT_PLANNING_SCHEMA["properties"]
+        net_planning_props = NET_COMBAT_PLANNING_SCHEMA["properties"]
+        self.assertIn("vehicle_updates", combat_props)
+        self.assertIn("vehicle_updates", net_props)
+        self.assertIn("vehicle_updates", planning_props)
+        self.assertIn("vehicle_updates", net_planning_props)
+
+    def test_vehicle_driver_schema_accepts_driver_object(self):
+        from game_systems.cpred import REPORT_CPRED_COMBAT_STATE_TOOL, REPORT_NET_COMBAT_STATE_TOOL
+        combat_driver_schema = (
+            REPORT_CPRED_COMBAT_STATE_TOOL["input_schema"]["properties"]["vehicle_updates"]["items"]["properties"]["driver"]
+        )
+        net_driver_schema = (
+            REPORT_NET_COMBAT_STATE_TOOL["input_schema"]["properties"]["vehicle_updates"]["items"]["properties"]["driver"]
+        )
+        combat_set_driver_schema = (
+            REPORT_CPRED_COMBAT_STATE_TOOL["input_schema"]["properties"]["vehicle_updates"]["items"]["properties"]["set_vehicle_stats"]["properties"]["driver"]
+        )
+        net_set_driver_schema = (
+            REPORT_NET_COMBAT_STATE_TOOL["input_schema"]["properties"]["vehicle_updates"]["items"]["properties"]["set_vehicle_stats"]["properties"]["driver"]
+        )
+        for schema in (combat_driver_schema, net_driver_schema, combat_set_driver_schema, net_set_driver_schema):
+            self.assertIn("oneOf", schema)
+            self.assertTrue(any(s.get("type") == "object" for s in schema["oneOf"] if isinstance(s, dict)))
+
+
+class TestVehicleOccupantsNormalization(unittest.TestCase):
+    """Regression tests for occupant normalization in vehicle bootstrap/update."""
+
+    def test_bootstrap_object_occupants_do_not_break_formatting(self):
+        combat = {"vehicles": {}}
+        _apply_vehicle_updates(combat, [{
+            "name": "Car",
+            "set_vehicle_stats": {
+                "type": "land", "sdp_max": 50, "sp": 0, "combat_move": 20,
+                "occupants": [{"name": "Bob"}, "Alice"], "driver": "V", "upgrades": [],
+            },
+        }])
+        lines = _format_vehicle_lines(combat["vehicles"])
+        joined = " ".join(lines)
+        self.assertIn("Passengers: Bob, Alice", joined)
+
+
+class TestRunModePipelineVehicleTracking(unittest.TestCase):
+    """Regression test for run_mode_pipeline vehicle-state access."""
+
+    def test_run_mode_pipeline_accepts_pipeline_state_for_vehicle_tracking(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline import run_mode_pipeline, PipelineStageResult
+
+        class _Provider:
+            def build_pipeline_request(self, **kwargs):
+                return kwargs
+
+            def send_request_stream(self, _client, _params):
+                yield SimpleNamespace(
+                    event_type="done",
+                    usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                           "output_tokens": 0, "reasoning_tokens": 0},
+                )
+
+            def calculate_cost_with_tier(self, _parsed, _tier):
+                return 0.0
+
+        planning_result = PipelineStageResult(
+            stage="planning",
+            content='{"actions":[{"type":"initiative","combatants":[{"name":"V","ref":6}]}]}',
+            parsed_json={"actions": [{"type": "initiative", "combatants": [{"name": "V", "ref": 6}]}]},
+            usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                   "output_tokens": 0, "reasoning_tokens": 0},
+            service_tier="standard",
+        )
+
+        with patch("pipeline.run_pipeline_stage", return_value=planning_result):
+            events = list(run_mode_pipeline(
+                provider=_Provider(),
+                client=None,
+                username="u",
+                project="p",
+                chat_name="c",
+                mode="combat",
+                planning_system="x",
+                narration_system="y",
+                mode_messages=[],
+                user_content="go",
+                planning_schema={},
+                game_state={"edgerunners": {}},
+                character_states={},
+                pipeline_state={"combat": {"vehicles": {"Car": {"sdp_current": 10, "sp": 1, "status": "active"}}}},
+            ))
+        self.assertTrue(any(e[0] == "pipeline_done" for e in events))
+
+
+class TestCPREDGameSystemHooks(unittest.TestCase):
+    """Smoke tests for required CPRED game-system hooks."""
+
+    def test_game_system_exposes_apply_vehicle_updates(self):
+        self.assertIn("apply_vehicle_updates", GAME_SYSTEM)
+        self.assertTrue(callable(GAME_SYSTEM["apply_vehicle_updates"]))
 
 
 if __name__ == "__main__":

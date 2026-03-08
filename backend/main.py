@@ -28,6 +28,7 @@ import inspect
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider
 from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider
+from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
 from sync_manager import sync_manager, SyncEvent, SyncEventType
@@ -2365,7 +2366,7 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
     return tool_input, retry_usage
 
 
-def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None, game_state=None):
+def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None, game_state=None, pipeline_state=None):
     """Call game-system apply_hack_state with only supported kwargs."""
     kwargs = {}
     try:
@@ -2378,6 +2379,8 @@ def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_op
             kwargs["resolver_state_ops"] = resolver_state_ops
         if accepts_var_kwargs or "game_state" in params:
             kwargs["game_state"] = game_state
+        if accepts_var_kwargs or "pipeline_state" in params:
+            kwargs["pipeline_state"] = pipeline_state
     except (TypeError, ValueError):
         pass
     return apply_fn(hack_state, tool_input, **kwargs)
@@ -2490,15 +2493,73 @@ def _apply_combat_state(gs, pipeline_state, tool_input):
             if cond in conditions:
                 conditions.remove(cond)
 
+    vehicle_updates = tool_input.get("vehicle_updates")
     _has_combat_field = "combat" in tool_input
     new_combat = tool_input.get("combat")
     if tool_input.get("combat_complete") or (_has_combat_field and new_combat is None):
+        # Preserve final vehicle deltas before clearing combat.
+        _st_combat = pipeline_state.get("combat")
+        if vehicle_updates and isinstance(vehicle_updates, list) and isinstance(_st_combat, dict):
+            _apply_veh_fn = gs.get("apply_vehicle_updates") if gs else None
+            if _apply_veh_fn:
+                _apply_veh_fn(_st_combat, vehicle_updates)
+            else:
+                _apply_vehicle_updates_fallback(_st_combat, vehicle_updates)
         pipeline_state["combat"] = None
     elif isinstance(new_combat, dict):
-        old_start = pipeline_state.get("combat", {}).get("start_message_id")
-        pipeline_state["combat"] = new_combat
-        if old_start and "start_message_id" not in new_combat:
-            pipeline_state["combat"]["start_message_id"] = old_start
+        _replace_combat_dict_legacy(pipeline_state, new_combat)
+        # Apply vehicle deltas after combat replacement to avoid losing updates.
+        if vehicle_updates and isinstance(vehicle_updates, list):
+            _st_combat = pipeline_state.get("combat")
+            if isinstance(_st_combat, dict):
+                _apply_veh_fn = gs.get("apply_vehicle_updates") if gs else None
+                if _apply_veh_fn:
+                    _apply_veh_fn(_st_combat, vehicle_updates)
+                else:
+                    _apply_vehicle_updates_fallback(_st_combat, vehicle_updates)
+    elif vehicle_updates and isinstance(vehicle_updates, list):
+        _st_combat = pipeline_state.get("combat")
+        if isinstance(_st_combat, dict):
+            _apply_veh_fn = gs.get("apply_vehicle_updates") if gs else None
+            if _apply_veh_fn:
+                _apply_veh_fn(_st_combat, vehicle_updates)
+            else:
+                _apply_vehicle_updates_fallback(_st_combat, vehicle_updates)
+
+
+def _replace_combat_dict_legacy(pipeline_state: dict, new_combat: dict) -> None:
+    """Replace pipeline_state['combat'] preserving backend-owned keys (legacy fallback).
+
+    Mirrors the same logic in pipeline._replace_combat_dict and cpred._replace_combat_dict.
+    Any new backend-owned key must be added to _BACKEND_OWNED_KEYS here too.
+    """
+    replace_combat_dict_preserving_backend_keys(pipeline_state, new_combat)
+
+
+def _is_combat_marked_complete(tool_input: dict) -> bool:
+    """Return True only when combat is explicitly ended in this tool payload."""
+    if not isinstance(tool_input, dict):
+        return False
+    return bool(tool_input.get("combat_complete")) or (
+        "combat" in tool_input and tool_input.get("combat") is None
+    )
+
+
+def _is_net_combat_marked_complete(tool_input: dict, pipeline_state: dict = None) -> bool:
+    """Return True when net combat is complete, preferring post-apply pipeline state."""
+    if isinstance(pipeline_state, dict):
+        nc = pipeline_state.get("net_combat")
+        if isinstance(nc, dict):
+            if bool(nc.get("combat_complete")) and bool(nc.get("net_complete")):
+                return True
+            if nc.get("active") is False and bool(nc.get("net_complete")):
+                return True
+    if not isinstance(tool_input, dict):
+        return False
+    _nc_combat_done = bool(tool_input.get("combat_complete")) or (
+        "combat" in tool_input and tool_input.get("combat") is None
+    )
+    return bool(_nc_combat_done and tool_input.get("net_complete"))
 
 
 def _combat_file_list(gs):
@@ -2565,6 +2626,8 @@ def _merge_character_updates(existing: list, resolver_updates: list) -> list:
             by_name[upd["name"]] = upd
 
     for r_upd in (resolver_updates or []):
+        if not isinstance(r_upd, dict):
+            continue
         name = r_upd.get("name", "")
         if not name:
             continue
@@ -2572,26 +2635,659 @@ def _merge_character_updates(existing: list, resolver_updates: list) -> list:
             target = by_name[name]
             # Merge hp_delta
             if "hp_delta" in r_upd:
-                target["hp_delta"] = target.get("hp_delta", 0) + r_upd["hp_delta"]
+                try:
+                    target["hp_delta"] = int(target.get("hp_delta", 0)) + int(r_upd["hp_delta"])
+                except (TypeError, ValueError, OverflowError):
+                    pass
             # Merge armor_delta
-            if "armor_delta" in r_upd:
+            if "armor_delta" in r_upd and isinstance(r_upd["armor_delta"], dict):
                 t_armor = target.get("armor_delta", {})
+                if not isinstance(t_armor, dict):
+                    t_armor = {}
                 for loc, val in r_upd["armor_delta"].items():
-                    t_armor[loc] = t_armor.get(loc, 0) + val
+                    try:
+                        t_armor[loc] = int(t_armor.get(loc, 0)) + int(val)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
                 target["armor_delta"] = t_armor
             # Merge critical_injury_add
-            if "critical_injury_add" in r_upd:
+            if "critical_injury_add" in r_upd and isinstance(r_upd["critical_injury_add"], list):
                 target.setdefault("critical_injury_add", []).extend(r_upd["critical_injury_add"])
             # Merge luck_delta
             if "luck_delta" in r_upd:
-                target["luck_delta"] = target.get("luck_delta", 0) + r_upd["luck_delta"]
+                try:
+                    target["luck_delta"] = int(target.get("luck_delta", 0)) + int(r_upd["luck_delta"])
+                except (TypeError, ValueError, OverflowError):
+                    pass
             # Merge ammo_consumed
-            if "ammo_consumed" in r_upd:
+            if "ammo_consumed" in r_upd and isinstance(r_upd["ammo_consumed"], list):
                 target.setdefault("ammo_consumed", []).extend(r_upd["ammo_consumed"])
         else:
             by_name[name] = r_upd
 
     return list(by_name.values())
+
+
+def _convert_state_ops_to_vehicle_updates(state_ops: list) -> list:
+    """Convert resolver state_ops (vehicle_sdp, vehicle_sp) to vehicle_updates format."""
+    by_vehicle = {}
+    for op in state_ops:
+        if not isinstance(op, dict):
+            continue
+        op_type = op.get("op")
+        if op_type not in ("vehicle_sdp", "vehicle_sp"):
+            continue
+        vname = str(op.get("vehicle", "")).strip()
+        if not vname:
+            continue
+        vkey = vname.casefold()
+        if vkey not in by_vehicle:
+            by_vehicle[vkey] = {"name": vname}
+        vupd = by_vehicle[vkey]
+        if op_type == "vehicle_sdp":
+            try:
+                vupd["sdp_delta"] = vupd.get("sdp_delta", 0) + int(op.get("change", 0))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        elif op_type == "vehicle_sp":
+            try:
+                vupd["sp_delta"] = vupd.get("sp_delta", 0) + int(op.get("change", 0))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return list(by_vehicle.values())
+
+
+
+def _merge_vehicle_updates(existing: list, resolver_updates: list) -> list:
+    """Merge resolver-generated vehicle_updates into planning-generated ones.
+
+    For matching names, merge sdp_delta/sp_delta additively. New names are appended.
+    Preserves model judgment fields (occupants, driver, status, set_vehicle_stats).
+    """
+    by_name = {}
+
+    def _merge_into(target: dict, src: dict) -> None:
+        if not isinstance(target, dict) or not isinstance(src, dict):
+            return
+        if "sdp_delta" in src:
+            try:
+                target["sdp_delta"] = int(target.get("sdp_delta", 0)) + int(src["sdp_delta"])
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if "sp_delta" in src:
+            try:
+                target["sp_delta"] = int(target.get("sp_delta", 0)) + int(src["sp_delta"])
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for k, v in src.items():
+            if k in ("name", "sdp_delta", "sp_delta"):
+                continue
+            if k not in target:
+                target[k] = v
+
+    for upd in (existing or []):
+        if isinstance(upd, dict) and upd.get("name"):
+            _name = str(upd.get("name", "")).strip()
+            if not _name:
+                continue
+            _key = _name.casefold()
+            if _key in by_name:
+                _merge_into(by_name[_key], upd)
+            else:
+                by_name[_key] = upd
+
+    for r_upd in (resolver_updates or []):
+        if not isinstance(r_upd, dict):
+            continue
+        name = str(r_upd.get("name", "")).strip()
+        if not name:
+            continue
+        name_key = name.casefold()
+        if name_key in by_name:
+            _merge_into(by_name[name_key], r_upd)
+        else:
+            by_name[name_key] = r_upd
+
+    return list(by_name.values())
+
+
+def _strip_and_merge_resolver_ops(tool_input: dict, state_ops: list) -> None:
+    """Strip dice-dependent fields from model output and merge resolver-computed updates.
+
+    Centralizes the strip+merge logic for modes that use character_updates/vehicle_updates
+    tool schemas (combat, net_combat, hack). Always strips dice-dependent fields when
+    resolver ran, even if no ops of that type were produced.
+    """
+    if not isinstance(tool_input, dict):
+        return
+    state_ops = state_ops or []
+    # Strip dice-dependent fields from model's character_updates
+    for upd in tool_input.get("character_updates", []):
+        if isinstance(upd, dict):
+            upd.pop("hp_delta", None)
+            upd.pop("armor_delta", None)
+            upd.pop("critical_injury_add", None)
+            upd.pop("luck_delta", None)
+            upd.pop("ammo", None)
+            upd.pop("ammo_consumed", None)
+    # Strip dice-dependent fields from model's vehicle_updates
+    for vupd in tool_input.get("vehicle_updates", []):
+        if isinstance(vupd, dict):
+            vupd.pop("sdp_delta", None)
+            vupd.pop("sp_delta", None)
+    # Merge resolver-computed character updates
+    resolver_char = _convert_state_ops_to_character_updates(state_ops)
+    if resolver_char:
+        tool_input["character_updates"] = _merge_character_updates(
+            tool_input.get("character_updates", []), resolver_char
+        )
+    # Merge resolver-computed vehicle updates
+    resolver_veh = _convert_state_ops_to_vehicle_updates(state_ops)
+    if resolver_veh:
+        tool_input["vehicle_updates"] = _merge_vehicle_updates(
+            tool_input.get("vehicle_updates", []), resolver_veh
+        )
+
+
+def _apply_vehicle_updates_fallback(combat_dict: dict, vehicle_updates: list) -> None:
+    """Best-effort fallback applier for vehicle SDP/SP deltas when no hook is present."""
+    if not isinstance(combat_dict, dict) or not isinstance(vehicle_updates, list):
+        return
+    vehicles = combat_dict.setdefault("vehicles", {})
+    if not isinstance(vehicles, dict):
+        vehicles = {}
+        combat_dict["vehicles"] = vehicles
+
+    def _resolve_vehicle_key_case_insensitive(name: str) -> str:
+        n = str(name or "").strip()
+        if not n:
+            return ""
+        if n in vehicles:
+            return n
+        n_cf = n.casefold()
+        for existing in vehicles.keys():
+            if isinstance(existing, str) and existing.casefold() == n_cf:
+                return existing
+        return n
+
+    def _normalize_occupants(values):
+        if not isinstance(values, list):
+            return []
+        normalized = []
+        for occ in values:
+            if isinstance(occ, dict):
+                n = occ.get("name")
+                if isinstance(n, str):
+                    n = n.strip()
+                    if n:
+                        normalized.append(n)
+            elif isinstance(occ, str):
+                n = occ.strip()
+                if n:
+                    normalized.append(n)
+        return normalized
+
+    def _normalize_driver(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            v = value.strip()
+            return v or None
+        if isinstance(value, dict):
+            n = value.get("name")
+            if isinstance(n, str):
+                n = n.strip()
+                return n or None
+            return None
+        return None
+
+    for upd in vehicle_updates:
+        if not isinstance(upd, dict):
+            continue
+        name = upd.get("name")
+        if isinstance(name, str):
+            name = name.strip()
+        if not isinstance(name, str) or not name:
+            continue
+        name = _resolve_vehicle_key_case_insensitive(name)
+
+        svs = upd.get("set_vehicle_stats")
+        if not isinstance(svs, dict):
+            svs = None
+        has_sdp_delta = "sdp_delta" in upd
+        has_sp_delta = "sp_delta" in upd
+
+        v = vehicles.get(name)
+        if not isinstance(v, dict):
+            if svs:
+                try:
+                    sdp_max = max(0, int(svs.get("sdp_max", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    sdp_max = 0
+                try:
+                    sp = max(0, int(svs.get("sp", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    sp = 0
+                try:
+                    combat_move = max(0, int(svs.get("combat_move", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    combat_move = 0
+                v = {
+                    "type": str(svs.get("type", "land") or "land"),
+                    "sdp_current": sdp_max,
+                    "sdp_max": sdp_max,
+                    "sp": sp,
+                    "combat_move": combat_move,
+                    "occupants": _normalize_occupants(svs.get("occupants", [])),
+                    "driver": _normalize_driver(svs.get("driver")),
+                    "upgrades": svs.get("upgrades", []) if isinstance(svs.get("upgrades"), list) else [],
+                    "status": "active",
+                }
+                vehicles[name] = v
+            elif has_sdp_delta or has_sp_delta:
+                # Unknown target for delta-only update: ignore to avoid phantom vehicles.
+                continue
+            else:
+                # Unknown target with no mechanical deltas: ignore.
+                continue
+
+        if has_sdp_delta:
+            try:
+                sdp_delta = int(upd.get("sdp_delta", 0))
+            except (TypeError, ValueError, OverflowError):
+                sdp_delta = 0
+            cur = max(0, int(v.get("sdp_current", 0)))
+            new_cur = max(0, cur + sdp_delta)
+            v["sdp_current"] = new_cur
+            try:
+                cur_max = int(v.get("sdp_max", 0))
+            except (TypeError, ValueError, OverflowError):
+                cur_max = 0
+            v["sdp_max"] = max(new_cur, cur_max)
+        if has_sp_delta:
+            try:
+                sp_delta = int(upd.get("sp_delta", 0))
+            except (TypeError, ValueError, OverflowError):
+                sp_delta = 0
+            try:
+                cur_sp = int(v.get("sp", 0))
+            except (TypeError, ValueError, OverflowError):
+                cur_sp = 0
+            v["sp"] = max(0, cur_sp + sp_delta)
+        if "occupants" in upd and isinstance(upd.get("occupants"), list):
+            v["occupants"] = _normalize_occupants(upd.get("occupants"))
+        if "driver" in upd:
+            v["driver"] = _normalize_driver(upd.get("driver"))
+        if "status" in upd:
+            st = upd.get("status")
+            if isinstance(st, str) and st in ("active", "disabled", "destroyed"):
+                v["status"] = st
+                if st == "destroyed":
+                    v["sdp_current"] = 0
+        if int(v.get("sdp_current", 0)) <= 0:
+            v["status"] = "destroyed"
+        elif v.get("status") not in ("active", "disabled", "destroyed"):
+            v["status"] = "active"
+
+
+def _canonicalize_vehicle_tracking_map(vehicle_map: dict) -> None:
+    """Coalesce vehicle tracking keys case-insensitively in place."""
+    if not isinstance(vehicle_map, dict) or not vehicle_map:
+        return
+    merged = {}
+    key_style = {}
+    for raw_key, raw_val in list(vehicle_map.items()):
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip()
+        if not key:
+            continue
+        canon = key.casefold()
+        if canon not in key_style:
+            key_style[canon] = key
+        out_key = key_style[canon]
+        if canon.endswith(":sp"):
+            try:
+                parsed = max(0, int(raw_val))
+            except (TypeError, ValueError, OverflowError):
+                parsed = 0
+            if out_key in merged and isinstance(merged[out_key], int):
+                merged[out_key] = min(merged[out_key], parsed)
+            else:
+                merged[out_key] = parsed
+        else:
+            if raw_val is None:
+                parsed = None
+            else:
+                try:
+                    parsed = max(0, int(raw_val))
+                except (TypeError, ValueError, OverflowError):
+                    parsed = None
+            if out_key in merged and isinstance(merged[out_key], int) and isinstance(parsed, int):
+                merged[out_key] = min(merged[out_key], parsed)
+            elif out_key not in merged:
+                merged[out_key] = parsed
+            elif merged[out_key] is None and isinstance(parsed, int):
+                merged[out_key] = parsed
+    vehicle_map.clear()
+    vehicle_map.update(merged)
+
+
+def _find_vehicle_tracking_key(vehicle_map: dict, name: str) -> str:
+    """Resolve an existing vehicle key case-insensitively."""
+    n = str(name or "").strip()
+    if not n:
+        return ""
+    if n in vehicle_map:
+        return n
+    target = n.casefold()
+    for k in vehicle_map.keys():
+        if isinstance(k, str) and not k.endswith(":sp") and k.casefold() == target:
+            return k
+    return ""
+
+
+def _find_vehicle_tracking_sp_key(vehicle_map: dict, name: str) -> str:
+    """Resolve an existing vehicle SP key case-insensitively."""
+    base = _find_vehicle_tracking_key(vehicle_map, name) or str(name or "").strip()
+    if not base:
+        return ""
+    sp_key = base + ":sp"
+    if sp_key in vehicle_map:
+        return sp_key
+    target = sp_key.casefold()
+    for k in vehicle_map.keys():
+        if isinstance(k, str) and k.endswith(":sp") and k.casefold() == target:
+            return k
+    return ""
+
+
+def _canonicalize_hp_tracking_map(hp_map: dict) -> None:
+    """Coalesce HP tracking keys case-insensitively in place."""
+    if not isinstance(hp_map, dict) or not hp_map:
+        return
+    merged = {}
+    key_style = {}
+    for raw_key, raw_val in list(hp_map.items()):
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key.strip()
+        if not key:
+            continue
+        canon = key.casefold()
+        if canon not in key_style:
+            key_style[canon] = key
+        out_key = key_style[canon]
+        try:
+            parsed = max(0, int(raw_val))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if out_key in merged:
+            merged[out_key] = min(merged[out_key], parsed)
+        else:
+            merged[out_key] = parsed
+    hp_map.clear()
+    hp_map.update(merged)
+
+
+def _find_hp_tracking_key(hp_map: dict, name: str) -> str:
+    """Resolve an existing HP key case-insensitively."""
+    n = str(name or "").strip()
+    if not n:
+        return ""
+    if n in hp_map:
+        return n
+    target = n.casefold()
+    for k in hp_map.keys():
+        if isinstance(k, str) and k.casefold() == target:
+            return k
+    return ""
+
+
+def _extract_resolve_mechanics_tracking_state(pipeline_state: dict) -> tuple[dict, dict]:
+    """Extract HP + vehicle SDP/SP tracking maps for sequential resolver calls."""
+    hp_map = {}
+    vehicle_map = {}
+    if not isinstance(pipeline_state, dict):
+        return hp_map, vehicle_map
+
+    game_state = pipeline_state.get("game_state")
+    if isinstance(game_state, dict):
+        for er_name, er_data in game_state.get("edgerunners", {}).items():
+            if not isinstance(er_data, dict):
+                continue
+            hp = er_data.get("hp", {})
+            if isinstance(hp, dict) and "current" in hp:
+                try:
+                    hp_map[er_name] = int(hp.get("current", 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+
+    character_states = pipeline_state.get("character_states")
+    if isinstance(character_states, dict):
+        for cs_name, cs_entry in character_states.items():
+            if cs_name in hp_map:
+                continue
+            d = cs_entry.get("data", cs_entry) if isinstance(cs_entry, dict) else {}
+            for v in d.get("vitals", []):
+                if v.get("label") == "HP" and "current" in v:
+                    try:
+                        hp_map[cs_name] = int(v.get("current", 0))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                    break
+
+    combat = pipeline_state.get("combat")
+    vehicles = combat.get("vehicles", {}) if isinstance(combat, dict) else {}
+    if isinstance(vehicles, dict):
+        for vname, vdata in vehicles.items():
+            if not isinstance(vdata, dict):
+                continue
+            vname = str(vname or "").strip()
+            if not vname:
+                continue
+            try:
+                sdp_current = int(vdata.get("sdp_current", 0))
+            except (TypeError, ValueError, OverflowError):
+                sdp_current = 0
+            try:
+                sp_current = int(vdata.get("sp", 0))
+            except (TypeError, ValueError, OverflowError):
+                sp_current = 0
+            is_destroyed = vdata.get("status") == "destroyed"
+            vehicle_map[vname] = 0 if is_destroyed else max(0, sdp_current)
+            vehicle_map[vname + ":sp"] = max(0, sp_current)
+
+    _canonicalize_hp_tracking_map(hp_map)
+    _canonicalize_vehicle_tracking_map(vehicle_map)
+    return hp_map, vehicle_map
+
+
+def _advance_tracking_maps_from_state_ops(hp_map: dict, vehicle_map: dict, state_ops: list) -> None:
+    """Advance running HP/vehicle tracking maps from resolver state_ops."""
+    if not isinstance(state_ops, list):
+        return
+    _canonicalize_hp_tracking_map(hp_map)
+    _canonicalize_vehicle_tracking_map(vehicle_map)
+    for op in state_ops:
+        if not isinstance(op, dict):
+            continue
+        op_type = op.get("op")
+        if op_type == "hp" and isinstance(hp_map, dict):
+            target = _find_hp_tracking_key(hp_map, op.get("edgerunner", "")) or str(op.get("edgerunner", "")).strip()
+            if target in hp_map:
+                try:
+                    hp_map[target] = max(0, int(hp_map[target]) + int(op.get("change", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        elif op_type == "vehicle_sdp" and isinstance(vehicle_map, dict):
+            vname = str(op.get("vehicle", "")).strip()
+            vkey = _find_vehicle_tracking_key(vehicle_map, vname) or vname
+            if vkey and vkey not in vehicle_map:
+                vehicle_map[vkey] = 0
+            if vkey in vehicle_map and isinstance(vehicle_map[vkey], int):
+                try:
+                    vehicle_map[vkey] = max(0, int(vehicle_map[vkey]) + int(op.get("change", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        elif op_type == "vehicle_sp" and isinstance(vehicle_map, dict):
+            vname = str(op.get("vehicle", "")).strip()
+            vkey = _find_vehicle_tracking_key(vehicle_map, vname) or vname
+            sp_key = _find_vehicle_tracking_sp_key(vehicle_map, vkey) or (vkey + ":sp" if vkey else "")
+            if vkey and sp_key not in vehicle_map:
+                vehicle_map[sp_key] = 0
+            if sp_key in vehicle_map and isinstance(vehicle_map[sp_key], int):
+                try:
+                    vehicle_map[sp_key] = max(0, int(vehicle_map[sp_key]) + int(op.get("change", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+
+
+def _seed_vehicle_tracking_map_from_actions(vehicle_map: dict, actions: list) -> None:
+    """Seed running vehicle tracking map from resolve_mechanics action payloads."""
+    if not isinstance(vehicle_map, dict) or not isinstance(actions, list):
+        return
+    _canonicalize_vehicle_tracking_map(vehicle_map)
+
+    def _norm_name(v):
+        return str(v or "").strip()
+
+    def _to_nonneg_int(v, default):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    def _as_bool(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v != 0
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "y", "on")
+        return False
+
+    def _seed(name, sdp_value=None, sp_value=None):
+        n = _norm_name(name)
+        if not n:
+            return
+        k = _find_vehicle_tracking_key(vehicle_map, n) or n
+        if k not in vehicle_map:
+            vehicle_map[k] = _to_nonneg_int(sdp_value, None)
+        elif vehicle_map[k] is None:
+            _parsed = _to_nonneg_int(sdp_value, None)
+            if isinstance(_parsed, int):
+                vehicle_map[k] = _parsed
+        sp_key = _find_vehicle_tracking_sp_key(vehicle_map, k) or (k + ":sp")
+        if sp_key not in vehicle_map:
+            vehicle_map[sp_key] = _to_nonneg_int(sp_value, 0)
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        a_type = action.get("type")
+        if a_type == "ramming":
+            _seed(action.get("vehicle_name"), action.get("vehicle_sdp_current"), action.get("vehicle_sp"))
+            if _as_bool(action.get("target_is_vehicle", False)):
+                _seed(action.get("target"), action.get("target_sdp_current"), action.get("target_sp"))
+        elif a_type == "driving_check":
+            _seed(action.get("vehicle_name"), action.get("vehicle_sdp_current"), action.get("vehicle_sp"))
+        elif a_type == "vehicle_weak_point":
+            _seed(action.get("vehicle_name"), action.get("vehicle_sdp_current"), action.get("vehicle_sp"))
+        elif a_type == "spike_strip":
+            _seed(action.get("target_vehicle_name"), action.get("target_vehicle_sdp_current"), action.get("target_vehicle_sp"))
+
+
+def _seed_hp_tracking_map_from_actions(hp_map: dict, actions: list) -> None:
+    """Seed running HP tracking map from resolve_mechanics action payloads."""
+    if not isinstance(hp_map, dict) or not isinstance(actions, list):
+        return
+    _canonicalize_hp_tracking_map(hp_map)
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        target = str(action.get("target", "")).strip()
+        if not target:
+            continue
+        target_key = _find_hp_tracking_key(hp_map, target) or target
+        if target_key in hp_map:
+            continue
+        if "target_hp_current" in action:
+            try:
+                hp_map[target_key] = max(0, int(action.get("target_hp_current", 0)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+
+def _apply_tar_consumed_state_ops(pipeline_state: dict, state_ops: list) -> None:
+    """Apply tar_consumed resolver ops to active hack/net state."""
+    if not isinstance(pipeline_state, dict) or not isinstance(state_ops, list):
+        return
+    if not any(isinstance(op, dict) and op.get("op") == "tar_consumed" for op in state_ops):
+        return
+    for key in ("hack_state", "net_combat"):
+        st = pipeline_state.get(key)
+        if isinstance(st, dict) and st.get("active"):
+            st["tar_stacks"] = 0
+
+
+def _inject_resolver_ops_stateful(tool_input: dict, state_ops: list, pipeline_state: dict, gs: dict) -> None:
+    """Inject resolver state_ops into a stateful tool_input dict.
+
+    Strips dice-dependent ops the model may have guessed in edgerunner_ops,
+    then merges authoritative resolver ops. Character ops go to edgerunner_ops;
+    vehicle ops are applied directly to pipeline_state["combat"]["vehicles"]
+    since stateful mode has no vehicle_updates schema.
+    """
+    if not state_ops:
+        return
+    # Strip dice-dependent ops the model may have included
+    _DICE_OPS = {"hp", "armor", "critical_injury", "luck", "ammo", "vehicle_sdp", "vehicle_sp"}
+    existing_er_ops = tool_input.get("edgerunner_ops") or []
+    if existing_er_ops:
+        tool_input["edgerunner_ops"] = [
+            op for op in existing_er_ops
+            if not (isinstance(op, dict) and op.get("op") in _DICE_OPS)
+        ]
+    # Add resolver-authoritative character ops
+    _char_ops = [op for op in state_ops
+                 if isinstance(op, dict) and op.get("op") not in ("vehicle_sdp", "vehicle_sp")]
+    if _char_ops:
+        tool_input["edgerunner_ops"] = (tool_input.get("edgerunner_ops") or []) + _char_ops
+    # Apply vehicle ops directly to combat state when available.
+    # If combat is initialized later in this same tool_input, defer until after apply.
+    _veh_updates = _convert_state_ops_to_vehicle_updates(state_ops)
+    if _veh_updates:
+        _st_combat = pipeline_state.get("combat")
+        if isinstance(_st_combat, dict):
+            _apply_veh_fn = gs.get("apply_vehicle_updates") if gs else None
+            if _apply_veh_fn:
+                _apply_veh_fn(_st_combat, _veh_updates)
+            else:
+                _apply_vehicle_updates_fallback(_st_combat, _veh_updates)
+        else:
+            tool_input["_resolver_vehicle_updates"] = _merge_vehicle_updates(
+                tool_input.get("_resolver_vehicle_updates", []),
+                _veh_updates,
+            )
+
+
+def _apply_deferred_stateful_vehicle_updates(tool_input: dict, pipeline_state: dict, gs: dict) -> None:
+    """Apply deferred resolver vehicle updates after stateful combat replacement."""
+    if not isinstance(tool_input, dict):
+        return
+    deferred_updates = tool_input.get("_resolver_vehicle_updates")
+    if not deferred_updates:
+        return
+    _st_combat = pipeline_state.get("combat") if isinstance(pipeline_state, dict) else None
+    if not isinstance(_st_combat, dict):
+        return
+    _apply_veh_fn = gs.get("apply_vehicle_updates") if gs else None
+    if _apply_veh_fn:
+        _apply_veh_fn(_st_combat, deferred_updates)
+    else:
+        _apply_vehicle_updates_fallback(_st_combat, deferred_updates)
+    tool_input.pop("_resolver_vehicle_updates", None)
 
 
 # ============================================================
@@ -2975,8 +3671,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if _hack_to_net_combat and hack_state:
         _ps = data.get("pipeline_state", {})
         _combat_info = hack_state.get("_initiate_combat", {})
-        # Write back brain damage from hack before transitioning
-        if gs.get("apply_hack_writeback") and hack_state.get("brain_damage", 0) > 0:
+        # Write back hack results (cycles, destroyed programs) before transitioning
+        if gs.get("apply_hack_writeback"):
             gs["apply_hack_writeback"](hack_state, _ps)
         # Create net_combat state with carried-over NET state
         _nc_from_hack = gs["init_net_combat_from_hack"](hack_state, _combat_info)
@@ -4224,6 +4920,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["hack_planning_schema"],
                     game_state=hack_ps.get("game_state"),
                     character_states=hack_ps.get("character_states"),
+                    pipeline_state=hack_ps,
                     tar_stacks=_safe_int(hack_state.get("tar_stacks", 0)) if isinstance(hack_state, dict) else 0,
                     alert_level=_safe_int(hack_state.get("alert_level", 0)) if isinstance(hack_state, dict) else 0,
                     active_programs=hack_state.get("active_programs") if isinstance(hack_state, dict) else None,
@@ -4278,6 +4975,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     hack_json,
                     resolver_state_ops=mode_result.state_ops,
                     game_state=hack_ps.get("game_state"),
+                    pipeline_state=hack_ps,
                 )
                 data["hack_state"] = hack_state
 
@@ -4487,6 +5185,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["combat_planning_schema"],
                     game_state=combat_ps.get("game_state"),
                     character_states=combat_ps.get("character_states"),
+                    pipeline_state=combat_ps,
                     tar_stacks=_safe_int((_net_combat or {}).get("tar_stacks", 0)) if isinstance(_net_combat, dict) and _net_combat.get("active") else 0,
                     alert_level=_safe_int((_net_combat or {}).get("alert_level", 0)) if isinstance(_net_combat, dict) and _net_combat.get("active") else 0,
                     active_programs=(_net_combat or {}).get("active_programs") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
@@ -4524,10 +5223,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Build combat_json compatible structure from planning output + resolved actions
                 combat_json = mode_result.planning_json
                 combat_json["narrative"] = mode_result.final_content
-                # Merge resolver-computed character_updates (hp, armor, crits, luck, ammo) into planner's judgment-based updates
-                _resolver_char_updates = _convert_state_ops_to_character_updates(mode_result.state_ops)
-                combat_json["character_updates"] = _merge_character_updates(
-                    combat_json.get("character_updates", []), _resolver_char_updates)
+                _strip_and_merge_resolver_ops(combat_json, mode_result.state_ops)
 
                 narrative = mode_result.final_content
                 combat_reasoning = "\n".join(mode_result.reasoning_summaries) if mode_result.reasoning_summaries else None
@@ -4538,6 +5234,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Apply combat state updates
                 combat_ps = data.get("pipeline_state", {})
                 _apply_combat_state(gs, combat_ps, combat_json)
+                _apply_tar_consumed_state_ops(combat_ps, mode_result.state_ops)
                 data["pipeline_state"] = combat_ps
 
                 # Emit state_update SSE event with updated pipeline_state
@@ -4679,7 +5376,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     done_data['service_tier'] = service_tier
                 if _original_model:
                     done_data['original_model'] = _original_model
-                if combat_json.get("combat_complete") or combat_json.get("combat") is None:
+                if _is_combat_marked_complete(combat_json):
                     done_data['combat_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
@@ -4750,6 +5447,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     planning_schema=gs["net_combat_planning_schema"],
                     game_state=nc_ps.get("game_state"),
                     character_states=nc_ps.get("character_states"),
+                    pipeline_state=nc_ps,
                     tar_stacks=_safe_int(nc_state.get("tar_stacks", 0)) if isinstance(nc_state, dict) else 0,
                     alert_level=_safe_int(nc_state.get("alert_level", 0)) if isinstance(nc_state, dict) else 0,
                     active_programs=nc_state.get("active_programs") if isinstance(nc_state, dict) else None,
@@ -4787,9 +5485,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Build nc_json compatible structure from planning output + resolved actions
                 nc_json = mode_result.planning_json
                 nc_json["narrative"] = mode_result.final_content
-                _resolver_char_updates = _convert_state_ops_to_character_updates(mode_result.state_ops)
-                nc_json["character_updates"] = _merge_character_updates(
-                    nc_json.get("character_updates", []), _resolver_char_updates)
+                _strip_and_merge_resolver_ops(nc_json, mode_result.state_ops)
+
                 # Nest hack_state_updates under hack_state key for apply_net_combat_state
                 hack_updates = nc_json.get("hack_state_updates", {})
                 if hack_updates:
@@ -4897,10 +5594,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         model=model_id, context_tokens=0)
 
                 branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
-                _nc_combat_done = nc_json.get("combat_complete") or (
-                    "combat" in nc_json and nc_json.get("combat") is None
-                )
-                _nc_both_done = _nc_combat_done and nc_json.get("net_complete")
+                _nc_both_done = _is_net_combat_marked_complete(nc_json, data.get("pipeline_state", {}))
                 done_data = {
                     'assistant_message': assistant_message,
                     'tokens': tokens_str,
@@ -5000,6 +5694,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             hack_state,
                             hack_json,
                             game_state=hack_ps.get("game_state"),
+                            pipeline_state=hack_ps,
                         )
                         data["hack_state"] = hack_state
                         yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
@@ -5832,6 +6527,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Opus calls resolve_mechanics once per combatant turn; we loop
                         # until the model stops calling it and calls report_*_state instead.
                         accumulated_rm_state_ops = []
+                        resolve_mechanics_ran = False
                         if gs and gs.get("id") == "cpred":
                             from game_systems.cpred_mechanics import resolve_actions as _rm_resolve_actions
 
@@ -5847,6 +6543,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             _rm_request_params = copy.deepcopy(request_params)
                             _rm_iteration = 0
                             _rm_max_iterations = 64
+                            _rm_running_hp_map = None
+                            _rm_running_vehicle_map = None
 
                             while True:
                                 if _rm_iteration >= _rm_max_iterations:
@@ -5855,6 +6553,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _rm_call = _find_rm_call(usage)
                                 if _rm_call is None:
                                     break  # No more resolve_mechanics — fall through to report_*_state
+                                resolve_mechanics_ran = True
 
                                 _rm_input = _rm_call.get("input") or {}
                                 if not isinstance(_rm_input, dict):
@@ -5899,6 +6598,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_ice = _rm_active_state.get("ice_status")
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
+                                _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
+                                if _rm_running_hp_map is None or _rm_running_vehicle_map is None:
+                                    _rm_running_hp_map, _rm_running_vehicle_map = _extract_resolve_mechanics_tracking_state(_rm_tracking_ps or {})
+                                _seed_vehicle_tracking_map_from_actions(
+                                    _rm_running_vehicle_map,
+                                    _rm_input.get("actions", []),
+                                )
+                                _seed_hp_tracking_map_from_actions(
+                                    _rm_running_hp_map,
+                                    _rm_input.get("actions", []),
+                                )
                                 _rm_result = _rm_resolve_actions(
                                     _rm_input.get("actions", []),
                                     relationships=_rm_gs.get("relationships"),
@@ -5908,12 +6618,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     active_programs=_rm_active_progs,
                                     installed_hardware=_rm_hw,
                                     ice_status=_rm_ice,
+                                    combatant_hp=_rm_running_hp_map,
+                                    combatant_vehicle_sdp=_rm_running_vehicle_map,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
-                                # If TAR was consumed, zero it on live state so next call doesn't re-apply
-                                if _rm_result.get("tar_consumed"):
-                                    if isinstance(_rm_active_state, dict) and _rm_active_state.get("active"):
-                                        _rm_active_state["tar_stacks"] = 0
+                                _advance_tracking_maps_from_state_ops(
+                                    _rm_running_hp_map,
+                                    _rm_running_vehicle_map,
+                                    _rm_result.get("state_ops", []),
+                                )
+                                _apply_tar_consumed_state_ops(_rm_tracking_ps or {}, _rm_result.get("state_ops", []))
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call
@@ -6005,25 +6719,6 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     usage[_k] = (usage.get(_k) or 0) + resolve_mechanics_extra_usage.get(_k, 0)
                             # Fall through to report_*_state handling with final usage
 
-                        # Merge accumulated resolver state_ops into tool_input before applying
-                        def _merge_resolver_ops_into_tool_input(_tool_input, _acc_ops):
-                            """Strip dice-dependent fields from model's tool_input and inject resolver-computed updates."""
-                            if not _acc_ops or not isinstance(_tool_input, dict):
-                                return
-                            _resolver_updates = _convert_state_ops_to_character_updates(_acc_ops)
-                            if _resolver_updates:
-                                # Strip dice-dependent fields from model's character_updates
-                                for _upd in _tool_input.get("character_updates", []):
-                                    if isinstance(_upd, dict):
-                                        _upd.pop("hp_delta", None)
-                                        _upd.pop("armor_delta", None)
-                                        _upd.pop("critical_injury_add", None)
-                                        _upd.pop("luck_delta", None)
-                                        _upd.pop("ammo", None)
-                                _tool_input["character_updates"] = _merge_character_updates(
-                                    _tool_input.get("character_updates", []), _resolver_updates
-                                )
-
                         # Handle hack mode tool output (Claude hack mode)
                         hack_tool_input = None
                         if use_hack_mode and model_id.startswith("claude"):
@@ -6031,13 +6726,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             _hack_gs = _hack_ps.get("game_state") if isinstance(_hack_ps, dict) else None
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["hack_tool"]):
-                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
+                                if resolve_mechanics_ran:
+                                    _strip_and_merge_resolver_ops(tool_input, accumulated_rm_state_ops)
                                 _apply_hack_state_compat(
                                     gs["apply_hack_state"],
                                     hack_state,
                                     tool_input,
                                     resolver_state_ops=accumulated_rm_state_ops,
                                     game_state=_hack_gs,
+                                    pipeline_state=_hack_ps,
                                 )
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
@@ -6063,13 +6760,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
-                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
+                                        if resolve_mechanics_ran:
+                                            _strip_and_merge_resolver_ops(retry_result, accumulated_rm_state_ops)
                                         _apply_hack_state_compat(
                                             gs["apply_hack_state"],
                                             hack_state,
                                             retry_result,
                                             resolver_state_ops=accumulated_rm_state_ops,
                                             game_state=_hack_gs,
+                                            pipeline_state=_hack_ps,
                                         )
                                         data["hack_state"] = hack_state
                                         hack_tool_input = retry_result
@@ -6084,7 +6783,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_net_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["net_combat_tool"]):
-                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
+                                if resolve_mechanics_ran:
+                                    _strip_and_merge_resolver_ops(tool_input, accumulated_rm_state_ops)
                                 net_combat_tool_input = tool_input
                                 _nc_ps = data.get("pipeline_state", {})
                                 gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"),
@@ -6111,7 +6811,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
-                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
+                                        if resolve_mechanics_ran:
+                                            _strip_and_merge_resolver_ops(retry_result, accumulated_rm_state_ops)
                                         net_combat_tool_input = retry_result
                                         _nc_ps = data.get("pipeline_state", {})
                                         gs["apply_net_combat_state"](_nc_ps, retry_result, game_state=_nc_ps.get("game_state"),
@@ -6129,7 +6830,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["combat_tool"]):
-                                _merge_resolver_ops_into_tool_input(tool_input, accumulated_rm_state_ops)
+                                if resolve_mechanics_ran:
+                                    _strip_and_merge_resolver_ops(tool_input, accumulated_rm_state_ops)
                                 combat_tool_input = tool_input
                                 # Apply combat state updates
                                 _combat_ps = data.get("pipeline_state", {})
@@ -6155,7 +6857,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
-                                        _merge_resolver_ops_into_tool_input(retry_result, accumulated_rm_state_ops)
+                                        if resolve_mechanics_ran:
+                                            _strip_and_merge_resolver_ops(retry_result, accumulated_rm_state_ops)
                                         combat_tool_input = retry_result
                                         # Apply state from retry result
                                         _combat_ps = data.get("pipeline_state", {})
@@ -6225,10 +6928,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             }
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["state_report_tool"]):
-                                # Inject resolver state_ops (from resolve_mechanics loop) into edgerunner_ops
-                                if accumulated_rm_state_ops:
-                                    existing_er_ops = tool_input.get("edgerunner_ops") or []
-                                    tool_input["edgerunner_ops"] = existing_er_ops + accumulated_rm_state_ops
+                                _inject_resolver_ops_stateful(tool_input, accumulated_rm_state_ops, stateful_pipeline_state, gs)
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
                                     stateful_pipeline_state["turn_counter"] += 1
@@ -6236,6 +6936,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 apply_single_agent_state_updates(
                                     stateful_pipeline_state, tool_input, current_turn, game_system=gs
                                 )
+                                _apply_deferred_stateful_vehicle_updates(tool_input, stateful_pipeline_state, gs)
                                 data["pipeline_state"] = stateful_pipeline_state
                                 stateful_tool_input = tool_input
                                 if is_ooc:
@@ -6260,9 +6961,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
-                                        if accumulated_rm_state_ops:
-                                            existing_er_ops = retry_result.get("edgerunner_ops") or []
-                                            retry_result["edgerunner_ops"] = existing_er_ops + accumulated_rm_state_ops
+                                        _inject_resolver_ops_stateful(retry_result, accumulated_rm_state_ops, stateful_pipeline_state, gs)
                                         is_ooc = retry_result.get("is_ooc", False)
                                         if not is_ooc:
                                             stateful_pipeline_state["turn_counter"] += 1
@@ -6270,6 +6969,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         apply_single_agent_state_updates(
                                             stateful_pipeline_state, retry_result, current_turn, game_system=gs
                                         )
+                                        _apply_deferred_stateful_vehicle_updates(retry_result, stateful_pipeline_state, gs)
                                         data["pipeline_state"] = stateful_pipeline_state
                                         stateful_tool_input = retry_result
                                         stateful_tool_retried = True
@@ -6758,13 +7458,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_hack_mode and hack_tool_input and hack_tool_input.get("hack_complete"):
                             done_data['hack_complete'] = True
                         if use_net_combat_mode and net_combat_tool_input:
-                            _nc_combat_done = net_combat_tool_input.get("combat_complete") or (
-                                "combat" in net_combat_tool_input and net_combat_tool_input.get("combat") is None
-                            )
-                            if _nc_combat_done and net_combat_tool_input.get("net_complete"):
+                            if _is_net_combat_marked_complete(net_combat_tool_input, data.get("pipeline_state", {})):
                                 done_data['net_combat_complete'] = True
                         if use_combat_mode and combat_tool_input:
-                            if combat_tool_input.get("combat_complete") or combat_tool_input.get("combat") is None:
+                            if _is_combat_marked_complete(combat_tool_input):
                                 done_data['combat_complete'] = True
                         if use_ship_combat_mode and ship_combat_tool_input:
                             if ship_combat_tool_input.get("ship_combat_complete") or ship_combat_tool_input.get("ship_combat") is None:
