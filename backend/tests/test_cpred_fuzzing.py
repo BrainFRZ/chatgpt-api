@@ -1030,9 +1030,11 @@ class TestResolveActionsFuzz(unittest.TestCase):
         # Default combatants=[] → empty order
         self.assertNotIn("error", r["results"][0])
 
-    def test_string_stat_value_caught(self):
+    def test_string_stat_value_coerced_to_default(self):
+        """Unparseable string stat_value is coerced to 0 by normalizer, not an error."""
         r = resolve_actions([{"type": "skill_check", "character": "V", "stat_value": "six"}])
-        self.assertIn("error", r["results"][0])
+        self.assertNotIn("error", r["results"][0])
+        self.assertEqual(r["results"][0]["stat_value"], 0)
 
     @patch(MOCK, return_value=5)
     def test_1000_actions_performance(self, _m):
@@ -2884,6 +2886,64 @@ class TestCPREDSyncFuzz(unittest.TestCase):
             if key in present_names or key not in er_names
         }
         self.assertEqual(scoped["funds"], expected_funds)
+
+
+class TestStringTypedActionInputs(unittest.TestCase):
+    """Fuzz: string-typed fields on older action types that previously lacked coercion."""
+
+    def test_string_typed_ranged_attack(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", return_value=7):
+            result = resolve_actions([{
+                "type": "ranged_attack",
+                "character": "V",
+                "stat_value": "8",
+                "skill_value": "6",
+                "weapon_type": "Pistol",
+                "damage_dice": "2",
+                "rof": "1",
+                "target_sp": "11",
+                "range_bracket": "0",
+                "is_ap": "true",
+                "seriously_wounded": "false",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["type"], "ranged_attack")
+
+    def test_string_typed_melee_attack(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", return_value=6):
+            result = resolve_actions([{
+                "type": "melee_attack",
+                "character": "V",
+                "attacker_stat": "6",
+                "attacker_skill": "4",
+                "defender_stat": "5",
+                "defender_skill": "3",
+                "damage_dice": "3",
+                "target_sp": "7",
+                "is_brawling": "yes",
+                "seriously_wounded_attacker": "false",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["type"], "melee_attack")
+
+    def test_string_typed_opposed_check(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", return_value=5):
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": "5",
+                "attacker_skill": "4",
+                "defender_stat": "6",
+                "defender_skill": "3",
+                "zap": "true",
+                "seriously_wounded_attacker": "false",
+                "seriously_wounded_defender": "false",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["type"], "opposed_check")
 
 
 if __name__ == "__main__":

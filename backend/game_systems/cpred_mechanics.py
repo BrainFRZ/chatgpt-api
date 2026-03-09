@@ -199,6 +199,110 @@ def _to_int(value, default: int = 0, minimum: Optional[int] = None) -> int:
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# Pre-dispatch action normalization
+# ---------------------------------------------------------------------------
+
+_INT_FIELDS: frozenset = frozenset({
+    "stat_value", "skill_value", "dv", "damage_dice", "rof", "target_sp",
+    "range_bracket", "body_stat", "death_save_count",
+    "attacker_stat", "defender_stat", "attacker_skill", "defender_skill",
+    "autofire_multiplier", "luck_spent", "attacker_ref", "attacker_autofire",
+    "stealth_stat", "stealth_skill", "interface_rank", "program_atk",
+    "program_damage_dice", "target_def", "target_rez",
+    "target_program_def", "target_program_rez",
+    "pedestrian_dex", "pedestrian_evasion", "role_ability_rank", "payout",
+    "rank", "buyer_cool", "buyer_trading", "vendor_cool", "vendor_trading",
+    "item_price", "base_discount",
+    "initiator_cool", "initiator_concentration", "initiator_rep",
+    "opponent_cool", "opponent_concentration", "opponent_rep",
+    "target_stat_value", "target_skill_value", "rel_bonus",
+    "target_vehicle_sp", "roms_death_save_bonus",
+})
+
+_BOOL_FIELDS: frozenset = frozenset({
+    "seriously_wounded", "seriously_wounded_attacker", "seriously_wounded_defender",
+    "seriously_wounded_initiator", "seriously_wounded_opponent",
+    "seriously_wounded_pedestrian", "seriously_wounded_target",
+    "is_ap", "is_rubber", "is_brawling",
+    "target_is_vehicle", "target_moving", "combat_plow", "nos_boosted",
+    "pedestrian_dodge", "zap",
+})
+
+_NAME_FIELDS: frozenset = frozenset({
+    "character", "target", "target_name", "weapon_name", "vehicle_name",
+    "target_vehicle_name", "target_driver", "target_vehicle_type",
+    "program_name", "ice_type", "item_name", "role", "price_category",
+    "maneuver", "hit_location", "weapon_type", "check_context",
+    "attacker_label", "defender_label", "attacker_skill_label",
+    "defender_skill_label", "on_hit", "on_miss", "on_success", "on_failure",
+})
+
+_NESTED_SCHEMAS: dict = {
+    "suppressive_fire": [("targets", {
+        "name": _norm_name, "will": _to_int,
+        "concentration": _to_int, "seriously_wounded": _as_bool,
+    })],
+    "ambush": [("targets", {
+        "name": _norm_name, "perception_stat": _to_int,
+        "perception_skill": _to_int,
+    })],
+    "initiative": [("combatants", {
+        "name": _norm_name, "ref": _to_int,
+    })],
+}
+
+
+def _normalize_action(action) -> dict | None:
+    """Coerce action dict field types before dispatch.
+
+    Returns a shallow copy with int/bool/name fields coerced and nested
+    target lists filtered. Returns None for non-dict input.
+    Only touches fields that are PRESENT — absent fields are left to
+    the dispatcher's .get(key, default) calls.
+    """
+    if not isinstance(action, dict):
+        return None
+    a = dict(action)
+    for key in _INT_FIELDS:
+        if key in a:
+            a[key] = _to_int(a[key], 0)
+    for key in _BOOL_FIELDS:
+        if key in a:
+            a[key] = _as_bool(a[key], False)
+    for key in _NAME_FIELDS:
+        if key in a:
+            a[key] = _norm_name(a[key])
+    # Ramming: non-empty string target_is_vehicle defaults to True
+    action_type = a.get("type")
+    if action_type == "ramming" and "target_is_vehicle" in action:
+        raw = action["target_is_vehicle"]
+        if isinstance(raw, str) and raw.strip():
+            a["target_is_vehicle"] = _as_bool(raw, True)
+    # Normalize weapon_type for DV table lookups
+    if "weapon_type" in a and a["weapon_type"]:
+        a["weapon_type"] = _normalize_ranged_weapon_type(a["weapon_type"])
+    # Nested list normalization (convert strings to name-dicts, coerce fields)
+    for list_field, field_schema in _NESTED_SCHEMAS.get(action_type, []):
+        raw_list = a.get(list_field)
+        if not isinstance(raw_list, list):
+            continue
+        normalized = []
+        for entry in raw_list:
+            if isinstance(entry, str):
+                entry = {"name": entry}
+            elif not isinstance(entry, dict):
+                normalized.append(entry)  # preserve for resolver to handle
+                continue
+            entry = dict(entry)
+            for fname, coercer in field_schema.items():
+                if fname in entry:
+                    entry[fname] = coercer(entry[fname])
+            normalized.append(entry)
+        a[list_field] = normalized
+    return a
+
+
 def _lookup_crit_injury(hit_location: str) -> dict:
     """Roll 2d6 and look up a critical injury from the appropriate table."""
     d1 = _roll_d6()
@@ -2466,58 +2570,49 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     _tar_consumed = False
 
     for action in actions:
-        action_type = None
         _ops_before = len(all_state_ops)
         try:
-            action_type = action.get("type") if isinstance(action, dict) else None
-            if isinstance(action, dict):
-                action = dict(action)
-                for _k in ("vehicle_name", "target", "target_vehicle_name"):
-                    if _k in action:
-                        action[_k] = _norm_name(action.get(_k))
-                if action_type == "ramming":
-                    _raw_target_is_vehicle = action.get("target_is_vehicle", False)
-                    _default_tiv = (
-                        isinstance(_raw_target_is_vehicle, str)
-                        and bool(str(_raw_target_is_vehicle).strip())
-                    )
-                    action["target_is_vehicle"] = _as_bool(_raw_target_is_vehicle, _default_tiv)
-                if action_type == "driving_check" and not str(action.get("vehicle_name", "")).strip() and not (sequential and vehicle_tracking_enabled):
+            action = _normalize_action(action)
+            if action is None:
+                results.append({"type": None, "error": "Non-dict action skipped"})
+                continue
+            action_type = action.get("type")
+            if action_type == "driving_check" and not str(action.get("vehicle_name", "")).strip() and not (sequential and vehicle_tracking_enabled):
+                results.append({
+                    "type": action_type,
+                    "character": action.get("character", ""),
+                    "error": "Driving check requires vehicle_name",
+                })
+                continue
+            if action_type == "vehicle_weak_point" and not str(action.get("vehicle_name", "")).strip():
+                results.append({
+                    "type": action_type,
+                    "character": action.get("character", ""),
+                    "error": "Vehicle weak point shot requires vehicle_name",
+                })
+                continue
+            if action_type == "spike_strip" and not str(action.get("target_vehicle_name", "")).strip():
+                results.append({
+                    "type": action_type,
+                    "character": action.get("character", ""),
+                    "error": "Spike strip requires target_vehicle_name",
+                })
+                continue
+            if action_type == "ramming":
+                if not str(action.get("vehicle_name", "")).strip():
                     results.append({
                         "type": action_type,
                         "character": action.get("character", ""),
-                        "error": "Driving check requires vehicle_name",
+                        "error": "Ramming requires vehicle_name",
                     })
                     continue
-                if action_type == "vehicle_weak_point" and not str(action.get("vehicle_name", "")).strip():
+                if not str(action.get("target", "")).strip():
                     results.append({
                         "type": action_type,
                         "character": action.get("character", ""),
-                        "error": "Vehicle weak point shot requires vehicle_name",
+                        "error": "Ramming requires target",
                     })
                     continue
-                if action_type == "spike_strip" and not str(action.get("target_vehicle_name", "")).strip():
-                    results.append({
-                        "type": action_type,
-                        "character": action.get("character", ""),
-                        "error": "Spike strip requires target_vehicle_name",
-                    })
-                    continue
-                if action_type == "ramming":
-                    if not str(action.get("vehicle_name", "")).strip():
-                        results.append({
-                            "type": action_type,
-                            "character": action.get("character", ""),
-                            "error": "Ramming requires vehicle_name",
-                        })
-                        continue
-                    if not str(action.get("target", "")).strip():
-                        results.append({
-                            "type": action_type,
-                            "character": action.get("character", ""),
-                            "error": "Ramming requires target",
-                        })
-                        continue
 
             # Seed vehicle tracking for newly introduced vehicles in this same batch.
             if sequential and vehicle_tracking_enabled and isinstance(action, dict):
@@ -2716,12 +2811,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             "formatted": _skip_note,
                         })
                         continue
-            # Copy action before mutation to avoid modifying caller's dict
-            if isinstance(action, dict) and (tar_stacks > 0 or alert_level >= 3) and action.get("net"):
-                action = dict(action)
-
             # Apply TAR penalty to next NET check only (auto-enforced by backend)
-            if isinstance(action, dict) and tar_stacks > 0 and action.get("net") and not _tar_consumed:
+            if tar_stacks > 0 and action.get("net") and not _tar_consumed:
                 _tar_penalty = tar_stacks * 2
                 if action_type == "skill_check":
                     action["stat_value"] = action.get("stat_value", 0) - _tar_penalty
@@ -2733,7 +2824,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     all_state_ops.append({"op": "tar_consumed"})
 
             # Apply alert-level DV penalty to NET skill checks (+2 at alert 3+)
-            if isinstance(action, dict) and alert_level >= 3 and action.get("net") and action_type == "skill_check":
+            if alert_level >= 3 and action.get("net") and action_type == "skill_check":
                 action["dv"] = action.get("dv", 13) + 2
 
             if action_type == "skill_check":
@@ -2790,7 +2881,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_sp=action.get("target_sp", 0),
                     range_bracket=action.get("range_bracket", 0),
                     hit_location=action.get("hit_location", "body"),
-                    is_ap=_as_bool(action.get("is_ap", False), False),
+                    is_ap=action.get("is_ap", False),
                     is_rubber=action.get("is_rubber", False),
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
@@ -2891,11 +2982,11 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 if actor_key in fighting_together_chars:
                     _sf_rel_bonus += 1
                 result = resolve_suppressive_fire(
-                    attacker_ref=_to_int(action.get("attacker_ref", 0), 0),
-                    attacker_autofire=_to_int(action.get("attacker_autofire", 0), 0),
+                    attacker_ref=action.get("attacker_ref", 0),
+                    attacker_autofire=action.get("attacker_autofire", 0),
                     targets=action.get("targets", []),
-                    seriously_wounded_attacker=_as_bool(action.get("seriously_wounded_attacker", False), False),
-                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    seriously_wounded_attacker=action.get("seriously_wounded_attacker", False),
+                    luck_spent=action.get("luck_spent", 0),
                     rel_bonus=_sf_rel_bonus,
                     character_name=actor_name,
                     weapon_name=action.get("weapon_name", ""),
@@ -2912,7 +3003,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "death_save":
                 actor_name = action.get("character", "")
                 actor_key = _norm_name(actor_name)
-                # T2 RomS: -1 to Death Save rolls
+                # T2 RomS: -1 to Death Save rolls (having a T2+ romantic partner)
                 _ds_roms_bonus = 1 if actor_key and actor_key == _relationship_owner_name and _romantic_partners_t2 else 0
                 result = resolve_death_save(
                     body_stat=action.get("body_stat", 6),
@@ -3241,7 +3332,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 actor_name = action.get("character", "")
                 _ram_vname = action.get("vehicle_name", "")
                 _ram_tname = action.get("target", "")
-                _ram_tis_v = _as_bool(action.get("target_is_vehicle", False), False)
+                _ram_tis_v = action.get("target_is_vehicle", False)
                 # Use sequential-tracked values when available
                 _ram_vkey = _norm_vehicle_track_key(_ram_vname)
                 _ram_tkey = _norm_vehicle_track_key(_ram_tname)
@@ -3270,12 +3361,12 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_sdp_current=_ram_tsdp,
                     occupants=action.get("occupants", []),
                     target_occupants=action.get("target_occupants", []),
-                    pedestrian_dodge=_as_bool(action.get("pedestrian_dodge", False), False),
+                    pedestrian_dodge=action.get("pedestrian_dodge", False),
                     pedestrian_dex=action.get("pedestrian_dex", 0),
                     pedestrian_evasion=action.get("pedestrian_evasion", 0),
-                    seriously_wounded_pedestrian=_as_bool(action.get("seriously_wounded_pedestrian", False), False),
-                    combat_plow=_as_bool(action.get("combat_plow", False), False),
-                    nos_boosted=_as_bool(action.get("nos_boosted", False), False),
+                    seriously_wounded_pedestrian=action.get("seriously_wounded_pedestrian", False),
+                    combat_plow=action.get("combat_plow", False),
+                    nos_boosted=action.get("nos_boosted", False),
                     on_hit=action.get("on_hit", ""),
                     on_miss=action.get("on_miss", ""),
                 )
@@ -3300,10 +3391,10 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     vehicle_sp=_wp_vsp,
                     vehicle_name=_wp_vname,
                     range_bracket=action.get("range_bracket", 0),
-                    target_moving=_as_bool(action.get("target_moving", True), True),
-                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
+                    target_moving=action.get("target_moving", True),
+                    seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
-                    is_ap=_as_bool(action.get("is_ap", False), False),
+                    is_ap=action.get("is_ap", False),
                     weapon_name=action.get("weapon_name", ""),
                     character_name=actor_name,
                     on_hit=action.get("on_hit", ""),
@@ -3330,7 +3421,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_vehicle_name=_ss_vname,
                     target_vehicle_sp=_ss_vsp,
                     target_vehicle_type=action.get("target_vehicle_type", "land"),
-                    seriously_wounded=_as_bool(action.get("seriously_wounded_target", False), False),
+                    seriously_wounded=action.get("seriously_wounded_target", False),
                     on_hit=action.get("on_hit", ""),
                     on_miss=action.get("on_miss", ""),
                 )
@@ -3342,11 +3433,11 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 actor_name = action.get("character", "")
                 result = resolve_hustle(
                     role=action.get("role", ""),
-                    role_ability_rank=_to_int(action.get("role_ability_rank", 0), 0),
-                    dv=_to_int(action.get("dv", 13), 13),
-                    payout=_to_int(action.get("payout", 0), 0),
-                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
-                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    role_ability_rank=action.get("role_ability_rank", 0),
+                    dv=action.get("dv", 13),
+                    payout=action.get("payout", 0),
+                    seriously_wounded=action.get("seriously_wounded", False),
+                    luck_spent=action.get("luck_spent", 0),
                     character=actor_name,
                     on_success=action.get("on_success", ""),
                     on_failure=action.get("on_failure", ""),
@@ -3361,12 +3452,12 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "find_item":
                 actor_name = action.get("character", "")
                 result = resolve_find_item(
-                    rank=_to_int(action.get("rank", 0), 0),
+                    rank=action.get("rank", 0),
                     price_category=action.get("price_category", "Costly"),
                     item_name=action.get("item_name", ""),
                     character=actor_name,
-                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
-                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    seriously_wounded=action.get("seriously_wounded", False),
+                    luck_spent=action.get("luck_spent", 0),
                     on_success=action.get("on_success", ""),
                     on_failure=action.get("on_failure", ""),
                 )
@@ -3380,16 +3471,16 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "haggle":
                 actor_name = action.get("character", "")
                 result = resolve_haggle(
-                    buyer_cool=_to_int(action.get("buyer_cool", 0), 0),
-                    buyer_trading=_to_int(action.get("buyer_trading", 0), 0),
-                    vendor_cool=_to_int(action.get("vendor_cool", 0), 0),
-                    vendor_trading=_to_int(action.get("vendor_trading", 0), 0),
+                    buyer_cool=action.get("buyer_cool", 0),
+                    buyer_trading=action.get("buyer_trading", 0),
+                    vendor_cool=action.get("vendor_cool", 0),
+                    vendor_trading=action.get("vendor_trading", 0),
                     item_name=action.get("item_name", ""),
-                    item_price=_to_int(action.get("item_price", 0), 0),
-                    base_discount=_to_int(action.get("base_discount", 10), 10),
+                    item_price=action.get("item_price", 0),
+                    base_discount=action.get("base_discount", 10),
                     character=actor_name,
-                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
-                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    seriously_wounded=action.get("seriously_wounded", False),
+                    luck_spent=action.get("luck_spent", 0),
                     on_success=action.get("on_success", ""),
                     on_failure=action.get("on_failure", ""),
                 )
@@ -3403,7 +3494,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "facedown":
                 actor_name = action.get("character", "")
                 _fd_target = action.get("target", "")
-                _fd_rel_bonus = _to_int(action.get("rel_bonus", 0), 0)
+                _fd_rel_bonus = action.get("rel_bonus", 0)
                 if relationships or factions:
                     if _fd_target:
                         _fd_rel_bonus = compute_rel_bonus(
@@ -3411,17 +3502,17 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             check_context="intimidation",
                         )
                 result = resolve_facedown(
-                    initiator_cool=_to_int(action.get("initiator_cool", 0), 0),
-                    initiator_concentration=_to_int(action.get("initiator_concentration", 0), 0),
-                    initiator_rep=_to_int(action.get("initiator_rep", 0), 0),
-                    opponent_cool=_to_int(action.get("opponent_cool", 0), 0),
-                    opponent_concentration=_to_int(action.get("opponent_concentration", 0), 0),
-                    opponent_rep=_to_int(action.get("opponent_rep", 0), 0),
+                    initiator_cool=action.get("initiator_cool", 0),
+                    initiator_concentration=action.get("initiator_concentration", 0),
+                    initiator_rep=action.get("initiator_rep", 0),
+                    opponent_cool=action.get("opponent_cool", 0),
+                    opponent_concentration=action.get("opponent_concentration", 0),
+                    opponent_rep=action.get("opponent_rep", 0),
                     character=actor_name,
                     target=_fd_target,
-                    seriously_wounded_initiator=_as_bool(action.get("seriously_wounded_initiator", False), False),
-                    seriously_wounded_opponent=_as_bool(action.get("seriously_wounded_opponent", False), False),
-                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    seriously_wounded_initiator=action.get("seriously_wounded_initiator", False),
+                    seriously_wounded_opponent=action.get("seriously_wounded_opponent", False),
+                    luck_spent=action.get("luck_spent", 0),
                     rel_bonus=_fd_rel_bonus,
                     on_success=action.get("on_success", ""),
                     on_failure=action.get("on_failure", ""),
@@ -3456,7 +3547,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         if _sp_key in effective_vehicle_sdp:
                             effective_vehicle_sdp[_sp_key] = max(0, effective_vehicle_sdp[_sp_key] + int(_op.get("change", 0)))
                     elif _op_type == "armor" and effective_armor_sp:
-                        _t = normalize_cpred_name(state_op_subject_name(_op, "edgerunner")).casefold()
+                        _t = _norm_hp_track_key(state_op_subject_name(_op, "edgerunner"))
                         if _t in effective_armor_sp:
                             try:
                                 effective_armor_sp[_t] = max(0, int(effective_armor_sp[_t]) + int(_op.get("change", 0)))

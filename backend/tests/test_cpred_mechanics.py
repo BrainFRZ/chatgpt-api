@@ -35,6 +35,7 @@ from game_systems.cpred_mechanics import (
     resolve_facedown,
     resolve_suppressive_fire,
     _roll_check_die,
+    _normalize_action,
 )
 from game_systems.cpred_tables import (
     CRIT_INJURY_BODY,
@@ -5864,6 +5865,84 @@ class TestSuppressiveFire(unittest.TestCase):
         r = results["results"][0]
         self.assertNotIn("error", r)
         self.assertEqual(len(r["targets"]), 2)
+
+
+class TestNormalizeAction(unittest.TestCase):
+    """Tests for _normalize_action pre-dispatch coercion."""
+
+    def test_string_int_fields_coerced(self):
+        result = _normalize_action({"type": "skill_check", "stat_value": "8", "skill_value": "3"})
+        self.assertEqual(result["stat_value"], 8)
+        self.assertEqual(result["skill_value"], 3)
+
+    def test_string_bool_fields_coerced(self):
+        result = _normalize_action({"type": "ranged_attack", "seriously_wounded": "true", "is_ap": "yes"})
+        self.assertIs(result["seriously_wounded"], True)
+        self.assertIs(result["is_ap"], True)
+
+    def test_name_fields_trimmed(self):
+        result = _normalize_action({"type": "skill_check", "character": "  V  ", "weapon_name": " Malorian "})
+        self.assertEqual(result["character"], "V")
+        self.assertEqual(result["weapon_name"], "Malorian")
+
+    def test_non_dict_returns_none(self):
+        self.assertIsNone(_normalize_action("not a dict"))
+        self.assertIsNone(_normalize_action(42))
+        self.assertIsNone(_normalize_action(None))
+
+    def test_absent_fields_untouched(self):
+        result = _normalize_action({"type": "skill_check"})
+        self.assertEqual(set(result.keys()), {"type"})
+
+    def test_nested_targets_normalized(self):
+        action = {
+            "type": "suppressive_fire",
+            "targets": [
+                {"name": "  Ganger ", "will": "5", "concentration": "3", "seriously_wounded": "false"},
+            ],
+        }
+        result = _normalize_action(action)
+        t = result["targets"][0]
+        self.assertEqual(t["name"], "Ganger")
+        self.assertEqual(t["will"], 5)
+        self.assertEqual(t["concentration"], 3)
+        self.assertIs(t["seriously_wounded"], False)
+
+    def test_nested_string_converted_to_dict(self):
+        action = {
+            "type": "suppressive_fire",
+            "targets": ["Ganger", None, {"name": "V", "will": 5}],
+        }
+        result = _normalize_action(action)
+        # String entries become {"name": "..."}, None preserved for resolver
+        self.assertEqual(len(result["targets"]), 3)
+        self.assertEqual(result["targets"][0], {"name": "Ganger"})
+        self.assertEqual(result["targets"][2]["name"], "V")
+
+    def test_weapon_type_case_normalized(self):
+        result = _normalize_action({"type": "ranged_attack", "weapon_type": "pistol"})
+        self.assertEqual(result["weapon_type"], "Pistol")
+
+    def test_ramming_string_target_is_vehicle(self):
+        result = _normalize_action({"type": "ramming", "target_is_vehicle": "yes"})
+        self.assertIs(result["target_is_vehicle"], True)
+        # Non-empty string defaults to True for ramming
+        result2 = _normalize_action({"type": "ramming", "target_is_vehicle": "vehicle"})
+        self.assertIs(result2["target_is_vehicle"], True)
+
+    def test_string_typed_skill_check_resolves(self):
+        """Integration: string-typed fields on skill_check resolve without error."""
+        with patch("game_systems.cpred_mechanics._roll_d10", return_value=5):
+            result = resolve_actions([{
+                "type": "skill_check",
+                "stat_value": "5",
+                "skill_value": "3",
+                "dv": "15",
+                "character": "V",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["type"], "skill_check")
 
 
 if __name__ == "__main__":
