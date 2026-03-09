@@ -428,6 +428,20 @@ class TestApplyHackStateRevealedNodes(unittest.TestCase):
         cpred_apply_hack_state(hs, inp)
         self.assertEqual(hs["active_programs"], SAMPLE_PROGRAMS)
 
+    def test_program_derez_uses_supported_status_contract(self):
+        hs = self._fresh()
+        hs["active_programs"] = [
+            {"name": "Armor", "category": "defender", "rez": 7, "status": "active"},
+            {"name": "Sword", "category": "attacker", "rez": 7, "status": "active"},
+        ]
+        cpred_apply_hack_state(
+            hs,
+            _make_hack_tool_input(active_programs=copy.deepcopy(hs["active_programs"])),
+            resolver_state_ops=[{"op": "program_derez", "program_name": "Armor"}],
+        )
+        self.assertEqual(hs["active_programs"][0]["status"], "derezzed")
+        self.assertEqual(hs["active_programs"][1]["status"], "active")
+
     def test_tar_consumed_overrides_model_tar_in_same_update(self):
         hs = self._fresh()
         hs["tar_stacks"] = 2

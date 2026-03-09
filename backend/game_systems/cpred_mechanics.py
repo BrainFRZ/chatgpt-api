@@ -11,6 +11,12 @@ import logging
 import random
 from typing import Optional
 
+from .cpred_identity import (
+    attach_state_op_subject,
+    build_relationship_context,
+    normalize_cpred_name,
+    state_op_subject_name,
+)
 from .cpred_tables import (
     CRIT_INJURY_BODY,
     CRIT_INJURY_HEAD,
@@ -25,6 +31,7 @@ from .cpred_tables import (
     VEHICLE_WEAK_POINT_MOVING_DV,
     SPIKE_STRIP_DV,
     SPIKE_STRIP_DAMAGE_DICE,
+    NIGHT_MARKET_DV,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,8 +84,7 @@ def _format_die(die_result: dict) -> str:
 
 def _critical_injury_state_op(edgerunner: str, injury: dict, reason: str) -> dict:
     """Build a critical injury state op in apply_game_state-compatible shape."""
-    return {
-        "edgerunner": edgerunner,
+    return attach_state_op_subject({
         "op": "critical_injury",
         "action": "add",
         "name": injury.get("name", ""),
@@ -86,7 +92,7 @@ def _critical_injury_state_op(edgerunner: str, injury: dict, reason: str) -> dic
         "dv_mod": int(injury.get("dv_mod", 0)),
         "location": injury.get("location", "body"),
         "reason": reason,
-    }
+    }, "edgerunner", edgerunner)
 
 
 def _luck_spend_state_op(edgerunner: str, luck_spent: int, reason: str) -> Optional[dict]:
@@ -94,12 +100,11 @@ def _luck_spend_state_op(edgerunner: str, luck_spent: int, reason: str) -> Optio
     spend = _to_int(luck_spent, 0, minimum=0)
     if spend <= 0:
         return None
-    return {
-        "edgerunner": edgerunner,
+    return attach_state_op_subject({
         "op": "luck",
         "change": -spend,
         "reason": reason,
-    }
+    }, "edgerunner", edgerunner)
 
 
 def _emit_luck_op_if_rolled(
@@ -273,6 +278,340 @@ def resolve_check(
         "dv": dv,
         "success": success,
         "formatted": formatted,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_hustle
+# ---------------------------------------------------------------------------
+
+def resolve_hustle(
+    role: str,
+    role_ability_rank: int,
+    dv: int,
+    payout: int,
+    seriously_wounded: bool = False,
+    luck_spent: int = 0,
+    character: str = "",
+    on_success: str = "",
+    on_failure: str = "",
+) -> dict:
+    """Resolve a Hustle downtime income roll: d10 + Role Ability Rank vs DV.
+
+    On success, auto-emits a eurobucks state_op with the payout.
+    Returns dict with full breakdown and formatted string.
+    """
+    die = _roll_check_die()
+
+    modifiers = []
+    total = die["total"] + role_ability_rank
+
+    if seriously_wounded:
+        total -= 2
+        modifiers.append(("Wounded", -2))
+
+    clamped_luck = max(0, _to_int(luck_spent, 0))
+    if clamped_luck > 0:
+        total += clamped_luck
+        modifiers.append(("Luck", clamped_luck))
+
+    success = total > dv  # must BEAT the DV
+
+    # Build formatted string
+    parts = [f"Hustle ({role}):", _format_die(die), f"+Role {role_ability_rank}"]
+    for label, val in modifiers:
+        parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
+    parts.append(f"= {total} vs DV{dv}")
+
+    state_ops = []
+    effective_payout = max(0, payout) if success else 0
+    if success:
+        parts.append(f"✓ — earned {effective_payout}eb")
+        state_ops.append({
+            "edgerunner": character,
+            "op": "eurobucks",
+            "change": effective_payout,
+            "reason": f"Hustle ({role})",
+        })
+    else:
+        parts.append("✗ — no payout")
+
+    formatted = " ".join(parts)
+    on_outcome = on_success if success else on_failure
+
+    return {
+        "die": die,
+        "role": role,
+        "role_ability_rank": role_ability_rank,
+        "modifiers": modifiers,
+        "total": total,
+        "dv": dv,
+        "success": success,
+        "payout": effective_payout,
+        "state_ops": state_ops,
+        "formatted": formatted,
+        "on_outcome": on_outcome,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_find_item  — Night market availability check
+# ---------------------------------------------------------------------------
+
+def resolve_find_item(
+    rank: int,
+    price_category: str,
+    item_name: str = "",
+    character: str = "",
+    seriously_wounded: bool = False,
+    luck_spent: int = 0,
+    on_success: str = "",
+    on_failure: str = "",
+) -> dict:
+    """Roll d10 + Fixer Rank (or Streetwise) vs DV by price category.
+
+    Auto-succeeds for Cheap/Everyday (DV 0).  Returns dict with breakdown.
+    """
+    dv = NIGHT_MARKET_DV.get(price_category, 17)  # default Expensive if unknown
+
+    # Auto-success for DV 0 categories
+    if dv == 0:
+        return {
+            "die": None,
+            "rank": rank,
+            "total": None,
+            "dv": 0,
+            "success": True,
+            "item_name": item_name,
+            "price_category": price_category,
+            "state_ops": [],
+            "formatted": f"Find Item ({item_name}): {price_category} — auto-success (no roll needed)",
+            "on_outcome": on_success,
+        }
+
+    die = _roll_check_die()
+    modifiers = []
+    total = die["total"] + rank
+
+    if seriously_wounded:
+        total -= 2
+        modifiers.append(("Wounded", -2))
+
+    clamped_luck = max(0, _to_int(luck_spent, 0))
+    if clamped_luck > 0:
+        total += clamped_luck
+        modifiers.append(("Luck", clamped_luck))
+
+    success = total > dv  # must BEAT the DV
+
+    label = item_name or price_category
+    parts = [f"Find Item ({label}):", _format_die(die), f"+Rank {rank}"]
+    for mod_label, val in modifiers:
+        parts.append(f"+{mod_label} {val}" if val > 0 else f"{mod_label} {val}")
+    parts.append(f"= {total} vs DV{dv}")
+
+    if success:
+        parts.append(f"✓ — {item_name or 'item'} available")
+    else:
+        parts.append(f"✗ — {item_name or 'item'} not found")
+
+    formatted = " ".join(parts)
+    on_outcome = on_success if success else on_failure
+
+    return {
+        "die": die,
+        "rank": rank,
+        "total": total,
+        "dv": dv,
+        "success": success,
+        "item_name": item_name,
+        "price_category": price_category,
+        "state_ops": [],
+        "formatted": formatted,
+        "on_outcome": on_outcome,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_haggle  — Opposed price negotiation
+# ---------------------------------------------------------------------------
+
+def resolve_haggle(
+    buyer_cool: int,
+    buyer_trading: int,
+    vendor_cool: int,
+    vendor_trading: int,
+    item_name: str = "",
+    item_price: int = 0,
+    base_discount: int = 10,
+    character: str = "",
+    seriously_wounded: bool = False,
+    luck_spent: int = 0,
+    on_success: str = "",
+    on_failure: str = "",
+) -> dict:
+    """Opposed COOL + Trading rolls to negotiate item price.
+
+    On success: price reduced by base_discount % (clamped 5–50).
+    On either outcome: auto-emits eurobucks state_op for the purchase cost.
+    """
+    buyer_die = _roll_check_die()
+    vendor_die = _roll_check_die()
+
+    buyer_modifiers = []
+    buyer_total = buyer_die["total"] + buyer_cool + buyer_trading
+
+    if seriously_wounded:
+        buyer_total -= 2
+        buyer_modifiers.append(("Wounded", -2))
+
+    clamped_luck = max(0, _to_int(luck_spent, 0))
+    if clamped_luck > 0:
+        buyer_total += clamped_luck
+        buyer_modifiers.append(("Luck", clamped_luck))
+
+    vendor_total = vendor_die["total"] + vendor_cool + vendor_trading
+
+    success = buyer_total > vendor_total
+
+    # Clamp discount
+    discount_pct = max(5, min(50, _to_int(base_discount, 10)))
+
+    price = max(0, _to_int(item_price, 0))
+    if success:
+        final_price = max(0, price - int(price * discount_pct / 100))
+    else:
+        discount_pct = 0
+        final_price = price
+    savings = price - final_price
+
+    state_ops = [{
+        "edgerunner": character,
+        "op": "eurobucks",
+        "change": -final_price,
+        "reason": f"Purchased {item_name}" if item_name else "Purchase",
+    }]
+
+    # Format
+    label = item_name or "item"
+    parts = [f"Haggle ({label}):"]
+    parts.append(f"Buyer {_format_die(buyer_die)} +COOL {buyer_cool} +Trading {buyer_trading}")
+    for mod_label, val in buyer_modifiers:
+        parts.append(f"+{mod_label} {val}" if val > 0 else f"{mod_label} {val}")
+    parts.append(f"= {buyer_total}")
+    parts.append(f"vs Vendor {_format_die(vendor_die)} +COOL {vendor_cool} +Trading {vendor_trading} = {vendor_total}")
+
+    if success:
+        parts.append(f"✓ — {discount_pct}% off! {price}eb → {final_price}eb (saved {savings}eb)")
+    else:
+        parts.append(f"✗ — no discount, paid {final_price}eb")
+
+    formatted = " ".join(parts)
+    on_outcome = on_success if success else on_failure
+
+    return {
+        "buyer_die": buyer_die,
+        "vendor_die": vendor_die,
+        "buyer_total": buyer_total,
+        "vendor_total": vendor_total,
+        "success": success,
+        "discount_pct": discount_pct,
+        "original_price": price,
+        "final_price": final_price,
+        "savings": savings,
+        "state_ops": state_ops,
+        "formatted": formatted,
+        "on_outcome": on_outcome,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_facedown  — Reputation-based intimidation (CRB §11)
+# ---------------------------------------------------------------------------
+
+def resolve_facedown(
+    initiator_cool: int,
+    initiator_concentration: int,
+    initiator_rep: int = 0,
+    opponent_cool: int = 0,
+    opponent_concentration: int = 0,
+    opponent_rep: int = 0,
+    character: str = "",
+    target: str = "",
+    seriously_wounded_initiator: bool = False,
+    seriously_wounded_opponent: bool = False,
+    luck_spent: int = 0,
+    rel_bonus: int = 0,
+    on_success: str = "",
+    on_failure: str = "",
+) -> dict:
+    """Resolve a Facedown (CRB §11): COOL + Concentration + d10 + Rep vs same.
+
+    Ties favor the opponent (defender). No state ops — purely social contest.
+    """
+    initiator_die = _roll_check_die()
+    opponent_die = _roll_check_die()
+
+    initiator_modifiers = []
+    initiator_total = initiator_die["total"] + initiator_cool + initiator_concentration + initiator_rep
+
+    if seriously_wounded_initiator:
+        initiator_total -= 2
+        initiator_modifiers.append(("Wounded", -2))
+
+    clamped_luck = max(0, _to_int(luck_spent, 0))
+    if clamped_luck > 0:
+        initiator_total += clamped_luck
+        initiator_modifiers.append(("Luck", clamped_luck))
+
+    clamped_rel = max(-5, min(5, _to_int(rel_bonus, 0)))
+    if clamped_rel != 0:
+        initiator_total += clamped_rel
+        initiator_modifiers.append(("RS", clamped_rel))
+
+    opponent_modifiers = []
+    opponent_total = opponent_die["total"] + opponent_cool + opponent_concentration + opponent_rep
+
+    if seriously_wounded_opponent:
+        opponent_total -= 2
+        opponent_modifiers.append(("Wounded", -2))
+
+    # Ties favor opponent (defender)
+    success = initiator_total > opponent_total
+    margin = initiator_total - opponent_total
+
+    # Format
+    init_name = character or "Initiator"
+    opp_name = target or "Opponent"
+
+    parts = [f"Facedown:"]
+    parts.append(f"{init_name} {_format_die(initiator_die)} +COOL {initiator_cool} +Conc {initiator_concentration} +Rep {initiator_rep}")
+    for label, val in initiator_modifiers:
+        parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
+    parts.append(f"= {initiator_total}")
+    parts.append(f"vs {opp_name} {_format_die(opponent_die)} +COOL {opponent_cool} +Conc {opponent_concentration} +Rep {opponent_rep}")
+    for label, val in opponent_modifiers:
+        parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
+    parts.append(f"= {opponent_total}")
+
+    if success:
+        parts.append(f"✓ — {opp_name} backs down (margin {margin})")
+    else:
+        parts.append(f"✗ — {init_name} fails to intimidate (margin {margin})")
+
+    formatted = " ".join(parts)
+    on_outcome = on_success if success else on_failure
+
+    return {
+        "initiator_die": initiator_die,
+        "opponent_die": opponent_die,
+        "initiator_total": initiator_total,
+        "opponent_total": opponent_total,
+        "success": success,
+        "margin": margin,
+        "state_ops": [],
+        "formatted": formatted,
+        "on_outcome": on_outcome,
     }
 
 
@@ -743,6 +1082,7 @@ def resolve_suppressive_fire(
     rel_bonus: int = 0,
     character_name: str = "",
     weapon_name: str = "",
+    tracked_edgerunners=None,
     on_success: str = "",
     on_failure: str = "",
 ) -> dict:
@@ -780,10 +1120,15 @@ def resolve_suppressive_fire(
     fmt_parts.append(f"= {attacker_total} |")
 
     for tgt in (targets or []):
-        tgt_name = tgt.get("name", "Target")
-        tgt_will = _to_int(tgt.get("will", 0), 0)
-        tgt_conc = _to_int(tgt.get("concentration", 0), 0)
-        tgt_wounded = _as_bool(tgt.get("seriously_wounded", False), False)
+        if isinstance(tgt, dict):
+            tgt_data = tgt
+            tgt_name = tgt_data.get("name", "Target")
+        else:
+            tgt_name = tgt if isinstance(tgt, str) and tgt else "Target"
+            tgt_data = {"name": tgt_name}
+        tgt_will = _to_int(tgt_data.get("will", 0), 0)
+        tgt_conc = _to_int(tgt_data.get("concentration", 0), 0)
+        tgt_wounded = _as_bool(tgt_data.get("seriously_wounded", False), False)
 
         def_die = _roll_check_die()
         def_total = def_die["total"] + tgt_will + tgt_conc
@@ -815,14 +1160,34 @@ def resolve_suppressive_fire(
 
     # Ammo state op
     state_ops = []
-    if weapon_name:
-        state_ops.append({
-            "edgerunner": character_name,
+    tracked_names = {
+        normalize_cpred_name(tracked_name)
+        for tracked_name in (tracked_edgerunners or [])
+        if normalize_cpred_name(tracked_name)
+    } if isinstance(tracked_edgerunners, (list, tuple, set)) else set()
+    attacker_name = normalize_cpred_name(character_name)
+    if weapon_name and (not tracked_names or attacker_name in tracked_names):
+        state_ops.append(attach_state_op_subject({
             "op": "ammo",
             "weapon_name": weapon_name,
             "rounds_consumed": 10,
             "reason": f"Suppressive Fire {weapon_name}",
-        })
+        }, "edgerunner", character_name))
+    for target_result in target_results:
+        if target_result.get("suppressed") and target_result.get("name"):
+            target_name = str(target_result["name"]).strip()
+            if not target_name:
+                continue
+            condition_op = {
+                "op": "add_condition",
+                "condition": "suppressed",
+                "reason": f"Suppressive Fire by {atk_name}",
+            }
+            if normalize_cpred_name(target_name) in tracked_names:
+                condition_op = attach_state_op_subject(condition_op, "edgerunner", target_name)
+            else:
+                condition_op = attach_state_op_subject(condition_op, "character", target_name)
+            state_ops.append(condition_op)
 
     on_outcome = on_success if any_suppressed else on_failure
 
@@ -998,17 +1363,20 @@ def resolve_death_save(
     body_stat: int,
     death_save_count: int,
     active_injuries: Optional[list] = None,
+    roms_death_save_bonus: int = 0,
 ) -> dict:
-    """Resolve a Death Save: d10 + count + injury mods vs BODY.
+    """Resolve a Death Save: d10 + count + injury mods - RomS bonus vs BODY.
 
     Natural 10 always fails. Must roll UNDER BODY to survive.
+    roms_death_save_bonus: T2+ RomS grants -1 to the roll (max 1).
     """
     d10 = _roll_d10()
     injury_mod = 0
     for ci in (active_injuries or []):
         mod = ci.get("dv_mod", 0) if isinstance(ci, dict) else 0
         injury_mod += mod if isinstance(mod, (int, float)) else 0
-    effective_roll = d10 + death_save_count + injury_mod
+    roms_mod = min(1, max(0, roms_death_save_bonus))
+    effective_roll = d10 + death_save_count + injury_mod - roms_mod
     natural_10 = d10 == 10
     survived = not natural_10 and effective_roll < body_stat
 
@@ -1018,6 +1386,8 @@ def resolve_death_save(
         parts.append(f"+cumulative {death_save_count}")
     if injury_mod > 0:
         parts.append(f"+injuries {injury_mod}")
+    if roms_mod > 0:
+        parts.append(f"−RomS {roms_mod}")
     parts.append(f"= {effective_roll} vs BODY {body_stat}")
     if natural_10:
         parts.append("→ NATURAL 10 — AUTO FAIL")
@@ -1033,6 +1403,7 @@ def resolve_death_save(
         "d10": d10,
         "death_save_count": death_save_count,
         "injury_mod": injury_mod,
+        "roms_death_save_bonus": roms_mod,
         "effective_roll": effective_roll,
         "threshold": body_stat,
         "natural_10": natural_10,
@@ -1170,25 +1541,31 @@ def resolve_ice_effect(ice_block, active_programs=None, installed_hardware=None,
     _hw = installed_hardware if isinstance(installed_hardware, list) else []
     hw_list = [str(h).lower() for h in _hw]
 
-    if effect == "program_destroy":
+    if effect in ("program_destroy", "program_derez"):
+        is_derez = effect == "program_derez"
         targets_defender = ice_block.get("targets_defender", False)
         candidates = []
         if isinstance(active_programs, list):
             for p in active_programs:
-                # Anti-program ICE can only destroy rezzed programs.
                 if isinstance(p, dict) and p.get("status") == "active":
                     if targets_defender and p.get("category") != "defender":
                         continue
                     candidates.append(p.get("name", "Unknown"))
         if candidates:
             chosen = random.choice(candidates)
-            state_ops.append({"op": "program_destroy", "program_name": chosen,
-                              "source": name})
+            op_name = "program_derez" if is_derez else "program_destroy"
+            state_op = {"op": op_name, "program_name": chosen, "source": name}
+            if is_derez:
+                state_op["status"] = "derezzed"
+                state_op["reactivate_net_actions"] = 2
+            state_ops.append(state_op)
             cat_note = " (Defender)" if targets_defender else ""
-            formatted_parts.append(f"{name} destroys {chosen}{cat_note}!")
+            verb = "derezzes" if is_derez else "destroys"
+            formatted_parts.append(f"{name} {verb} {chosen}{cat_note}!")
         else:
             cat_note = " Defender" if targets_defender else ""
-            formatted_parts.append(f"{name} finds no{cat_note} programs to destroy.")
+            verb = "derez" if is_derez else "destroy"
+            formatted_parts.append(f"{name} finds no{cat_note} programs to {verb}.")
             annotations.append("no_targets")
 
     elif effect == "body_fire":
@@ -1966,7 +2343,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     sequential: bool = True, combatant_hp: dict = None,
                     tar_stacks: int = 0, alert_level: int = 0,
                     active_programs=None, installed_hardware=None,
-                    ice_status=None, combatant_vehicle_sdp: dict = None) -> dict:
+                    ice_status=None, combatant_vehicle_sdp: dict = None,
+                    relationship_owner: str = "", relationship_actor_names=None,
+                    relationship_present_names=None, relationship_context: dict = None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -1984,6 +2363,56 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     Returns {"results": [...], "state_ops": [...]}.
     """
     from .cpred import compute_rel_bonus
+
+    def _romantic_partner_names(min_roms: int) -> set[str]:
+        partners = set()
+        if not isinstance(relationships, dict):
+            return partners
+        for npc_name, npc_data in relationships.items():
+            if not isinstance(npc_data, dict):
+                continue
+            try:
+                roms = int(npc_data.get("roms", 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if roms >= min_roms:
+                partner_name = _norm_name(npc_name)
+                if partner_name:
+                    partners.add(partner_name)
+        return partners
+
+    _batch_chars = {
+        _norm_name(a.get("character", ""))
+        for a in actions
+        if isinstance(a, dict) and a.get("character")
+    }
+    _batch_chars.discard("")
+    if isinstance(relationship_context, dict):
+        _relationship_context = build_relationship_context(
+            actions=actions,
+            relationship_owner=relationship_context.get("owner_name", relationship_owner),
+            relationship_actor_names=relationship_context.get("actor_names", relationship_actor_names),
+            relationship_present_names=relationship_context.get("present_names", relationship_present_names),
+        )
+    else:
+        _relationship_context = build_relationship_context(
+            actions=actions,
+            relationship_owner=relationship_owner,
+            relationship_actor_names=relationship_actor_names,
+            relationship_present_names=relationship_present_names,
+        )
+    _presence_chars = _relationship_context["present_names"] or set(_batch_chars)
+    _relationship_actor_names = _relationship_context["actor_names"]
+    _relationship_owner_name = _relationship_context["owner_name"]
+
+    _romantic_partners_t2 = _romantic_partner_names(25)
+    _romantic_partners_t3 = _romantic_partner_names(45)
+    fighting_together_chars: set[str] = set()
+    if _relationship_owner_name and _relationship_owner_name in _presence_chars:
+        for partner_name in _romantic_partners_t3:
+            if partner_name in _presence_chars:
+                fighting_together_chars.add(_relationship_owner_name)
+                fighting_together_chars.add(partner_name)
 
     results = []
     all_state_ops = []
@@ -2334,6 +2763,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
 
             elif action_type == "ranged_attack":
                 actor_name = action.get("character", "")
+                actor_key = _norm_name(actor_name)
                 _ra_target_name = action.get("target", "")
                 # Auto-compute rel_bonus from relationships when target is provided
                 ra_rel_bonus = action.get("rel_bonus", 0)
@@ -2343,6 +2773,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             relationships, factions, _ra_target_name,
                             check_context="combat",
                         )
+                # T3 RomS: +1 when fighting together with romantic partner
+                if actor_key in fighting_together_chars:
+                    ra_rel_bonus += 1
                 # Use tracked HP for target when sequential
                 _ra_target_hp = action.get("target_hp_current")
                 _ra_target_key = _norm_hp_track_key(_ra_target_name)
@@ -2378,6 +2811,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     all_state_ops.extend(result.get("state_ops", []))
 
             elif action_type == "melee_attack":
+                actor_name = action.get("character", "")
+                actor_key = _norm_name(actor_name)
                 _melee_target = action.get("target", "")
                 _melee_rel_bonus = 0
                 if relationships or factions:
@@ -2386,6 +2821,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             relationships, factions, _melee_target,
                             check_context="combat",
                         )
+                # T3 RomS: +1 when fighting together with romantic partner
+                if actor_key in fighting_together_chars:
+                    _melee_rel_bonus += 1
                 result = resolve_melee_attack(
                     attacker_stat=action.get("attacker_stat", 0),
                     attacker_skill=action.get("attacker_skill", 0),
@@ -2403,12 +2841,13 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     on_hit=action.get("on_hit", ""),
                     on_miss=action.get("on_miss", ""),
                 )
-                result["character"] = action.get("character", "")
+                result["character"] = actor_name
                 results.append(result)
                 all_state_ops.extend(result.get("state_ops", []))
 
             elif action_type == "autofire":
                 actor_name = action.get("character", "")
+                actor_key = _norm_name(actor_name)
                 _af_target = action.get("target", "")
                 _af_rel_bonus = 0
                 if relationships or factions:
@@ -2417,6 +2856,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             relationships, factions, _af_target,
                             check_context="combat",
                         )
+                # T3 RomS: +1 when fighting together with romantic partner
+                if actor_key in fighting_together_chars:
+                    _af_rel_bonus += 1
                 result = resolve_autofire(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -2444,14 +2886,20 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
 
             elif action_type == "suppressive_fire":
                 actor_name = action.get("character", "")
+                actor_key = _norm_name(actor_name)
+                _sf_rel_bonus = 0
+                if actor_key in fighting_together_chars:
+                    _sf_rel_bonus += 1
                 result = resolve_suppressive_fire(
                     attacker_ref=_to_int(action.get("attacker_ref", 0), 0),
                     attacker_autofire=_to_int(action.get("attacker_autofire", 0), 0),
                     targets=action.get("targets", []),
                     seriously_wounded_attacker=_as_bool(action.get("seriously_wounded_attacker", False), False),
                     luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    rel_bonus=_sf_rel_bonus,
                     character_name=actor_name,
                     weapon_name=action.get("weapon_name", ""),
+                    tracked_edgerunners=_relationship_actor_names,
                     on_success=action.get("on_success", ""),
                     on_failure=action.get("on_failure", ""),
                 )
@@ -2463,10 +2911,14 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
 
             elif action_type == "death_save":
                 actor_name = action.get("character", "")
+                actor_key = _norm_name(actor_name)
+                # T2 RomS: -1 to Death Save rolls
+                _ds_roms_bonus = 1 if actor_key and actor_key == _relationship_owner_name and _romantic_partners_t2 else 0
                 result = resolve_death_save(
                     body_stat=action.get("body_stat", 6),
                     death_save_count=action.get("death_save_count", 0),
                     active_injuries=action.get("active_injuries"),
+                    roms_death_save_bonus=_ds_roms_bonus,
                 )
                 result["character"] = actor_name
                 results.append(result)
@@ -2510,14 +2962,14 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     rel_bonus=_opp_rel,
                 )
                 result["character"] = actor_name
-                # Zap damage: on hit, roll Interface rank d6 for REZ damage
+                # Zap damage: on hit, roll 1d6 (flat, per Hacking Rulebook §7)
                 if action.get("zap") and result["success"]:
-                    _zap_dice = max(1, action.get("interface_rank", 1))
-                    _zap_total = sum(random.randint(1, 6) for _ in range(_zap_dice))
+                    _zap_dice = 1
+                    _zap_total = random.randint(1, 6)
                     result["zap_damage"] = _zap_total
                     result["zap_dice"] = _zap_dice
-                    result["zap_note"] = f"Zap deals {_zap_total} REZ damage ({_zap_dice}d6)"
-                    result["formatted"] += f" — Zap {_zap_dice}d6 = {_zap_total} REZ dmg"
+                    result["zap_note"] = f"Zap deals {_zap_total} damage (1d6)"
+                    result["formatted"] += f" — Zap 1d6 = {_zap_total} dmg"
                     _target_ice = action.get("target", "")
                     _target_ice_key = None
                     for _key_candidate in (
@@ -2677,8 +3129,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         # Fill in edgerunner name for cascade brain_damage ops before extending
                         _fx_ops = _fx.get("state_ops", [])
                         for _fxop in _fx_ops:
-                            if isinstance(_fxop, dict) and _fxop.get("op") == "brain_damage" and not _fxop.get("edgerunner"):
-                                _fxop["edgerunner"] = _nr_name
+                            if isinstance(_fxop, dict) and _fxop.get("op") == "brain_damage" and not state_op_subject_name(_fxop, "edgerunner"):
+                                attach_state_op_subject(_fxop, "edgerunner", _nr_name)
                         all_state_ops.extend(_fx_ops)
                         if _fx.get("formatted"):
                             result["ice_effect"] = _fx["formatted"]
@@ -2886,6 +3338,100 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 results.append(result)
                 all_state_ops.extend(result.get("state_ops", []))
 
+            elif action_type == "hustle":
+                actor_name = action.get("character", "")
+                result = resolve_hustle(
+                    role=action.get("role", ""),
+                    role_ability_rank=_to_int(action.get("role_ability_rank", 0), 0),
+                    dv=_to_int(action.get("dv", 13), 13),
+                    payout=_to_int(action.get("payout", 0), 0),
+                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
+                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    character=actor_name,
+                    on_success=action.get("on_success", ""),
+                    on_failure=action.get("on_failure", ""),
+                )
+                result["type"] = "hustle"
+                result["character"] = actor_name
+                results.append(result)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on Hustle")
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "find_item":
+                actor_name = action.get("character", "")
+                result = resolve_find_item(
+                    rank=_to_int(action.get("rank", 0), 0),
+                    price_category=action.get("price_category", "Costly"),
+                    item_name=action.get("item_name", ""),
+                    character=actor_name,
+                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
+                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    on_success=action.get("on_success", ""),
+                    on_failure=action.get("on_failure", ""),
+                )
+                result["type"] = "find_item"
+                result["character"] = actor_name
+                results.append(result)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on Find Item")
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "haggle":
+                actor_name = action.get("character", "")
+                result = resolve_haggle(
+                    buyer_cool=_to_int(action.get("buyer_cool", 0), 0),
+                    buyer_trading=_to_int(action.get("buyer_trading", 0), 0),
+                    vendor_cool=_to_int(action.get("vendor_cool", 0), 0),
+                    vendor_trading=_to_int(action.get("vendor_trading", 0), 0),
+                    item_name=action.get("item_name", ""),
+                    item_price=_to_int(action.get("item_price", 0), 0),
+                    base_discount=_to_int(action.get("base_discount", 10), 10),
+                    character=actor_name,
+                    seriously_wounded=_as_bool(action.get("seriously_wounded", False), False),
+                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    on_success=action.get("on_success", ""),
+                    on_failure=action.get("on_failure", ""),
+                )
+                result["type"] = "haggle"
+                result["character"] = actor_name
+                results.append(result)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on Haggle")
+                all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "facedown":
+                actor_name = action.get("character", "")
+                _fd_target = action.get("target", "")
+                _fd_rel_bonus = _to_int(action.get("rel_bonus", 0), 0)
+                if relationships or factions:
+                    if _fd_target:
+                        _fd_rel_bonus = compute_rel_bonus(
+                            relationships, factions, _fd_target,
+                            check_context="intimidation",
+                        )
+                result = resolve_facedown(
+                    initiator_cool=_to_int(action.get("initiator_cool", 0), 0),
+                    initiator_concentration=_to_int(action.get("initiator_concentration", 0), 0),
+                    initiator_rep=_to_int(action.get("initiator_rep", 0), 0),
+                    opponent_cool=_to_int(action.get("opponent_cool", 0), 0),
+                    opponent_concentration=_to_int(action.get("opponent_concentration", 0), 0),
+                    opponent_rep=_to_int(action.get("opponent_rep", 0), 0),
+                    character=actor_name,
+                    target=_fd_target,
+                    seriously_wounded_initiator=_as_bool(action.get("seriously_wounded_initiator", False), False),
+                    seriously_wounded_opponent=_as_bool(action.get("seriously_wounded_opponent", False), False),
+                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    rel_bonus=_fd_rel_bonus,
+                    on_success=action.get("on_success", ""),
+                    on_failure=action.get("on_failure", ""),
+                )
+                result["type"] = "facedown"
+                result["character"] = actor_name
+                results.append(result)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on Facedown")
+
             else:
                 results.append({"type": action_type, "error": f"Unknown action type: {action_type}"})
 
@@ -2896,20 +3442,21 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         continue
                     _op_type = _op.get("op")
                     if _op_type == "hp" and effective_hp:
-                        _t = _norm_hp_track_key(_op.get("edgerunner", ""))
+                        _t = _norm_hp_track_key(state_op_subject_name(_op, "edgerunner"))
                         if _t in effective_hp:
                             effective_hp[_t] = max(0, effective_hp[_t] + int(_op.get("change", 0)))
                     elif _op_type == "vehicle_sdp" and vehicle_tracking_enabled:
-                        _vn = _norm_vehicle_track_key(_op.get("vehicle", ""))
+                        _vn = _norm_vehicle_track_key(state_op_subject_name(_op, "vehicle"))
                         if _vn in effective_vehicle_sdp and isinstance(effective_vehicle_sdp[_vn], int):
                             effective_vehicle_sdp[_vn] = max(0, effective_vehicle_sdp[_vn] + int(_op.get("change", 0)))
                     elif _op_type == "vehicle_sp" and vehicle_tracking_enabled:
-                        _vn = _norm_vehicle_track_key(_op.get("vehicle", ""))
-                        _sp_key = _norm_vehicle_track_key(_op.get("vehicle", ""), sp=True)
+                        _vehicle_name = state_op_subject_name(_op, "vehicle")
+                        _vn = _norm_vehicle_track_key(_vehicle_name)
+                        _sp_key = _norm_vehicle_track_key(_vehicle_name, sp=True)
                         if _sp_key in effective_vehicle_sdp:
                             effective_vehicle_sdp[_sp_key] = max(0, effective_vehicle_sdp[_sp_key] + int(_op.get("change", 0)))
                     elif _op_type == "armor" and effective_armor_sp:
-                        _t = _norm_name(_op.get("edgerunner", "")).casefold()
+                        _t = normalize_cpred_name(state_op_subject_name(_op, "edgerunner")).casefold()
                         if _t in effective_armor_sp:
                             try:
                                 effective_armor_sp[_t] = max(0, int(effective_armor_sp[_t]) + int(_op.get("change", 0)))
@@ -2958,7 +3505,12 @@ RESOLVE_MECHANICS_TOOL = {
         "- driving_check: {type, character, vehicle_name, stat_value (REF), skill_value, maneuver (maintain_control/swerve/sharp_turn/emergency_stop/bootleg_turn/do_a_jump/landing/aerobatic_maneuver), seriously_wounded?, luck_spent?, on_hit?, on_miss?}\n"
         "- ramming: {type, character (driver), vehicle_name, target, vehicle_sdp_current, vehicle_sp, target_hp_current, target_sp, target_is_vehicle?, target_sdp_current?, occupants: [{name}], target_occupants?: [{name}], pedestrian_dodge?, pedestrian_dex? (DEX stat), pedestrian_evasion? (Evasion skill), seriously_wounded_pedestrian?, combat_plow?, nos_boosted?, on_hit?, on_miss?}\n"
         "- vehicle_weak_point: {type, character, stat_value, skill_value, weapon_type, damage_dice, vehicle_sp, vehicle_name, range_bracket, target_moving?, seriously_wounded?, luck_spent?, is_ap?, weapon_name?, on_hit?, on_miss?}\n"
-        "- spike_strip: {type, character (deployer), target_driver, target_stat_value (REF), target_skill_value (Drive Land Vehicle), target_vehicle_name, target_vehicle_sp, target_vehicle_type (land only), seriously_wounded_target?, on_hit?, on_miss?}"
+        "- spike_strip: {type, character (deployer), target_driver, target_stat_value (REF), target_skill_value (Drive Land Vehicle), target_vehicle_name, target_vehicle_sp, target_vehicle_type (land only), seriously_wounded_target?, on_hit?, on_miss?}\n"
+        "- hustle: {type, character, role (e.g. 'Fixer'/'Solo'), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.\n"
+        "- find_item: {type, character, rank (Fixer Operator rank or Streetwise skill), price_category (Cheap/Everyday/Costly/Premium/Expensive/Very Expensive/Luxury/Super Luxury), item_name, seriously_wounded?, luck_spent?, on_success?, on_failure?} — Night market availability: d10 + rank vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.\n"
+        "- haggle: {type, character, buyer_cool, buyer_trading, vendor_cool, vendor_trading, item_name, item_price, base_discount? (default 10, range 5-50), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.\n"
+        "- facedown: {type, character, target (opponent name), initiator_cool, initiator_concentration, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_concentration, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (§11): COOL + Concentration + d10 + Rep vs same. For intimidation standoffs and staredowns. Ties favor opponent. Rep is optional (0 is valid).\n"
+        "- suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt."
     ),
     "input_schema": {
         "type": "object",
@@ -2978,6 +3530,7 @@ RESOLVE_MECHANICS_TOOL = {
                                      "ice_attack_vs_program", "ambush",
                                      "driving_check", "ramming",
                                      "vehicle_weak_point", "spike_strip",
+                                     "hustle", "find_item", "haggle", "facedown",
                                      "suppressive_fire"],
                         },
                         "character": {"type": "string"},

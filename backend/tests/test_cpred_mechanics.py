@@ -29,6 +29,10 @@ from game_systems.cpred_mechanics import (
     resolve_ramming,
     resolve_vehicle_weak_point,
     resolve_spike_strip,
+    resolve_hustle,
+    resolve_find_item,
+    resolve_haggle,
+    resolve_facedown,
     resolve_suppressive_fire,
     _roll_check_die,
 )
@@ -38,8 +42,11 @@ from game_systems.cpred_tables import (
     RANGED_DV_TABLE,
     AUTOFIRE_DV_TABLE,
     calculate_hp,
+    ARCHITECTURE_DIFFICULTY_DV,
+    SR_DIFFICULTY_RATING,
+    LOBBY_NODE_TABLE,
 )
-from game_systems.cpred import _apply_vehicle_updates, _format_vehicle_lines, apply_cpred_combat_state, GAME_SYSTEM
+from game_systems.cpred import _apply_vehicle_updates, _format_vehicle_lines, apply_cpred_combat_state, GAME_SYSTEM, init_game_state as init_cpred_game_state, apply_game_state as apply_cpred_game_state
 
 
 class TestResolveCheck(unittest.TestCase):
@@ -539,6 +546,20 @@ class TestResolveIceEffect(unittest.TestCase):
         destroys = [op for op in result["state_ops"] if op.get("op") == "program_destroy"]
         self.assertEqual(len(destroys), 1)
         self.assertEqual(destroys[0]["program_name"], "ZActive")
+
+    def test_program_derez_targets_defenders_and_emits_reactivation_metadata(self):
+        ice_block = {"name": "Raven", "effect": "program_derez", "targets_defender": True}
+        active_programs = [
+            {"name": "Sword", "category": "attacker", "status": "active"},
+            {"name": "Armor", "category": "defender", "status": "active"},
+        ]
+        with patch("game_systems.cpred_mechanics.random.choice", side_effect=lambda c: c[0]):
+            result = resolve_ice_effect(ice_block, active_programs=active_programs)
+        derez_ops = [op for op in result["state_ops"] if op.get("op") == "program_derez"]
+        self.assertEqual(len(derez_ops), 1)
+        self.assertEqual(derez_ops[0]["program_name"], "Armor")
+        self.assertEqual(derez_ops[0]["status"], "derezzed")
+        self.assertEqual(derez_ops[0]["reactivate_net_actions"], 2)
 
     def test_invalid_ranged_attack_does_not_spend_luck(self):
         """Invalid ranged requests should not consume Luck."""
@@ -3566,6 +3587,20 @@ class TestInjectResolverOpsStateful(unittest.TestCase):
         _inject_resolver_ops_stateful({}, state_ops, pipeline_state, gs={})
         self.assertEqual(combat["vehicles"]["Car"]["sdp_current"], 35)
 
+    def test_npc_condition_ops_merge_into_character_states_not_edgerunner_ops(self):
+        from main import _inject_resolver_ops_stateful
+
+        tool_input = {}
+        state_ops = [{
+            "op": "add_condition",
+            "subject": {"kind": "character", "name": "Guard"},
+            "edgerunner": "Guard",
+            "condition": "suppressed",
+        }]
+        _inject_resolver_ops_stateful(tool_input, state_ops, {}, {})
+        self.assertNotIn("edgerunner_ops", tool_input)
+        self.assertEqual(tool_input["character_states"]["Guard"]["_conditions_add"], ["suppressed"])
+
 
 class TestStripAndMergeResolverOps(unittest.TestCase):
     """Regression tests for resolver-authoritative strip behavior in main.py."""
@@ -3600,6 +3635,13 @@ class TestStripAndMergeResolverOps(unittest.TestCase):
         ammo_consumed = tool_input["character_updates"][0].get("ammo_consumed", [])
         self.assertEqual(len(ammo_consumed), 1)
         self.assertEqual(ammo_consumed[0]["rounds_consumed"], 3)
+
+    def test_merges_condition_updates_from_resolver(self):
+        from main import _strip_and_merge_resolver_ops
+        tool_input = {"character_updates": [{"name": "Guard", "conditions_add": ["old"]}]}
+        state_ops = [{"op": "add_condition", "edgerunner": "Guard", "condition": "suppressed"}]
+        _strip_and_merge_resolver_ops(tool_input, state_ops)
+        self.assertIn("suppressed", tool_input["character_updates"][0]["conditions_add"])
 
 
 class TestLegacyApplyCombatStateVehicleUpdates(unittest.TestCase):
@@ -4105,6 +4147,271 @@ class TestRunModePipelineVehicleTracking(unittest.TestCase):
             ))
         self.assertTrue(any(e[0] == "pipeline_done" for e in events))
 
+    def test_run_mode_pipeline_carries_fight_together_bonus_across_phases(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline import run_mode_pipeline, PipelineStageResult
+
+        class _Provider:
+            def build_pipeline_request(self, **kwargs):
+                return kwargs
+
+            def send_request_stream(self, _client, _params):
+                yield SimpleNamespace(
+                    event_type="done",
+                    usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                           "output_tokens": 0, "reasoning_tokens": 0},
+                )
+
+            def calculate_cost_with_tier(self, _parsed, _tier):
+                return 0.0
+
+        planning_result = PipelineStageResult(
+            stage="planning",
+            content="{}",
+            parsed_json={
+                "current_player": "V",
+                "actions": [
+                    {
+                        "type": "initiative",
+                        "combatants": [{"name": "V", "ref": 6}, {"name": "Judy", "ref": 5}],
+                    },
+                    {
+                        "type": "ranged_attack",
+                        "character": "V",
+                        "stat_value": 6,
+                        "skill_value": 6,
+                        "weapon_type": "Pistol",
+                        "damage_dice": 2,
+                        "target_sp": 11,
+                        "range_bracket": 0,
+                    },
+                ],
+            },
+            usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                   "output_tokens": 0, "reasoning_tokens": 0},
+            service_tier="standard",
+        )
+
+        with patch("pipeline.run_pipeline_stage", return_value=planning_result), \
+             patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            events = list(run_mode_pipeline(
+                provider=_Provider(),
+                client=None,
+                username="u",
+                project="p",
+                chat_name="c",
+                mode="combat",
+                planning_system="x",
+                narration_system="y",
+                mode_messages=[],
+                user_content="go",
+                planning_schema={},
+                game_state={
+                    "edgerunners": {"V": {"hp": {"current": 40, "max": 40}}},
+                    "relationships": {"Judy": {"rs": 50, "roms": 50}},
+                },
+                character_states={},
+                pipeline_state={"combat": {"current_turn": "V", "vehicles": {}}},
+            ))
+
+        done = next(e[1] for e in events if e[0] == "pipeline_done")
+        attack_result = next(r for r in done.resolved_actions if r.get("type") == "ranged_attack")
+        self.assertEqual(attack_result["attacks"][0]["roll"]["total"], 18)
+
+    def test_run_mode_pipeline_uses_existing_initiative_order_for_later_round_presence(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline import run_mode_pipeline, PipelineStageResult
+
+        class _Provider:
+            def build_pipeline_request(self, **kwargs):
+                return kwargs
+
+            def send_request_stream(self, _client, _params):
+                yield SimpleNamespace(
+                    event_type="done",
+                    usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                           "output_tokens": 0, "reasoning_tokens": 0},
+                )
+
+            def calculate_cost_with_tier(self, _parsed, _tier):
+                return 0.0
+
+        planning_result = PipelineStageResult(
+            stage="planning",
+            content="{}",
+            parsed_json={
+                "current_player": "V",
+                "actions": [{
+                    "type": "ranged_attack",
+                    "character": "V",
+                    "stat_value": 6,
+                    "skill_value": 6,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 2,
+                    "target_sp": 11,
+                    "range_bracket": 0,
+                }],
+            },
+            usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                   "output_tokens": 0, "reasoning_tokens": 0},
+            service_tier="standard",
+        )
+
+        with patch("pipeline.run_pipeline_stage", return_value=planning_result), \
+             patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            events = list(run_mode_pipeline(
+                provider=_Provider(),
+                client=None,
+                username="u",
+                project="p",
+                chat_name="c",
+                mode="combat",
+                planning_system="x",
+                narration_system="y",
+                mode_messages=[],
+                user_content="go",
+                planning_schema={},
+                game_state={
+                    "edgerunners": {"V": {"hp": {"current": 40, "max": 40}}},
+                    "relationships": {"Judy": {"rs": 50, "roms": 50}},
+                },
+                character_states={},
+                pipeline_state={
+                    "combat": {
+                        "round": 2,
+                        "initiative_order": ["V", "Judy", "Guard"],
+                        "current_turn": "V",
+                        "vehicles": {},
+                    }
+                },
+            ))
+
+        done = next(e[1] for e in events if e[0] == "pipeline_done")
+        attack_result = next(r for r in done.resolved_actions if r.get("type") == "ranged_attack")
+        self.assertEqual(attack_result["attacks"][0]["roll"]["total"], 18)
+
+    def test_run_mode_pipeline_does_not_use_npc_current_turn_as_relationship_owner(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from pipeline import run_mode_pipeline, PipelineStageResult
+
+        class _Provider:
+            def build_pipeline_request(self, **kwargs):
+                return kwargs
+
+            def send_request_stream(self, _client, _params):
+                yield SimpleNamespace(
+                    event_type="done",
+                    usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                           "output_tokens": 0, "reasoning_tokens": 0},
+                )
+
+            def calculate_cost_with_tier(self, _parsed, _tier):
+                return 0.0
+
+        planning_result = PipelineStageResult(
+            stage="planning",
+            content="{}",
+            parsed_json={
+                "actions": [{
+                    "type": "ranged_attack",
+                    "character": "Guard",
+                    "stat_value": 6,
+                    "skill_value": 6,
+                    "weapon_type": "Pistol",
+                    "damage_dice": 2,
+                    "target_sp": 11,
+                    "range_bracket": 0,
+                }],
+            },
+            usage={"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                   "output_tokens": 0, "reasoning_tokens": 0},
+            service_tier="standard",
+        )
+
+        with patch("pipeline.run_pipeline_stage", return_value=planning_result), \
+             patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            events = list(run_mode_pipeline(
+                provider=_Provider(),
+                client=None,
+                username="u",
+                project="p",
+                chat_name="c",
+                mode="combat",
+                planning_system="x",
+                narration_system="y",
+                mode_messages=[],
+                user_content="go",
+                planning_schema={},
+                game_state={
+                    "edgerunners": {"V": {"hp": {"current": 40, "max": 40}}},
+                    "relationships": {"Judy": {"rs": 50, "roms": 50}},
+                },
+                character_states={},
+                pipeline_state={
+                    "combat": {
+                        "round": 2,
+                        "initiative_order": ["Guard", "Judy", "V"],
+                        "current_turn": "Guard",
+                        "vehicles": {},
+                    }
+                },
+            ))
+
+        done = next(e[1] for e in events if e[0] == "pipeline_done")
+        attack_result = next(r for r in done.resolved_actions if r.get("type") == "ranged_attack")
+        self.assertEqual(attack_result["attacks"][0]["roll"]["total"], 17)
+
+
+class TestDeterministicRelationshipOwner(unittest.TestCase):
+    """Deterministic beat resolution should use the current PC's relationship map."""
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=5)
+    def test_resolve_pipeline_mechanics_uses_current_player_as_owner(self, _m):
+        from pipeline import resolve_pipeline_mechanics
+
+        beats = [{
+            "beat": "V opens fire while Judy backs her up.",
+            "resolution": {
+                "type": "ranged_attack",
+                "character": "V",
+                "stat_value": 6,
+                "skill_value": 6,
+                "weapon_type": "Pistol",
+                "damage_dice": 2,
+                "target_sp": 11,
+                "range_bracket": 0,
+            },
+        }]
+        annotated, _ops = resolve_pipeline_mechanics(
+            beats,
+            {"edgerunners": {"V": {"hp": {"current": 40, "max": 40}}}, "relationships": {"Judy": {"rs": 50, "roms": 50}}},
+            relationship_owner="V",
+            relationship_present_names={"V", "Judy"},
+        )
+        self.assertEqual(annotated[0]["result"]["attacks"][0]["roll"]["total"], 18)
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=5)
+    def test_resolve_pipeline_mechanics_persists_suppressed_condition_for_enemy(self, _m):
+        from pipeline import resolve_pipeline_mechanics, _apply_resolver_character_state_deltas
+
+        beats = [{
+            "beat": "V lays down suppressive fire.",
+            "resolution": {
+                "type": "suppressive_fire",
+                "character": "V",
+                "attacker_ref": 8,
+                "attacker_autofire": 6,
+                "targets": [{"name": "Guard", "will": 4, "concentration": 2}],
+                "weapon_name": "SMG",
+            },
+        }]
+        _annotated, ops = resolve_pipeline_mechanics(beats, {"edgerunners": {"V": {"hp": {"current": 40, "max": 40}}}})
+        updated = _apply_resolver_character_state_deltas({}, ops, 1, tracked_edgerunners={"V"})
+        self.assertIn("suppressed", updated["Guard"]["data"]["conditions"])
+
 
 class TestCPREDGameSystemHooks(unittest.TestCase):
     """Smoke tests for required CPRED game-system hooks."""
@@ -4114,11 +4421,1236 @@ class TestCPREDGameSystemHooks(unittest.TestCase):
         self.assertTrue(callable(GAME_SYSTEM["apply_vehicle_updates"]))
 
 
+# ===========================================================================
+# Hustle resolver tests
+# ===========================================================================
+
+class TestResolveHustle(unittest.TestCase):
+    """Tests for resolve_hustle — d10 + Role Ability Rank vs DV."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    @patch(MOCK, return_value=7)
+    def test_hustle_success(self, _m):
+        """Roll beats DV → eurobucks state_op emitted with correct payout."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=4, dv=10, payout=500,
+            character="V",
+        )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["total"], 11)  # 7 + 4
+        self.assertEqual(r["payout"], 500)
+        self.assertEqual(len(r["state_ops"]), 1)
+        op = r["state_ops"][0]
+        self.assertEqual(op["op"], "eurobucks")
+        self.assertEqual(op["change"], 500)
+        self.assertEqual(op["edgerunner"], "V")
+        self.assertIn("Fixer", op["reason"])
+        self.assertIn("✓", r["formatted"])
+        self.assertIn("500eb", r["formatted"])
+
+    @patch(MOCK, return_value=3)
+    def test_hustle_failure(self, _m):
+        """Roll fails DV → no eurobucks op, payout=0."""
+        r = resolve_hustle(
+            role="Solo", role_ability_rank=2, dv=10, payout=300,
+            character="Jackie",
+        )
+        self.assertFalse(r["success"])
+        self.assertEqual(r["total"], 5)  # 3 + 2
+        self.assertEqual(r["payout"], 0)
+        self.assertEqual(len(r["state_ops"]), 0)
+        self.assertIn("✗", r["formatted"])
+        self.assertIn("no payout", r["formatted"])
+
+    @patch(MOCK, return_value=7)
+    def test_hustle_wounded_penalty(self, _m):
+        """seriously_wounded applies -2."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=4, dv=10, payout=500,
+            seriously_wounded=True, character="V",
+        )
+        self.assertEqual(r["total"], 9)  # 7 + 4 - 2
+        self.assertFalse(r["success"])  # 9 > 10 is False
+        self.assertEqual(r["payout"], 0)
+        self.assertIn("Wounded", r["formatted"])
+
+    @patch(MOCK, return_value=5)
+    def test_hustle_luck_spend(self, _m):
+        """Luck adds to total."""
+        r = resolve_hustle(
+            role="Techie", role_ability_rank=3, dv=10, payout=200,
+            luck_spent=3, character="V",
+        )
+        self.assertEqual(r["total"], 11)  # 5 + 3 + 3
+        self.assertTrue(r["success"])
+        self.assertEqual(r["payout"], 200)
+        self.assertIn("Luck", r["formatted"])
+
+    @patch(MOCK, return_value=7)
+    def test_hustle_via_resolve_actions(self, _m):
+        """Dispatch through batch processor."""
+        batch = resolve_actions([{
+            "type": "hustle",
+            "character": "V",
+            "role": "Fixer",
+            "role_ability_rank": 4,
+            "dv": 10,
+            "payout": 500,
+        }])
+        self.assertEqual(len(batch["results"]), 1)
+        result = batch["results"][0]
+        self.assertEqual(result["type"], "hustle")
+        self.assertTrue(result["success"])
+        # eurobucks op in batch state_ops
+        eb_ops = [o for o in batch["state_ops"] if o.get("op") == "eurobucks"]
+        self.assertEqual(len(eb_ops), 1)
+        self.assertEqual(eb_ops[0]["change"], 500)
+
+    @patch(MOCK, return_value=7)
+    def test_hustle_luck_via_resolve_actions(self, _m):
+        """Luck spend emits luck state_op in batch."""
+        batch = resolve_actions([{
+            "type": "hustle",
+            "character": "V",
+            "role": "Solo",
+            "role_ability_rank": 2,
+            "dv": 10,
+            "payout": 100,
+            "luck_spent": 3,
+        }])
+        luck_ops = [o for o in batch["state_ops"] if o.get("op") == "luck"]
+        self.assertEqual(len(luck_ops), 1)
+        self.assertEqual(luck_ops[0]["change"], -3)
+
+    @patch(MOCK, side_effect=[10, 6])
+    def test_hustle_crit_explosion(self, _m):
+        """Natural 10 explodes upward (d10=10+6=16)."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=2, dv=15, payout=1000,
+            character="V",
+        )
+        self.assertEqual(r["die"]["total"], 16)
+        self.assertEqual(r["total"], 18)  # 16 + 2
+        self.assertTrue(r["success"])
+        self.assertEqual(r["payout"], 1000)
+
+    @patch(MOCK, return_value=8)
+    def test_hustle_on_outcome_success(self, _m):
+        """on_success is returned as on_outcome."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=4, dv=10, payout=500,
+            character="V", on_success="Got the gig", on_failure="No dice",
+        )
+        self.assertEqual(r["on_outcome"], "Got the gig")
+
+    @patch(MOCK, return_value=2)
+    def test_hustle_on_outcome_failure(self, _m):
+        """on_failure is returned as on_outcome."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=4, dv=10, payout=500,
+            character="V", on_success="Got the gig", on_failure="No dice",
+        )
+        self.assertEqual(r["on_outcome"], "No dice")
+
+
+class TestSyncCharacterStatesArmor(unittest.TestCase):
+    """Armor SP synced from edgerunner state into character_states resources."""
+
+    def _sync(self, character_states, game_state, turn=1):
+        from pipeline import _sync_cpred_character_states_from_game_state
+        return _sync_cpred_character_states_from_game_state(character_states, game_state, turn)
+
+    def _make_gs(self, name="V", armor=None, **extras):
+        er = {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+              "luck": {"current": 6, "max": 6}}
+        if armor is not None:
+            er["armor"] = armor
+        er.update(extras)
+        return {"edgerunners": {name: er}}
+
+    def test_armor_head_body_in_resources(self):
+        cs = {"V": {"data": {"type": "pc"}}}
+        gs = self._make_gs(armor={"head": 11, "body": 7})
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        resources = data["resources"]
+        labels = {r["label"]: r for r in resources}
+        self.assertEqual(labels["Armor (Head)"]["current"], 11)
+        self.assertEqual(labels["Armor (Body)"]["current"], 7)
+
+    def test_armor_zero_when_missing(self):
+        cs = {"V": {"data": {"type": "pc"}}}
+        gs = self._make_gs()  # no armor key
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        resources = data["resources"]
+        labels = {r["label"]: r for r in resources}
+        self.assertEqual(labels["Armor (Head)"]["current"], 0)
+        self.assertEqual(labels["Armor (Body)"]["current"], 0)
+
+    def test_armor_ablation_updates(self):
+        """Armor SP decreases when ablation reduces the value."""
+        cs = {"V": {"data": {"type": "pc", "resources": [
+            {"label": "Armor (Head)", "current": 11, "max": 11},
+            {"label": "Armor (Body)", "current": 11, "max": 11},
+        ]}}}
+        gs = self._make_gs(armor={"head": 11, "body": 7})  # body ablated
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        labels = {r["label"]: r for r in data["resources"]}
+        self.assertEqual(labels["Armor (Body)"]["current"], 7)
+        self.assertEqual(labels["Armor (Body)"]["max"], 7)
+
+    def test_invalid_armor_values_fall_back_to_zero(self):
+        """Malformed armor payloads should not crash sync."""
+        cs = {"V": {"data": {"type": "pc"}}}
+        gs = self._make_gs(armor={"head": "bad", "body": None})
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        labels = {r["label"]: r for r in data["resources"]}
+        self.assertEqual(labels["Armor (Head)"]["current"], 0)
+        self.assertEqual(labels["Armor (Body)"]["current"], 0)
+
+
+class TestSyncConditionsFromEdgerunner(unittest.TestCase):
+    """General conditions from edgerunner state merged into character_states."""
+
+    def _sync(self, character_states, game_state, turn=1):
+        from pipeline import _sync_cpred_character_states_from_game_state
+        return _sync_cpred_character_states_from_game_state(character_states, game_state, turn)
+
+    def _make_gs(self, name="V", conditions=None, **extras):
+        er = {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+              "luck": {"current": 6, "max": 6}}
+        if conditions is not None:
+            er["conditions"] = conditions
+        er.update(extras)
+        return {"edgerunners": {name: er}}
+
+    def test_general_conditions_synced(self):
+        cs = {"V": {"data": {"type": "pc"}}}
+        gs = self._make_gs(conditions=["partially_nude", "unconscious"])
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        self.assertIn("partially_nude", data["conditions"])
+        self.assertIn("unconscious", data["conditions"])
+
+    def test_conditions_not_duplicated(self):
+        cs = {"V": {"data": {"type": "pc", "conditions": ["partially_nude"]}}}
+        gs = self._make_gs(conditions=["partially_nude"])
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        self.assertEqual(data["conditions"].count("partially_nude"), 1)
+
+    def test_model_conditions_preserved(self):
+        """Model-set conditions that aren't in game_state survive the sync."""
+        cs = {"V": {"data": {"type": "pc", "conditions": ["custom_model_condition"]}}}
+        gs = self._make_gs(conditions=["unconscious"])
+        result = self._sync(cs, gs)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        self.assertIn("custom_model_condition", data["conditions"])
+        self.assertIn("unconscious", data["conditions"])
+
+    def test_cleared_game_state_conditions_are_removed_on_next_sync(self):
+        cs = {"V": {"data": {"type": "pc", "conditions": ["custom_model_condition"]}}}
+        gs_with_cond = self._make_gs(conditions=["unconscious"])
+        result = self._sync(cs, gs_with_cond)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        self.assertIn("custom_model_condition", data["conditions"])
+        self.assertIn("unconscious", data["conditions"])
+
+        gs_cleared = self._make_gs(conditions=[])
+        result = self._sync(result, gs_cleared, turn=2)
+        data = result["V"]["data"] if "data" in result["V"] else result["V"]
+        self.assertIn("custom_model_condition", data["conditions"])
+        self.assertNotIn("unconscious", data["conditions"])
+
+
+class TestSyncHudFunds(unittest.TestCase):
+    """Tests for _sync_hud_funds_from_edgerunners."""
+
+    def _sync(self, hud_state, game_state):
+        from pipeline import _sync_hud_funds_from_edgerunners
+        return _sync_hud_funds_from_edgerunners(hud_state, game_state)
+
+    def test_basic_eurobucks(self):
+        gs = {"edgerunners": {"V": {"eurobucks": 2500}, "Jackie": {"eurobucks": 800}}}
+        result = self._sync({}, gs)
+        self.assertEqual(result["funds"]["V"], "2,500 eb")
+        self.assertEqual(result["funds"]["Jackie"], "800 eb")
+
+    def test_preserves_shared_pools(self):
+        hud = {"funds": {"crew fund": "10,000 eb", "V": "old"}}
+        gs = {"edgerunners": {"V": {"eurobucks": 3000}}}
+        result = self._sync(hud, gs)
+        self.assertEqual(result["funds"]["crew fund"], "10,000 eb")
+        self.assertEqual(result["funds"]["V"], "3,000 eb")
+
+    def test_no_edgerunners(self):
+        result = self._sync({}, {})
+        self.assertEqual(result, {})
+
+    def test_no_game_state(self):
+        hud = {"funds": {"V": "100 eb"}}
+        result = self._sync(hud, None)
+        self.assertEqual(result["funds"]["V"], "100 eb")
+
+    def test_none_hud_state(self):
+        gs = {"edgerunners": {"V": {"eurobucks": 500}}}
+        result = self._sync(None, gs)
+        self.assertEqual(result["funds"]["V"], "500 eb")
+
+    def test_edgerunner_without_eurobucks_ignored(self):
+        gs = {"edgerunners": {"V": {"hp": {"current": 40, "max": 40}}}}
+        result = self._sync({}, gs)
+        self.assertEqual(result, {})
+
+    def test_formatting_large_amounts(self):
+        gs = {"edgerunners": {"V": {"eurobucks": 1000000}}}
+        result = self._sync({}, gs)
+        self.assertEqual(result["funds"]["V"], "1,000,000 eb")
+
+    def test_scoping_filters_off_scene_edgerunner_funds_even_without_character_state(self):
+        from pipeline import scope_hud_funds
+
+        gs = {"edgerunners": {"V": {"eurobucks": 2500}, "Jackie": {"eurobucks": 800}}}
+        hud = self._sync({}, gs)
+        scoped = scope_hud_funds(
+            hud,
+            {"pcs_present": ["V"]},
+            {"V": {}},
+        )
+        self.assertEqual(scoped["funds"], {"V": "2,500 eb"})
+
+    def test_sync_and_scope_helper_preserves_scene_scope(self):
+        from pipeline import _sync_and_scope_cpred_hud_funds
+
+        gs = {"edgerunners": {"V": {"eurobucks": 2500}, "Jackie": {"eurobucks": 800}}}
+        scoped = _sync_and_scope_cpred_hud_funds(
+            {"funds": {"V": "old"}},
+            gs,
+            {"pcs_present": ["V"]},
+            {"V": {}},
+        )
+        self.assertEqual(scoped["funds"], {"V": "2,500 eb"})
+
+    def test_single_agent_update_keeps_scene_scoped_funds(self):
+        from pipeline import apply_single_agent_state_updates
+
+        ps = {
+            "scene_state": {"pcs_present": ["V"], "npcs_present": []},
+            "character_states": {"V": {"data": {"type": "pc"}}},
+            "hud_state": {"funds": {"V": "old"}},
+            "game_state": init_cpred_game_state(),
+            "combat": {},
+        }
+        ps["game_state"]["edgerunners"] = {
+            "V": {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+                  "luck": {"current": 6, "max": 6}, "eurobucks": 1000},
+            "Jackie": {"hp": {"current": 35, "max": 35}, "humanity": {"current": 55, "max": 55},
+                       "luck": {"current": 5, "max": 5}, "eurobucks": 800},
+        }
+        gs = {
+            "id": "cpred",
+            "apply_game_state": apply_cpred_game_state,
+            "init_game_state": init_cpred_game_state,
+        }
+        updated = apply_single_agent_state_updates(ps, {}, 2, game_system=gs)
+        self.assertEqual(updated["hud_state"]["funds"], {"V": "1,000 eb"})
+
+    def test_single_agent_update_rebuilds_authoritative_funds_over_stale_reported_hud(self):
+        from pipeline import apply_single_agent_state_updates
+
+        ps = {
+            "scene_state": {"pcs_present": ["V"], "npcs_present": []},
+            "character_states": {"V": {"data": {"type": "pc"}}},
+            "hud_state": {"funds": {"crew fund": "10,000 eb"}},
+            "game_state": init_cpred_game_state(),
+            "combat": {},
+        }
+        ps["game_state"]["edgerunners"] = {
+            "V": {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+                  "luck": {"current": 6, "max": 6}, "eurobucks": 1000},
+            "Jackie": {"hp": {"current": 35, "max": 35}, "humanity": {"current": 55, "max": 55},
+                       "luck": {"current": 5, "max": 5}, "eurobucks": 800},
+        }
+        gs = {
+            "id": "cpred",
+            "apply_game_state": apply_cpred_game_state,
+            "init_game_state": init_cpred_game_state,
+        }
+        updated = apply_single_agent_state_updates(
+            ps,
+            {"hud_state": {"funds": {"V": "0 eb", "Jackie": "999,999 eb", "crew fund": "10,000 eb"}}},
+            2,
+            game_system=gs,
+        )
+        self.assertEqual(updated["hud_state"]["funds"], {"V": "1,000 eb", "crew fund": "10,000 eb"})
+
+
+class TestRebuildCPREDProjections(unittest.TestCase):
+    """Shared CPRED projection rebuild helper should be the single source of derived views."""
+
+    def test_rebuild_scopes_and_overwrites_authoritative_funds(self):
+        from pipeline import _rebuild_cpred_projections
+
+        ps = {
+            "scene_state": {"pcs_present": ["V"], "npcs_present": []},
+            "character_states": {"V": {"data": {"type": "pc"}}},
+            "hud_state": {"funds": {"V": "old", "Jackie": "old", "crew fund": "10,000 eb"}},
+            "game_state": init_cpred_game_state(),
+        }
+        ps["game_state"]["edgerunners"] = {
+            "V": {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+                  "luck": {"current": 6, "max": 6}, "eurobucks": 1000},
+            "Jackie": {"hp": {"current": 35, "max": 35}, "humanity": {"current": 55, "max": 55},
+                       "luck": {"current": 5, "max": 5}, "eurobucks": 800},
+        }
+
+        rebuilt = _rebuild_cpred_projections(ps, 2)
+        self.assertEqual(rebuilt["hud_state"]["funds"], {"V": "1,000 eb", "crew fund": "10,000 eb"})
+        self.assertEqual(rebuilt["hud_line"], "[Funds: V: 1,000 eb, crew fund: 10,000 eb]")
+        v_data = ps["character_states"]["V"]["data"]
+        labels = {r["label"]: r for r in v_data["resources"]}
+        self.assertEqual(labels["Luck"]["current"], 6)
+
+
+class TestSyncRunsAfterResolveActions(unittest.TestCase):
+    """End-to-end: hustle → eurobucks op → apply_game_state → funds updated."""
+
+    @patch("game_systems.cpred_mechanics.random.randint", return_value=8)
+    def test_hustle_updates_funds_via_sync(self, _m):
+        from pipeline import _sync_hud_funds_from_edgerunners
+
+        game_state = init_cpred_game_state()
+        game_state["edgerunners"] = {
+            "V": {"hp": {"current": 40, "max": 40}, "humanity": {"current": 60, "max": 60},
+                  "luck": {"current": 6, "max": 6}, "eurobucks": 1000}
+        }
+        # Resolve hustle
+        batch = resolve_actions([{
+            "type": "hustle", "character": "V", "role": "Fixer",
+            "role_ability_rank": 4, "dv": 10, "payout": 500,
+        }])
+        self.assertTrue(batch["results"][0]["success"])
+
+        # Apply ops to game_state
+        apply_cpred_game_state(game_state, {"edgerunner_ops": batch["state_ops"]}, turn=1)
+        self.assertEqual(game_state["edgerunners"]["V"]["eurobucks"], 1500)
+
+        # Sync to HUD
+        hud = _sync_hud_funds_from_edgerunners({}, game_state)
+        self.assertEqual(hud["funds"]["V"], "1,500 eb")
+
+
+class TestDeathSaveRomSBonus(unittest.TestCase):
+    """T2 RomS: -1 to Death Save effective roll."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    @patch(MOCK, return_value=5)
+    def test_roms_bonus_reduces_effective_roll(self, _m):
+        """Direct call with roms_death_save_bonus=1 reduces effective_roll by 1."""
+        from game_systems.cpred_mechanics import resolve_death_save
+        base = resolve_death_save(body_stat=8, death_save_count=2)
+        with_roms = resolve_death_save(body_stat=8, death_save_count=2, roms_death_save_bonus=1)
+        self.assertEqual(with_roms["effective_roll"], base["effective_roll"] - 1)
+        self.assertEqual(with_roms["roms_death_save_bonus"], 1)
+
+    @patch(MOCK, return_value=5)
+    def test_roms_bonus_via_resolve_actions(self, _m):
+        """resolve_actions auto-applies -1 when relationships have roms >= 25."""
+        rels = {"Judy": {"rs": 50, "roms": 30}}
+        batch = resolve_actions(
+            [{"type": "death_save", "character": "V", "body_stat": 8, "death_save_count": 2}],
+            relationships=rels,
+            relationship_actor_names={"V"},
+        )
+        result = batch["results"][0]
+        # d10=5 + count=2 - roms=1 = 6
+        self.assertEqual(result["effective_roll"], 6)
+        self.assertEqual(result["roms_death_save_bonus"], 1)
+
+    @patch(MOCK, return_value=5)
+    def test_no_roms_bonus_below_t2(self, _m):
+        """roms=20 (below T2 threshold 25) → no bonus."""
+        rels = {"Judy": {"rs": 50, "roms": 20}}
+        batch = resolve_actions(
+            [{"type": "death_save", "character": "V", "body_stat": 8, "death_save_count": 2}],
+            relationships=rels,
+            relationship_actor_names={"V"},
+        )
+        result = batch["results"][0]
+        # d10=5 + count=2 = 7 (no roms reduction)
+        self.assertEqual(result["effective_roll"], 7)
+        self.assertEqual(result["roms_death_save_bonus"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_roms_bonus_formatted(self, _m):
+        """RomS modifier appears in formatted string."""
+        from game_systems.cpred_mechanics import resolve_death_save
+        r = resolve_death_save(body_stat=8, death_save_count=0, roms_death_save_bonus=1)
+        self.assertIn("RomS", r["formatted"])
+
+    @patch(MOCK, return_value=5)
+    def test_no_roms_bonus_no_relationships(self, _m):
+        """No relationships → no bonus."""
+        batch = resolve_actions(
+            [{"type": "death_save", "character": "V", "body_stat": 8, "death_save_count": 2}],
+        )
+        self.assertEqual(batch["results"][0]["roms_death_save_bonus"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_roms_bonus_does_not_leak_to_unrelated_character(self, _m):
+        """Only the relationship owner gets the death-save RomS bonus."""
+        rels = {"Judy": {"rs": 50, "roms": 30}}
+        batch = resolve_actions(
+            [{"type": "death_save", "character": "Rogue", "body_stat": 8, "death_save_count": 2}],
+            relationships=rels,
+            relationship_actor_names={"V"},
+        )
+        result = batch["results"][0]
+        self.assertEqual(result["effective_roll"], 7)
+        self.assertEqual(result["roms_death_save_bonus"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_roms_bonus_preserved_with_multiple_pc_actor_names(self, _m):
+        """Multiple tracked PCs should not blank the actual relationship owner."""
+        rels = {"Judy": {"rs": 50, "roms": 30}}
+        batch = resolve_actions(
+            [{"type": "death_save", "character": "V", "body_stat": 8, "death_save_count": 2}],
+            relationships=rels,
+            relationship_actor_names={"V", "Rogue"},
+        )
+        result = batch["results"][0]
+        self.assertEqual(result["effective_roll"], 6)
+        self.assertEqual(result["roms_death_save_bonus"], 1)
+
+
+class TestFightTogether(unittest.TestCase):
+    """T3 RomS: +1 to attacks when fighting together with romantic partner."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_ranged_attack(self, _m):
+        """Both PC and NPC partner in batch → +1 to PC's ranged attack roll."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Judy", "stat_value": 5, "skill_value": 5,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        v_roll = batch["results"][0]["attacks"][0]["roll"]
+        # d10=5 + 6 + 6 + 1(fight together via RS) = 18
+        self.assertEqual(v_roll["total"], 18)
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_melee_attack(self, _m):
+        """Both in batch → +1 to melee attack via rel_bonus."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "melee_attack", "character": "V", "attacker_stat": 6, "attacker_skill": 6,
+             "defender_stat": 5, "defender_skill": 5, "damage_dice": 3, "target_sp": 0},
+            {"type": "skill_check", "character": "Judy", "stat_value": 5, "skill_value": 5, "dv": 13},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        v_result = batch["results"][0]
+        # Melee is opposed: attacker d10=5 + 6 + 6 + 1(fight) = 18
+        atk_total = v_result["attacks"][0]["attacker_roll"]["total"]
+        self.assertEqual(atk_total, 18)  # 5+6+6+1(fight together)
+        self.assertIn("RS", v_result["attacks"][0]["attacker_roll"]["formatted"])
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_solo_no_bonus(self, _m):
+        """Only PC in batch, partner not present → no +1."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        v_roll = batch["results"][0]["attacks"][0]["roll"]
+        self.assertEqual(v_roll["total"], 17)  # 5 + 6 + 6, no fight_together
+
+    @patch(MOCK, return_value=5)
+    def test_invalid_npc_relationship_owner_does_not_gain_bonus(self, _m):
+        """NPC names must not be accepted as relationship owners."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        batch = resolve_actions(
+            [{
+                "type": "ranged_attack",
+                "character": "Guard",
+                "stat_value": 6,
+                "skill_value": 6,
+                "weapon_type": "Pistol",
+                "damage_dice": 2,
+                "target_sp": 11,
+                "range_bracket": 0,
+            }],
+            relationships=rels,
+            relationship_owner="Guard",
+            relationship_actor_names={"V"},
+            relationship_present_names={"V", "Judy", "Guard"},
+        )
+        guard_roll = batch["results"][0]["attacks"][0]["roll"]
+        self.assertEqual(guard_roll["total"], 17)
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_below_t3(self, _m):
+        """Partner in batch but roms=30 (below T3=45) → no +1."""
+        rels = {"Judy": {"rs": 50, "roms": 30}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Judy", "stat_value": 5, "skill_value": 5,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        v_roll = batch["results"][0]["attacks"][0]["roll"]
+        self.assertEqual(v_roll["total"], 17)  # no fight_together bonus
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_both_get_bonus(self, _m):
+        """Both PC and NPC partner get the +1."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Judy", "stat_value": 5, "skill_value": 5,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        v_roll_total = batch["results"][0]["attacks"][0]["roll"]["total"]
+        judy_roll_total = batch["results"][1]["attacks"][0]["roll"]["total"]
+        self.assertEqual(v_roll_total, 18)   # 5+6+6+1
+        self.assertEqual(judy_roll_total, 16)  # 5+5+5+1
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_bonus_does_not_leak_to_unrelated_batch_member(self, _m):
+        """Only the owner and romantic partner get the T3 combat bonus."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Judy", "stat_value": 5, "skill_value": 5,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Rogue", "stat_value": 4, "skill_value": 4,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V"})
+        self.assertEqual(batch["results"][0]["attacks"][0]["roll"]["total"], 18)
+        self.assertEqual(batch["results"][1]["attacks"][0]["roll"]["total"], 16)
+        self.assertEqual(batch["results"][2]["attacks"][0]["roll"]["total"], 13)
+
+    @patch(MOCK, return_value=5)
+    def test_fight_together_bonus_preserved_with_multiple_pc_actor_names(self, _m):
+        """Multiple tracked PCs should not disable the owner's combat RomS bonus."""
+        rels = {"Judy": {"rs": 50, "roms": 50}}
+        actions = [
+            {"type": "ranged_attack", "character": "V", "stat_value": 6, "skill_value": 6,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "ranged_attack", "character": "Judy", "stat_value": 5, "skill_value": 5,
+             "weapon_type": "Pistol", "damage_dice": 2, "target_sp": 11, "range_bracket": 0},
+            {"type": "skill_check", "character": "Rogue", "stat_value": 5, "skill_value": 5, "dv": 13},
+        ]
+        batch = resolve_actions(actions, relationships=rels, relationship_actor_names={"V", "Rogue"})
+        self.assertEqual(batch["results"][0]["attacks"][0]["roll"]["total"], 18)
+
+
+class TestLuckResetRomSBonus(unittest.TestCase):
+    """T3/T4 RomS: +1 LUCK on luck_reset."""
+
+    def _make_game_state(self, luck_max=7, roms=0):
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 3, "max": luck_max},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "death_save_count": 0,
+            "critical_injuries": [],
+        }
+        if roms > 0:
+            gs["relationships"]["Judy"] = {"rs": 50, "roms": roms}
+        return gs
+
+    def test_luck_reset_with_t3_roms(self):
+        """roms=50 → luck.current = max + 1."""
+        gs = self._make_game_state(luck_max=7, roms=50)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck_reset", "reason": "New session"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 8)  # 7 + 1
+
+    def test_luck_reset_without_roms(self):
+        """No relationships → luck.current = max."""
+        gs = self._make_game_state(luck_max=7, roms=0)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck_reset", "reason": "New session"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 7)
+
+    def test_luck_reset_roms_below_t3(self):
+        """roms=30 (below T3=45) → luck.current = max (no bonus)."""
+        gs = self._make_game_state(luck_max=7, roms=30)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck_reset", "reason": "New session"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 7)
+
+    def test_bonus_luck_consumed_by_spend(self):
+        """After +1 bonus, luck spend clamps back to max."""
+        gs = self._make_game_state(luck_max=7, roms=50)
+        # Reset gives 8
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck_reset", "reason": "New session"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 8)
+        # Spend 1 → clamped to max(7)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck", "change": -1, "reason": "Spent"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 7)
+
+    def test_apply_game_state_ignores_non_edgerunner_subject_ops(self):
+        """Typed character ops must not create authoritative edgerunners."""
+        gs = self._make_game_state(luck_max=7, roms=0)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [{
+            "subject": {"kind": "character", "name": "Guard"},
+            "edgerunner": "Guard",
+            "op": "ammo",
+            "weapon_name": "SMG",
+            "rounds_consumed": 10,
+        }]}, turn=1)
+        self.assertNotIn("Guard", gs["edgerunners"])
+
+
+class TestResolveFindItem(unittest.TestCase):
+    """Tests for resolve_find_item — d10 + Rank vs DV by price category."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    @patch(MOCK, return_value=8)
+    def test_find_costly_failure_boundary(self, _m):
+        """Rank 4 + d10=8 = 12, does NOT beat DV13."""
+        r = resolve_find_item(rank=4, price_category="Costly", item_name="Agent")
+        self.assertFalse(r["success"])
+        self.assertEqual(r["total"], 12)  # 8 + 4
+        self.assertEqual(r["dv"], 13)
+        self.assertIn("✗", r["formatted"])
+
+    @patch(MOCK, return_value=10)
+    def test_find_costly_success_crit(self, _m):
+        """Rank 4 + crit 10+extra → beats DV13."""
+        r = resolve_find_item(rank=4, price_category="Costly", item_name="Agent")
+        self.assertTrue(r["success"])
+        self.assertGreater(r["total"], 13)
+        self.assertIn("✓", r["formatted"])
+
+    def test_find_cheap_auto_success(self):
+        """Cheap category → auto-success, no roll."""
+        r = resolve_find_item(rank=1, price_category="Cheap", item_name="Kibble")
+        self.assertTrue(r["success"])
+        self.assertIsNone(r["die"])
+        self.assertIn("auto-success", r["formatted"])
+
+    def test_find_everyday_auto_success(self):
+        """Everyday category → auto-success, no roll."""
+        r = resolve_find_item(rank=0, price_category="Everyday", item_name="Flashlight")
+        self.assertTrue(r["success"])
+        self.assertIsNone(r["die"])
+
+    @patch(MOCK, return_value=3)
+    def test_find_luxury_failure(self, _m):
+        """Rank 4 + d10=3 = 7 vs DV21 → fails."""
+        r = resolve_find_item(rank=4, price_category="Luxury", item_name="Militech Malorian")
+        self.assertFalse(r["success"])
+        self.assertEqual(r["total"], 7)
+        self.assertEqual(r["dv"], 21)
+
+    @patch(MOCK, return_value=7)
+    def test_find_item_luck_not_enough(self, _m):
+        """Luck adds to total but still not enough to beat DV."""
+        r = resolve_find_item(rank=4, price_category="Premium", item_name="Armor Jacket",
+                              luck_spent=3)
+        self.assertEqual(r["total"], 14)  # 7 + 4 + 3
+        self.assertFalse(r["success"])  # 14 does NOT beat DV15
+
+    @patch(MOCK, return_value=7)
+    def test_find_item_luck_success(self, _m):
+        """Luck pushes total over DV."""
+        r = resolve_find_item(rank=4, price_category="Premium", item_name="Armor Jacket",
+                              luck_spent=5)
+        self.assertEqual(r["total"], 16)  # 7 + 4 + 5
+        self.assertTrue(r["success"])  # 16 > 15
+        self.assertIn("Luck", r["formatted"])
+
+    @patch(MOCK, return_value=7)
+    def test_find_via_resolve_actions(self, _m):
+        """Dispatch through batch processor."""
+        batch = resolve_actions([{
+            "type": "find_item",
+            "character": "Delphi",
+            "rank": 4,
+            "price_category": "Costly",
+            "item_name": "Agent",
+        }])
+        self.assertEqual(len(batch["results"]), 1)
+        result = batch["results"][0]
+        self.assertEqual(result["type"], "find_item")
+
+    def test_find_item_auto_success_does_not_spend_luck(self):
+        batch = resolve_actions([{
+            "type": "find_item",
+            "character": "Delphi",
+            "rank": 4,
+            "price_category": "Cheap",
+            "item_name": "Kibble",
+            "luck_spent": 3,
+        }])
+        self.assertTrue(batch["results"][0]["success"])
+        luck_ops = [o for o in batch["state_ops"] if o.get("op") == "luck"]
+        self.assertEqual(luck_ops, [])
+
+
+class TestResolveHaggle(unittest.TestCase):
+    """Tests for resolve_haggle — opposed COOL + Trading rolls."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def test_haggle_success(self):
+        """Buyer beats vendor → discount applied, eurobucks deducted at discounted price."""
+        # Buyer rolls 8, vendor rolls 3
+        with patch(self.MOCK, side_effect=[8, 3]):
+            r = resolve_haggle(
+                buyer_cool=6, buyer_trading=4,
+                vendor_cool=5, vendor_trading=3,
+                item_name="Kevlar Jacket", item_price=100,
+                base_discount=20, character="V",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["buyer_total"], 18)   # 8 + 6 + 4
+        self.assertEqual(r["vendor_total"], 11)   # 3 + 5 + 3
+        self.assertEqual(r["discount_pct"], 20)
+        self.assertEqual(r["original_price"], 100)
+        self.assertEqual(r["final_price"], 80)    # 100 - 20%
+        self.assertEqual(r["savings"], 20)
+        self.assertEqual(len(r["state_ops"]), 1)
+        op = r["state_ops"][0]
+        self.assertEqual(op["op"], "eurobucks")
+        self.assertEqual(op["change"], -80)
+        self.assertEqual(op["edgerunner"], "V")
+        self.assertIn("✓", r["formatted"])
+
+    def test_haggle_failure(self):
+        """Vendor beats buyer → full price paid."""
+        # Buyer rolls 3, vendor rolls 8
+        with patch(self.MOCK, side_effect=[3, 8]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=6, vendor_trading=4,
+                item_name="SMG", item_price=500,
+                base_discount=15, character="V",
+            )
+        self.assertFalse(r["success"])
+        self.assertEqual(r["discount_pct"], 0)
+        self.assertEqual(r["final_price"], 500)
+        self.assertEqual(r["savings"], 0)
+        op = r["state_ops"][0]
+        self.assertEqual(op["change"], -500)
+        self.assertIn("✗", r["formatted"])
+
+    def test_haggle_state_ops(self):
+        """Eurobucks op emitted with correct negative change on success."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=2,
+                item_name="Cyberarm", item_price=1000,
+                base_discount=10, character="V",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["final_price"], 900)
+        op = r["state_ops"][0]
+        self.assertEqual(op["change"], -900)
+        self.assertIn("Cyberarm", op["reason"])
+
+    def test_haggle_discount_clamped_high(self):
+        """base_discount > 50 clamped to 50."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=2,
+                item_price=1000, base_discount=80, character="V",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["discount_pct"], 50)
+        self.assertEqual(r["final_price"], 500)
+
+    def test_haggle_discount_clamped_low(self):
+        """base_discount < 5 clamped to 5."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=2,
+                item_price=1000, base_discount=1, character="V",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["discount_pct"], 5)
+        self.assertEqual(r["final_price"], 950)
+
+    def test_haggle_zero_price_stays_zero(self):
+        """Free items should not become 1eb charges on success."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=2,
+                item_price=0, base_discount=10, character="V",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["original_price"], 0)
+        self.assertEqual(r["final_price"], 0)
+        self.assertEqual(r["savings"], 0)
+        self.assertEqual(r["state_ops"][0]["change"], 0)
+
+    def test_haggle_via_resolve_actions(self):
+        """Dispatch through batch processor."""
+        with patch(self.MOCK, side_effect=[8, 3]):
+            batch = resolve_actions([{
+                "type": "haggle",
+                "character": "V",
+                "buyer_cool": 6,
+                "buyer_trading": 4,
+                "vendor_cool": 5,
+                "vendor_trading": 3,
+                "item_name": "Kevlar Jacket",
+                "item_price": 100,
+                "base_discount": 20,
+            }])
+        self.assertEqual(len(batch["results"]), 1)
+        result = batch["results"][0]
+        self.assertEqual(result["type"], "haggle")
+        self.assertTrue(result["success"])
+        eb_ops = [o for o in batch["state_ops"] if o.get("op") == "eurobucks"]
+        self.assertEqual(len(eb_ops), 1)
+        self.assertEqual(eb_ops[0]["change"], -80)
+
+    def test_haggle_luck(self):
+        """Luck adds to buyer total."""
+        with patch(self.MOCK, side_effect=[5, 7]):
+            r = resolve_haggle(
+                buyer_cool=4, buyer_trading=3,
+                vendor_cool=5, vendor_trading=4,
+                item_price=200, luck_spent=3, character="V",
+            )
+        # buyer: 5 + 4 + 3 + 3(luck) = 15; vendor: 7 + 5 + 4 = 16
+        self.assertEqual(r["buyer_total"], 15)
+        self.assertEqual(r["vendor_total"], 16)
+        self.assertFalse(r["success"])
+        self.assertIn("Luck", r["formatted"])
+
+    def test_haggle_wounded(self):
+        """Seriously wounded applies -2 to buyer."""
+        with patch(self.MOCK, side_effect=[8, 5]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=3,
+                item_price=100, seriously_wounded=True, character="V",
+            )
+        # buyer: 8 + 5 + 3 - 2 = 14; vendor: 5 + 4 + 3 = 12
+        self.assertEqual(r["buyer_total"], 14)
+        self.assertTrue(r["success"])
+        self.assertIn("Wounded", r["formatted"])
+
+
+class TestResolveFacedown(unittest.TestCase):
+    """Tests for resolve_facedown — Reputation Facedown (CRB §11)."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def test_facedown_initiator_wins(self):
+        """Initiator higher total → success, positive margin."""
+        # Initiator rolls 8, opponent rolls 3
+        with patch(self.MOCK, side_effect=[8, 3]):
+            r = resolve_facedown(
+                initiator_cool=6, initiator_concentration=4, initiator_rep=3,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=1,
+                character="V", target="Thug",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["initiator_total"], 21)  # 8 + 6 + 4 + 3
+        self.assertEqual(r["opponent_total"], 12)    # 3 + 5 + 3 + 1
+        self.assertEqual(r["margin"], 9)
+        self.assertIn("✓", r["formatted"])
+        self.assertIn("backs down", r["formatted"])
+
+    def test_facedown_opponent_wins(self):
+        """Opponent higher total → failure."""
+        # Initiator rolls 3, opponent rolls 8
+        with patch(self.MOCK, side_effect=[3, 8]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=6, opponent_concentration=4, opponent_rep=2,
+                character="V", target="Boss",
+            )
+        self.assertFalse(r["success"])
+        self.assertTrue(r["margin"] < 0)
+        self.assertIn("✗", r["formatted"])
+
+    def test_facedown_tie_favors_opponent(self):
+        """Equal totals → success = False (ties favor opponent)."""
+        with patch(self.MOCK, side_effect=[5, 5]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=2,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=2,
+                character="V", target="Rival",
+            )
+        self.assertFalse(r["success"])
+        self.assertEqual(r["margin"], 0)
+        self.assertEqual(r["initiator_total"], r["opponent_total"])
+
+    def test_facedown_rep_matters(self):
+        """High rep swings the outcome for otherwise equal stats."""
+        # Both roll 5, same COOL/Conc, but initiator has rep 5 vs opponent rep 0
+        with patch(self.MOCK, side_effect=[5, 5]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=5,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                character="Legend", target="Nobody",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["margin"], 5)
+
+    def test_facedown_wounded(self):
+        """Seriously wounded applies -2 to initiator."""
+        with patch(self.MOCK, side_effect=[8, 5]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                seriously_wounded_initiator=True,
+                character="V", target="Guard",
+            )
+        # initiator: 8 + 5 + 3 + 0 - 2 = 14; opponent: 5 + 5 + 3 + 0 = 13
+        self.assertEqual(r["initiator_total"], 14)
+        self.assertEqual(r["opponent_total"], 13)
+        self.assertTrue(r["success"])
+        self.assertIn("Wounded", r["formatted"])
+
+    def test_facedown_wounded_opponent(self):
+        """Seriously wounded applies -2 to opponent."""
+        with patch(self.MOCK, side_effect=[5, 8]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                seriously_wounded_opponent=True,
+                character="V", target="Guard",
+            )
+        # initiator: 5 + 5 + 3 = 13; opponent: 8 + 5 + 3 - 2 = 14
+        self.assertEqual(r["initiator_total"], 13)
+        self.assertEqual(r["opponent_total"], 14)
+        self.assertFalse(r["success"])
+
+    def test_facedown_luck(self):
+        """Luck adds to initiator total."""
+        with patch(self.MOCK, side_effect=[4, 7]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                luck_spent=3,
+                character="V", target="Thug",
+            )
+        # initiator: 4 + 5 + 3 + 0 + 3(luck) = 15; opponent: 7 + 5 + 3 + 0 = 15
+        self.assertEqual(r["initiator_total"], 15)
+        self.assertEqual(r["opponent_total"], 15)
+        # Tie → opponent wins
+        self.assertFalse(r["success"])
+        self.assertIn("Luck", r["formatted"])
+
+    def test_facedown_relationship_bonus(self):
+        """Relationship modifiers apply to facedown as a target-based social contest."""
+        with patch(self.MOCK, side_effect=[5, 6]):
+            batch = resolve_actions([{
+                "type": "facedown",
+                "character": "V",
+                "target": "Judy",
+                "initiator_cool": 5,
+                "initiator_concentration": 3,
+                "initiator_rep": 0,
+                "opponent_cool": 5,
+                "opponent_concentration": 3,
+                "opponent_rep": 0,
+            }], relationships={"Judy": {"rs": 50, "roms": 50}})
+        result = batch["results"][0]
+        self.assertTrue(result["success"])
+        self.assertEqual(result["initiator_total"], 15)
+        self.assertIn("RS", result["formatted"])
+
+    def test_facedown_no_state_ops(self):
+        """Facedown emits no state_ops (purely social)."""
+        with patch(self.MOCK, side_effect=[5, 5]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+            )
+        self.assertEqual(r["state_ops"], [])
+
+    def test_facedown_on_outcome(self):
+        """on_success/on_failure correctly selected."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                on_success="They back down", on_failure="They stand firm",
+            )
+        self.assertEqual(r["on_outcome"], "They back down")
+
+        with patch(self.MOCK, side_effect=[2, 9]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
+                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                on_success="They back down", on_failure="They stand firm",
+            )
+        self.assertEqual(r["on_outcome"], "They stand firm")
+
+    def test_facedown_via_resolve_actions(self):
+        """Dispatch through batch processor works."""
+        with patch(self.MOCK, side_effect=[8, 3]):
+            batch = resolve_actions([{
+                "type": "facedown",
+                "character": "V",
+                "target": "Thug",
+                "initiator_cool": 6,
+                "initiator_concentration": 4,
+                "initiator_rep": 3,
+                "opponent_cool": 5,
+                "opponent_concentration": 3,
+                "opponent_rep": 1,
+                "on_success": "Thug backs down",
+                "on_failure": "Thug stands firm",
+            }])
+        self.assertEqual(len(batch["results"]), 1)
+        result = batch["results"][0]
+        self.assertEqual(result["type"], "facedown")
+        self.assertEqual(result["character"], "V")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["on_outcome"], "Thug backs down")
+
+    def test_facedown_via_resolve_actions_luck_op(self):
+        """Luck spend through batch processor emits luck state_op."""
+        with patch(self.MOCK, side_effect=[5, 5]):
+            batch = resolve_actions([{
+                "type": "facedown",
+                "character": "V",
+                "target": "Boss",
+                "initiator_cool": 5,
+                "initiator_concentration": 3,
+                "initiator_rep": 0,
+                "opponent_cool": 5,
+                "opponent_concentration": 3,
+                "opponent_rep": 0,
+                "luck_spent": 2,
+            }])
+        luck_ops = [o for o in batch["state_ops"] if o.get("op") == "luck"]
+        self.assertEqual(len(luck_ops), 1)
+        self.assertEqual(luck_ops[0]["change"], -2)
+
+
+class TestResolveMechanicsPresenceHelpers(unittest.TestCase):
+    """Relationship-presence helpers used by resolve_mechanics should include combat participants."""
+
+    def test_collect_relationship_present_names_includes_initiative_order(self):
+        from main import _collect_relationship_present_names
+
+        names = _collect_relationship_present_names(
+            [{"type": "ranged_attack", "character": "V"}],
+            {
+                "combat": {"initiative_order": ["V", "Judy"], "current_turn": "V"},
+                "character_states": {"Guard": {"data": {"combat_data": {"hp_max": 20}}}},
+            },
+        )
+        self.assertEqual(names, {"V", "Judy", "Guard"})
+
+
+class TestCPREDIdentityHelpers(unittest.TestCase):
+    """Shared CPRED relationship/state-op identity helpers."""
+
+    def test_build_relationship_context_rejects_npc_fallback_owner(self):
+        from game_systems.cpred_identity import build_relationship_context
+
+        ctx = build_relationship_context(
+            actions=[{"type": "ranged_attack", "character": "Guard"}],
+            relationship_owner="",
+            fallback_owner="Guard",
+            relationship_actor_names={"V"},
+            relationship_present_names={"V", "Judy", "Guard"},
+        )
+        self.assertEqual(ctx["owner_name"], "V")
+        self.assertEqual(ctx["actor_names"], {"V"})
+        self.assertEqual(ctx["present_names"], {"V", "Judy", "Guard"})
+
+    def test_state_op_subject_prefers_explicit_subject_kind(self):
+        from game_systems.cpred_identity import state_op_subject
+
+        subject = state_op_subject({
+            "subject": {"kind": "character", "name": "Guard"},
+            "edgerunner": "Guard",
+            "op": "add_condition",
+        })
+        self.assertEqual(subject, {"kind": "character", "name": "Guard"})
+
+
+class TestArchitectureDifficultyTables(unittest.TestCase):
+    """Tests for NET Architecture Difficulty Rating tables (CRB p.210-211)."""
+
+    def test_difficulty_dv_values(self):
+        """Verify all 4 CRB difficulty ratings map to correct DVs."""
+        self.assertEqual(ARCHITECTURE_DIFFICULTY_DV["basic"], 6)
+        self.assertEqual(ARCHITECTURE_DIFFICULTY_DV["standard"], 8)
+        self.assertEqual(ARCHITECTURE_DIFFICULTY_DV["uncommon"], 10)
+        self.assertEqual(ARCHITECTURE_DIFFICULTY_DV["advanced"], 12)
+        self.assertEqual(len(ARCHITECTURE_DIFFICULTY_DV), 4)
+
+    def test_sr_difficulty_mapping_covers_all_srs(self):
+        """SR 1-5 all map to valid difficulty ratings."""
+        for sr in range(1, 6):
+            rating = SR_DIFFICULTY_RATING[sr]
+            self.assertIn(rating, ARCHITECTURE_DIFFICULTY_DV,
+                          f"SR {sr} maps to '{rating}' which is not a valid difficulty rating")
+
+    def test_sr_difficulty_specific_values(self):
+        """Verify the recommended SR → difficulty mappings."""
+        self.assertEqual(SR_DIFFICULTY_RATING[1], "basic")
+        self.assertEqual(SR_DIFFICULTY_RATING[2], "standard")
+        self.assertEqual(SR_DIFFICULTY_RATING[3], "standard")
+        self.assertEqual(SR_DIFFICULTY_RATING[4], "uncommon")
+        self.assertEqual(SR_DIFFICULTY_RATING[5], "advanced")
+
+    def test_lobby_node_table(self):
+        """Lobby table has 3 entries with correct types and DVs."""
+        self.assertEqual(len(LOBBY_NODE_TABLE), 3)
+        for entry in LOBBY_NODE_TABLE:
+            self.assertIn("type", entry)
+            self.assertIn("dv", entry)
+            self.assertIn(entry["type"], ("file", "password"))
+            self.assertIn(entry["dv"], (6, 8))
+
+    def test_lobby_dvs_never_exceed_standard(self):
+        """Lobby DVs should be at most DV 8 (standard), never higher."""
+        for entry in LOBBY_NODE_TABLE:
+            self.assertLessEqual(entry["dv"], ARCHITECTURE_DIFFICULTY_DV["standard"])
+
+
 class TestSuppressiveFire(unittest.TestCase):
     """Tests for Suppressive Fire resolver (CRB p.174)."""
 
     def test_single_target_suppressed(self):
         """Attacker rolls high, single target rolls low → suppressed."""
+        # Attacker d10=8, target d10=3
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[8, 3]):
             result = resolve_suppressive_fire(
                 attacker_ref=8, attacker_autofire=6,
@@ -4135,6 +5667,7 @@ class TestSuppressiveFire(unittest.TestCase):
 
     def test_single_target_not_suppressed(self):
         """Defender rolls high → not suppressed."""
+        # Attacker d10=3, target d10=9
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[3, 9]):
             result = resolve_suppressive_fire(
                 attacker_ref=5, attacker_autofire=4,
@@ -4148,6 +5681,8 @@ class TestSuppressiveFire(unittest.TestCase):
 
     def test_tie_favors_defender(self):
         """Exact tie → not suppressed (ties favor defender)."""
+        # Attacker: d10=5 + REF 5 + Autofire 5 = 15
+        # Defender: d10=5 + WILL 5 + Conc 5 = 15
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
             result = resolve_suppressive_fire(
                 attacker_ref=5, attacker_autofire=5,
@@ -4158,6 +5693,10 @@ class TestSuppressiveFire(unittest.TestCase):
 
     def test_multiple_targets(self):
         """2+ targets, mixed results — verify per-target outcomes."""
+        # Attacker d10=7 → total = 7+8+6 = 21
+        # Target A d10=3 → total = 3+4+2 = 9 (suppressed)
+        # Target B d10=8 → total = 8+5+5 = 18 (not suppressed — wait, 18 < 21 so suppressed)
+        # Target C d10=9 → total = 9+6+6 = 21 (tie, not suppressed)
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[7, 3, 8, 9]):
             result = resolve_suppressive_fire(
                 attacker_ref=8, attacker_autofire=6,
@@ -4198,8 +5737,51 @@ class TestSuppressiveFire(unittest.TestCase):
         ammo_ops = [op for op in result["state_ops"] if op.get("op") == "ammo"]
         self.assertEqual(len(ammo_ops), 0)
 
+    def test_npc_targets_emit_character_condition_ops(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[8, 3]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8,
+                attacker_autofire=6,
+                targets=[{"name": "Guard", "will": 4, "concentration": 2}],
+                character_name="V",
+                tracked_edgerunners={"V"},
+            )
+        condition_ops = [op for op in result["state_ops"] if op.get("op") == "add_condition"]
+        self.assertEqual(len(condition_ops), 1)
+        self.assertEqual(condition_ops[0].get("character"), "Guard")
+        self.assertNotIn("edgerunner", condition_ops[0])
+
+    def test_edgerunner_targets_keep_edgerunner_condition_ops(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[8, 3]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8,
+                attacker_autofire=6,
+                targets=[{"name": "Judy", "will": 4, "concentration": 2}],
+                character_name="V",
+                tracked_edgerunners={"V", "Judy"},
+            )
+        condition_ops = [op for op in result["state_ops"] if op.get("op") == "add_condition"]
+        self.assertEqual(len(condition_ops), 1)
+        self.assertEqual(condition_ops[0].get("edgerunner"), "Judy")
+        self.assertNotIn("character", condition_ops[0])
+
+    def test_npc_attacker_does_not_emit_ammo_op_for_edgerunner_state(self):
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[8, 3]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8,
+                attacker_autofire=6,
+                targets=[{"name": "V", "will": 4, "concentration": 2}],
+                character_name="Guard",
+                weapon_name="SMG",
+                tracked_edgerunners={"V"},
+            )
+        ammo_ops = [op for op in result["state_ops"] if op.get("op") == "ammo"]
+        self.assertEqual(ammo_ops, [])
+
     def test_seriously_wounded_penalties(self):
         """Both attacker and target wounded → −2 each."""
+        # Attacker: d10=6 + REF 8 + AF 6 - 2 wound = 18
+        # Target:   d10=6 + WILL 8 + Conc 6 - 2 wound = 18 → tie, not suppressed
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[6, 6]):
             result = resolve_suppressive_fire(
                 attacker_ref=8, attacker_autofire=6,
@@ -4207,12 +5789,15 @@ class TestSuppressiveFire(unittest.TestCase):
                 seriously_wounded_attacker=True,
                 character_name="V",
             )
+        # Both get -2, so totals are equal → tie → not suppressed
         self.assertFalse(result["targets"][0]["suppressed"])
         self.assertEqual(result["attacker_total"], 18)
         self.assertEqual(result["targets"][0]["defender_total"], 18)
 
     def test_luck_spent_on_attacker(self):
         """Luck adds to attacker total."""
+        # Attacker: d10=5 + REF 5 + AF 5 + Luck 3 = 18
+        # Target:   d10=5 + WILL 5 + Conc 5 = 15 → suppressed
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
             result = resolve_suppressive_fire(
                 attacker_ref=5, attacker_autofire=5,
@@ -4224,6 +5809,7 @@ class TestSuppressiveFire(unittest.TestCase):
 
     def test_on_outcome_routing(self):
         """on_success when any suppressed, on_failure when none."""
+        # Suppressed case
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[9, 2]):
             result = resolve_suppressive_fire(
                 attacker_ref=8, attacker_autofire=6,
@@ -4233,6 +5819,7 @@ class TestSuppressiveFire(unittest.TestCase):
             )
         self.assertEqual(result["on_outcome"], "Targets dive for cover")
 
+        # Not suppressed case
         with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[2, 9]):
             result = resolve_suppressive_fire(
                 attacker_ref=3, attacker_autofire=2,
@@ -4260,8 +5847,23 @@ class TestSuppressiveFire(unittest.TestCase):
         self.assertEqual(r["type"], "suppressive_fire")
         self.assertEqual(r["character"], "V")
         self.assertTrue(r["success"])
+        # Check state_ops include ammo
         ammo_ops = [op for op in results["state_ops"] if op.get("op") == "ammo"]
         self.assertEqual(len(ammo_ops), 1)
+
+    def test_dispatcher_handles_malformed_targets(self):
+        """Malformed target entries should not turn the whole action into an error."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[7, 3, 5]):
+            results = resolve_actions([{
+                "type": "suppressive_fire",
+                "character": "V",
+                "attacker_ref": 8,
+                "attacker_autofire": 6,
+                "targets": ["Ganger", None],
+            }])
+        r = results["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(len(r["targets"]), 2)
 
 
 if __name__ == "__main__":

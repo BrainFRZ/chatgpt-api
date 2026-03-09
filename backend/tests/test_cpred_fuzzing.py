@@ -42,9 +42,14 @@ from game_systems.cpred_mechanics import (
     resolve_ramming,
     resolve_vehicle_weak_point,
     resolve_spike_strip,
+    resolve_hustle,
+    resolve_find_item,
+    resolve_haggle,
+    resolve_facedown,
+    resolve_suppressive_fire,
     RESOLVE_MECHANICS_TOOL,
 )
-from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE, CYBERWARE_TABLE
+from game_systems.cpred_tables import RANGED_DV_TABLE, AUTOFIRE_DV_TABLE, CYBERWARE_TABLE, NIGHT_MARKET_DV
 from game_systems.cpred_combat import _replace_combat_dict as _replace_cpred_combat_dict
 from main import (
     _convert_state_ops_to_vehicle_updates,
@@ -52,7 +57,12 @@ from main import (
     _merge_vehicle_updates,
     _replace_combat_dict_legacy,
 )
-from pipeline import _replace_combat_dict
+from pipeline import (
+    _replace_combat_dict,
+    _sync_cpred_character_states_from_game_state,
+    _sync_hud_funds_from_edgerunners,
+    scope_hud_funds,
+)
 
 MOCK = "game_systems.cpred_mechanics.random.randint"
 
@@ -631,7 +641,7 @@ class TestResolveDeathSaveFuzz(unittest.TestCase):
     """Boundary and malformed-input tests for resolve_death_save."""
 
     REQUIRED_KEYS = {
-        "type", "d10", "death_save_count", "injury_mod",
+        "type", "d10", "death_save_count", "injury_mod", "roms_death_save_bonus",
         "effective_roll", "threshold", "natural_10", "survived", "formatted",
     }
 
@@ -1154,9 +1164,10 @@ class TestResolveActionsUncommittedFuzz(unittest.TestCase):
         }])
         out = result["results"][0]
         if out["success"]:
-            self.assertEqual(out["zap_dice"], interface_rank, f"seed={seed}")
-            self.assertGreaterEqual(out["zap_damage"], interface_rank, f"seed={seed}")
-            self.assertLessEqual(out["zap_damage"], interface_rank * 6, f"seed={seed}")
+            # Zap always deals flat 1d6 (Hacking Rulebook §7)
+            self.assertEqual(out["zap_dice"], 1, f"seed={seed}")
+            self.assertGreaterEqual(out["zap_damage"], 1, f"seed={seed}")
+            self.assertLessEqual(out["zap_damage"], 6, f"seed={seed}")
             rez_ops = [op for op in result["state_ops"] if op.get("op") == "rez_damage"]
             self.assertEqual(len(rez_ops), 1, f"seed={seed}")
             self.assertEqual(rez_ops[0]["target"], "Hellhound", f"seed={seed}")
@@ -1981,7 +1992,7 @@ class TestToolSchema(unittest.TestCase):
                     "initiative", "opposed_check", "program_attack",
                     "program_attack_vs_netrunner", "ice_attack_vs_program", "ambush",
                     "driving_check", "ramming", "vehicle_weak_point", "spike_strip",
-                    "suppressive_fire"}
+                    "hustle", "find_item", "haggle", "facedown", "suppressive_fire"}
         self.assertEqual(set(type_enum), expected)
 
 
@@ -2387,6 +2398,492 @@ class TestMainPipelineMergeAndReplaceFuzz(unittest.TestCase):
                     self.assertEqual(ps["combat"].get(key), old[key])
                 elif key in new:
                     self.assertEqual(ps["combat"].get(key), new[key])
+
+
+# ===========================================================================
+# TestResolveHustleFuzz
+# ===========================================================================
+class TestResolveHustleFuzz(unittest.TestCase):
+    """Boundary and extreme-value tests for resolve_hustle."""
+
+    REQUIRED_KEYS = {"die", "role", "role_ability_rank", "modifiers", "total",
+                     "dv", "success", "payout", "state_ops", "formatted", "on_outcome"}
+
+    @patch(MOCK, return_value=5)
+    def test_rank_zero(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=0, dv=4, payout=100, character="V")
+        self.assertEqual(r["total"], 5)
+        self.assertTrue(r["success"])
+        self.assertTrue(self.REQUIRED_KEYS <= set(r.keys()))
+
+    @patch(MOCK, return_value=5)
+    def test_negative_rank(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=-3, dv=1, payout=100, character="V")
+        self.assertEqual(r["total"], 2)  # 5 + (-3)
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_very_large_rank(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=10000, dv=1, payout=100, character="V")
+        self.assertEqual(r["total"], 10005)
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_payout_zero(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=4, dv=1, payout=0, character="V")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["payout"], 0)
+        # Even on success, payout=0 still emits the op (with change=0)
+        self.assertEqual(len(r["state_ops"]), 1)
+        self.assertEqual(r["state_ops"][0]["change"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_negative_payout_clamped(self, _m):
+        """Negative payout is clamped to 0 via max(0, payout)."""
+        r = resolve_hustle(role="Solo", role_ability_rank=4, dv=1, payout=-500, character="V")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["payout"], 0)
+        self.assertEqual(r["state_ops"][0]["change"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_dv_zero(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=0, dv=0, payout=100, character="V")
+        self.assertTrue(r["success"])  # 5 > 0
+
+    @patch(MOCK, return_value=5)
+    def test_dv_very_high(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=0, dv=9999, payout=100, character="V")
+        self.assertFalse(r["success"])
+        self.assertEqual(r["payout"], 0)
+
+    @patch(MOCK, return_value=5)
+    def test_dv_negative(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=0, dv=-100, payout=100, character="V")
+        self.assertTrue(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_very_large_payout(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=10, dv=1, payout=999999, character="V")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["payout"], 999999)
+
+    @patch(MOCK, return_value=5)
+    def test_empty_role_string(self, _m):
+        r = resolve_hustle(role="", role_ability_rank=4, dv=1, payout=100, character="V")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["role"], "")
+
+    @patch(MOCK, return_value=5)
+    def test_empty_character_string(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=4, dv=1, payout=100, character="")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["state_ops"][0]["edgerunner"], "")
+
+    @patch(MOCK, return_value=5)
+    def test_wounded_and_luck_combined(self, _m):
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=4, dv=10, payout=100,
+            seriously_wounded=True, luck_spent=3, character="V",
+        )
+        # 5 + 4 - 2 + 3 = 10; 10 > 10 is False (must BEAT)
+        self.assertEqual(r["total"], 10)
+        self.assertFalse(r["success"])
+
+    @patch(MOCK, return_value=5)
+    def test_negative_luck_ignored(self, _m):
+        r = resolve_hustle(role="Fixer", role_ability_rank=4, dv=1, payout=100,
+                           luck_spent=-5, character="V")
+        self.assertEqual(r["total"], 9)  # 5 + 4, luck clamped to 0
+
+    @patch(MOCK, return_value=5)
+    def test_hustle_in_tool_enum(self, _m):
+        """hustle is in RESOLVE_MECHANICS_TOOL enum."""
+        enum_values = RESOLVE_MECHANICS_TOOL["input_schema"]["properties"]["actions"]["items"]["properties"]["type"]["enum"]
+        self.assertIn("hustle", enum_values)
+
+    @given(
+        rank=st.integers(-100, 100),
+        dv=st.integers(-100, 100),
+        payout=st.integers(-1000, 10000),
+        wounded=st.booleans(),
+        luck=st.integers(-10, 20),
+    )
+    @settings(max_examples=50)
+    def test_hypothesis_hustle_never_crashes(self, rank, dv, payout, wounded, luck):
+        """Property: resolve_hustle never raises regardless of inputs."""
+        r = resolve_hustle(
+            role="Fixer", role_ability_rank=rank, dv=dv, payout=payout,
+            seriously_wounded=wounded, luck_spent=luck, character="V",
+        )
+        self.assertIsInstance(r, dict)
+        self.assertTrue(self.REQUIRED_KEYS <= set(r.keys()))
+        self.assertIsInstance(r["formatted"], str)
+        self.assertGreaterEqual(r["payout"], 0)
+        if r["success"]:
+            self.assertEqual(len(r["state_ops"]), 1)
+        else:
+            self.assertEqual(len(r["state_ops"]), 0)
+            self.assertEqual(r["payout"], 0)
+
+
+class TestResolveNightMarketFuzz(unittest.TestCase):
+    """Property-based coverage for new night market mechanics."""
+
+    FIND_ITEM_KEYS = {
+        "die", "rank", "total", "dv", "success", "item_name",
+        "price_category", "state_ops", "formatted", "on_outcome",
+    }
+    HAGGLE_KEYS = {
+        "buyer_die", "vendor_die", "buyer_total", "vendor_total", "success",
+        "discount_pct", "original_price", "final_price", "savings",
+        "state_ops", "formatted", "on_outcome",
+    }
+
+    @settings(max_examples=150, deadline=None)
+    @given(
+        rank=st.integers(min_value=-100, max_value=100),
+        price_category=st.one_of(
+            st.sampled_from(list(NIGHT_MARKET_DV.keys())),
+            st.text(min_size=0, max_size=20),
+        ),
+        item_name=st.text(min_size=0, max_size=20),
+        wounded=st.booleans(),
+        luck=st.integers(min_value=-20, max_value=20),
+    )
+    def test_find_item_invariants(self, rank, price_category, item_name, wounded, luck):
+        result = resolve_find_item(
+            rank=rank,
+            price_category=price_category,
+            item_name=item_name,
+            character="V",
+            seriously_wounded=wounded,
+            luck_spent=luck,
+            on_success="available",
+            on_failure="missing",
+        )
+        self.assertTrue(self.FIND_ITEM_KEYS <= set(result.keys()))
+        self.assertEqual(result["state_ops"], [])
+        self.assertEqual(result["price_category"], price_category)
+        self.assertEqual(result["item_name"], item_name)
+        self.assertEqual(result["dv"], NIGHT_MARKET_DV.get(price_category, 17))
+        if result["dv"] == 0:
+            self.assertTrue(result["success"])
+            self.assertIsNone(result["die"])
+            self.assertIsNone(result["total"])
+            self.assertEqual(result["on_outcome"], "available")
+        else:
+            self.assertIsInstance(result["die"], dict)
+            self.assertIsInstance(result["total"], int)
+            self.assertEqual(result["success"], result["total"] > result["dv"])
+            self.assertEqual(result["on_outcome"], "available" if result["success"] else "missing")
+
+    @settings(max_examples=150, deadline=None)
+    @given(
+        buyer_cool=st.integers(min_value=-20, max_value=20),
+        buyer_trading=st.integers(min_value=-20, max_value=20),
+        vendor_cool=st.integers(min_value=-20, max_value=20),
+        vendor_trading=st.integers(min_value=-20, max_value=20),
+        item_price=st.integers(min_value=-1000, max_value=20_000),
+        base_discount=st.integers(min_value=-100, max_value=100),
+        wounded=st.booleans(),
+        luck=st.integers(min_value=-20, max_value=20),
+    )
+    def test_haggle_invariants(
+        self,
+        buyer_cool,
+        buyer_trading,
+        vendor_cool,
+        vendor_trading,
+        item_price,
+        base_discount,
+        wounded,
+        luck,
+    ):
+        result = resolve_haggle(
+            buyer_cool=buyer_cool,
+            buyer_trading=buyer_trading,
+            vendor_cool=vendor_cool,
+            vendor_trading=vendor_trading,
+            item_name="item",
+            item_price=item_price,
+            base_discount=base_discount,
+            character="V",
+            seriously_wounded=wounded,
+            luck_spent=luck,
+            on_success="discount",
+            on_failure="full_price",
+        )
+        self.assertTrue(self.HAGGLE_KEYS <= set(result.keys()))
+        self.assertEqual(len(result["state_ops"]), 1)
+        self.assertEqual(result["state_ops"][0]["op"], "eurobucks")
+        self.assertEqual(result["state_ops"][0]["change"], -result["final_price"])
+        self.assertEqual(result["savings"], result["original_price"] - result["final_price"])
+        self.assertGreaterEqual(result["original_price"], 0)
+        self.assertGreaterEqual(result["final_price"], 0)
+        self.assertEqual(result["on_outcome"], "discount" if result["success"] else "full_price")
+        if result["success"]:
+            self.assertGreaterEqual(result["discount_pct"], 5)
+            self.assertLessEqual(result["discount_pct"], 50)
+            if result["original_price"] > 0:
+                self.assertGreaterEqual(result["final_price"], 1)
+                self.assertLessEqual(result["final_price"], result["original_price"])
+        else:
+            self.assertEqual(result["discount_pct"], 0)
+            self.assertEqual(result["final_price"], result["original_price"])
+            self.assertEqual(result["savings"], 0)
+
+
+class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
+    """Property-based coverage for new social and suppressive-fire mechanics."""
+
+    FACEDOWN_KEYS = {
+        "initiator_die", "opponent_die", "initiator_total", "opponent_total",
+        "success", "margin", "state_ops", "formatted", "on_outcome",
+    }
+    SUPPRESSIVE_TARGET = st.fixed_dictionaries({
+        "name": st.text(min_size=0, max_size=16),
+        "will": st.integers(min_value=-20, max_value=20),
+        "concentration": st.integers(min_value=-20, max_value=20),
+        "seriously_wounded": st.booleans(),
+    })
+
+    @settings(max_examples=150, deadline=None)
+    @given(
+        initiator_cool=st.integers(min_value=-20, max_value=20),
+        initiator_concentration=st.integers(min_value=-20, max_value=20),
+        initiator_rep=st.integers(min_value=-10, max_value=10),
+        opponent_cool=st.integers(min_value=-20, max_value=20),
+        opponent_concentration=st.integers(min_value=-20, max_value=20),
+        opponent_rep=st.integers(min_value=-10, max_value=10),
+        wounded_initiator=st.booleans(),
+        wounded_opponent=st.booleans(),
+        luck=st.integers(min_value=-20, max_value=20),
+    )
+    def test_facedown_invariants(
+        self,
+        initiator_cool,
+        initiator_concentration,
+        initiator_rep,
+        opponent_cool,
+        opponent_concentration,
+        opponent_rep,
+        wounded_initiator,
+        wounded_opponent,
+        luck,
+    ):
+        result = resolve_facedown(
+            initiator_cool=initiator_cool,
+            initiator_concentration=initiator_concentration,
+            initiator_rep=initiator_rep,
+            opponent_cool=opponent_cool,
+            opponent_concentration=opponent_concentration,
+            opponent_rep=opponent_rep,
+            character="V",
+            target="Target",
+            seriously_wounded_initiator=wounded_initiator,
+            seriously_wounded_opponent=wounded_opponent,
+            luck_spent=luck,
+            on_success="back_down",
+            on_failure="stand_firm",
+        )
+        self.assertTrue(self.FACEDOWN_KEYS <= set(result.keys()))
+        self.assertEqual(result["margin"], result["initiator_total"] - result["opponent_total"])
+        self.assertEqual(result["success"], result["initiator_total"] > result["opponent_total"])
+        self.assertEqual(result["state_ops"], [])
+        self.assertEqual(result["on_outcome"], "back_down" if result["success"] else "stand_firm")
+
+    @settings(max_examples=150, deadline=None)
+    @given(
+        attacker_ref=st.integers(min_value=-20, max_value=20),
+        attacker_autofire=st.integers(min_value=-20, max_value=20),
+        targets=st.lists(SUPPRESSIVE_TARGET, min_size=0, max_size=8),
+        wounded_attacker=st.booleans(),
+        luck=st.integers(min_value=-20, max_value=20),
+        rel_bonus=st.integers(min_value=-10, max_value=10),
+        weapon_name=st.text(min_size=0, max_size=16),
+    )
+    def test_suppressive_fire_invariants(
+        self,
+        attacker_ref,
+        attacker_autofire,
+        targets,
+        wounded_attacker,
+        luck,
+        rel_bonus,
+        weapon_name,
+    ):
+        result = resolve_suppressive_fire(
+            attacker_ref=attacker_ref,
+            attacker_autofire=attacker_autofire,
+            targets=targets,
+            seriously_wounded_attacker=wounded_attacker,
+            luck_spent=luck,
+            rel_bonus=rel_bonus,
+            character_name="V",
+            weapon_name=weapon_name,
+            on_success="suppressed",
+            on_failure="resisted",
+        )
+        self.assertEqual(len(result["targets"]), len(targets))
+        self.assertEqual(result["rounds_consumed"], 10)
+        suppressed_flags = [target["suppressed"] for target in result["targets"]]
+        self.assertEqual(result["any_suppressed"], any(suppressed_flags))
+        self.assertEqual(result["success"], any(suppressed_flags))
+        self.assertEqual(result["on_outcome"], "suppressed" if result["success"] else "resisted")
+        for target in result["targets"]:
+            self.assertEqual(target["suppressed"], result["attacker_total"] > target["defender_total"])
+        ammo_ops = [op for op in result["state_ops"] if op.get("op") == "ammo"]
+        self.assertEqual(len(ammo_ops), 1 if weapon_name else 0)
+        if ammo_ops:
+            self.assertEqual(ammo_ops[0]["rounds_consumed"], 10)
+            self.assertEqual(ammo_ops[0]["weapon_name"], weapon_name)
+
+
+class TestCPREDSyncFuzz(unittest.TestCase):
+    """Property-based coverage for new CPRED sync helpers."""
+
+    @settings(max_examples=120, deadline=None)
+    @given(
+        hp_current=st.integers(min_value=-50, max_value=200),
+        hp_max=st.integers(min_value=-50, max_value=200),
+        humanity_current=st.integers(min_value=-50, max_value=200),
+        humanity_max=st.integers(min_value=-50, max_value=200),
+        luck_current=st.integers(min_value=-20, max_value=50),
+        luck_max=st.integers(min_value=-20, max_value=50),
+        armor_head=st.integers(min_value=-10, max_value=25),
+        armor_body=st.integers(min_value=-10, max_value=25),
+        model_conditions=st.lists(NAME, unique=True, min_size=0, max_size=5),
+        old_synced_conditions=st.lists(NAME, unique=True, min_size=0, max_size=5),
+        er_conditions=st.lists(NAME, unique=True, min_size=0, max_size=5),
+        seriously_wounded=st.booleans(),
+        critical_injuries=st.lists(NAME, unique=True, min_size=0, max_size=4),
+    )
+    def test_sync_character_state_invariants(
+        self,
+        hp_current,
+        hp_max,
+        humanity_current,
+        humanity_max,
+        luck_current,
+        luck_max,
+        armor_head,
+        armor_body,
+        model_conditions,
+        old_synced_conditions,
+        er_conditions,
+        seriously_wounded,
+        critical_injuries,
+    ):
+        character_states = {
+            "V": {
+                "data": {
+                    "type": "pc",
+                    "conditions": model_conditions + old_synced_conditions,
+                    "resources": [{"label": "Ammo", "current": 3, "max": 6}],
+                },
+                "_synced_general_conditions": old_synced_conditions,
+            }
+        }
+        game_state = {
+            "edgerunners": {
+                "V": {
+                    "hp": {"current": hp_current, "max": hp_max},
+                    "humanity": {"current": humanity_current, "max": humanity_max},
+                    "luck": {"current": luck_current, "max": luck_max},
+                    "armor": {"head": armor_head, "body": armor_body},
+                    "conditions": er_conditions,
+                    "critical_injuries": [{"name": name} for name in critical_injuries],
+                    "seriously_wounded": seriously_wounded,
+                }
+            }
+        }
+
+        result = _sync_cpred_character_states_from_game_state(character_states, game_state, current_turn=1)
+        entry = result["V"]
+        data = entry["data"] if "data" in entry else entry
+
+        vital_map = {item["label"]: item for item in data["vitals"]}
+        self.assertEqual(vital_map["HP"]["current"], hp_current)
+        self.assertEqual(vital_map["HP"]["max"], hp_max)
+        self.assertEqual(vital_map["Humanity"]["current"], humanity_current)
+        self.assertEqual(vital_map["Humanity"]["max"], humanity_max)
+
+        resource_map = {item["label"]: item for item in data["resources"]}
+        self.assertEqual(resource_map["Luck"]["current"], luck_current)
+        self.assertEqual(resource_map["Luck"]["max"], luck_max)
+        self.assertEqual(resource_map["Armor (Head)"]["current"], armor_head)
+        self.assertEqual(resource_map["Armor (Head)"]["max"], armor_head)
+        self.assertEqual(resource_map["Armor (Body)"]["current"], armor_body)
+        self.assertEqual(resource_map["Armor (Body)"]["max"], armor_body)
+        self.assertEqual(resource_map["Ammo"]["current"], 3)
+
+        expected_conditions = [cond for cond in model_conditions if cond not in set(old_synced_conditions)]
+        for cond in er_conditions:
+            if cond not in expected_conditions:
+                expected_conditions.append(cond)
+        if seriously_wounded:
+            expected_conditions.append("Seriously Wounded")
+        expected_conditions.extend(f"Critical Injury: {name}" for name in critical_injuries)
+        self.assertEqual(data["conditions"], expected_conditions)
+        self.assertEqual(entry["_synced_general_conditions"], er_conditions)
+
+    @settings(max_examples=120, deadline=None)
+    @given(
+        edgerunner_wallets=st.dictionaries(
+            keys=NAME,
+            values=st.one_of(st.integers(min_value=-5000, max_value=50_000), st.text(min_size=0, max_size=8)),
+            min_size=1,
+            max_size=6,
+        ),
+        extra_funds=st.dictionaries(keys=NAME, values=st.text(min_size=0, max_size=16), max_size=6),
+        present_names=st.sets(NAME, max_size=6),
+    )
+    def test_sync_and_scope_hud_funds_invariants(self, edgerunner_wallets, extra_funds, present_names):
+        er_names = set(edgerunner_wallets.keys())
+        hud_state = {
+            "funds": {
+                **extra_funds,
+                **{name: f"old-{idx}" for idx, name in enumerate(edgerunner_wallets)},
+            }
+        }
+        game_state = {
+            "edgerunners": {
+                name: {"eurobucks": value}
+                for name, value in edgerunner_wallets.items()
+            }
+        }
+
+        synced = _sync_hud_funds_from_edgerunners(hud_state, game_state)
+        numeric_wallets = {
+            name: value for name, value in edgerunner_wallets.items() if isinstance(value, int)
+        }
+        if not numeric_wallets:
+            self.assertEqual(synced, hud_state)
+            return
+
+        self.assertEqual(synced["_character_fund_keys"], sorted(er_names))
+        for name, value in numeric_wallets.items():
+            self.assertEqual(synced["funds"][name], f"{value:,} eb")
+        for name in er_names - set(numeric_wallets.keys()):
+            self.assertNotIn(name, synced["funds"])
+        for key, value in extra_funds.items():
+            if key not in er_names:
+                self.assertEqual(synced["funds"][key], value)
+
+        scoped = scope_hud_funds(
+            synced,
+            {"pcs_present": sorted(present_names), "npcs_present": []},
+            {},
+        )
+        if not present_names:
+            self.assertEqual(scoped, synced)
+            return
+        expected_funds = {
+            key: value
+            for key, value in synced["funds"].items()
+            if key in present_names or key not in er_names
+        }
+        self.assertEqual(scoped["funds"], expected_funds)
 
 
 if __name__ == "__main__":

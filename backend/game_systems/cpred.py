@@ -19,6 +19,7 @@ from . import cpred_net_combat as _cpred_net_combat
 # Re-export core functions used by pipeline.py and other external callers
 from .cpred_core import (  # noqa: F401
     compute_rel_bonus,
+    max_roms_score,
     init_game_state,
     apply_game_state,
     build_game_injection,
@@ -412,6 +413,9 @@ Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Se
 - initiative: {"type": "initiative", "character": "all", "combatants": [{"name": "<name>", "ref": <REF stat>}, ...]}
   Roll d10+REF per combatant. Returns sorted initiative order.
 
+- hustle: {"type": "hustle", "character": "<name>", "role": "<Role name>", "role_ability_rank": <int>, "dv": <int>, "payout": <int eurobucks>, "seriously_wounded": <bool>, "luck_spent": <0-N>, "on_success": "<narrative>", "on_failure": "<narrative>"}
+  Downtime income roll: d10 + Role Ability Rank vs DV. Backend auto-emits eurobucks on success — do NOT also emit a eurobucks edgerunner_op (the resolver handles payout). On success, update character_states to reflect the new funds balance.
+
 CHARACTER CREATION:
 - Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
 
@@ -558,11 +562,26 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - Combat bonuses: Deeply negative RS (hatred/obsession) and high RomS (intimate familiarity) apply "all" bonuses to combat rolls too — the backend auto-applies these.
 - Bootstrap: When [RELATIONSHIP STATE] is empty, use "set" ops to initialize NPCs and factions from context.
 
+### Night Market Mechanics:
+- find_item: Fixer Operator rank + d10 vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.
+- haggle: Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.
+- Typical flow: find_item → (if found) haggle to negotiate price. Haggle always deducts eurobucks.
+
+### Facedown (§11):
+When a character tries to intimidate, stare down, or threaten someone into backing off, use the `facedown` action type in resolve_mechanics. This is the CRB §11 Facedown — an opposed COOL + Concentration contest where Reputation provides an optional edge.
+- Call resolve_mechanics with: {type: "facedown", character: "<initiator>", target: "<opponent>", initiator_cool, initiator_concentration, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_concentration, opponent_rep (0 if none), on_success: "<what happens if they back down>", on_failure: "<what happens if they don't>"}
+- Backend resolves: both sides roll d10 + COOL + Concentration + Rep. Ties favor the opponent. Returns formatted roll string and success/failure.
+- Rep is a bonus, not a requirement — a zero-rep edgerunner with high COOL and Concentration can absolutely win a Facedown. Rep just tips the scales for those who have it.
+- When to use: Intimidation standoffs, staredowns, threats to make someone back off, "you don't want to do this" moments. Any direct confrontation where one side tries to cow the other through force of will.
+- When NOT to use: Persuasion or negotiation (use skill_check), combat actions (use attack types), contests of non-intimidation skills (use opposed_check).
+- Rep lookup: Read Rep from character sheets. For NPCs without explicit Rep, use 0 or estimate from context (street thug ~1-2, gang lieutenant ~3-4, known fixer ~4-5, corpo exec ~2-3, legend ~8+).
+- Narrative: On success, the opponent backs down, flinches, or yields. On failure, they hold firm and the initiator must escalate or retreat.
+
 ### Dice Mechanics (relationship modifiers):
 - Relationship bonuses are auto-applied by the backend when your action includes a `target`. For skill_check, also include `check_context` (e.g. "social", "persuasion", "perception"). Combat actions (ranged_attack, melee_attack, autofire) always use "combat" context automatically.
 - Most RS/FR bonuses are social-only. But deeply negative RS ("all" penalty from hatred) and high RomS ("all" bonus from intimacy) apply to combat rolls too.
 - Maximum combined relationship bonus: ±5 to any single check.
-- RomS mechanical bonuses: T2 = -1 Death Save rolls; T3-T4 = +1 LUCK/session; T5 = take damage for partner 1/session; T6 = redirect 10 dmg 1/session.
+- RomS mechanical bonuses (auto-applied by backend): T2 = -1 Death Save rolls; T3 = +1 attacks when fighting together (both in same combat round); T3-T4 = +1 LUCK on luck_reset. T5/T6 damage redirect is narrative — describe the partner intercepting the hit.
 
 ### IP Scoring (Improvement Points — §7):
 Use the "ip_ops" array to maintain running numerical scores for IP awards. The [IP TRACKER] injection shows current session scores and prior awards — it persists across context trims and is your authoritative memory of session performance.
@@ -684,13 +703,15 @@ Action types for resolve_mechanics:
 - program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+- hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.
+- facedown: {type, character, target, initiator_cool, initiator_concentration, initiator_rep, opponent_cool, opponent_concentration, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Reputation Facedown (§11): COOL + Concentration + d10 + Rep vs same. For intimidation standoffs. Ties favor opponent.
 - suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed. Ties favor defender. Consumes 10 rounds. No damage.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type.
 Active effects shown in injection — narrate them, do NOT manually track them. Giant's forced Jack Out cascades all rezzed Black ICE effects — this can be lethal. KRASH Barrier = immune to forced Jack Out. When programs are DESTROYED, narrate dramatically. Fire extinguish → backend auto-sets nudity condition.
 
 When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated. Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
-For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls Interface rank d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
+For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls 1d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
 Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack/NET session.
@@ -1354,7 +1375,7 @@ Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE comba
 When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in report_hack_state.
 For anti-program ICE (Dragon/Killer/Sabertooth) attacking programs, use `ice_attack_vs_program`: {type, character (ICE name), ice_type, target_program, target_program_def, target_program_rez}.
 When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
-For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls Interface rank d6 REZ damage on hit and auto-applies to ice_status.
+For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
 Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack.
@@ -1379,16 +1400,24 @@ An exchange may cover part or all of a Netrunner turn. The player controls how m
 ### Meat Actions During a Hack
 On their turn, a Netrunner chooses EITHER Meat Action(s) OR NET Actions — never both. If the player specifies a Meat Action (shoot, move, take cover, etc.), resolve it as a normal meatspace action. This consumes the Netrunner's entire turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to complete the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
 
+### Architecture Difficulty Rating (p.210-211)
+When generating a NET architecture, choose a Difficulty Rating based on SR:
+- SR 1 → Basic (DV 6) | SR 2-3 → Standard (DV 8) | SR 4 → Uncommon (DV 10) | SR 5 → Advanced (DV 12)
+All Password, File, and Control Node nodes use the SAME DV from the chosen rating. DVs do NOT escalate by node depth.
+Black ICE nodes do NOT use this DV — their stats are resolved by backend from ICE type.
+**Lobby (first two nodes):** The first two nodes may use lighter content regardless of rating — File DV6, Password DV6, or Password DV8.
+**Custom architectures:** GMs may mix DVs across nodes for narrative purposes (CRB p.209), but the default is uniform DV from the Difficulty Rating.
+
 ### Quick Hack Flow (Rulebook §3)
 3 linear nodes (entry → obstacle → objective).
-- Exchange 1: Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Initialize revealed_nodes with the starting node. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
+- Exchange 1: Choose Difficulty Rating by SR (see above). Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Initialize revealed_nodes with the starting node. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
 - Exchanges 2-5: Navigate obstacle nodes, resolve ICE encounters and checks. One player decision + resolution per exchange.
 - Final exchange: Objective node + completion. Set hack_complete: true.
 - Target 3-6 exchanges total. NEVER compress multiple phases into one exchange. NEVER choose actions for the player.
 
 ### Full Run Flow (Rulebook §4)
 4-6 node network with routing choices.
-- Exchange 1: Generate system architecture per Rulebook §4. Store in hack_state.system_map as JSON: {"sr": N, "nodes": {"NodeName": {"type": "gateway|data_node|control_node|password_gate|target", "ice": "patrol|tar|black|trace|null", "dv": N, "connections": [...], "contents": "..."}}}
+- Exchange 1: Choose Difficulty Rating by SR (see above). Generate system architecture per Rulebook §4. Store in hack_state.system_map as JSON: {"sr": N, "difficulty": "basic|standard|uncommon|advanced", "nodes": {"NodeName": {"type": "gateway|data_node|control_node|password_gate|target", "ice": "patrol|tar|black|trace|null", "dv": N, "connections": [...], "contents": "..."}}}
 - Initialize revealed_nodes with the starting node. Describe the Gateway node. The player does NOT see the full map — reveal only through navigation and Probe/Pathfinder.
 - Subsequent exchanges: Player navigates, fights ICE, accesses objectives. Only reveal nodes the Netrunner can see.
 - Target 5-10 exchanges total.
@@ -1418,8 +1447,8 @@ Alert only rises from events INSIDE the architecture. These are the triggers —
 | 0 | Dormant | Normal DVs. System unaware. |
 | 1–2 | Elevated | System suspicious. No mechanical change yet. |
 | 3–4 | Active Search | **ALL Interface check DVs +2.** Patrol ICE detection rolls get +2 bonus. |
-| 5–6 | Lockdown | DV +2 persists. **Moving between nodes requires an Interface check (DV 6 + alert_level).** If no Trace ICE is active anywhere, spawn a new Trace ICE at the Gateway (active, REZ = SR × 2). |
-| 7+ | Convergence | **Spawn Black ICE** at the Netrunner's current node (Kraken or equivalent, REZ = SR × 3, treat as fresh hostile). Set `initiate_combat` with reason "Convergence" and facility-appropriate security NPCs. The hack is in endgame — Jack Out or finish the objective NOW. |
+| 5–6 | Lockdown | DV +2 persists. **Moving between nodes requires an Interface check (DV = system Base DV from SR table).** If no Trace ICE is active anywhere, spawn a new Trace ICE at the Gateway (active, REZ = SR × 2). |
+| 7+ | Convergence | **Spawn Black ICE** at the Netrunner's current node (type scales with SR — auto-spawned by backend). Set `initiate_combat` with reason "Convergence" and facility-appropriate security NPCs. The hack is in endgame — Jack Out or finish the objective NOW. |
 
 When alert_level crosses a threshold boundary, apply the new effects immediately — do NOT wait until the next exchange. Stack with existing effects (e.g., DV +2 at Active Search persists through Lockdown and Convergence).
 
@@ -1676,7 +1705,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **Netrunner's body is in meatspace**: can be shot, hit, caught in AoE. Track via character_updates. With Virtuality Goggles the Netrunner can still see and move in meatspace; without them the Netrunner is **Unconscious** in meatspace (no Move Action, no dodge).
 - **Brain damage**: When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in hack_state or character_updates.hp_delta. For anti-program ICE, use `ice_attack_vs_program`: {type, character, ice_type, target_program, target_program_def, target_program_rez}.
 - **Program deactivation**: When resolve_mechanics returns `program_deactivated`, the program is deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
-- **Zap damage**: For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls Interface rank d6 REZ damage on hit and auto-applies to ice_status.
+- **Zap damage**: For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 - **TAR penalty**: TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 - **Alert DV penalty**: +2 to all NET skill check DVs at alert 3+ is auto-applied by the backend. Do NOT add +2 manually.
 - **Forced disconnect**: Backend auto-sets net_complete=true on explicit forced jack-out/flatline conditions.
@@ -2012,7 +2041,7 @@ The backend resolves dice. Do NOT roll dice or calculate outcomes.
 
 DICE ACTION TYPES for the "actions" array:
 - skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true} — for flat Interface checks
-- opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls Interface rank d6 REZ damage on hit. Skill fields default to 0 for NET checks.
+- opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET checks.
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
@@ -2076,7 +2105,7 @@ MEATSPACE ACTION TYPES:
 
 NET ACTION TYPES:
 - skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true)
-- opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls Interface rank d6 REZ damage on hit. Skill fields default to 0 for NET.
+- opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET.
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.

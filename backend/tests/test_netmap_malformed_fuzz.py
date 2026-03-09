@@ -1140,12 +1140,19 @@ class TestUncommittedHackStateFuzz(unittest.TestCase):
     @settings(max_examples=220, deadline=None)
     @given(seed=st.integers(min_value=0, max_value=999_999))
     def test_forced_disconnect_seeded(self, seed):
+        """Forced disconnect triggers when character has dead/unconscious condition."""
         rng = random.Random(seed)
         max_hp = rng.randint(10, 50)
         current_hp = rng.randint(0, max_hp)
         bd = rng.randint(1, 60)
+        # Forced disconnect now checks for explicit conditions, not raw HP math.
+        # Simulate: if brain damage would kill (HP - bd < 0), add "dead" condition.
+        conditions = ["dead"] if current_hp - bd < 0 else []
         hs = cpred_init_hack_state(hacker_name="V")
-        game_state = {"edgerunners": {"V": {"hp": {"current": current_hp, "max": max_hp}}}}
+        er = {"hp": {"current": current_hp, "max": max_hp}}
+        if conditions:
+            er["conditions"] = conditions
+        game_state = {"edgerunners": {"V": er}}
         cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 0}}, resolver_state_ops=[
             {"op": "brain_damage", "change": -bd}
         ], game_state=game_state)

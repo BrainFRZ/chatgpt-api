@@ -17,6 +17,12 @@ from typing import Optional, Iterator
 from providers import ParsedResponse, StreamEvent, Pricing
 from providers.openai_provider import OpenAIProvider, FLEX_PRICING, STANDARD_PRICING
 from combat_state import replace_combat_dict_preserving_backend_keys
+from game_systems.cpred_identity import (
+    build_relationship_context,
+    collect_relationship_present_names,
+    state_op_has_subject_kind,
+    state_op_subject_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +177,12 @@ def generate_dice_pool(game_system_id: str) -> str:
 # Deterministic Mechanics Resolution (cpred only)
 # ============================================================
 
-def resolve_pipeline_mechanics(beats: list, game_state: dict) -> tuple:
+def resolve_pipeline_mechanics(
+    beats: list,
+    game_state: dict,
+    relationship_owner: str = "",
+    relationship_present_names=None,
+) -> tuple:
     """Resolve structured beats from Events using deterministic code.
 
     For each beat with a non-null "resolution", dispatch to the appropriate
@@ -233,10 +244,17 @@ def resolve_pipeline_mechanics(beats: list, game_state: dict) -> tuple:
         try:
             action = dict(resolution)  # copy so we don't mutate
             action = _hydrate_action_from_state(action)
+            _relationship_context = build_relationship_context(
+                actions=[action],
+                relationship_owner=relationship_owner,
+                relationship_actor_names=shadow_edgerunner_names,
+                relationship_present_names=relationship_present_names,
+            )
             result = resolve_actions(
                 [action],
                 relationships=shadow_state.get("relationships"),
                 factions=shadow_state.get("factions"),
+                relationship_context=_relationship_context,
             )
             action_results = result.get("results", [])
             action_ops = result.get("state_ops", [])
@@ -280,7 +298,7 @@ def resolve_pipeline_mechanics(beats: list, game_state: dict) -> tuple:
                 # Never create synthetic edgerunners in shadow state from NPC/enemy target ops.
                 shadow_ops = [
                     op for op in action_ops
-                    if isinstance(op, dict) and op.get("edgerunner") in shadow_edgerunner_names
+                    if isinstance(op, dict) and state_op_has_subject_kind(op, "edgerunner", shadow_edgerunner_names)
                 ]
                 if shadow_ops:
                     cpred_apply_game_state(shadow_state, {"edgerunner_ops": shadow_ops}, turn=0)
@@ -337,6 +355,12 @@ def _sync_cpred_character_states_from_game_state(
     if not isinstance(edgerunners, dict) or not edgerunners:
         return character_states
 
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
     def _upsert_stat(items: list, label: str, current: int, maximum: int) -> list:
         out = [i for i in items if isinstance(i, dict)]
         for item in out:
@@ -371,21 +395,47 @@ def _sync_cpred_character_states_from_game_state(
         data.setdefault("level", None)
 
         vitals = data.get("vitals", []) if isinstance(data.get("vitals"), list) else []
-        vitals = _upsert_stat(vitals, "HP", int(hp.get("current", 0)), int(hp.get("max", 0)))
-        vitals = _upsert_stat(vitals, "Humanity", int(humanity.get("current", 0)), int(humanity.get("max", 0)))
+        vitals = _upsert_stat(vitals, "HP", _safe_int(hp.get("current", 0)), _safe_int(hp.get("max", 0)))
+        vitals = _upsert_stat(vitals, "Humanity", _safe_int(humanity.get("current", 0)), _safe_int(humanity.get("max", 0)))
         data["vitals"] = vitals
 
         resources = data.get("resources", []) if isinstance(data.get("resources"), list) else []
-        resources = _upsert_stat(resources, "Luck", int(luck.get("current", 0)), int(luck.get("max", 0)))
+        resources = _upsert_stat(resources, "Luck", _safe_int(luck.get("current", 0)), _safe_int(luck.get("max", 0)))
+        armor = er.get("armor", {}) if isinstance(er.get("armor"), dict) else {}
+        head_sp = _safe_int(armor.get("head", 0))
+        body_sp = _safe_int(armor.get("body", 0))
+        resources = _upsert_stat(resources, "Armor (Head)", head_sp, head_sp)
+        resources = _upsert_stat(resources, "Armor (Body)", body_sp, body_sp)
         data["resources"] = resources
 
         existing_conditions = data.get("conditions", [])
         if not isinstance(existing_conditions, list):
             existing_conditions = []
+        synced_general_conditions = existing_entry.get("_synced_general_conditions", [])
+        if not isinstance(synced_general_conditions, list):
+            synced_general_conditions = []
+        synced_general_conditions = {
+            cond for cond in synced_general_conditions if isinstance(cond, str)
+        }
         conditions = [
             c for c in existing_conditions
-            if isinstance(c, str) and c != "Seriously Wounded" and not c.startswith("Critical Injury: ")
+            if (
+                isinstance(c, str)
+                and c != "Seriously Wounded"
+                and not c.startswith("Critical Injury: ")
+                and c not in synced_general_conditions
+            )
         ]
+        # Sync general conditions from edgerunner state (partially_nude, unconscious, etc.)
+        er_conditions = er.get("conditions", [])
+        current_synced_general_conditions = []
+        if isinstance(er_conditions, list):
+            for cond in er_conditions:
+                if isinstance(cond, str) and cond not in conditions:
+                    conditions.append(cond)
+                    current_synced_general_conditions.append(cond)
+                elif isinstance(cond, str):
+                    current_synced_general_conditions.append(cond)
         if er.get("seriously_wounded"):
             conditions.append("Seriously Wounded")
         for ci in er.get("critical_injuries", []):
@@ -395,7 +445,20 @@ def _sync_cpred_character_states_from_game_state(
 
         updates[name] = data
 
-    return apply_character_states(character_states, updates, current_turn)
+    result = apply_character_states(character_states, updates, current_turn)
+    for name in tracked_names:
+        entry = result.get(name)
+        if not isinstance(entry, dict):
+            continue
+        er = edgerunners.get(name, {})
+        er_conditions = er.get("conditions", []) if isinstance(er, dict) else []
+        if isinstance(er_conditions, list):
+            entry["_synced_general_conditions"] = [
+                cond for cond in er_conditions if isinstance(cond, str)
+            ]
+        else:
+            entry["_synced_general_conditions"] = []
+    return result
 
 
 def build_events_messages(
@@ -1356,6 +1419,41 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
     return existing
 
 
+def _apply_resolver_character_state_deltas(
+    character_states: dict,
+    resolver_ops: list,
+    current_turn: int,
+    tracked_edgerunners: Optional[set[str]] = None,
+) -> dict:
+    """Apply resolver condition deltas for non-edgerunners into character_states."""
+    if not isinstance(character_states, dict):
+        character_states = {}
+    if not isinstance(resolver_ops, list) or not resolver_ops:
+        return character_states
+
+    tracked = tracked_edgerunners if isinstance(tracked_edgerunners, set) else set()
+    deltas = {}
+    for op in resolver_ops:
+        if not isinstance(op, dict):
+            continue
+        name = state_op_subject_name(op, "character") or state_op_subject_name(op, "edgerunner")
+        if not isinstance(name, str) or not name or name in tracked:
+            continue
+        op_type = op.get("op")
+        condition = op.get("condition", "")
+        if not isinstance(condition, str) or not condition:
+            continue
+        entry = deltas.setdefault(name, {})
+        if op_type == "add_condition":
+            entry.setdefault("_conditions_add", []).append(condition)
+        elif op_type == "remove_condition":
+            entry.setdefault("_conditions_remove", []).append(condition)
+
+    if not deltas:
+        return character_states
+    return apply_character_states(character_states, deltas, current_turn)
+
+
 # ============================================================
 # Injection Builders (format state for model consumption)
 # ============================================================
@@ -1379,7 +1477,10 @@ def scope_hud_funds(hud_state: dict, scene_state: dict, character_states: dict) 
     present = {n for n in pcs_present + npcs_present if isinstance(n, str) and n}
     if not isinstance(funds, dict) or not present:
         return hud_state
-    all_chars = set(character_states.keys())
+    all_chars = {name for name in character_states.keys() if isinstance(name, str)}
+    tracked_fund_keys = hud_state.get("_character_fund_keys", [])
+    if isinstance(tracked_fund_keys, list):
+        all_chars.update(name for name in tracked_fund_keys if isinstance(name, str))
     return {**hud_state, "funds": {
         k: v for k, v in funds.items() if k in present or k not in all_chars
     }}
@@ -1403,6 +1504,89 @@ def derive_funds_from_ship_credits(hud_state: dict, game_state: dict) -> dict:
         for account, amount in ship_credits.items()
     }
     return {**hud_state, "funds": derived}
+
+
+def _sync_hud_funds_from_edgerunners(hud_state: dict, game_state: dict) -> dict:
+    """Sync per-edgerunner eurobucks from game_state into hud_state.funds.
+
+    Parallels derive_funds_from_ship_credits but for CPRED edgerunner wallets.
+    Preserves non-edgerunner fund keys (e.g. "crew fund") so shared pools remain
+    model-managed.
+    """
+    if not isinstance(hud_state, dict):
+        hud_state = {}
+    if not isinstance(game_state, dict):
+        return hud_state
+    edgerunners = game_state.get("edgerunners", {})
+    if not isinstance(edgerunners, dict) or not edgerunners:
+        return hud_state
+    er_funds = {}
+    er_names = set()
+    for name, er in edgerunners.items():
+        er_names.add(name)
+        if not isinstance(er, dict):
+            continue
+        eb = er.get("eurobucks")
+        if isinstance(eb, (int, float)):
+            er_funds[name] = f"{int(eb):,} eb"
+    if not er_funds:
+        return hud_state
+    # Preserve non-edgerunner keys (shared pools like "crew fund")
+    existing_funds = hud_state.get("funds", {})
+    if not isinstance(existing_funds, dict):
+        existing_funds = {}
+    merged = {k: v for k, v in existing_funds.items() if k not in er_names}
+    merged.update(er_funds)
+    return {**hud_state, "funds": merged, "_character_fund_keys": sorted(er_names)}
+
+
+def _sync_and_scope_cpred_hud_funds(
+    hud_state: dict,
+    game_state: dict,
+    scene_state: dict,
+    character_states: dict,
+) -> dict:
+    """Refresh CPRED wallet HUD from game_state, then re-apply scene scoping."""
+    synced = _sync_hud_funds_from_edgerunners(hud_state, game_state)
+    return scope_hud_funds(synced, scene_state, character_states)
+
+
+def _rebuild_cpred_projections(
+    pipeline_state: dict,
+    current_turn: int,
+    tracked_edgerunners: Optional[set[str]] = None,
+) -> dict:
+    """Rebuild CPRED derived views from authoritative game_state in one place.
+
+    Order is intentional:
+    1. character_states already contain model/resolver non-authoritative deltas
+    2. sync authoritative edgerunner vitals/resources/conditions from game_state
+    3. rebuild/scoped HUD funds from authoritative edgerunner balances
+    """
+    if not isinstance(pipeline_state, dict):
+        return {"character_states": {}, "hud_state": {}, "hud_line": ""}
+
+    character_states = _sync_cpred_character_states_from_game_state(
+        pipeline_state.get("character_states", {}),
+        pipeline_state.get("game_state", {}),
+        current_turn,
+        tracked_edgerunners=tracked_edgerunners,
+    )
+    pipeline_state["character_states"] = character_states
+
+    hud_state = _sync_and_scope_cpred_hud_funds(
+        pipeline_state.get("hud_state", {}),
+        pipeline_state.get("game_state", {}),
+        pipeline_state.get("scene_state", {}),
+        character_states,
+    )
+    pipeline_state["hud_state"] = hud_state
+
+    return {
+        "character_states": character_states,
+        "hud_state": hud_state,
+        "hud_line": _format_cpred_hud_line(hud_state),
+    }
 
 
 def build_hud_state_injection(hud_state: dict, scene_state: dict, character_states: dict, game_state: dict = None) -> str:
@@ -1790,15 +1974,9 @@ def run_pipeline(
             pipeline_state["game_state"] = gs["init_game_state"]()
         gs["apply_game_state"](pipeline_state["game_state"], events_data, current_turn)
 
-    # Derive hud_state.funds from ship.credits (single source of truth), then scene-scope
+    # Persist HUD state from Events. CPRED authoritative funds are rebuilt later
+    # after character/game-state updates so model ordering cannot leak stale values.
     if "hud_state" in events_data:
-        events_data["hud_state"] = derive_funds_from_ship_credits(
-            events_data["hud_state"],
-            pipeline_state.get("game_state"))
-        events_data["hud_state"] = scope_hud_funds(
-            events_data["hud_state"],
-            pipeline_state.get("scene_state", {}),
-            pipeline_state.get("character_states", {}))
         pipeline_state["hud_state"] = events_data["hud_state"]
 
     # Persist combat state (initiative tracker) from Events
@@ -1822,6 +2000,17 @@ def run_pipeline(
                 new_pipeline_state["character_states"],
                 events_data["character_states"],
                 current_turn
+            )
+        if game_system == "cpred":
+            _rebuild_cpred_projections(new_pipeline_state, current_turn)
+        elif "hud_state" in events_data:
+            new_pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("game_state"))
+            new_pipeline_state["hud_state"] = scope_hud_funds(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("scene_state", {}),
+                new_pipeline_state.get("character_states", {}),
             )
 
         final_content = events_data.get("content", "")
@@ -1851,8 +2040,19 @@ def run_pipeline(
         yield ("pipeline_stage", {"stage": "mechanics", "status": "thinking"})
 
         canonical_edgerunners = set((new_pipeline_state.get("game_state", {}).get("edgerunners") or {}).keys())
+        _scene_state = events_data.get("scene_state") if isinstance(events_data.get("scene_state"), dict) else {}
+        _relationship_present_names = set()
+        for _group in (_scene_state.get("pcs_present", []), _scene_state.get("npcs_present", [])):
+            if not isinstance(_group, list):
+                continue
+            for _name in _group:
+                if isinstance(_name, str) and _name.strip():
+                    _relationship_present_names.add(_name.strip())
         resolved_beats, resolver_ops = resolve_pipeline_mechanics(
-            events_data.get("beats", []), new_pipeline_state.get("game_state", {})
+            events_data.get("beats", []),
+            new_pipeline_state.get("game_state", {}),
+            relationship_owner=events_data.get("current_player", ""),
+            relationship_present_names=_relationship_present_names,
         )
 
         # Apply character_states from Events
@@ -1866,7 +2066,7 @@ def run_pipeline(
         if gs.get("apply_game_state") and resolver_ops:
             resolver_ops_for_state = [
                 op for op in resolver_ops
-                if isinstance(op, dict) and op.get("edgerunner") in canonical_edgerunners
+                if isinstance(op, dict) and state_op_has_subject_kind(op, "edgerunner", canonical_edgerunners)
             ]
         else:
             resolver_ops_for_state = []
@@ -1874,26 +2074,37 @@ def run_pipeline(
             gs["apply_game_state"](new_pipeline_state["game_state"],
                                     {"edgerunner_ops": resolver_ops_for_state}, current_turn)
 
-        # Keep character_states synchronized with resolver-applied CPRED state.
+        new_pipeline_state["character_states"] = _apply_resolver_character_state_deltas(
+            new_pipeline_state.get("character_states", {}),
+            resolver_ops,
+            current_turn,
+            tracked_edgerunners=canonical_edgerunners,
+        )
+
+        # Keep character_states and HUD funds synchronized with resolver-applied CPRED state.
         if game_system == "cpred":
-            new_pipeline_state["character_states"] = _sync_cpred_character_states_from_game_state(
-                new_pipeline_state.get("character_states", {}),
-                new_pipeline_state.get("game_state", {}),
+            _cpred_views = _rebuild_cpred_projections(
+                new_pipeline_state,
                 current_turn,
                 tracked_edgerunners=canonical_edgerunners,
             )
+        else:
+            _cpred_views = None
 
         # Build narration input matching what Narration expects
         mechanics_data = {
             "route": "narration",
             "beats": resolved_beats,
-            "edgerunner_ops": (events_data.get("edgerunner_ops") or []) + resolver_ops,
+            "edgerunner_ops": (events_data.get("edgerunner_ops") or []) + [
+                op for op in resolver_ops
+                if isinstance(op, dict) and state_op_has_subject_kind(op, "edgerunner")
+            ],
             "relationship_ops": events_data.get("relationship_ops") or [],
             "character_states": {
                 name: (entry.get("data", entry) if isinstance(entry, dict) else entry)
                 for name, entry in new_pipeline_state.get("character_states", {}).items()
             },
-            "hud": _format_cpred_hud_line(new_pipeline_state.get("hud_state", {})),
+            "hud": (_cpred_views["hud_line"] if _cpred_views else _format_cpred_hud_line(new_pipeline_state.get("hud_state", {}))),
             "arc_label": events_data.get("arc_label"),
             "callbacks": events_data.get("callbacks") or [],
             "current_player": events_data.get("current_player"),
@@ -2120,6 +2331,9 @@ def run_mode_pipeline(
     actions = planning_data.get("actions", [])
     resolved = {"results": [], "state_ops": []}
     if actions:
+        def _clean_name(value):
+            return value.strip() if isinstance(value, str) else ""
+
         try:
             _tar_stacks = int(tar_stacks)
         except (TypeError, ValueError, OverflowError):
@@ -2137,11 +2351,34 @@ def run_mode_pipeline(
         # Extract relationships/factions for bonus auto-computation
         _rels = game_state.get("relationships") if isinstance(game_state, dict) else None
         _facs = game_state.get("factions") if isinstance(game_state, dict) else None
+        _relationship_actor_names = set((game_state.get("edgerunners") or {}).keys()) if isinstance(game_state, dict) else set()
+        _round_participant_names = collect_relationship_present_names(
+            actions=actions,
+            combat=(pipeline_state or {}).get("combat") if isinstance(pipeline_state, dict) else None,
+            character_states=(pipeline_state or {}).get("character_states") if isinstance(pipeline_state, dict) else None,
+        )
+        _relationship_context = build_relationship_context(
+            actions=actions,
+            relationship_owner=_clean_name(planning_data.get("current_player", "")),
+            fallback_owner=_clean_name(((pipeline_state or {}).get("combat") or {}).get("current_turn", "")),
+            relationship_actor_names=_relationship_actor_names,
+            relationship_present_names=_round_participant_names,
+        )
 
         # Resolve ambush first if present. TAR can only be consumed once across
         # the entire exchange, so carry the remaining stacks across phases.
         _phase_tar = _tar_stacks
-        ambush_result = resolve_actions(ambush_actions, relationships=_rels, factions=_facs, tar_stacks=_phase_tar, alert_level=_alert_level, active_programs=active_programs, installed_hardware=installed_hardware, ice_status=ice_status) if ambush_actions else {"results": [], "state_ops": [], "tar_consumed": False}
+        ambush_result = resolve_actions(
+            ambush_actions,
+            relationships=_rels,
+            factions=_facs,
+            tar_stacks=_phase_tar,
+            alert_level=_alert_level,
+            active_programs=active_programs,
+            installed_hardware=installed_hardware,
+            ice_status=ice_status,
+            relationship_context=_relationship_context,
+        ) if ambush_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if ambush_result.get("tar_consumed"):
             _phase_tar = 0
 
@@ -2157,7 +2394,17 @@ def run_mode_pipeline(
             if _surprised_names:
                 _ia["surprised"] = _surprised_names
 
-        init_result = resolve_actions(init_actions, relationships=_rels, factions=_facs, tar_stacks=_phase_tar, alert_level=_alert_level, active_programs=active_programs, installed_hardware=installed_hardware, ice_status=ice_status) if init_actions else {"results": [], "state_ops": [], "tar_consumed": False}
+        init_result = resolve_actions(
+            init_actions,
+            relationships=_rels,
+            factions=_facs,
+            tar_stacks=_phase_tar,
+            alert_level=_alert_level,
+            active_programs=active_programs,
+            installed_hardware=installed_hardware,
+            ice_status=ice_status,
+            relationship_context=_relationship_context,
+        ) if init_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if init_result.get("tar_consumed"):
             _phase_tar = 0
 
@@ -2213,7 +2460,8 @@ def run_mode_pipeline(
             combatant_vehicle_sdp=_combatant_vehicle_sdp,
             tar_stacks=_phase_tar, alert_level=_alert_level,
             active_programs=active_programs, installed_hardware=installed_hardware,
-            ice_status=ice_status
+            ice_status=ice_status,
+            relationship_context=_relationship_context,
         ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results
@@ -3213,14 +3461,21 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist HUD state from tool report
     if "hud_state" in parsed:
         pipeline_state["hud_state"] = parsed["hud_state"]
+    # Sync CPRED character_states + HUD funds from authoritative game_state.
+    # Runs AFTER model's hud_state is merged/scoped so game_state overrides stale values.
+    if game_system and game_system.get("id") == "cpred":
+        _rebuild_cpred_projections(pipeline_state, current_turn)
+    elif "hud_state" in parsed:
         # Match run_pipeline semantics: derive/scope only when HUD is emitted this turn.
         pipeline_state["hud_state"] = derive_funds_from_ship_credits(
             pipeline_state.get("hud_state", {}),
-            pipeline_state.get("game_state"))
+            pipeline_state.get("game_state", {}),
+        )
         pipeline_state["hud_state"] = scope_hud_funds(
             pipeline_state.get("hud_state", {}),
             pipeline_state.get("scene_state", {}),
-            pipeline_state.get("character_states", {}))
+            pipeline_state.get("character_states", {}),
+        )
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         _replace_combat_dict(pipeline_state, parsed["combat"])

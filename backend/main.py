@@ -49,6 +49,13 @@ from pipeline import (
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
+from game_systems.cpred_identity import (
+    build_relationship_context,
+    collect_relationship_present_names,
+    state_op_has_subject_kind,
+    state_op_subject,
+    state_op_subject_name,
+)
 
 # Pipeline agent names (used for per-agent instructions and file routing)
 PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
@@ -2578,14 +2585,17 @@ def _convert_state_ops_to_character_updates(state_ops: list) -> list:
     for op in state_ops:
         if not isinstance(op, dict):
             continue
-        name = op.get("edgerunner", "")
-        if not name:
+        op_type = op.get("op")
+        subject = state_op_subject(op)
+        if not subject or subject["kind"] not in ("edgerunner", "character"):
             continue
+        if op_type not in ("add_condition", "remove_condition") and subject["kind"] != "edgerunner":
+            continue
+        name = subject["name"]
         if name not in by_name:
             by_name[name] = {"name": name}
         upd = by_name[name]
 
-        op_type = op.get("op")
         if op_type == "hp":
             upd["hp_delta"] = upd.get("hp_delta", 0) + int(op.get("change", 0))
         elif op_type == "armor":
@@ -2611,8 +2621,67 @@ def _convert_state_ops_to_character_updates(state_ops: list) -> list:
                 "rounds_consumed": int(op.get("rounds_consumed", 0)),
             })
             upd["ammo_consumed"] = ammo_list
+        elif op_type == "add_condition":
+            condition = str(op.get("condition", "")).strip()
+            if condition:
+                upd.setdefault("conditions_add", []).append(condition)
+        elif op_type == "remove_condition":
+            condition = str(op.get("condition", "")).strip()
+            if condition:
+                upd.setdefault("conditions_remove", []).append(condition)
 
     return list(by_name.values())
+
+
+def _convert_state_ops_to_character_state_deltas(state_ops: list, tracked_edgerunners=None) -> dict:
+    """Convert non-authoritative resolver condition ops into character_states deltas."""
+    deltas = {}
+    tracked_names = set(tracked_edgerunners or []) if isinstance(tracked_edgerunners, (list, tuple, set)) else set()
+    for op in state_ops or []:
+        if not isinstance(op, dict):
+            continue
+        op_type = op.get("op")
+        if op_type not in ("add_condition", "remove_condition"):
+            continue
+        subject = state_op_subject(op)
+        if not subject or subject["kind"] not in ("character", "edgerunner"):
+            continue
+        if subject["kind"] == "edgerunner" and subject["name"] in tracked_names:
+            continue
+        name = subject["name"]
+        condition = str(op.get("condition", "")).strip()
+        if not name or not condition:
+            continue
+        entry = deltas.setdefault(name, {})
+        if op_type == "add_condition":
+            entry.setdefault("_conditions_add", []).append(condition)
+        else:
+            entry.setdefault("_conditions_remove", []).append(condition)
+    return deltas
+
+
+def _merge_character_state_deltas(existing: dict, resolver_deltas: dict) -> dict:
+    """Merge resolver-generated character condition deltas into character_states payloads."""
+    merged = {}
+    if isinstance(existing, dict):
+        for name, value in existing.items():
+            merged[name] = dict(value) if isinstance(value, dict) else value
+    for name, delta in (resolver_deltas or {}).items():
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(delta, dict):
+            continue
+        current = merged.get(name)
+        if not isinstance(current, dict):
+            current = {}
+        else:
+            current = dict(current)
+        if isinstance(delta.get("_conditions_add"), list):
+            current.setdefault("_conditions_add", []).extend(delta["_conditions_add"])
+        if isinstance(delta.get("_conditions_remove"), list):
+            current.setdefault("_conditions_remove", []).extend(delta["_conditions_remove"])
+        merged[name] = current
+    return merged
 
 
 def _merge_character_updates(existing: list, resolver_updates: list) -> list:
@@ -2662,6 +2731,11 @@ def _merge_character_updates(existing: list, resolver_updates: list) -> list:
             # Merge ammo_consumed
             if "ammo_consumed" in r_upd and isinstance(r_upd["ammo_consumed"], list):
                 target.setdefault("ammo_consumed", []).extend(r_upd["ammo_consumed"])
+            # Merge condition deltas
+            if "conditions_add" in r_upd and isinstance(r_upd["conditions_add"], list):
+                target.setdefault("conditions_add", []).extend(r_upd["conditions_add"])
+            if "conditions_remove" in r_upd and isinstance(r_upd["conditions_remove"], list):
+                target.setdefault("conditions_remove", []).extend(r_upd["conditions_remove"])
         else:
             by_name[name] = r_upd
 
@@ -2677,7 +2751,7 @@ def _convert_state_ops_to_vehicle_updates(state_ops: list) -> list:
         op_type = op.get("op")
         if op_type not in ("vehicle_sdp", "vehicle_sp"):
             continue
-        vname = str(op.get("vehicle", "")).strip()
+        vname = state_op_subject_name(op, "vehicle")
         if not vname:
             continue
         vkey = vname.casefold()
@@ -2695,6 +2769,15 @@ def _convert_state_ops_to_vehicle_updates(state_ops: list) -> list:
             except (TypeError, ValueError, OverflowError):
                 pass
     return list(by_vehicle.values())
+
+
+def _collect_relationship_present_names(actions: list, pipeline_state: dict) -> set[str]:
+    """Collect current combat participants for relationship mechanics."""
+    return collect_relationship_present_names(
+        actions=actions,
+        combat=pipeline_state.get("combat") if isinstance(pipeline_state, dict) else None,
+        character_states=pipeline_state.get("character_states") if isinstance(pipeline_state, dict) else None,
+    )
 
 
 
@@ -3114,14 +3197,15 @@ def _advance_tracking_maps_from_state_ops(hp_map: dict, vehicle_map: dict, state
             continue
         op_type = op.get("op")
         if op_type == "hp" and isinstance(hp_map, dict):
-            target = _find_hp_tracking_key(hp_map, op.get("edgerunner", "")) or str(op.get("edgerunner", "")).strip()
+            target_name = state_op_subject_name(op, "edgerunner")
+            target = _find_hp_tracking_key(hp_map, target_name) or target_name
             if target in hp_map:
                 try:
                     hp_map[target] = max(0, int(hp_map[target]) + int(op.get("change", 0)))
                 except (TypeError, ValueError, OverflowError):
                     continue
         elif op_type == "vehicle_sdp" and isinstance(vehicle_map, dict):
-            vname = str(op.get("vehicle", "")).strip()
+            vname = state_op_subject_name(op, "vehicle")
             vkey = _find_vehicle_tracking_key(vehicle_map, vname) or vname
             if vkey and vkey not in vehicle_map:
                 vehicle_map[vkey] = 0
@@ -3131,7 +3215,7 @@ def _advance_tracking_maps_from_state_ops(hp_map: dict, vehicle_map: dict, state
                 except (TypeError, ValueError, OverflowError):
                     continue
         elif op_type == "vehicle_sp" and isinstance(vehicle_map, dict):
-            vname = str(op.get("vehicle", "")).strip()
+            vname = state_op_subject_name(op, "vehicle")
             vkey = _find_vehicle_tracking_key(vehicle_map, vname) or vname
             sp_key = _find_vehicle_tracking_sp_key(vehicle_map, vkey) or (vkey + ":sp" if vkey else "")
             if vkey and sp_key not in vehicle_map:
@@ -3249,11 +3333,25 @@ def _inject_resolver_ops_stateful(tool_input: dict, state_ops: list, pipeline_st
             op for op in existing_er_ops
             if not (isinstance(op, dict) and op.get("op") in _DICE_OPS)
         ]
-    # Add resolver-authoritative character ops
-    _char_ops = [op for op in state_ops
-                 if isinstance(op, dict) and op.get("op") not in ("vehicle_sdp", "vehicle_sp")]
+    _tracked_edgerunners = set()
+    if isinstance(pipeline_state, dict):
+        _tracked_edgerunners = set((((pipeline_state.get("game_state") or {}).get("edgerunners")) or {}).keys())
+    # Add resolver-authoritative edgerunner ops only; NPC-only condition ops
+    # belong in character_states so they cannot synthesize bogus edgerunners.
+    _char_ops = [
+        op for op in state_ops
+        if isinstance(op, dict)
+        and op.get("op") not in ("vehicle_sdp", "vehicle_sp")
+        and state_op_has_subject_kind(op, "edgerunner", _tracked_edgerunners if _tracked_edgerunners else None)
+    ]
     if _char_ops:
         tool_input["edgerunner_ops"] = (tool_input.get("edgerunner_ops") or []) + _char_ops
+    _character_state_deltas = _convert_state_ops_to_character_state_deltas(state_ops, tracked_edgerunners=_tracked_edgerunners)
+    if _character_state_deltas:
+        tool_input["character_states"] = _merge_character_state_deltas(
+            tool_input.get("character_states"),
+            _character_state_deltas,
+        )
     # Apply vehicle ops directly to combat state when available.
     # If combat is initialized later in this same tool_input, defer until after apply.
     _veh_updates = _convert_state_ops_to_vehicle_updates(state_ops)
@@ -6609,6 +6707,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_running_hp_map,
                                     _rm_input.get("actions", []),
                                 )
+                                _rm_relationship_context = build_relationship_context(
+                                    actions=_rm_input.get("actions", []),
+                                    relationship_owner=str(_rm_input.get("current_player") or ""),
+                                    fallback_owner=str(((_rm_tracking_ps or {}).get("combat") or {}).get("current_turn") or ""),
+                                    relationship_actor_names=set((_rm_gs.get("edgerunners") or {}).keys()) if isinstance(_rm_gs.get("edgerunners"), dict) else set(),
+                                    relationship_present_names=_collect_relationship_present_names(
+                                        _rm_input.get("actions", []),
+                                        _rm_tracking_ps or {},
+                                    ),
+                                )
                                 _rm_result = _rm_resolve_actions(
                                     _rm_input.get("actions", []),
                                     relationships=_rm_gs.get("relationships"),
@@ -6620,6 +6728,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     ice_status=_rm_ice,
                                     combatant_hp=_rm_running_hp_map,
                                     combatant_vehicle_sdp=_rm_running_vehicle_map,
+                                    relationship_context=_rm_relationship_context,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(
