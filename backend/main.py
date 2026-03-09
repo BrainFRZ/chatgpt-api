@@ -26,8 +26,8 @@ import inspect
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
-from providers.openai_provider import OpenAIProvider
-from providers.anthropic_provider import AnthropicProvider, AnthropicOpusProvider
+from providers.openai_provider import OpenAIProvider, OpenAI54Provider
+from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider
 from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
@@ -100,19 +100,24 @@ PRICING = {
 
 # Register available model providers
 ProviderRegistry.register(OpenAIProvider())
+ProviderRegistry.register(OpenAI54Provider())
 ProviderRegistry.register(AnthropicProvider())
+ProviderRegistry.register(AnthropicOpus45Provider())
 ProviderRegistry.register(AnthropicOpusProvider())
 
 # Default model for new chats
-DEFAULT_MODEL = "gpt-5.2"
+DEFAULT_MODEL = "claude-opus-4.5"
+
+# Model used for auto-switching during combat/hack/net_combat/ship_combat
+COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return DEFAULT_MODEL if user has OpenAI key, else claude-opus-4.6 if Anthropic key."""
-    if get_api_key(username, "openai"):
-        return DEFAULT_MODEL
+    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
     if get_api_key(username, "anthropic"):
-        return "claude-opus-4.6"
+        return DEFAULT_MODEL  # claude-opus-4.5
+    if get_api_key(username, "openai"):
+        return "gpt-5.4"
     return DEFAULT_MODEL
 
 # ============================================================
@@ -133,7 +138,12 @@ def get_token_encoder():
 
 def get_claude_provider():
     """Get any Claude provider for token counting (they use the same tokenizer)."""
-    return ProviderRegistry.get("claude-sonnet-4.5") or ProviderRegistry.get("claude-opus-4.6")
+    return ProviderRegistry.get("claude-sonnet-4.5") or ProviderRegistry.get("claude-opus-4.5")
+
+
+def get_gpt_provider():
+    """Get any GPT provider for token counting (they use the same tokenizer)."""
+    return ProviderRegistry.get("gpt-5.4") or ProviderRegistry.get("gpt-5.2")
 
 
 @contextmanager
@@ -2093,7 +2103,7 @@ def send_message(request: SendMessageRequest):
         # This enables instant model switching without recounting
 
         # Get cross-model providers for token counting
-        gpt_provider = ProviderRegistry.get("gpt-5.2")
+        gpt_provider = get_gpt_provider()
         claude_provider = get_claude_provider()
         claude_api_key = get_api_key(username, "anthropic")
 
@@ -3748,11 +3758,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             data["hack_state"] = None
             logger.info(f"Hack: cleared completed hack_state for {username}")
 
-    # Auto-switch Claude to GPT-5.2 for hack mode (preserves Anthropic prompt cache)
+    # Auto-switch Claude to GPT for hack mode (preserves Anthropic prompt cache)
     _original_model = None
     if use_hack_mode and model_id.startswith("claude"):
         _original_model = model_id
-        model_id = DEFAULT_MODEL
+        model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -3831,10 +3841,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         _ps_for_combat["net_combat"] = _expanded
         _net_combat = _expanded
 
-    # Auto-switch Claude to GPT-5.2 for net_combat mode
+    # Auto-switch Claude to GPT for net_combat mode
     if use_net_combat_mode and model_id.startswith("claude"):
         _original_model = model_id
-        model_id = DEFAULT_MODEL
+        model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -3851,10 +3861,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if (not use_hack_mode) and (not use_net_combat_mode) and _combat and request.project and gs and gs.get("combat_contract"):
         use_combat_mode = True
 
-    # Auto-switch Claude to GPT-5.2 for combat mode (preserves Anthropic prompt cache)
+    # Auto-switch Claude to GPT for combat mode (preserves Anthropic prompt cache)
     if use_combat_mode and model_id.startswith("claude"):
         _original_model = model_id
-        model_id = DEFAULT_MODEL
+        model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -3874,10 +3884,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and _ship_combat and request.project and gs and gs.get("ship_combat_contract"):
         use_ship_combat_mode = True
 
-    # Auto-switch Claude to GPT-5.2 for ship combat mode
+    # Auto-switch Claude to GPT for ship combat mode
     if use_ship_combat_mode and model_id.startswith("claude"):
         _original_model = model_id
-        model_id = DEFAULT_MODEL
+        model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -3896,9 +3906,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         use_sex_mode = True
 
     # Auto-switch to Opus for sex mode (regardless of current model)
-    if use_sex_mode and model_id != "claude-opus-4.6":
+    if use_sex_mode and model_id != "claude-opus-4.5":
         _original_model = model_id
-        model_id = "claude-opus-4.6"
+        model_id = "claude-opus-4.5"
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -3922,7 +3932,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and model_id.startswith("claude") and request.project and not (model_id == "gpt-5.2")
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and model_id.startswith("claude") and request.project
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
@@ -3999,8 +4009,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         logger.info(f"Hack mode: {hack_state.get('tier')} for {username}, "
                      f"SR {hack_state.get('sr')}, {len(hack_history)} prior hack exchanges")
 
-        if model_id == "gpt-5.2":
-            # GPT-5.2: build non-streaming JSON request via pipeline request builder
+        if model_id.startswith("gpt"):
+            # GPT: build non-streaming JSON request via pipeline request builder
             gpt_hack_messages = [
                 {"role": "system", "content": hack_system_content
                  + "\n\nYou MUST output valid JSON matching the report_hack_state schema:\n"
@@ -4070,8 +4080,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         logger.info(f"Combat mode: round {combat.get('round', 1)} for {username}, "
                     f"{len(combat_history)} prior combat exchanges")
 
-        if model_id == "gpt-5.2":
-            # GPT-5.2: build non-streaming JSON request via pipeline request builder
+        if model_id.startswith("gpt"):
+            # GPT: build non-streaming JSON request via pipeline request builder
             gpt_combat_messages = [
                 {"role": "system", "content": combat_system_content
                  + "\n\nYou MUST output valid JSON matching the report_combat_state schema:\n"
@@ -4159,7 +4169,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         logger.info(f"Net combat mode: round {nc_combat.get('round', 1)} for {username}, "
                     f"netrunner={nc_state.get('netrunner', '?')}, {len(nc_history)} prior exchanges")
 
-        if model_id == "gpt-5.2":
+        if model_id.startswith("gpt"):
             gpt_nc_messages = [
                 {"role": "system", "content": nc_system_content
                  + "\n\nYou MUST output valid JSON matching the report_net_combat_state schema:\n"
@@ -4239,7 +4249,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         logger.info(f"Ship combat mode: round {ship_combat.get('round', 1)} for {username}, "
                     f"{len(ship_combat_history)} prior ship combat exchanges")
 
-        if model_id == "gpt-5.2":
+        if model_id.startswith("gpt"):
             gpt_ship_combat_messages = [
                 {"role": "system", "content": ship_combat_system_content
                  + "\n\nYou MUST output valid JSON matching the report_ship_combat_state schema:\n"
@@ -4266,7 +4276,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             inferred_original_model = _original_model
             if not inferred_original_model:
                 current_chat_model = data.get("model")
-                if current_chat_model and current_chat_model != "claude-opus-4.6":
+                if current_chat_model and current_chat_model != "claude-opus-4.5":
                     inferred_original_model = current_chat_model
             if inferred_original_model:
                 sex_scene["original_model"] = inferred_original_model
@@ -4974,9 +4984,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
-            use_pipeline = model_id == "gpt-5.2" and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode
+            use_pipeline = model_id.startswith("gpt") and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode
             # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
-            use_mode_pipeline = model_id == "gpt-5.2" and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics")
+            use_mode_pipeline = model_id.startswith("gpt") and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics")
 
             if use_mode_pipeline and use_hack_mode:
                 # ============================================================
@@ -5736,7 +5746,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             f"combat_complete={nc_json.get('combat_complete', False)}, "
                             f"net_complete={nc_json.get('net_complete', False)}")
 
-            elif (use_hack_mode or use_combat_mode or use_net_combat_mode) and model_id == "gpt-5.2" and not use_mode_pipeline:
+            elif (use_hack_mode or use_combat_mode or use_net_combat_mode) and model_id.startswith("gpt") and not use_mode_pipeline:
                 # ============================================================
                 # GPT-5.2 mode fallback: non-deterministic game systems use single-shot JSON
                 # ============================================================
@@ -5952,7 +5962,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 logger.info(f"{_mode_label} mode (GPT-5.2 fallback): completed for {username}")
 
-            elif use_ship_combat_mode and model_id == "gpt-5.2":
+            elif use_ship_combat_mode and model_id.startswith("gpt"):
                 # ============================================================
                 # GPT-5.2 Ship combat mode: non-streaming JSON call
                 # ============================================================
@@ -6229,7 +6239,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": game_notifs}))
 
                 # Get cross-model providers for token counting
-                gpt_provider = ProviderRegistry.get("gpt-5.2")
+                gpt_provider = get_gpt_provider()
                 claude_provider = get_claude_provider()
                 claude_api_key = get_api_key(username, "anthropic")
 
@@ -6580,7 +6590,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 event_count = 0
                 client_disconnected = False
                 resolve_mechanics_extra_usage = None  # Track usage from resolve_mechanics round-trip (cpred)
-                if model_id == "gpt-5.2":
+                if model_id.startswith("gpt"):
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
                 else:
                     stream_iter = provider.send_request_stream(client, request_params)
@@ -7208,7 +7218,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             data["pipeline_state"] = ps
 
                         # Get cross-model providers for token counting
-                        gpt_provider = ProviderRegistry.get("gpt-5.2")
+                        gpt_provider = get_gpt_provider()
                         claude_provider = get_claude_provider()
                         claude_api_key = get_api_key(username, "anthropic")
 
@@ -7290,7 +7300,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         service_tier = usage.get('service_tier')
 
                         # Calculate cost using tier-aware pricing for GPT-5.2
-                        if model_id == "gpt-5.2" and service_tier:
+                        if model_id.startswith("gpt") and service_tier:
                             total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
                         else:
                             total_cost = provider.calculate_cost(parsed)
@@ -7616,7 +7626,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _chain_actual_model_id = model_id
                                 if model_id.startswith("claude"):
                                     _chain_original_model = model_id
-                                    _chain_model_id = DEFAULT_MODEL
+                                    _chain_model_id = COMBAT_AUTO_SWITCH_MODEL
                                     _chain_provider = ProviderRegistry.get(_chain_model_id)
                                     _chain_api_key = get_api_key(username, ProviderRegistry.get_required_api_key(_chain_model_id))
                                     if not _chain_provider or not _chain_api_key:

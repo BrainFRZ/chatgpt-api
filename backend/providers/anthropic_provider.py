@@ -387,8 +387,61 @@ class AnthropicProvider(ModelProvider):
         return response.input_tokens
 
 
+class AnthropicOpus45Provider(AnthropicProvider):
+    """Provider for Claude Opus 4.5 with adaptive thinking."""
+
+    MODEL_NAME = "claude-opus-4-5-20250918"
+    MAX_TOKENS = 16000
+
+    BETA_HEADERS = [
+        "context-1m-2025-08-07",
+        "context-management-2025-06-27",
+        "extended-cache-ttl-2025-04-11"
+    ]
+
+    @property
+    def model_id(self) -> str:
+        return "claude-opus-4.5"
+
+    @property
+    def display_name(self) -> str:
+        return "Claude Opus 4.5"
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing(
+            input_base=5.00,
+            cache_write=10.00,
+            cache_read=0.50,
+            output=25.0,
+            reasoning=25.0
+        )
+
+    @property
+    def context_limits(self) -> ContextLimits:
+        return ContextLimits(
+            threshold=80_000,
+            target=55_000
+        )
+
+    def build_request(
+        self,
+        messages: list[dict],
+        username: str,
+        project: Optional[str],
+        chat_name: str,
+        is_free_chat: bool,
+        use_cache: bool = True
+    ) -> dict:
+        """Build request with adaptive thinking for Opus 4.5."""
+        params = super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
+        params["thinking"] = {"type": "adaptive"}
+        params["output_config"] = {"effort": "high"}
+        return params
+
+
 class AnthropicOpusProvider(AnthropicProvider):
-    """Provider for Claude Opus 4.6 with adaptive thinking."""
+    """Provider for Claude Opus 4.6 (inactive, kept for potential future use)."""
 
     MODEL_NAME = "claude-opus-4-6"
     MAX_TOKENS = 16000        # Same as Sonnet (SDK requires streaming for higher values)

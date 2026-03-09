@@ -87,13 +87,15 @@ class TestGetModels:
     """Tests for GET /api/models endpoint."""
 
     def test_returns_all_models(self):
-        """Verify GPT-5.2, Claude Sonnet 4.5, and Claude Opus 4.6 are returned."""
+        """Verify all registered models are returned."""
         models = main.list_models()
-        assert len(models) == 3
+        assert len(models) == 5
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
+        assert "gpt-5.4" in model_ids
         assert "claude-sonnet-4.5" in model_ids
+        assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
 
     def test_gpt52_metadata(self, client):
@@ -377,13 +379,13 @@ class TestGetChatModel:
         assert "model" in data
         assert data["model"] == "gpt-5.2"
 
-    def test_old_chat_defaults_to_gpt(self, client, test_user, temp_data_dir):
-        """Old chat without model field should default to gpt-5.2."""
+    def test_old_chat_defaults_to_default_model(self, client, test_user, temp_data_dir):
+        """Old chat without model field should default to DEFAULT_MODEL."""
         # test_chat fixture doesn't have model field
         response = client.get(f"/api/chat/{test_user}/test_chat")
         assert response.status_code == 200
         data = response.json()
-        assert data["model"] == "gpt-5.2"
+        assert data["model"] == main.DEFAULT_MODEL
 
 
 class TestCreateChatWithModel:
@@ -821,23 +823,25 @@ class TestProviderRegistry:
         assert gpt is not None
         assert claude is not None
 
-    def test_get_default_returns_gpt(self):
-        """Default provider should be GPT-5.2."""
+    def test_get_default_returns_opus45(self):
+        """Default provider should be Claude Opus 4.5."""
         from providers import ProviderRegistry
 
         default = ProviderRegistry.get_default()
-        assert default.model_id == "gpt-5.2"
+        assert default.model_id == "claude-opus-4.5"
 
     def test_list_models_returns_metadata(self):
         """list_models should return metadata for all providers."""
         from providers import ProviderRegistry
 
         models = ProviderRegistry.list_models()
-        assert len(models) == 3
+        assert len(models) == 5
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
+        assert "gpt-5.4" in model_ids
         assert "claude-sonnet-4.5" in model_ids
+        assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
 
     def test_get_required_api_key(self):

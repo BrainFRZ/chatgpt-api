@@ -49,7 +49,7 @@ export interface ChatMessage {
   reasoning?: string;
   attached_files?: {filename: string, content: string}[];
   model?: string;  // Model used for this response (assistant messages only)
-  service_tier?: 'flex' | 'standard' | null;  // GPT-5.2 service tier (flex or standard)
+  service_tier?: 'flex' | 'standard' | null;  // GPT service tier (flex or standard)
   bookmark?: string;  // User-defined bookmark annotation
   hack_mode?: boolean;  // True for messages during a hack mode encounter
   sex_mode?: boolean;  // True for messages during an intimate scene

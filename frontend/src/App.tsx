@@ -157,7 +157,7 @@ function App() {
   const [error, setError] = useState('');
   const [docsRefreshed, setDocsRefreshed] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-5.2');
+  const [selectedModel, setSelectedModel] = useState<string>('claude-opus-4.5');
   const [anthropicSync, setAnthropicSync] = useState<boolean>(true);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null);
@@ -298,7 +298,7 @@ function App() {
   const [projectChatsCache, setProjectChatsCache] = useState<{[key: string]: string[]}>({});
   const [rootChatsCache, setRootChatsCache] = useState<string[] | null>(null);
   const [projectModel, setProjectModel] = useState<string | null>(null);
-  const isPipelineProject = projectModel === 'gpt-5.2';
+  const isPipelineProject = projectModel?.startsWith('gpt') ?? false;
   const [projectGameSystem, setProjectGameSystem] = useState<string | null>(null);
   const [availableGameSystems, setAvailableGameSystems] = useState<{id: string, name: string}[]>([]);
 
@@ -682,6 +682,7 @@ function App() {
       .catch(() => {
         // Fallback models if API fails
         setAvailableModels([
+          { id: 'gpt-5.4', name: 'GPT-5.4', pricing: { input_new: 2.50, input_cached: 0.25, output: 15, reasoning: 15 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } },
           { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', pricing: { input_new: 5, input_cached: 0.5, output: 25, reasoning: 25 }, context_limits: { threshold: 80000, target: 55000 } }
@@ -802,7 +803,7 @@ function App() {
     }
 
     // Fetch project metadata to get the project's default model
-    let fetchedModel = 'gpt-5.2';
+    let fetchedModel = 'claude-opus-4.5';
     try {
       const metadataResponse = await fetch(`/api/project-metadata/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
@@ -810,7 +811,7 @@ function App() {
       if (metadataResponse.ok) {
         const metadataData = await metadataResponse.json();
         if (currentProjectRef.current !== projectName) return;
-        fetchedModel = metadataData.model || 'gpt-5.2';
+        fetchedModel = metadataData.model || 'claude-opus-4.5';
         setProjectModel(fetchedModel);
         setProjectGameSystem(metadataData.game_system || 'dnd5e');
       }
@@ -822,7 +823,7 @@ function App() {
     fetchProjectFiles(projectName);
     fetchProjectInstructions(projectName);
     // Fetch per-agent instructions for pipeline projects
-    if (fetchedModel === 'gpt-5.2') {
+    if (fetchedModel.startsWith('gpt')) {
       fetchAgentInstructions(projectName);
     }
     fetchProjectChatsDetailed(projectName);
@@ -1184,7 +1185,7 @@ function App() {
         fetchProjectFiles(currentProject);
         fetchProjectInstructions(currentProject);
         // Fetch agent instructions if switching to pipeline model
-        if (newModel === 'gpt-5.2') {
+        if (newModel.startsWith('gpt')) {
           fetchAgentInstructions(currentProject);
         }
       }
@@ -1674,8 +1675,8 @@ function App() {
       setExpandedReasoning(new Set());
 
       // Set model selection from chat data
-      // Priority: chat's model > project's model > 'gpt-5.2'
-      setSelectedModel(data.model || projectModel || 'gpt-5.2');
+      // Priority: chat's model > project's model > default
+      setSelectedModel(data.model || projectModel || 'claude-opus-4.5');
       setAnthropicSync(data.anthropic_sync !== false);
 
       // Load pipeline state, game system, and hack state for right panel
