@@ -403,6 +403,9 @@ Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Se
 - autofire: {"type": "autofire", "character": "<attacker>", "stat_value": <REF>, "skill_value": <Autofire skill>, "weapon_type": "<SMG|Assault Rifle>", "autofire_multiplier": <3|4>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-4>, "hit_location": "head|body", "is_ap": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
   Autofire multiplier: 3 for SMG, 4 for AR. Consumes 10 rounds. Damage = 2d6 × margin, capped by multiplier.
 
+- suppressive_fire: {"type": "suppressive_fire", "character": "<attacker>", "attacker_ref": <REF>, "attacker_autofire": <Autofire skill>, "targets": [{"name": "<target>", "will": <WILL>, "concentration": <Concentration>, "seriously_wounded": <bool>}], "seriously_wounded_attacker": <bool>, "luck_spent": <int>, "weapon_name": "<weapon>", "on_success": "<narrative if any suppressed>", "on_failure": "<narrative if none suppressed>"}
+  Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt.
+
 - death_save: {"type": "death_save", "character": "<name>", "body_stat": <BODY>, "death_save_count": <cumulative count>, "active_injuries": [{"name": "<injury>", "dv_mod": <int>}, ...]}
   Roll d10 vs BODY. Natural 10 always fails. Cumulative +1 per previous save.
 
@@ -681,6 +684,7 @@ Action types for resolve_mechanics:
 - program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+- suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed. Ties favor defender. Consumes 10 rounds. No damage.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type.
 Active effects shown in injection — narrate them, do NOT manually track them. Giant's forced Jack Out cascades all rezzed Black ICE effects — this can be lethal. KRASH Barrier = immune to forced Jack Out. When programs are DESTROYED, narrate dramatically. Fire extinguish → backend auto-sets nudity condition.

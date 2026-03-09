@@ -102,6 +102,31 @@ def _luck_spend_state_op(edgerunner: str, luck_spent: int, reason: str) -> Optio
     }
 
 
+def _emit_luck_op_if_rolled(
+    all_state_ops: list,
+    result: dict,
+    actor_name: str,
+    luck_spent: int,
+    reason: str,
+) -> None:
+    """Emit luck-spend state_op unless the result has an error or no roll occurred.
+
+    Resolvers that auto-succeed without rolling set their die key to None
+    (e.g. find_item for Cheap/Everyday).  This guard prevents Luck deduction
+    when no die was actually rolled.
+    """
+    if result.get("error"):
+        return
+    luck_op = _luck_spend_state_op(actor_name, luck_spent, reason)
+    if not luck_op:
+        return
+    # Auto-success guard: resolvers that skip rolling set die/roll to None
+    for key in ("die", "roll", "attack_roll"):
+        if key in result and result[key] is None:
+            return
+    all_state_ops.append(luck_op)
+
+
 def _iter_critical_injuries(damage: dict) -> list:
     """Normalize damage result critical injuries to a list."""
     injuries = damage.get("critical_injuries")
@@ -701,6 +726,116 @@ def resolve_autofire(
         "damage": damage_result,
         "rounds_consumed": 10,
         "state_ops": state_ops,
+        "on_outcome": on_outcome,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_suppressive_fire  — Area denial (CRB p.174)
+# ---------------------------------------------------------------------------
+
+def resolve_suppressive_fire(
+    attacker_ref: int,
+    attacker_autofire: int,
+    targets: list,
+    seriously_wounded_attacker: bool = False,
+    luck_spent: int = 0,
+    rel_bonus: int = 0,
+    character_name: str = "",
+    weapon_name: str = "",
+    on_success: str = "",
+    on_failure: str = "",
+) -> dict:
+    """Resolve Suppressive Fire (CRB p.174): area denial via autofire.
+
+    Attacker rolls d10 + REF + Autofire once. Each target rolls
+    d10 + WILL + Concentration. Targets who fail (attacker > defender)
+    are suppressed. Ties favor defender. Consumes 10 rounds. No damage.
+    """
+    attacker_die = _roll_check_die()
+    attacker_total = attacker_die["total"] + _to_int(attacker_ref, 0) + _to_int(attacker_autofire, 0)
+    attacker_mods = []
+
+    if seriously_wounded_attacker:
+        attacker_total -= 2
+        attacker_mods.append(("Wounded", -2))
+
+    clamped_luck = max(0, _to_int(luck_spent, 0))
+    if clamped_luck > 0:
+        attacker_total += clamped_luck
+        attacker_mods.append(("Luck", clamped_luck))
+
+    if rel_bonus:
+        attacker_total += rel_bonus
+        attacker_mods.append(("Rel", rel_bonus))
+
+    # --- Per-target resolution ---
+    target_results = []
+    atk_name = character_name or "Attacker"
+
+    fmt_parts = [f"Suppressive Fire: {atk_name} {_format_die(attacker_die)}"
+                 f"+REF {attacker_ref}+Autofire {attacker_autofire}"]
+    for label, val in attacker_mods:
+        fmt_parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
+    fmt_parts.append(f"= {attacker_total} |")
+
+    for tgt in (targets or []):
+        tgt_name = tgt.get("name", "Target")
+        tgt_will = _to_int(tgt.get("will", 0), 0)
+        tgt_conc = _to_int(tgt.get("concentration", 0), 0)
+        tgt_wounded = _as_bool(tgt.get("seriously_wounded", False), False)
+
+        def_die = _roll_check_die()
+        def_total = def_die["total"] + tgt_will + tgt_conc
+        def_mods = []
+        if tgt_wounded:
+            def_total -= 2
+            def_mods.append(("Wounded", -2))
+
+        # Ties favor defender (not suppressed)
+        suppressed = attacker_total > def_total
+
+        target_results.append({
+            "name": tgt_name,
+            "defender_die": def_die,
+            "defender_total": def_total,
+            "suppressed": suppressed,
+        })
+
+        tgt_fmt = f"{tgt_name} {_format_die(def_die)}+WILL {tgt_will}+Conc {tgt_conc}"
+        for label, val in def_mods:
+            tgt_fmt += f" {label} {val}" if val < 0 else f" +{label} {val}"
+        tgt_fmt += f" = {def_total}"
+        tgt_fmt += " ✗ SUPPRESSED" if suppressed else " ✓ resists"
+        fmt_parts.append(tgt_fmt + " |")
+
+    formatted = " ".join(fmt_parts).rstrip(" |")
+
+    any_suppressed = any(t["suppressed"] for t in target_results) if target_results else False
+
+    # Ammo state op
+    state_ops = []
+    if weapon_name:
+        state_ops.append({
+            "edgerunner": character_name,
+            "op": "ammo",
+            "weapon_name": weapon_name,
+            "rounds_consumed": 10,
+            "reason": f"Suppressive Fire {weapon_name}",
+        })
+
+    on_outcome = on_success if any_suppressed else on_failure
+
+    return {
+        "type": "suppressive_fire",
+        "success": any_suppressed,
+        "attacker_total": attacker_total,
+        "attacker_die": attacker_die,
+        "targets": target_results,
+        "any_suppressed": any_suppressed,
+        "rounds_consumed": 10,
+        "state_ops": state_ops,
+        "formatted": formatted,
         "on_outcome": on_outcome,
     }
 
@@ -2194,13 +2329,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 result["type"] = "skill_check"
                 result["character"] = actor_name
                 results.append(result)
-                luck_op = _luck_spend_state_op(
-                    edgerunner=actor_name,
-                    luck_spent=action.get("luck_spent", 0),
-                    reason="Luck spent on skill check",
-                )
-                if luck_op:
-                    all_state_ops.append(luck_op)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on skill check")
 
             elif action_type == "ranged_attack":
                 actor_name = action.get("character", "")
@@ -2243,13 +2373,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 result["character"] = actor_name
                 results.append(result)
                 if not result.get("error"):
-                    luck_op = _luck_spend_state_op(
-                        edgerunner=actor_name,
-                        luck_spent=action.get("luck_spent", 0),
-                        reason="Luck spent on ranged attack",
-                    )
-                    if luck_op:
-                        all_state_ops.append(luck_op)
+                    _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                            action.get("luck_spent", 0), "Luck spent on ranged attack")
                     all_state_ops.extend(result.get("state_ops", []))
 
             elif action_type == "melee_attack":
@@ -2313,14 +2438,28 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 result["character"] = actor_name
                 results.append(result)
                 if not result.get("error"):
-                    luck_op = _luck_spend_state_op(
-                        edgerunner=actor_name,
-                        luck_spent=action.get("luck_spent", 0),
-                        reason="Luck spent on autofire",
-                    )
-                    if luck_op:
-                        all_state_ops.append(luck_op)
+                    _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                            action.get("luck_spent", 0), "Luck spent on autofire")
                     all_state_ops.extend(result.get("state_ops", []))
+
+            elif action_type == "suppressive_fire":
+                actor_name = action.get("character", "")
+                result = resolve_suppressive_fire(
+                    attacker_ref=_to_int(action.get("attacker_ref", 0), 0),
+                    attacker_autofire=_to_int(action.get("attacker_autofire", 0), 0),
+                    targets=action.get("targets", []),
+                    seriously_wounded_attacker=_as_bool(action.get("seriously_wounded_attacker", False), False),
+                    luck_spent=_to_int(action.get("luck_spent", 0), 0),
+                    character_name=actor_name,
+                    weapon_name=action.get("weapon_name", ""),
+                    on_success=action.get("on_success", ""),
+                    on_failure=action.get("on_failure", ""),
+                )
+                result["character"] = actor_name
+                results.append(result)
+                all_state_ops.extend(result.get("state_ops", []))
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on Suppressive Fire")
 
             elif action_type == "death_save":
                 actor_name = action.get("character", "")
@@ -2419,13 +2558,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         elif isinstance(_target_node_hint, str) and _target_node_hint:
                             _rez_op["target_node"] = _target_node_hint
                         all_state_ops.append(_rez_op)
-                luck_op = _luck_spend_state_op(
-                    edgerunner=actor_name,
-                    luck_spent=action.get("luck_spent", 0),
-                    reason="Luck spent on opposed check",
-                )
-                if luck_op:
-                    all_state_ops.append(luck_op)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on opposed check")
                 results.append(result)
 
             elif action_type == "program_attack":
@@ -2647,13 +2781,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 )
                 result["character"] = actor_name
                 results.append(result)
-                luck_op = _luck_spend_state_op(
-                    edgerunner=actor_name,
-                    luck_spent=action.get("luck_spent", 0),
-                    reason="Luck spent on driving check",
-                )
-                if luck_op and not result.get("error"):
-                    all_state_ops.append(luck_op)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on driving check")
                 all_state_ops.extend(result.get("state_ops", []))
 
             elif action_type == "ramming":
@@ -2730,13 +2859,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 )
                 result["character"] = actor_name
                 results.append(result)
-                luck_op = _luck_spend_state_op(
-                    edgerunner=actor_name,
-                    luck_spent=action.get("luck_spent", 0),
-                    reason="Luck spent on vehicle weak point shot",
-                )
-                if luck_op and not result.get("error") and result.get("attack_roll") is not None:
-                    all_state_ops.append(luck_op)
+                _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
+                                        action.get("luck_spent", 0), "Luck spent on vehicle weak point shot")
                 all_state_ops.extend(result.get("state_ops", []))
 
             elif action_type == "spike_strip":
@@ -2853,7 +2977,8 @@ RESOLVE_MECHANICS_TOOL = {
                                      "program_attack_vs_netrunner",
                                      "ice_attack_vs_program", "ambush",
                                      "driving_check", "ramming",
-                                     "vehicle_weak_point", "spike_strip"],
+                                     "vehicle_weak_point", "spike_strip",
+                                     "suppressive_fire"],
                         },
                         "character": {"type": "string"},
                     },

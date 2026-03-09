@@ -29,6 +29,7 @@ from game_systems.cpred_mechanics import (
     resolve_ramming,
     resolve_vehicle_weak_point,
     resolve_spike_strip,
+    resolve_suppressive_fire,
     _roll_check_die,
 )
 from game_systems.cpred_tables import (
@@ -4111,6 +4112,156 @@ class TestCPREDGameSystemHooks(unittest.TestCase):
     def test_game_system_exposes_apply_vehicle_updates(self):
         self.assertIn("apply_vehicle_updates", GAME_SYSTEM)
         self.assertTrue(callable(GAME_SYSTEM["apply_vehicle_updates"]))
+
+
+class TestSuppressiveFire(unittest.TestCase):
+    """Tests for Suppressive Fire resolver (CRB p.174)."""
+
+    def test_single_target_suppressed(self):
+        """Attacker rolls high, single target rolls low → suppressed."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[8, 3]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8, attacker_autofire=6,
+                targets=[{"name": "Ganger A", "will": 4, "concentration": 2}],
+                character_name="V", weapon_name="SMG",
+            )
+        self.assertEqual(result["type"], "suppressive_fire")
+        self.assertTrue(result["success"])
+        self.assertTrue(result["any_suppressed"])
+        self.assertEqual(len(result["targets"]), 1)
+        self.assertTrue(result["targets"][0]["suppressed"])
+        self.assertEqual(result["rounds_consumed"], 10)
+        self.assertIn("SUPPRESSED", result["formatted"])
+
+    def test_single_target_not_suppressed(self):
+        """Defender rolls high → not suppressed."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[3, 9]):
+            result = resolve_suppressive_fire(
+                attacker_ref=5, attacker_autofire=4,
+                targets=[{"name": "Solo", "will": 7, "concentration": 5}],
+                character_name="V",
+            )
+        self.assertFalse(result["success"])
+        self.assertFalse(result["any_suppressed"])
+        self.assertFalse(result["targets"][0]["suppressed"])
+        self.assertIn("resists", result["formatted"])
+
+    def test_tie_favors_defender(self):
+        """Exact tie → not suppressed (ties favor defender)."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
+            result = resolve_suppressive_fire(
+                attacker_ref=5, attacker_autofire=5,
+                targets=[{"name": "Guard", "will": 5, "concentration": 5}],
+            )
+        self.assertFalse(result["targets"][0]["suppressed"])
+        self.assertFalse(result["success"])
+
+    def test_multiple_targets(self):
+        """2+ targets, mixed results — verify per-target outcomes."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[7, 3, 8, 9]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8, attacker_autofire=6,
+                targets=[
+                    {"name": "Ganger A", "will": 4, "concentration": 2},
+                    {"name": "Ganger B", "will": 5, "concentration": 5},
+                    {"name": "Ganger C", "will": 6, "concentration": 6},
+                ],
+                character_name="V",
+            )
+        self.assertEqual(len(result["targets"]), 3)
+        self.assertTrue(result["targets"][0]["suppressed"])   # 9 < 21
+        self.assertTrue(result["targets"][1]["suppressed"])    # 18 < 21
+        self.assertFalse(result["targets"][2]["suppressed"])   # 21 = 21 tie
+        self.assertTrue(result["any_suppressed"])
+        self.assertTrue(result["success"])
+
+    def test_ammo_consumption(self):
+        """Verify 10-round ammo state_op emitted with weapon_name."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
+            result = resolve_suppressive_fire(
+                attacker_ref=6, attacker_autofire=4,
+                targets=[{"name": "T", "will": 3, "concentration": 2}],
+                character_name="V", weapon_name="Militech Crusher",
+            )
+        ammo_ops = [op for op in result["state_ops"] if op.get("op") == "ammo"]
+        self.assertEqual(len(ammo_ops), 1)
+        self.assertEqual(ammo_ops[0]["rounds_consumed"], 10)
+        self.assertEqual(ammo_ops[0]["weapon_name"], "Militech Crusher")
+
+    def test_no_ammo_op_without_weapon_name(self):
+        """No ammo op when weapon_name is empty."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
+            result = resolve_suppressive_fire(
+                attacker_ref=6, attacker_autofire=4,
+                targets=[{"name": "T", "will": 3, "concentration": 2}],
+            )
+        ammo_ops = [op for op in result["state_ops"] if op.get("op") == "ammo"]
+        self.assertEqual(len(ammo_ops), 0)
+
+    def test_seriously_wounded_penalties(self):
+        """Both attacker and target wounded → −2 each."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[6, 6]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8, attacker_autofire=6,
+                targets=[{"name": "T", "will": 8, "concentration": 6, "seriously_wounded": True}],
+                seriously_wounded_attacker=True,
+                character_name="V",
+            )
+        self.assertFalse(result["targets"][0]["suppressed"])
+        self.assertEqual(result["attacker_total"], 18)
+        self.assertEqual(result["targets"][0]["defender_total"], 18)
+
+    def test_luck_spent_on_attacker(self):
+        """Luck adds to attacker total."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[5, 5]):
+            result = resolve_suppressive_fire(
+                attacker_ref=5, attacker_autofire=5,
+                targets=[{"name": "T", "will": 5, "concentration": 5}],
+                luck_spent=3,
+            )
+        self.assertEqual(result["attacker_total"], 18)
+        self.assertTrue(result["targets"][0]["suppressed"])
+
+    def test_on_outcome_routing(self):
+        """on_success when any suppressed, on_failure when none."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[9, 2]):
+            result = resolve_suppressive_fire(
+                attacker_ref=8, attacker_autofire=6,
+                targets=[{"name": "T", "will": 3, "concentration": 2}],
+                on_success="Targets dive for cover",
+                on_failure="They shrug it off",
+            )
+        self.assertEqual(result["on_outcome"], "Targets dive for cover")
+
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[2, 9]):
+            result = resolve_suppressive_fire(
+                attacker_ref=3, attacker_autofire=2,
+                targets=[{"name": "T", "will": 7, "concentration": 6}],
+                on_success="Targets dive for cover",
+                on_failure="They shrug it off",
+            )
+        self.assertEqual(result["on_outcome"], "They shrug it off")
+
+    def test_dispatcher_routing(self):
+        """Call via resolve_actions to verify dispatcher wiring."""
+        with patch("game_systems.cpred_mechanics._roll_d10", side_effect=[7, 3]):
+            results = resolve_actions([{
+                "type": "suppressive_fire",
+                "character": "V",
+                "attacker_ref": 8,
+                "attacker_autofire": 6,
+                "targets": [{"name": "Ganger", "will": 4, "concentration": 2}],
+                "weapon_name": "SMG",
+                "on_success": "suppressed",
+                "on_failure": "resisted",
+            }])
+        self.assertEqual(len(results["results"]), 1)
+        r = results["results"][0]
+        self.assertEqual(r["type"], "suppressive_fire")
+        self.assertEqual(r["character"], "V")
+        self.assertTrue(r["success"])
+        ammo_ops = [op for op in results["state_ops"] if op.get("op") == "ammo"]
+        self.assertEqual(len(ammo_ops), 1)
 
 
 if __name__ == "__main__":

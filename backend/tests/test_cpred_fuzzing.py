@@ -1980,7 +1980,8 @@ class TestToolSchema(unittest.TestCase):
         expected = {"skill_check", "ranged_attack", "melee_attack", "autofire", "death_save",
                     "initiative", "opposed_check", "program_attack",
                     "program_attack_vs_netrunner", "ice_attack_vs_program", "ambush",
-                    "driving_check", "ramming", "vehicle_weak_point", "spike_strip"}
+                    "driving_check", "ramming", "vehicle_weak_point", "spike_strip",
+                    "suppressive_fire"}
         self.assertEqual(set(type_enum), expected)
 
 
