@@ -236,12 +236,12 @@ AIMED_SHOT_EFFECTS = {
 # Black ICE / Anti-Program ICE stat blocks (CRB pp. 204-208)
 # ---------------------------------------------------------------------------
 ICE_STAT_BLOCKS = {
-    "asp":        {"name": "Asp",        "class": "anti_personnel", "per": 4, "spd": 6, "atk": 2, "def": 2, "rez": 15, "damage_dice": 3, "effect": "program_destroy",   "effect_desc": "Destroys 1 random rezzed Program"},
+    "asp":        {"name": "Asp",        "class": "anti_personnel", "per": 4, "spd": 6, "atk": 2, "def": 2, "rez": 15, "damage_dice": 0, "effect": "program_destroy",   "effect_desc": "Destroys 1 random rezzed Program (no brain damage)"},
     "giant":      {"name": "Giant",      "class": "anti_personnel", "per": 2, "spd": 2, "atk": 8, "def": 4, "rez": 25, "damage_dice": 3, "effect": "forced_jack_out",   "effect_desc": "3d6 brain damage + forced unsafe Jack Out"},
     "hellhound":  {"name": "Hellhound",  "class": "anti_personnel", "per": 6, "spd": 6, "atk": 6, "def": 2, "rez": 20, "damage_dice": 2, "effect": "body_fire",         "effect_desc": "2d6 brain damage + clothes catch fire (2 meat HP/turn)", "defense_hardware": "Insulated Wiring"},
     "kraken":     {"name": "Kraken",     "class": "anti_personnel", "per": 6, "spd": 2, "atk": 8, "def": 4, "rez": 30, "damage_dice": 3, "effect": "movement_lock",      "effect_desc": "3d6 brain damage + cannot move nodes"},
     "liche":      {"name": "Liche",      "class": "anti_personnel", "per": 8, "spd": 2, "atk": 6, "def": 2, "rez": 25, "damage_dice": 0, "effect": "stat_debuff",        "effect_desc": "Reduces INT, REF, DEX by 1d6 each", "debuff_stats": ["INT", "REF", "DEX"]},
-    "raven":      {"name": "Raven",      "class": "anti_personnel", "per": 6, "spd": 4, "atk": 4, "def": 2, "rez": 15, "damage_dice": 1, "effect": "program_destroy",    "effect_desc": "1d6 brain damage + destroys 1 Defender program", "targets_defender": True},
+    "raven":      {"name": "Raven",      "class": "anti_personnel", "per": 6, "spd": 4, "atk": 4, "def": 2, "rez": 15, "damage_dice": 1, "effect": "program_derez",     "effect_desc": "1d6 brain damage + derezzes 1 random Defender program (reactivate = 2 NET Actions)", "targets_defender": True},
     "scorpion":   {"name": "Scorpion",   "class": "anti_personnel", "per": 2, "spd": 6, "atk": 2, "def": 2, "rez": 15, "damage_dice": 0, "effect": "stat_debuff",        "effect_desc": "Reduces MOVE by 1d6", "debuff_stats": ["MOVE"]},
     "skunk":      {"name": "Skunk",      "class": "anti_personnel", "per": 2, "spd": 4, "atk": 4, "def": 2, "rez": 10, "damage_dice": 0, "effect": "slide_penalty",      "effect_desc": "-2 to all Slide checks until derezzed"},
     "wisp":       {"name": "Wisp",       "class": "anti_personnel", "per": 4, "spd": 4, "atk": 4, "def": 2, "rez": 15, "damage_dice": 1, "effect": "net_action_penalty", "effect_desc": "1d6 brain damage + lose 1 NET Action next turn"},
@@ -265,7 +265,7 @@ ICE_STAT_BLOCKS = {
 # ---------------------------------------------------------------------------
 PROGRAM_STATS = {
     "Eraser":           {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Cloak",                          "cost": 20},
-    "SeeYa":            {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Pathfinder",                     "cost": 20},
+    "See Ya":           {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Pathfinder",                     "cost": 20},
     "Speedy Gonzalvez": {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Speed",                          "cost": 100},
     "Worm":             {"category": "booster",  "atk": 0, "def": 0, "rez": 7, "effect": "+2 Backdoor",                       "cost": 50},
     "Armor":            {"category": "defender", "atk": 0, "def": 0, "rez": 7, "effect": "Reduce brain dmg by 4",             "cost": 50},
@@ -371,7 +371,15 @@ CYBERWARE_TABLE = {
     "Linear Frame Sigma":   {"category": "borgware", "install": "Hospital",     "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": "Grafted Muscle/Bone Lace", "description": "BODY to 12. Req BODY 6"},
     "Linear Frame Beta":    {"category": "borgware", "install": "Hospital",     "cost": 5000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": "Grafted Muscle/Bone Lace", "description": "BODY to 14. Req BODY 8 + 2x Grafted"},
     "MultiOptic Mount":     {"category": "borgware", "install": "Hospital",     "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Mount up to 5 additional Cybereyes"},
-    "Sensor Array":         {"category": "borgware", "install": "Clinic",       "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Install 5 additional Cyberaudio options"},
+    "Sensor Array":         {"category": "borgware", "install": "Hospital",     "cost": 1000,  "hl_fixed": 14, "hl_dice": "4d6", "ceiling_cost": 4, "foundational": False, "option_slots": 0, "requires": None, "description": "Install 5 additional Cyberaudio options"},
+    # Fashionware (HL 0, ceiling_cost 0 — cosmetic implants)
+    "Biomonitor":           {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Subdermal health readout"},
+    "Chemskin":             {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Color/texture-changing skin"},
+    "EMP Threading":        {"category": "fashionware", "install": "Clinic",  "cost": 10,    "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Glowing circuit-pattern threads under skin"},
+    "Light Tattoo":         {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Animated/glowing tattoo"},
+    "Shift Tacts":          {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Color-changing contact lenses"},
+    "Skinwatch":            {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Subdermal LED watch display"},
+    "Techhair":             {"category": "fashionware", "install": "Clinic",  "cost": 100,   "hl_fixed": 0, "hl_dice": "0",  "ceiling_cost": 0, "foundational": False, "option_slots": 0, "requires": None, "description": "Color/length-changing hair"},
 }
 
 # ---------------------------------------------------------------------------
@@ -419,6 +427,14 @@ X2_SKILLS = {
 PRICE_CATEGORIES = {
     "Cheap": 10, "Everyday": 20, "Costly": 50, "Premium": 100,
     "Expensive": 500, "Very Expensive": 1000, "Luxury": 5000, "Super Luxury": 10000,
+}
+
+# ---------------------------------------------------------------------------
+# Night market availability DVs (CRB Night Market rules)
+# ---------------------------------------------------------------------------
+NIGHT_MARKET_DV = {
+    "Cheap": 0, "Everyday": 0, "Costly": 13, "Premium": 15,
+    "Expensive": 17, "Very Expensive": 19, "Luxury": 21, "Super Luxury": 23,
 }
 
 # ---------------------------------------------------------------------------
@@ -476,15 +492,69 @@ VEHICLE_STATS = {
     "jetski":           {"name": "Jetski",                "sdp": 35,  "sp": 0, "seats": 2, "move_min": 20, "move_max": 40, "type": "sea"},
     "gyrocopter":       {"name": "Gyrocopter",            "sdp": 35,  "sp": 0, "seats": 2, "move_min": 30, "move_max": 50, "type": "air"},
     "compact":          {"name": "Compact Groundcar",     "sdp": 50,  "sp": 0, "seats": 4, "move_min": 20, "move_max": 30, "type": "land"},
-    "high_performance": {"name": "High Perf. Groundcar",  "sdp": 50,  "sp": 0, "seats": 2, "move_min": 40, "move_max": 60, "type": "land"},
+    "high_performance": {"name": "High Perf. Groundcar",  "sdp": 50,  "sp": 0, "seats": 4, "move_min": 40, "move_max": 60, "type": "land"},
     "super_groundcar":  {"name": "Super Groundcar",       "sdp": 50,  "sp": 0, "seats": 2, "move_min": 50, "move_max": 60, "type": "land"},
-    "speedboat":        {"name": "Speedboat",             "sdp": 50,  "sp": 0, "seats": 4, "move_min": 30, "move_max": 40, "type": "sea"},
-    "helicopter":       {"name": "Helicopter",            "sdp": 55,  "sp": 0, "seats": 4, "move_min": 30, "move_max": 40, "type": "air"},
-    "av_9":             {"name": "AV-9 Aerodyne",         "sdp": 60,  "sp": 0, "seats": 4, "move_min": 20, "move_max": 40, "type": "air"},
+    "speedboat":        {"name": "Speedboat",             "sdp": 50,  "sp": 0, "seats": 4, "move_min": 20, "move_max": 20, "type": "sea"},
+    "helicopter":       {"name": "Helicopter",            "sdp": 60,  "sp": 0, "seats": 4, "move_min": 40, "move_max": 40, "type": "air"},
+    "av_9":             {"name": "AV-9 Aerodyne",         "sdp": 60,  "sp": 0, "seats": 2, "move_min": 60, "move_max": 60, "type": "air"},
     "av_4":             {"name": "AV-4 Aerodyne",         "sdp": 100, "sp": 0, "seats": 6, "move_min": 20, "move_max": 40, "type": "air"},
     "yacht":            {"name": "Yacht",                 "sdp": 100, "sp": 0, "seats": 6, "move_min": 10, "move_max": 20, "type": "sea"},
+    "cabin_cruiser":    {"name": "Cabin Cruiser",          "sdp": 60,  "sp": 0, "seats": 2, "move_min": 10, "move_max": 10, "type": "sea"},
     "aerozep":          {"name": "Aerozep",               "sdp": 100, "sp": 0, "seats": 4, "move_min": 10, "move_max": 20, "type": "air"},
 }
+
+# ---------------------------------------------------------------------------
+# NET Architecture SR → Base DV (Hacking Rulebook §4)
+# Used for Lockdown movement checks, Disable DV, etc.
+# ---------------------------------------------------------------------------
+SR_BASE_DV = {
+    1: 9,
+    2: 13,
+    3: 15,
+    4: 17,
+    5: 21,
+}
+
+# ---------------------------------------------------------------------------
+# Convergence Black ICE spawn by SR (Hacking Rulebook §6)
+# Lower-SR systems spawn lighter Black ICE; SR 4-5 spawn Kraken.
+# ---------------------------------------------------------------------------
+CONVERGENCE_ICE_BY_SR = {
+    1: "hellhound",
+    2: "hellhound",
+    3: "giant",
+    4: "kraken",
+    5: "kraken",
+}
+
+# ---------------------------------------------------------------------------
+# Architecture Difficulty Rating — CRB p.210
+# All Password, File, and Control Node entries in an architecture share the
+# SAME DV based on the chosen difficulty rating.  DVs do NOT escalate by depth.
+# ---------------------------------------------------------------------------
+ARCHITECTURE_DIFFICULTY_DV = {
+    "basic":     6,
+    "standard":  8,
+    "uncommon": 10,
+    "advanced": 12,
+}
+
+# Recommended SR → Difficulty mapping (editorial guideline, not CRB-mandated)
+SR_DIFFICULTY_RATING = {
+    1: "basic",
+    2: "standard",
+    3: "standard",
+    4: "uncommon",
+    5: "advanced",
+}
+
+# CRB p.211 — Random table for the first two nodes (the "Lobby").
+# Lobby nodes may use lighter content regardless of the architecture's rating.
+LOBBY_NODE_TABLE = [
+    {"type": "file",     "dv": 6},
+    {"type": "password", "dv": 6},
+    {"type": "password", "dv": 8},
+]
 
 DRIVING_CHECK_DVS = {
     "maintain_control": 10,

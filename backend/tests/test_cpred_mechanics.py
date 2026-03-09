@@ -3436,7 +3436,7 @@ class TestSeatsBaseValue(unittest.TestCase):
                 "occupants": ["V"], "driver": "V", "upgrades": [],
             },
         }])
-        self.assertEqual(combat["vehicles"]["High Perf. Groundcar"]["seats"], 2)
+        self.assertEqual(combat["vehicles"]["High Perf. Groundcar"]["seats"], 4)
 
     def test_explicit_seats_in_set_vehicle_stats(self):
         """Model can provide seats directly, bypassing lookup."""

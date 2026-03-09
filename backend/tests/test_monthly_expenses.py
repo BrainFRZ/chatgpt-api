@@ -70,7 +70,7 @@ class TestCostTables(unittest.TestCase):
 
     def test_lifestyle_costs_sorted_ascending(self):
         self.assertEqual(min(LIFESTYLE_COSTS.values()), 100)
-        self.assertEqual(max(LIFESTYLE_COSTS.values()), 1000)
+        self.assertEqual(max(LIFESTYLE_COSTS.values()), 1500)
 
 
 class TestDefaultEdgerunner(unittest.TestCase):
@@ -187,7 +187,7 @@ class TestProcessExpensesDeduction(unittest.TestCase):
         gs["current_date"] = "2045-01-31"
         _process_expenses(gs, "2045-02-01")
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 2000)  # 3000 - 1000
+        self.assertEqual(er["eurobucks"], 1500)  # 3000 - 1500
         self.assertEqual(er["lifestyle_paid_month"], "2045-02")
 
     def test_both_deducted(self):
@@ -196,7 +196,7 @@ class TestProcessExpensesDeduction(unittest.TestCase):
         gs["current_date"] = "2045-01-31"
         _process_expenses(gs, "2045-02-01")
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 2300)  # 5000 - 2500 - 200
+        self.assertEqual(er["eurobucks"], 2200)  # 5000 - 2500 - 300
         self.assertEqual(er["housing_paid_month"], "2045-02")
         self.assertEqual(er["lifestyle_paid_month"], "2045-02")
 
@@ -759,7 +759,7 @@ class TestEndToEnd(unittest.TestCase):
             "hud_state": {"date": "2045-02-01"}
         }, 2)
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 300)  # 3000 - 2500 - 200
+        self.assertEqual(er["eurobucks"], 200)  # 3000 - 2500 - 300
         self.assertEqual(er["housing_paid_month"], "2045-02")
         self.assertEqual(er["lifestyle_paid_month"], "2045-02")
 
@@ -769,9 +769,9 @@ class TestEndToEnd(unittest.TestCase):
             "hud_state": {"date": "2045-03-01"}
         }, 3)
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 100)  # 300 - 200 (lifestyle only)
+        self.assertEqual(er["eurobucks"], 200)  # can't afford housing (2500) or lifestyle (300)
         self.assertEqual(er["housing_paid_month"], "2045-02")  # Didn't pay March
-        self.assertEqual(er["lifestyle_paid_month"], "2045-03")
+        self.assertEqual(er["lifestyle_paid_month"], "2045-02")  # Can't afford (300 > 200)
 
         # Turn 4: advance to Mar 5 — 4 days on street with consequences
         gs["_pending_notifications"] = []
@@ -791,8 +791,8 @@ class TestEndToEnd(unittest.TestCase):
             "hud_state": {"date": "2045-03-06"}
         }, 5)
         er = gs["edgerunners"]["V"]
-        # 100 + 5000 = 5100, then housing catch-up -2500 = 2600
-        self.assertEqual(er["eurobucks"], 2600)
+        # 200 + 5000 = 5200, then housing catch-up -2500, lifestyle catch-up -300 = 2400
+        self.assertEqual(er["eurobucks"], 2400)
         self.assertEqual(er["housing_paid_month"], "2045-03")
         self.assertEqual(er["days_on_street"], 0)  # Reset after catch-up
 
