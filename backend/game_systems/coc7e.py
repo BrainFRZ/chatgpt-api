@@ -216,7 +216,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). During combat, set appropriate round durations (e.g. '12 seconds' for a 2-round fight). The backend computes the clock from this value — do NOT manually set hud_state.time or hud_state.date.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -502,7 +502,7 @@ COMBAT (CoC 7E):
 HUD:
 - Format: [Date: X | Time: XXXX | Loc: X | SAN: X/Y | Luck: Z]
 - Include per-investigator SAN and Luck in the HUD
-- Build from hud_state, advance time by time_passed
+- Build from hud_state. hud_state.time and hud_state.date are computed by the backend — use them as-is.
 
 IMPORTANT:
 - Output ONLY valid JSON
@@ -613,8 +613,9 @@ SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_state
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
 `[Date: X | Time: XXXX | Loc: X | SAN: X/Y | Luck: Z]`
 Include per-investigator SAN and Luck from `[INVESTIGATOR STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — SAN/Luck come from investigator_ops).
+Time is managed by the backend (30 seconds/turn default).
+To override the default duration (e.g. combat rounds, travel, extended actions), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+Do NOT manually set `time` or `date` — report location, funds, trackables only (SAN/Luck come from investigator_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from scenario context
@@ -828,7 +829,15 @@ STATE_REPORT_TOOL = {
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
-                    "trackables": {"description": "null or object of resource name → value"}
+                    "trackables": {"description": "null or object of resource name → value"},
+                    "time_override": {
+                        "type": "object",
+                        "description": "Override default 30s turn duration. Use for combat rounds, travel, extended actions. Omit for normal turns.",
+                        "properties": {
+                            "minutes": {"type": "number", "description": "Duration in minutes (e.g. 0.1 for a 6-second combat round)"},
+                            "reason": {"type": "string", "description": "Why this turn's duration differs (e.g. 'Combat round', 'Research at the library')"}
+                        }
+                    }
                 }
             },
             "plot_ops": {

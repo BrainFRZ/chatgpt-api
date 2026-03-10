@@ -66,6 +66,7 @@
 !backend/tests/test_netmap_e2e.py
 !backend/tests/test_monthly_expenses.py
 !backend/tests/test_housing_sharing.py
+!backend/tests/test_clock.py
 !data/
 !data/rulebooks/
 !data/rulebooks/cp_red/

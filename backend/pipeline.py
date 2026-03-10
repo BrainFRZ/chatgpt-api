@@ -79,9 +79,91 @@ NARRATION_TARGET_PAIRS = 20
 
 # State management constants
 CALLBACK_RESOLVED_RETENTION = 20  # Turns to keep resolved callbacks before pruning
+DEFAULT_TURN_SECONDS = 30  # Default time per normal turn (all game systems)
 NPC_MEMORY_TIER_LIMITS = {"high": 8, "moderate": 10, "flavor": 12}
 NPC_MEMORY_MAX_PER_NPC = 30
 CHARACTER_STATE_TTL = 150  # Prune NPC character states not updated in this many turns
+
+# ============================================================
+# In-Game Clock Helpers
+# ============================================================
+
+_TIME_PASSED_RE = re.compile(r'(\d+)\s*(second|minute|hour|day)s?', re.IGNORECASE)
+
+def parse_time_passed(text: str) -> int:
+    """Parse freeform duration text to total seconds.
+    Handles: '30 seconds', '5 minutes', '2 hours', '1 day',
+    '1 hour 30 minutes', etc.  Returns 0 on failure."""
+    if not text or not isinstance(text, str):
+        return 0
+    multipliers = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+    total = 0
+    for match in _TIME_PASSED_RE.finditer(text):
+        n = int(match.group(1))
+        unit = match.group(2).lower()
+        total += n * multipliers.get(unit, 0)
+    return total
+
+
+def advance_clock(time_str: str, date_str: str, seconds: int) -> tuple:
+    """Advance HHMM time by *seconds*, returning (new_time, new_date).
+    Handles midnight rollover.  Returns inputs unchanged if unparseable."""
+    if not time_str or not isinstance(time_str, str):
+        return time_str, date_str
+    # Parse HHMM
+    t = time_str.strip()
+    if len(t) < 3 or not t.isdigit():
+        return time_str, date_str
+    try:
+        h = int(t[:-2]) if len(t) > 2 else 0
+        m = int(t[-2:])
+    except ValueError:
+        return time_str, date_str
+
+    total_secs = h * 3600 + m * 60 + seconds
+    days_added = total_secs // 86400
+    remainder = total_secs % 86400
+    new_h = remainder // 3600
+    new_m = (remainder % 3600) // 60
+    new_time = f"{new_h:02d}{new_m:02d}"
+
+    new_date = date_str or ""
+    if days_added > 0 and new_date:
+        # Try to advance date (YYYY-MM-DD or similar)
+        try:
+            from datetime import datetime, timedelta
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%d %B %Y"):
+                try:
+                    dt = datetime.strptime(new_date.strip(), fmt)
+                    dt += timedelta(days=days_added)
+                    new_date = dt.strftime(fmt)
+                    break
+                except ValueError:
+                    continue
+        except Exception:
+            pass  # Leave date unchanged if unparseable
+    return new_time, new_date
+
+
+def _advance_hud_clock(pipeline_state: dict, seconds: int) -> None:
+    """Advance hud_state time/date by *seconds*, using the sub-minute buffer."""
+    if seconds <= 0:
+        return
+    hud = pipeline_state.get("hud_state", {})
+    old_time = hud.get("time", "")
+    old_date = hud.get("date", "")
+    if not old_time:  # No clock seed yet — skip
+        return
+    buf = pipeline_state.get("_clock_seconds_buffer", 0)
+    total = buf + seconds
+    minutes_to_add = total // 60
+    pipeline_state["_clock_seconds_buffer"] = total % 60
+    if minutes_to_add > 0:
+        new_time, new_date = advance_clock(old_time, old_date, minutes_to_add * 60)
+        hud["time"] = new_time
+        if new_date:
+            hud["date"] = new_date
+
 
 # ============================================================
 # Pipeline Result
@@ -968,7 +1050,8 @@ def _fresh_pipeline_state() -> dict:
         "hud_state": {},
         "combat": None,
         "ship_combat": None,
-        "turn_counter": 0
+        "turn_counter": 0,
+        "_clock_seconds_buffer": 0
     }
 
 
@@ -989,7 +1072,8 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "hud_state": {},
             "combat": None,
             "ship_combat": None,
-            "turn_counter": 0
+            "turn_counter": 0,
+            "_clock_seconds_buffer": 0
         }
 
     # New format — ensure all keys exist
@@ -1070,6 +1154,9 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("turn_counter", 0)
     if not isinstance(state.get("turn_counter"), int):
         state["turn_counter"] = 0
+    state.setdefault("_clock_seconds_buffer", 0)
+    if not isinstance(state.get("_clock_seconds_buffer"), int):
+        state["_clock_seconds_buffer"] = 0
     return state
 
 
@@ -1976,8 +2063,32 @@ def run_pipeline(
 
     # Persist HUD state from Events. CPRED authoritative funds are rebuilt later
     # after character/game-state updates so model ordering cannot leak stale values.
+    # Backend-driven clock: preserve previous time/date, advance via parsed time_passed.
     if "hud_state" in events_data:
+        prev_time = pipeline_state.get("hud_state", {}).get("time", "")
+        prev_date = pipeline_state.get("hud_state", {}).get("date", "")
         pipeline_state["hud_state"] = events_data["hud_state"]
+        # If we have a clock seed (prev turn had time), override model's time/date
+        # and advance via backend arithmetic.  First turn: accept model's values as seed.
+        if prev_time:
+            pipeline_state["hud_state"]["time"] = prev_time
+            pipeline_state["hud_state"]["date"] = prev_date
+            if events_route == "output":
+                # OOC turn — 0 seconds, clock frozen
+                pass
+            else:
+                tp_text = events_data.get("time_passed", "")
+                tp_seconds = parse_time_passed(tp_text)
+                if tp_seconds == 0:
+                    tp_seconds = DEFAULT_TURN_SECONDS
+                _advance_hud_clock(pipeline_state, tp_seconds)
+                # Emit notification for non-default durations
+                if tp_seconds != DEFAULT_TURN_SECONDS:
+                    pipeline_state.setdefault("_pending_time_notifications", []).append({
+                        "type": "time_passed",
+                        "duration": tp_text,
+                        "reason": "",
+                    })
 
     # Persist combat state (initiative tracker) from Events
     if "combat" in events_data:
@@ -3458,9 +3569,46 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         if "game_state" not in pipeline_state:
             pipeline_state["game_state"] = game_system["init_game_state"]()
         game_system["apply_game_state"](pipeline_state["game_state"], parsed, current_turn)
-    # Persist HUD state from tool report
+    # Persist HUD state from tool report.
+    # Backend-driven clock: preserve previous time/date, advance via time_override or default.
     if "hud_state" in parsed:
+        prev_time = pipeline_state.get("hud_state", {}).get("time", "")
+        prev_date = pipeline_state.get("hud_state", {}).get("date", "")
         pipeline_state["hud_state"] = parsed["hud_state"]
+        # If we have a clock seed, override model's time/date with backend-controlled values
+        if prev_time:
+            pipeline_state["hud_state"]["time"] = prev_time
+            pipeline_state["hud_state"]["date"] = prev_date
+            is_ooc = parsed.get("is_ooc", False)
+            if is_ooc:
+                pass  # OOC turn — clock frozen
+            else:
+                time_override = (parsed.get("hud_state") or {}).get("time_override")
+                if time_override and isinstance(time_override, dict):
+                    override_minutes = time_override.get("minutes", 0)
+                    tp_seconds = int(override_minutes * 60) if override_minutes else DEFAULT_TURN_SECONDS
+                    override_reason = time_override.get("reason", "")
+                else:
+                    tp_seconds = DEFAULT_TURN_SECONDS
+                    override_reason = None
+                # Strip time_override from persisted hud_state (consumed, not for storage)
+                pipeline_state["hud_state"].pop("time_override", None)
+                _advance_hud_clock(pipeline_state, tp_seconds)
+                # Emit notification for non-default durations
+                if tp_seconds != DEFAULT_TURN_SECONDS and override_reason is not None:
+                    # Build human-readable duration string
+                    _mins = tp_seconds // 60
+                    if _mins >= 60:
+                        _dur_str = f"{_mins // 60} hour{'s' if _mins // 60 != 1 else ''}" + (f" {_mins % 60} minute{'s' if _mins % 60 != 1 else ''}" if _mins % 60 else "")
+                    elif _mins > 0:
+                        _dur_str = f"{_mins} minute{'s' if _mins != 1 else ''}"
+                    else:
+                        _dur_str = f"{tp_seconds} seconds"
+                    pipeline_state.setdefault("_pending_time_notifications", []).append({
+                        "type": "time_passed",
+                        "duration": _dur_str,
+                        "reason": override_reason or "",
+                    })
     # Sync CPRED character_states + HUD funds from authoritative game_state.
     # Runs AFTER model's hud_state is merged/scoped so game_state overrides stale values.
     if game_system and game_system.get("id") == "cpred":

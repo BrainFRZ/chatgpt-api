@@ -1658,7 +1658,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers, e.g. '1 minute', '10 minutes', '2 hours'>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock — do NOT manually set hud_state.time or hud_state.date. During combat, time is locked at 6 seconds/round by the backend (30 seconds/round in ship combat); time_passed is ignored.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -2131,8 +2131,10 @@ If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel:
 During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y]`
 Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
 **Do NOT include funds/credits in the HUD line — funds are displayed in the character panel only.**
-Advance time/date based on in-world passage. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, trackables only — funds auto-derived).
+Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat, 30 seconds/round in ship combat).
+To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+Do NOT manually set `time` or `date`. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
+Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override only — date/time auto-computed, funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -2391,7 +2393,15 @@ STATE_REPORT_TOOL = {
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
                     "funds": {"description": "Auto-derived from ship.credits. Do NOT set — use ship_ops credits instead."},
-                    "trackables": {"description": "null or object of resource name → value"}
+                    "trackables": {"description": "null or object of resource name → value"},
+                    "time_override": {
+                        "type": "object",
+                        "description": "Override default 30s turn duration. Only outside combat. Omit for normal turns.",
+                        "properties": {
+                            "minutes": {"type": "number", "description": "Duration in minutes"},
+                            "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Hyperspace jump to Kepler-442')"}
+                        }
+                    }
                 }
             },
             "plot_ops": {
@@ -2516,4 +2526,6 @@ GAME_SYSTEM = {
     "build_ship_combat_profile": build_ship_combat_profile,
     "build_ship_combat_injection": build_ship_combat_injection,
     "apply_ship_combat_state": apply_ship_combat_state,
+    "combat_round_seconds": 6,  # D&D RAW: 1 combat round = 6 seconds
+    "ship_combat_round_seconds": 30,  # Ship combat round = 5 combat rounds (30s)
 }

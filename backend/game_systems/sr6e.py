@@ -240,7 +240,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). During combat, set appropriate round durations (e.g. '3 seconds' per combat turn). The backend computes the clock from this value — do NOT manually set hud_state.time or hud_state.date.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -524,7 +524,7 @@ Opposed: 🎲 [Description]: [Pool Xd6] **Y hits** vs [Opponent Pool Xd6] **Z hi
 
 HUD:
 - Format: [Date: 2082-XX-XX | Time: XXXX | Loc: X | Edge: X/Y | P: X/Y | S: X/Y]
-- Build from hud_state, advance time by time_passed
+- Build from hud_state. hud_state.time and hud_state.date are computed by the backend — use them as-is.
 - Include per-runner Edge and CM when relevant
 
 CHARACTER STATES:
@@ -650,8 +650,9 @@ Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops.
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
 `[Date: 2082-XX-XX | Time: XXXX | Loc: X | Edge: X/Y | P: X/Y | S: X/Y]`
 Include per-runner Edge and condition monitors from `[RUNNER STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — Edge/CM come from runner_ops).
+Time is managed by the backend (30 seconds/turn default).
+To override the default duration (e.g. combat rounds, travel, extended actions), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+Do NOT manually set `time` or `date` — report location, funds, trackables only (Edge/CM come from runner_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from run/scenario context
@@ -858,7 +859,15 @@ STATE_REPORT_TOOL = {
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
-                    "trackables": {"description": "null or object of resource name → value"}
+                    "trackables": {"description": "null or object of resource name → value"},
+                    "time_override": {
+                        "type": "object",
+                        "description": "Override default 30s turn duration. Use for combat rounds, travel, extended actions. Omit for normal turns.",
+                        "properties": {
+                            "minutes": {"type": "number", "description": "Duration in minutes (e.g. 0.05 for a 3-second combat turn)"},
+                            "reason": {"type": "string", "description": "Why this turn's duration differs (e.g. 'Combat turn', 'Legwork across the Sprawl')"}
+                        }
+                    }
                 }
             },
             "plot_ops": {

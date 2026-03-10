@@ -47,6 +47,7 @@ from pipeline import (
     collapse_net_combat_messages,
     collapse_sex_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
+    _advance_hud_clock,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 from game_systems.cpred_identity import (
@@ -4835,6 +4836,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if ship_combat_json_valid:
                 ship_combat_ps = data.get("pipeline_state", {})
                 gs["apply_ship_combat_state"](ship_combat_ps, ship_combat_json)
+                # Ship combat clock: advance by game-system-defined ship round duration
+                _ship_secs = gs.get("ship_combat_round_seconds") if gs else None
+                if _ship_secs:
+                    _advance_hud_clock(ship_combat_ps, _ship_secs)
                 data["pipeline_state"] = ship_combat_ps
 
                 yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
@@ -5086,6 +5091,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     pipeline_state=hack_ps,
                 )
                 data["hack_state"] = hack_state
+
+                # Combat clock: advance by game-system-defined round duration
+                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                if _combat_secs:
+                    _advance_hud_clock(hack_ps, _combat_secs)
 
                 # Emit updated hack state
                 yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
@@ -5344,6 +5354,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _apply_combat_state(gs, combat_ps, combat_json)
                 _apply_tar_consumed_state_ops(combat_ps, mode_result.state_ops)
                 data["pipeline_state"] = combat_ps
+
+                # Combat clock: advance by game-system-defined round duration
+                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                if _combat_secs:
+                    _advance_hud_clock(combat_ps, _combat_secs)
 
                 # Emit state_update SSE event with updated pipeline_state
                 yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
@@ -5610,6 +5625,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 gs["apply_net_combat_state"](nc_ps, nc_json, game_state=nc_ps.get("game_state"),
                                              resolver_state_ops=mode_result.state_ops)
                 data["pipeline_state"] = nc_ps
+
+                # Combat clock: advance by game-system-defined round duration
+                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                if _combat_secs:
+                    _advance_hud_clock(nc_ps, _combat_secs)
 
                 yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                 await sync_manager.broadcast_to_chat(
@@ -6238,6 +6258,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         await sync_manager.broadcast_to_chat(chat_key,
                             SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": game_notifs}))
 
+                # Emit time-override notifications (pipeline path)
+                time_notifs = ps.pop("_pending_time_notifications", [])
+                if time_notifs:
+                    yield f"event: state_notifications\ndata: {json.dumps(time_notifs)}\n\n"
+                    await sync_manager.broadcast_to_chat(chat_key,
+                        SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
+
                 # Get cross-model providers for token counting
                 gpt_provider = get_gpt_provider()
                 claude_provider = get_claude_provider()
@@ -6857,6 +6884,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 )
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
+                                # Combat clock: advance by game-system-defined round duration
+                                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                if _combat_secs:
+                                    _advance_hud_clock(_hack_ps, _combat_secs)
                                 logger.info(f"Hack mode: applied hack state for {username}, "
                                             f"alert={hack_state.get('alert_level')}, "
                                             f"node={hack_state.get('current_node')}, "
@@ -6891,6 +6922,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         )
                                         data["hack_state"] = hack_state
                                         hack_tool_input = retry_result
+                                        # Combat clock: advance by game-system-defined round duration (retry)
+                                        _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                        if _combat_secs:
+                                            _advance_hud_clock(_hack_ps, _combat_secs)
                                         logger.info(f"Hack mode: retry succeeded for {username}")
                                     else:
                                         logger.warning(f"Hack mode: retry also failed for {username}")
@@ -6909,6 +6944,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 gs["apply_net_combat_state"](_nc_ps, tool_input, game_state=_nc_ps.get("game_state"),
                                                              resolver_state_ops=accumulated_rm_state_ops)
                                 data["pipeline_state"] = _nc_ps
+                                # Combat clock: advance by game-system-defined round duration
+                                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                if _combat_secs:
+                                    _advance_hud_clock(_nc_ps, _combat_secs)
                                 logger.info(f"Net combat mode: applied state for {username}, "
                                             f"combat_complete={tool_input.get('combat_complete', False)}, "
                                             f"net_complete={tool_input.get('net_complete', False)}")
@@ -6937,6 +6976,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         gs["apply_net_combat_state"](_nc_ps, retry_result, game_state=_nc_ps.get("game_state"),
                                                                      resolver_state_ops=accumulated_rm_state_ops)
                                         data["pipeline_state"] = _nc_ps
+                                        # Combat clock: advance by game-system-defined round duration (retry)
+                                        _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                        if _combat_secs:
+                                            _advance_hud_clock(_nc_ps, _combat_secs)
                                         logger.info(f"Net combat mode: retry succeeded for {username}")
                                     else:
                                         logger.warning(f"Net combat mode: retry also failed for {username}")
@@ -6956,6 +6999,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _combat_ps = data.get("pipeline_state", {})
                                 _apply_combat_state(gs, _combat_ps, tool_input)
                                 data["pipeline_state"] = _combat_ps
+                                # Combat clock: advance by game-system-defined round duration
+                                _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                if _combat_secs:
+                                    _advance_hud_clock(_combat_ps, _combat_secs)
                                 logger.info(f"Combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('combat_complete', False)}")
                             else:
@@ -6983,6 +7030,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         _combat_ps = data.get("pipeline_state", {})
                                         _apply_combat_state(gs, _combat_ps, retry_result)
                                         data["pipeline_state"] = _combat_ps
+                                        # Combat clock: advance by game-system-defined round duration (retry)
+                                        _combat_secs = gs.get("combat_round_seconds") if gs else None
+                                        if _combat_secs:
+                                            _advance_hud_clock(_combat_ps, _combat_secs)
                                         logger.info(f"Combat mode: retry succeeded for {username}")
                                     else:
                                         logger.warning(f"Combat mode: retry also failed for {username}")
@@ -7000,6 +7051,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     if _sc_dbg_pre.get("bootstrap_messages"):
                                         ship_combat_bootstrap_messages_snapshot = copy.deepcopy(_sc_dbg_pre.get("bootstrap_messages"))
                                 gs["apply_ship_combat_state"](_ship_combat_ps, tool_input)
+                                # Ship combat clock: advance by game-system-defined ship round duration
+                                _ship_secs = gs.get("ship_combat_round_seconds") if gs else None
+                                if _ship_secs:
+                                    _advance_hud_clock(_ship_combat_ps, _ship_secs)
                                 data["pipeline_state"] = _ship_combat_ps
                                 logger.info(f"Ship combat mode: applied state for {username}, "
                                             f"complete={tool_input.get('ship_combat_complete', False)}")
@@ -7028,6 +7083,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             if _sc_dbg_pre.get("bootstrap_messages"):
                                                 ship_combat_bootstrap_messages_snapshot = copy.deepcopy(_sc_dbg_pre.get("bootstrap_messages"))
                                         gs["apply_ship_combat_state"](_ship_combat_ps, retry_result)
+                                        # Ship combat clock: advance by game-system-defined ship round duration (retry)
+                                        _ship_secs = gs.get("ship_combat_round_seconds") if gs else None
+                                        if _ship_secs:
+                                            _advance_hud_clock(_ship_combat_ps, _ship_secs)
                                         data["pipeline_state"] = _ship_combat_ps
                                         logger.info(f"Ship combat mode: retry succeeded for {username}")
                                     else:
@@ -7177,6 +7236,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 yield f"event: state_notifications\ndata: {json.dumps(game_notifs)}\n\n"
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": game_notifs}))
+
+                        # Emit time-override notifications (single-agent path)
+                        if stateful_pipeline_state:
+                            time_notifs = stateful_pipeline_state.pop("_pending_time_notifications", [])
+                            if time_notifs:
+                                yield f"event: state_notifications\ndata: {json.dumps(time_notifs)}\n\n"
+                                await sync_manager.broadcast_to_chat(chat_key,
+                                    SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''

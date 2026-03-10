@@ -611,6 +611,14 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'time_passed') {
+                return (
+                  <div key={i} style={styles.timePassedNotification}>
+                    <span style={styles.notificationLabel}>{'⏱ '}{n.duration}</span>
+                    {n.reason && <span style={styles.notificationReason}> — {n.reason}</span>}
+                  </div>
+                );
+              }
               if (n.type === 'plot_decision') {
                 const isDivergence = n.severity === 'divergence';
                 return (

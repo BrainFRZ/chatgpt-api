@@ -1314,6 +1314,15 @@ export const styles: { [key: string]: React.CSSProperties } = {
     color: '#ffcc80',
     borderLeft: '3px solid #ff9800',
   },
+  timePassedNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(66, 165, 245, 0.06)',
+    color: '#90caf9',
+    borderLeft: '3px solid #42a5f5',
+  },
   plotNotification: {
     padding: '4px 10px',
     borderRadius: '4px',

@@ -253,7 +253,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers, e.g. '1 minute', '10 minutes', '2 hours'>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock — do NOT manually set hud_state.time or hud_state.date. During combat, time is locked at 6 seconds/round by the backend; time_passed is ignored.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -613,8 +613,7 @@ HUD:
 - Base format: [Date: X | Time: XXXX | Loc: X]
 - If hud_state.trackables is non-null, append each trackable after Loc: [Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]
 - Build the HUD from the "hud_state" object in the Events JSON:
-  * Use hud_state.date for the Date field; advance the date if time_passed crosses midnight
-  * Take hud_state.time and advance it by the "time_passed" value for the Time field
+  * hud_state.time and hud_state.date are computed by the backend. Use them as-is for the Date and Time fields.
   * Use hud_state.location for Loc (update if the player moved this turn)
   * If hud_state.trackables is non-null, include each key-value pair as additional HUD segments. Update values if a beat consumes or replenishes a tracked resource (e.g. fuel spent on travel, ammo fired in combat).
 - Events has full conversation context and provides accurate hud_state; trust its values as the baseline
@@ -731,9 +730,10 @@ Optional arrays (omit or leave empty when no ops occurred):
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
 `[Date: X | Time: XXXX | Loc: X]`
 If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
-Advance time/date based on in-world passage. Update trackables if resources changed.
+Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat).
+To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+Do NOT manually set `time` or `date` — report location, funds, trackables only.
 Game-specific stats come from injected game-state blocks, NOT from hud_state.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -959,7 +959,15 @@ STATE_REPORT_TOOL = {
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
                     "funds": {"description": "Object mapping names to funds (e.g. {\"party chest\": \"500 gp\", \"Aedina\": \"32 gp\"}). Include shared pools as named entries alongside characters."},
-                    "trackables": {"description": "null or object of resource name → value"}
+                    "trackables": {"description": "null or object of resource name → value"},
+                    "time_override": {
+                        "type": "object",
+                        "description": "Override default 30s turn duration. Only outside combat. Omit for normal turns.",
+                        "properties": {
+                            "minutes": {"type": "number", "description": "Duration in minutes"},
+                            "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Travel to the docks')"}
+                        }
+                    }
                 }
             },
             "plot_ops": {
@@ -1314,4 +1322,5 @@ GAME_SYSTEM = {
     "build_combat_injection": build_combat_injection,
     "apply_combat_state": apply_combat_state,
     "combat_files": ["Core Conversion.md", "Character Sheets.md", "Character Sheets.yaml"],
+    "combat_round_seconds": 6,  # D&D RAW: 1 combat round = 6 seconds
 }

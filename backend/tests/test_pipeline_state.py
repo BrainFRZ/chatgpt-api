@@ -292,7 +292,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
 
 
 # ============================================================
@@ -1489,7 +1489,7 @@ class TestRunPipelineE2E:
         state = result.pipeline_state
 
         # Verify full nested structure exists
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
 
         # Turn counter should be 1 (migrated from 0 + increment)
         assert state["turn_counter"] == 1
@@ -2902,21 +2902,30 @@ class TestApplySingleAgentHudState:
         assert ps["hud_state"] == {"date": "Day 3", "time": "0900"}
 
     def test_hud_state_replaced_not_merged(self):
+        """Model's hud_state replaces previous, but time/date are backend-controlled
+        when a clock seed exists (previous time is non-empty)."""
         ps = _fresh_pipeline_state()
         ps["hud_state"] = {"date": "Day 3", "time": "0900", "location": "Tavern"}
         parsed = {
             "hud_state": {"date": "Day 4", "time": "1000", "location": "Market"}
         }
         apply_single_agent_state_updates(ps, parsed, current_turn=2)
-        assert ps["hud_state"] == {"date": "Day 4", "time": "1000", "location": "Market"}
+        # Location comes from model, but time/date are backend-controlled:
+        # prev_time=0900, default 30s advance → buffer=30, time stays 0900
+        assert ps["hud_state"]["location"] == "Market"
+        assert ps["hud_state"]["time"] == "0900"  # Backend-controlled, not model's "1000"
+        assert ps["hud_state"]["date"] == "Day 3"  # Backend-controlled, not model's "Day 4"
 
     def test_hud_state_empty_dict_still_persisted(self):
-        """Empty dict hud_state from tool call should still overwrite (key present, value falsy)."""
+        """Empty dict hud_state from tool call overwrites, but backend restores
+        time/date when a clock seed exists."""
         ps = _fresh_pipeline_state()
         ps["hud_state"] = {"date": "Day 3", "time": "0900"}
         parsed = {"hud_state": {}}
         apply_single_agent_state_updates(ps, parsed, current_turn=2)
-        assert ps["hud_state"] == {}
+        # Backend restores time/date from previous clock seed
+        assert ps["hud_state"]["time"] == "0900"
+        assert ps["hud_state"]["date"] == "Day 3"
 
 
 class TestMalformedMechanicsHandoff:

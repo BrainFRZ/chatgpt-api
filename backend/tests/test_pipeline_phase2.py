@@ -841,9 +841,10 @@ class TestTimePassedFlow:
         assert "TIME PASSED" in EVENTS_CONTRACT
 
     def test_mechanics_contract_references_time_passed(self):
-        """Mechanics contract should reference time_passed for HUD advancement."""
-        assert "time_passed" in MECHANICS_CONTRACT
-        assert "advance it by" in MECHANICS_CONTRACT and "time_passed" in MECHANICS_CONTRACT
+        """Mechanics contract should reference hud_state time/date as backend-computed."""
+        # time_passed is still referenced in the Events JSON that Mechanics receives
+        assert "hud_state" in MECHANICS_CONTRACT
+        assert "backend" in MECHANICS_CONTRACT.lower() or "as-is" in MECHANICS_CONTRACT
 
     def test_events_schema_a_time_passed_in_mechanics_input(self):
         """Events JSON with time_passed should be passed to Mechanics via build_mechanics_messages."""
@@ -944,9 +945,8 @@ class TestTimePassedFlow:
         events_data_received = json.loads(user_msg["content"])
         assert events_data_received["time_passed"] == "15 minutes"
 
-        # Verify Mechanics system prompt tells it to use time_passed for HUD
-        assert "time_passed" in mechanics_messages[0]["content"]
-        assert "advance it by" in mechanics_messages[0]["content"]
+        # Verify Mechanics system prompt tells it to use hud_state (backend-computed)
+        assert "hud_state" in mechanics_messages[0]["content"]
 
     def test_time_passed_without_context_updates(self):
         """time_passed should be preserved (CONTEXT UPDATES injection was removed)."""

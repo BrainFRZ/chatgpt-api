@@ -89,7 +89,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock — do NOT manually set hud_state.time or hud_state.date. During combat/hack/net_combat, time is locked at 3 seconds/round by the backend; time_passed is ignored.>",
   "beats": [
     {"beat": "<narrative description>", "resolution": null},
     {"beat": "<narrative description>", "resolution": {<resolution object — see RESOLUTION TYPES below>}}
@@ -639,8 +639,9 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
 `[Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]`
 Include per-edgerunner HP and Humanity from `[EDGERUNNER STATE]`, NOT from hud_state.
-Advance time/date based on in-world passage.
-Report updated values via `report_state` tool's `hud_state` field (date, time, location, funds, trackables only — HP/Humanity come from edgerunner_ops).
+Time is managed by the backend (30 seconds/turn default, 3 seconds/round in combat/hack/net_combat).
+To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+Do NOT manually set `time` or `date` — report location, funds, trackables only (HP/Humanity come from edgerunner_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from gig/scenario context
@@ -898,7 +899,15 @@ STATE_REPORT_TOOL = {
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
                     "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
-                    "trackables": {"description": "null or object of resource name → value"}
+                    "trackables": {"description": "null or object of resource name → value"},
+                    "time_override": {
+                        "type": "object",
+                        "description": "Override default 30s turn duration. Only outside combat/hack/net_combat. Omit for normal turns.",
+                        "properties": {
+                            "minutes": {"type": "number", "description": "Duration in minutes"},
+                            "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Travel to Night City docks')"}
+                        }
+                    }
                 }
             },
             "plot_ops": {
@@ -2181,6 +2190,7 @@ GAME_SYSTEM = {
     "combat_tool": REPORT_CPRED_COMBAT_STATE_TOOL,
     "build_combat_profile": build_cpred_combat_profile,
     "build_combat_injection": build_cpred_combat_injection,
+    "combat_round_seconds": 3,  # CPRED RAW: 1 combat round = 3 seconds
     "apply_combat_state": apply_cpred_combat_state,
     "apply_vehicle_updates": _apply_vehicle_updates,
     "combat_files": ["Combat Ruleset.md", "Character Sheets.md", "Character Sheets.yaml"],
