@@ -165,6 +165,59 @@ def _advance_hud_clock(pipeline_state: dict, seconds: int) -> None:
             hud["date"] = new_date
 
 
+def _persist_hud_state_with_backend_clock(
+    pipeline_state: dict,
+    incoming_hud_state: Optional[dict] = None,
+    *,
+    seconds: int,
+    is_ooc: bool = False,
+    replace_snapshot: bool = True,
+) -> bool:
+    """Persist hud_state while keeping time/date backend-owned after initial seed.
+
+    If a previous clock seed exists, incoming time/date are ignored and the backend
+    advances the prior clock by *seconds* unless the turn is OOC.
+    If no previous seed exists, the incoming time/date are accepted once as the
+    initial seed. This is required to bootstrap a fresh chat's clock.
+
+    When *incoming_hud_state* is omitted, the existing HUD snapshot is preserved and
+    only the clock is advanced. When *replace_snapshot* is False, incoming fields are
+    merged over the existing HUD instead of replacing it. This is used by mode tools,
+    which may only need to seed time/date without rebuilding the full HUD snapshot.
+
+    Returns True when the backend advanced an existing clock seed this turn.
+    """
+    prev_hud = pipeline_state.get("hud_state", {})
+    prev_time = prev_hud.get("time", "") if isinstance(prev_hud, dict) else ""
+    prev_date = prev_hud.get("date", "") if isinstance(prev_hud, dict) else ""
+    hud_base = copy.deepcopy(prev_hud) if isinstance(prev_hud, dict) else {}
+
+    if incoming_hud_state is None:
+        hud = hud_base
+    elif isinstance(incoming_hud_state, dict):
+        incoming = copy.deepcopy(incoming_hud_state)
+        hud = {**hud_base, **incoming} if not replace_snapshot else incoming
+    else:
+        hud = {} if replace_snapshot else hud_base
+    hud.pop("time_override", None)
+
+    pipeline_state["hud_state"] = hud
+
+    if prev_time:
+        hud["time"] = prev_time
+        hud["date"] = prev_date
+        if not is_ooc:
+            _advance_hud_clock(pipeline_state, seconds)
+            return True
+        return False
+
+    # Fresh chat/bootstrap: accept the model-provided absolute clock once.
+    if not hud.get("time"):
+        hud.pop("time", None)
+        hud.pop("date", None)
+    return False
+
+
 # ============================================================
 # Pipeline Result
 # ============================================================
@@ -2063,32 +2116,24 @@ def run_pipeline(
 
     # Persist HUD state from Events. CPRED authoritative funds are rebuilt later
     # after character/game-state updates so model ordering cannot leak stale values.
-    # Backend-driven clock: preserve previous time/date, advance via parsed time_passed.
-    if "hud_state" in events_data:
-        prev_time = pipeline_state.get("hud_state", {}).get("time", "")
-        prev_date = pipeline_state.get("hud_state", {}).get("date", "")
-        pipeline_state["hud_state"] = events_data["hud_state"]
-        # If we have a clock seed (prev turn had time), override model's time/date
-        # and advance via backend arithmetic.  First turn: accept model's values as seed.
-        if prev_time:
-            pipeline_state["hud_state"]["time"] = prev_time
-            pipeline_state["hud_state"]["date"] = prev_date
-            if events_route == "output":
-                # OOC turn — 0 seconds, clock frozen
-                pass
-            else:
-                tp_text = events_data.get("time_passed", "")
-                tp_seconds = parse_time_passed(tp_text)
-                if tp_seconds == 0:
-                    tp_seconds = DEFAULT_TURN_SECONDS
-                _advance_hud_clock(pipeline_state, tp_seconds)
-                # Emit notification for non-default durations
-                if tp_seconds != DEFAULT_TURN_SECONDS:
-                    pipeline_state.setdefault("_pending_time_notifications", []).append({
-                        "type": "time_passed",
-                        "duration": tp_text,
-                        "reason": "",
-                    })
+    # Backend-driven clock: accept an initial seed once, then advance only by deltas.
+    if "hud_state" in events_data or isinstance(pipeline_state.get("hud_state"), dict):
+        tp_text = events_data.get("time_passed", "")
+        tp_seconds = parse_time_passed(tp_text)
+        if tp_seconds == 0:
+            tp_seconds = DEFAULT_TURN_SECONDS
+        advanced_clock = _persist_hud_state_with_backend_clock(
+            pipeline_state,
+            events_data.get("hud_state"),
+            seconds=tp_seconds,
+            is_ooc=(events_route == "output"),
+        )
+        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS:
+            pipeline_state.setdefault("_pending_time_notifications", []).append({
+                "type": "time_passed",
+                "duration": tp_text,
+                "reason": "",
+            })
 
     # Persist combat state (initiative tracker) from Events
     if "combat" in events_data:
@@ -2114,7 +2159,7 @@ def run_pipeline(
             )
         if game_system == "cpred":
             _rebuild_cpred_projections(new_pipeline_state, current_turn)
-        elif "hud_state" in events_data:
+        elif isinstance(new_pipeline_state.get("hud_state"), dict):
             new_pipeline_state["hud_state"] = derive_funds_from_ship_credits(
                 new_pipeline_state.get("hud_state", {}),
                 new_pipeline_state.get("game_state"))
@@ -2192,13 +2237,23 @@ def run_pipeline(
             tracked_edgerunners=canonical_edgerunners,
         )
 
-        # Keep character_states and HUD funds synchronized with resolver-applied CPRED state.
+        # Keep character_states and HUD funds synchronized with resolver-applied state.
         if game_system == "cpred":
             _cpred_views = _rebuild_cpred_projections(
                 new_pipeline_state,
                 current_turn,
                 tracked_edgerunners=canonical_edgerunners,
             )
+        elif isinstance(new_pipeline_state.get("hud_state"), dict):
+            new_pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("game_state"))
+            new_pipeline_state["hud_state"] = scope_hud_funds(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("scene_state", {}),
+                new_pipeline_state.get("character_states", {}),
+            )
+            _cpred_views = None
         else:
             _cpred_views = None
 
@@ -2265,6 +2320,17 @@ def run_pipeline(
             if "game_state" not in pipeline_state:
                 pipeline_state["game_state"] = gs["init_game_state"]()
             gs["apply_game_state"](pipeline_state["game_state"], mechanics_data, current_turn)
+        # Keep HUD funds synchronized after Mechanics applies game-state changes.
+        if game_system != "cpred" and isinstance(new_pipeline_state.get("hud_state"), dict):
+            new_pipeline_state["hud_state"] = derive_funds_from_ship_credits(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("game_state"))
+            new_pipeline_state["hud_state"] = scope_hud_funds(
+                new_pipeline_state.get("hud_state", {}),
+                new_pipeline_state.get("scene_state", {}),
+                new_pipeline_state.get("character_states", {}),
+            )
+
         stage_results.append(mechanics_result)
         if mechanics_result.usage.get('reasoning'):
             reasoning_summaries.append(f"[Mechanics] {mechanics_result.usage['reasoning']}")
@@ -3570,51 +3636,49 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             pipeline_state["game_state"] = game_system["init_game_state"]()
         game_system["apply_game_state"](pipeline_state["game_state"], parsed, current_turn)
     # Persist HUD state from tool report.
-    # Backend-driven clock: preserve previous time/date, advance via time_override or default.
-    if "hud_state" in parsed:
-        prev_time = pipeline_state.get("hud_state", {}).get("time", "")
-        prev_date = pipeline_state.get("hud_state", {}).get("date", "")
-        pipeline_state["hud_state"] = parsed["hud_state"]
-        # If we have a clock seed, override model's time/date with backend-controlled values
-        if prev_time:
-            pipeline_state["hud_state"]["time"] = prev_time
-            pipeline_state["hud_state"]["date"] = prev_date
-            is_ooc = parsed.get("is_ooc", False)
-            if is_ooc:
-                pass  # OOC turn — clock frozen
+    # Backend-driven clock: accept an initial seed once, then advance only by deltas.
+    if "hud_state" in parsed or isinstance(pipeline_state.get("hud_state"), dict):
+        is_ooc = parsed.get("is_ooc", False)
+        raw_hud = parsed.get("hud_state")
+        incoming_hud = raw_hud if isinstance(raw_hud, dict) else None
+        time_override = (incoming_hud or {}).get("time_override")
+        if time_override and isinstance(time_override, dict):
+            try:
+                override_minutes = float(time_override.get("minutes", 0) or 0)
+            except (TypeError, ValueError):
+                override_minutes = 0
+            tp_seconds = int(override_minutes * 60) if override_minutes > 0 else DEFAULT_TURN_SECONDS
+            override_reason = time_override.get("reason", "")
+        else:
+            tp_seconds = DEFAULT_TURN_SECONDS
+            override_reason = None
+        advanced_clock = _persist_hud_state_with_backend_clock(
+            pipeline_state,
+            incoming_hud,
+            seconds=tp_seconds,
+            is_ooc=is_ooc,
+        )
+        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS and override_reason is not None:
+            # Build human-readable duration string
+            _mins = tp_seconds // 60
+            if _mins >= 60:
+                _dur_str = f"{_mins // 60} hour{'s' if _mins // 60 != 1 else ''}" + (f" {_mins % 60} minute{'s' if _mins % 60 != 1 else ''}" if _mins % 60 else "")
+            elif _mins > 0:
+                _dur_str = f"{_mins} minute{'s' if _mins != 1 else ''}"
             else:
-                time_override = (parsed.get("hud_state") or {}).get("time_override")
-                if time_override and isinstance(time_override, dict):
-                    override_minutes = time_override.get("minutes", 0)
-                    tp_seconds = int(override_minutes * 60) if override_minutes else DEFAULT_TURN_SECONDS
-                    override_reason = time_override.get("reason", "")
-                else:
-                    tp_seconds = DEFAULT_TURN_SECONDS
-                    override_reason = None
-                # Strip time_override from persisted hud_state (consumed, not for storage)
-                pipeline_state["hud_state"].pop("time_override", None)
-                _advance_hud_clock(pipeline_state, tp_seconds)
-                # Emit notification for non-default durations
-                if tp_seconds != DEFAULT_TURN_SECONDS and override_reason is not None:
-                    # Build human-readable duration string
-                    _mins = tp_seconds // 60
-                    if _mins >= 60:
-                        _dur_str = f"{_mins // 60} hour{'s' if _mins // 60 != 1 else ''}" + (f" {_mins % 60} minute{'s' if _mins % 60 != 1 else ''}" if _mins % 60 else "")
-                    elif _mins > 0:
-                        _dur_str = f"{_mins} minute{'s' if _mins != 1 else ''}"
-                    else:
-                        _dur_str = f"{tp_seconds} seconds"
-                    pipeline_state.setdefault("_pending_time_notifications", []).append({
-                        "type": "time_passed",
-                        "duration": _dur_str,
-                        "reason": override_reason or "",
-                    })
+                _dur_str = f"{tp_seconds} seconds"
+            pipeline_state.setdefault("_pending_time_notifications", []).append({
+                "type": "time_passed",
+                "duration": _dur_str,
+                "reason": override_reason or "",
+            })
     # Sync CPRED character_states + HUD funds from authoritative game_state.
     # Runs AFTER model's hud_state is merged/scoped so game_state overrides stale values.
     if game_system and game_system.get("id") == "cpred":
         _rebuild_cpred_projections(pipeline_state, current_turn)
-    elif "hud_state" in parsed:
-        # Match run_pipeline semantics: derive/scope only when HUD is emitted this turn.
+    elif isinstance(pipeline_state.get("hud_state"), dict):
+        # Always refresh HUD projection when hud_state exists, even if the model
+        # omitted hud_state this turn — clock advanced so funds/scoping must stay current.
         pipeline_state["hud_state"] = derive_funds_from_ship_credits(
             pipeline_state.get("hud_state", {}),
             pipeline_state.get("game_state", {}),

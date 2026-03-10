@@ -1,7 +1,13 @@
-"""Tests for the in-game clock helpers: advance_clock, parse_time_passed, _advance_hud_clock."""
+"""Tests for the in-game clock helpers."""
 
 import pytest
-from pipeline import advance_clock, parse_time_passed, _advance_hud_clock, DEFAULT_TURN_SECONDS
+from pipeline import (
+    advance_clock,
+    parse_time_passed,
+    _advance_hud_clock,
+    _persist_hud_state_with_backend_clock,
+    DEFAULT_TURN_SECONDS,
+)
 
 
 # ── parse_time_passed ──────────────────────────────────────
@@ -210,9 +216,144 @@ class TestAdvanceHudClock:
         assert ps["hud_state"]["time"] == "1401"
 
 
+class TestPersistHudStateWithBackendClock:
+    def test_bootstrap_accepts_initial_seed(self):
+        ps = {"hud_state": {}, "_clock_seconds_buffer": 0}
+        advanced = _persist_hud_state_with_backend_clock(
+            ps,
+            {"time": "1400", "date": "2045-08-22", "location": "Watson"},
+            seconds=300,
+        )
+
+        assert advanced is False
+        assert ps["hud_state"]["time"] == "1400"
+        assert ps["hud_state"]["date"] == "2045-08-22"
+        assert ps["hud_state"]["location"] == "Watson"
+        assert ps["_clock_seconds_buffer"] == 0
+
+    def test_existing_seed_ignores_new_absolute_time_and_advances_by_delta(self):
+        ps = {
+            "hud_state": {"time": "1400", "date": "2045-08-22", "location": "Apartment"},
+            "_clock_seconds_buffer": 0,
+        }
+        advanced = _persist_hud_state_with_backend_clock(
+            ps,
+            {"time": "2300", "date": "2099-01-01", "location": "Watson", "time_override": {"minutes": 5}},
+            seconds=300,
+        )
+
+        assert advanced is True
+        assert ps["hud_state"]["time"] == "1405"
+        assert ps["hud_state"]["date"] == "2045-08-22"
+        assert ps["hud_state"]["location"] == "Watson"
+        assert "time_override" not in ps["hud_state"]
+
+    def test_ooc_turn_keeps_existing_seed_frozen(self):
+        ps = {
+            "hud_state": {"time": "1400", "date": "2045-08-22", "location": "Apartment"},
+            "_clock_seconds_buffer": 0,
+        }
+        advanced = _persist_hud_state_with_backend_clock(
+            ps,
+            {"time": "2300", "date": "2099-01-01", "location": "Watson"},
+            seconds=300,
+            is_ooc=True,
+        )
+
+        assert advanced is False
+        assert ps["hud_state"]["time"] == "1400"
+        assert ps["hud_state"]["date"] == "2045-08-22"
+        assert ps["hud_state"]["location"] == "Watson"
+        assert ps["_clock_seconds_buffer"] == 0
+
+    def test_missing_hud_snapshot_still_advances_existing_seed(self):
+        ps = {
+            "hud_state": {"time": "1400", "date": "2045-08-22", "location": "Apartment"},
+            "_clock_seconds_buffer": 0,
+        }
+        advanced = _persist_hud_state_with_backend_clock(ps, None, seconds=300)
+
+        assert advanced is True
+        assert ps["hud_state"]["time"] == "1405"
+        assert ps["hud_state"]["date"] == "2045-08-22"
+        assert ps["hud_state"]["location"] == "Apartment"
+
+    def test_merge_mode_seed_preserves_existing_snapshot_fields(self):
+        ps = {
+            "hud_state": {"location": "Apartment"},
+            "_clock_seconds_buffer": 0,
+        }
+        advanced = _persist_hud_state_with_backend_clock(
+            ps,
+            {"time": "1400", "date": "2045-08-22"},
+            seconds=6,
+            replace_snapshot=False,
+        )
+
+        assert advanced is False
+        assert ps["hud_state"]["time"] == "1400"
+        assert ps["hud_state"]["date"] == "2045-08-22"
+        assert ps["hud_state"]["location"] == "Apartment"
+
+
 # ── Game system combat_round_seconds fields ───────────────
 
 class TestGameSystemRoundDurations:
+    def test_all_combat_mode_systems_have_round_seconds(self):
+        from game_systems import get_game_system, list_game_systems
+
+        for system_meta in list_game_systems():
+            game_system = get_game_system(system_meta["id"])
+            if game_system.get("combat_tool"):
+                assert "combat_round_seconds" in game_system, system_meta["id"]
+
+    def test_mode_tools_do_not_carry_hud_state_seed(self):
+        """Mode tools no longer own clock seeding — only narrative paths do."""
+        from game_systems import get_game_system, list_game_systems
+
+        for system_meta in list_game_systems():
+            game_system = get_game_system(system_meta["id"])
+            for tool_key in ("combat_tool", "hack_tool", "net_combat_tool", "ship_combat_tool"):
+                tool = game_system.get(tool_key)
+                if tool:
+                    props = tool["input_schema"]["properties"]
+                    assert "hud_state" not in props, f"{system_meta['id']}:{tool_key}"
+
+    def test_planning_schemas_do_not_carry_hud_state_seed(self):
+        """Planning schemas no longer own clock seeding — only narrative paths do."""
+        from game_systems import get_game_system, list_game_systems
+
+        for system_meta in list_game_systems():
+            game_system = get_game_system(system_meta["id"])
+            for schema_key in ("combat_planning_schema", "hack_planning_schema", "net_combat_planning_schema"):
+                schema = game_system.get(schema_key)
+                if schema:
+                    props = schema["properties"]
+                    assert "hud_state" not in props, f"{system_meta['id']}:{schema_key}"
+
+    def test_mode_advance_without_seed_is_noop(self):
+        """_advance_mode_hud_clock with empty clock is a harmless no-op."""
+        ps = {"hud_state": {}, "_clock_seconds_buffer": 0}
+        _persist_hud_state_with_backend_clock(ps, None, seconds=6, replace_snapshot=False)
+        assert ps["hud_state"] == {}
+        assert ps["_clock_seconds_buffer"] == 0
+
+    def test_mode_advance_with_existing_seed_advances(self):
+        """When clock is already seeded, mode advance works without model input."""
+        ps = {
+            "hud_state": {"time": "1400", "date": "2045-08-22", "location": "Watson"},
+            "_clock_seconds_buffer": 0,
+        }
+        _persist_hud_state_with_backend_clock(ps, None, seconds=6, replace_snapshot=False)
+        assert ps["_clock_seconds_buffer"] == 6
+        assert ps["hud_state"]["time"] == "1400"
+        # After 10 rounds (60s total), clock ticks forward 1 minute
+        for _ in range(9):
+            _persist_hud_state_with_backend_clock(ps, None, seconds=6, replace_snapshot=False)
+        assert ps["_clock_seconds_buffer"] == 0
+        assert ps["hud_state"]["time"] == "1401"
+        assert ps["hud_state"]["location"] == "Watson"
+
     def test_dnd5e_has_combat_round_seconds(self):
         from game_systems.dnd5e import GAME_SYSTEM
         assert GAME_SYSTEM["combat_round_seconds"] == 6
@@ -229,13 +370,13 @@ class TestGameSystemRoundDurations:
         from game_systems.cpred import GAME_SYSTEM
         assert GAME_SYSTEM["combat_round_seconds"] == 3
 
-    def test_coc7e_no_combat_round_seconds(self):
+    def test_coc7e_has_combat_round_seconds(self):
         from game_systems.coc7e import GAME_SYSTEM
-        assert "combat_round_seconds" not in GAME_SYSTEM
+        assert GAME_SYSTEM["combat_round_seconds"] == 6
 
-    def test_sr6e_no_combat_round_seconds(self):
+    def test_sr6e_has_combat_round_seconds(self):
         from game_systems.sr6e import GAME_SYSTEM
-        assert "combat_round_seconds" not in GAME_SYSTEM
+        assert GAME_SYSTEM["combat_round_seconds"] == 3
 
     def test_dnd5e_no_ship_combat_round_seconds(self):
         from game_systems.dnd5e import GAME_SYSTEM

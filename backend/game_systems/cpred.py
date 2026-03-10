@@ -89,7 +89,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock — do NOT manually set hud_state.time or hud_state.date. During combat/hack/net_combat, time is locked at 3 seconds/round by the backend; time_passed is ignored.>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock. If the clock is empty, provide hud_state.time and hud_state.date once as the initial seed; otherwise do NOT manually set them. During combat/hack/net_combat, time is locked at 3 seconds/round by the backend; time_passed is ignored.>",
   "beats": [
     {"beat": "<narrative description>", "resolution": null},
     {"beat": "<narrative description>", "resolution": {<resolution object — see RESOLUTION TYPES below>}}
@@ -641,7 +641,7 @@ Read the `[HUD STATE]` injection for the previous turn's values. After your narr
 Include per-edgerunner HP and Humanity from `[EDGERUNNER STATE]`, NOT from hud_state.
 Time is managed by the backend (30 seconds/turn default, 3 seconds/round in combat/hack/net_combat).
 To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
-Do NOT manually set `time` or `date` — report location, funds, trackables only (HP/Humanity come from edgerunner_ops).
+If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (HP/Humanity come from edgerunner_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from gig/scenario context
@@ -1194,7 +1194,6 @@ CPRED_COMBAT_CONTRACT = """You are the COMBAT MASTER for a Cyberpunk RED session
 YOUR ROLE: Adjudicate all combat mechanics and narrate the encounter with visceral intensity. You cover Events (state tracking), Mechanics (rules adjudication), and Narration (player-facing prose) in a single focused call each exchange.
 
 Call report_combat_state every exchange, then write your narrative response.
-
 RULES REFERENCE:
 DV tables, weapon/armor stats, damage resolution, critical injury tables, cover HP, and Solo Combat Awareness allocation are resolved automatically by the backend. The Combat Ruleset document covers vehicle combat (§18), conditions (§17), and procedural edge cases. The rules summarized below are for quick reference.
 

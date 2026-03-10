@@ -240,7 +240,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). During combat, set appropriate round durations (e.g. '3 seconds' per combat turn). The backend computes the clock from this value — do NOT manually set hud_state.time or hud_state.date.>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock. If the clock is empty, provide hud_state.time and hud_state.date once as the initial seed; otherwise do NOT manually set them. During combat, time is locked at 3 seconds/round by the backend; time_passed is ignored.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -652,7 +652,7 @@ Read the `[HUD STATE]` injection for the previous turn's values. After your narr
 Include per-runner Edge and condition monitors from `[RUNNER STATE]`, NOT from hud_state.
 Time is managed by the backend (30 seconds/turn default).
 To override the default duration (e.g. combat rounds, travel, extended actions), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
-Do NOT manually set `time` or `date` — report location, funds, trackables only (Edge/CM come from runner_ops).
+If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (Edge/CM come from runner_ops).
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from run/scenario context
@@ -1007,4 +1007,5 @@ GAME_SYSTEM = {
     "combat_tool": REPORT_COMBAT_STATE_TOOL,
     "build_combat_profile": build_combat_profile,
     "build_combat_injection": build_combat_injection,
+    "combat_round_seconds": 3,  # Combat turns are 3 seconds in backend clock math
 }

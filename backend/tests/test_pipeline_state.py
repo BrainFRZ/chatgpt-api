@@ -2927,6 +2927,48 @@ class TestApplySingleAgentHudState:
         assert ps["hud_state"]["time"] == "0900"
         assert ps["hud_state"]["date"] == "Day 3"
 
+    def test_hud_state_time_override_advances_existing_seed(self):
+        ps = _fresh_pipeline_state()
+        ps["hud_state"] = {"date": "Day 3", "time": "0900", "location": "Tavern"}
+        parsed = {
+            "hud_state": {
+                "date": "Day 4",
+                "time": "1000",
+                "location": "Market",
+                "time_override": {"minutes": 5, "reason": "travel"},
+            }
+        }
+
+        apply_single_agent_state_updates(ps, parsed, current_turn=2)
+
+        assert ps["hud_state"]["location"] == "Market"
+        assert ps["hud_state"]["time"] == "0905"
+        assert ps["hud_state"]["date"] == "Day 3"
+        assert "time_override" not in ps["hud_state"]
+
+    def test_hud_state_time_override_without_seed_does_not_persist(self):
+        ps = _fresh_pipeline_state()
+        parsed = {
+            "hud_state": {
+                "location": "Market",
+                "time_override": {"minutes": 5, "reason": "travel"},
+            }
+        }
+
+        apply_single_agent_state_updates(ps, parsed, current_turn=1)
+
+        assert ps["hud_state"] == {"location": "Market"}
+
+    def test_missing_hud_state_still_advances_existing_seed(self):
+        ps = _fresh_pipeline_state()
+        ps["hud_state"] = {"date": "Day 3", "time": "0900", "location": "Tavern"}
+
+        apply_single_agent_state_updates(ps, {}, current_turn=2)
+
+        assert ps["hud_state"]["location"] == "Tavern"
+        assert ps["hud_state"]["time"] == "0900"
+        assert ps["_clock_seconds_buffer"] == 30
+
 
 class TestMalformedMechanicsHandoff:
     """Deterministic malformed-input coverage for mechanics->state handoff."""

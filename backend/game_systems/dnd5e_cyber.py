@@ -1658,7 +1658,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "beat_responses": <number of responses on this beat>,
     "notes": "<pacing observations>"
   },
-  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock — do NOT manually set hud_state.time or hud_state.date. During combat, time is locked at 6 seconds/round by the backend (30 seconds/round in ship combat); time_passed is ignored.>",
+  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock. If the clock is empty, provide hud_state.time and hud_state.date once as the initial seed; otherwise do NOT manually set them. During combat, time is locked at 6 seconds/round by the backend (30 seconds/round in ship combat); time_passed is ignored.>",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -2133,8 +2133,8 @@ Hull/Shields appear in HUD only during active ship combat — they come from `[S
 **Do NOT include funds/credits in the HUD line — funds are displayed in the character panel only.**
 Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat, 30 seconds/round in ship combat).
 To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
-Do NOT manually set `time` or `date`. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
-Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override only — date/time auto-computed, funds auto-derived).
+If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
+Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override, and bootstrap-only date/time seed — funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
