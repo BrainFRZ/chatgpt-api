@@ -2486,7 +2486,7 @@ def run_mode_pipeline(
     ]
 
     planning_config = StageConfig(
-        name="planning",
+        name=f"{mode}_planning",
         reasoning_effort="medium",
         service_tier="auto",
         json_mode=True,
@@ -2664,7 +2664,7 @@ def run_mode_pipeline(
     ]
 
     narration_config = StageConfig(
-        name="narration",
+        name=f"{mode}_narration",
         reasoning_effort="low",
         service_tier="auto",
         json_mode=False,
@@ -2675,7 +2675,7 @@ def run_mode_pipeline(
         username=username,
         project=project,
         chat_name=chat_name,
-        stage_name="narration",
+        stage_name=f"{mode}_narration",
         reasoning_effort=narration_config.reasoning_effort,
         service_tier=narration_config.service_tier,
         json_mode=False
@@ -2701,7 +2701,7 @@ def run_mode_pipeline(
     # Aggregate usage
     stage_results = [planning_result]
     narration_stage_result = PipelineStageResult(
-        stage="narration",
+        stage=f"{mode}_narration",
         content=narration_content,
         parsed_json=None,
         usage=narration_usage or {},

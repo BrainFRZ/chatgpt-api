@@ -518,8 +518,8 @@ class TestOpenAIProvider:
         assert params["input"] == messages
         assert params["store"] is False
         assert params["prompt_cache_retention"] == "24h"
-        assert "testuser" in params["prompt_cache_key"]
-        assert "myproject" in params["prompt_cache_key"]
+        assert params["prompt_cache_key"].startswith("rv-")
+        assert len(params["prompt_cache_key"]) <= 64
         assert "reasoning" in params
         assert params["reasoning"]["effort"] == "medium"
 

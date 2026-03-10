@@ -4,9 +4,26 @@ OpenAI GPT provider implementations (GPT-5.2, GPT-5.4).
 
 from typing import Any, Optional, Iterator
 from openai import OpenAI
+import hashlib
 import tiktoken
 
 from . import ModelProvider, ParsedResponse, Pricing, ContextLimits, StreamEvent
+
+
+def _build_cache_key(username: str, project: str, chat_name: str, stage: str = "") -> str:
+    """Build a prompt_cache_key that fits within the 64-char API limit.
+
+    Hashes the variable-length session parts (username/project/chat) into a
+    fixed 16-char hex digest, keeping the stage name in the clear so different
+    pipeline stages never collide regardless of session name length.
+
+    Layout: "rv-{hash16}-{stage}"  (max 24 chars with longest stage name)
+    """
+    session = f"{username}/{project or 'root'}/{chat_name}"
+    digest = hashlib.md5(session.encode()).hexdigest()[:16]
+    if stage:
+        return f"rv-{digest}-{stage}"
+    return f"rv-{digest}"
 
 
 # Cache the tiktoken encoder for performance
@@ -96,15 +113,12 @@ class OpenAIProvider(ModelProvider):
         OpenAI allows consecutive user messages, so updates can be sent
         as a separate trailing user message.
         """
-        # Sanitize project name for cache key
-        project_part = (project or "root").replace(" ", "-").replace("/", "-").replace("\\", "-")
-
         params = {
             "model": self.MODEL_NAME,
             "input": messages,
             "store": False,
             "prompt_cache_retention": self.PROMPT_CACHE_RETENTION,
-            "prompt_cache_key": f"rv-86171435-{username}-{project_part}-{chat_name}"[:64],
+            "prompt_cache_key": _build_cache_key(username, project, chat_name),
             "reasoning": {
                 "effort": "medium",
                 "summary": "auto"
@@ -355,14 +369,12 @@ class OpenAIProvider(ModelProvider):
         service tier, and JSON response format per-stage.
         Each stage gets its own cache key to avoid cache invalidation.
         """
-        project_part = (project or "root").replace(" ", "-").replace("/", "-").replace("\\", "-")
-
         params = {
             "model": self.MODEL_NAME,
             "input": messages,
             "store": False,
             "prompt_cache_retention": self.PROMPT_CACHE_RETENTION,
-            "prompt_cache_key": f"rv-86171435-{username}-{project_part}-{chat_name}-{stage_name}"[:64],
+            "prompt_cache_key": _build_cache_key(username, project, chat_name, stage_name),
             "reasoning": {
                 "effort": reasoning_effort,
                 "summary": "auto"
