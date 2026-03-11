@@ -1697,7 +1697,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     }
   },
   "relationship_ops": [
-    {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
+    {"op": "rs", "target": "<NPC>", "change": <int>, "reason": "<why>"}
   ],
   "ship_ops": [
     {"op": "hull|shields|shield_regen|ammo|credits|set", ...}
@@ -1793,31 +1793,27 @@ SHIP COMBAT TRIGGER:
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
 - Use "relationship_ops" to update scores. Operations:
-  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Relationship Score change (PC → NPC). Clamped -100 to +100.
-  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Romance Score change (PC → NPC). Clamped 0 to 100.
-  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
-  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
-  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
   * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
     Bootstrap inter-NPC relationship.
 - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (close bonds, rivalries, romances between crew members, etc.).
-- "new_total" is for Narration display only — the system uses "change" to compute the actual score.
 - Scoring guidelines:
   * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
   * Opposition: -3 to -10, Betrayals: -15 to -30
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
-- Tier boundary checking: After computing new_total, compare against tier boundaries. If the score crosses into a new tier:
-  1. Append the new tier name to the reason field (e.g. "Defended her honor → T4: Good")
-  2. Narration should narratively acknowledge the relationship shift
-  3. Narration displays a prominent tier transition line: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
+- The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
 - Alliance cascades: When a relationship change should logically affect allied factions, emit additional FR ops manually.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
@@ -2058,8 +2054,8 @@ OUTPUT STRUCTURE:
    Normal roll: 🎲 [Description]: [**selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
    Advantage/Disadvantage: same format as standard D&D 5E
 3. If "relationship_ops" is non-empty, format as OOC line above HUD:
-   📊 **RS** [Name] [+/-N] ([total]) · [reason] | **FR** [Name] [+/-N] ([total]) · [reason]
-   Tier crossing: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
+   📊 **RS** [Name] [+/-N] ([new_total]) · [reason] | **FR** [Name] [+/-N] ([new_total]) · [reason]
+   The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
 4. If "ship_ops" is non-empty, format ship changes as a brief line:
    🚀 Hull -15 (185/200) · Missile impact | Shields -20 (60/100) · Absorbed railgun fire
 5. HUD appended verbatim at the end
@@ -2103,16 +2099,16 @@ Optional arrays (omit or leave empty when no ops occurred):
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
 - **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **relationship_ops**: Track RS/RomS/FR changes. Operations:
-  * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
-  * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
-  * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}`
+  * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}`
+  * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
-  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
-  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
+  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
 - **ship_combat_trigger**: When ships engage in actual ship-to-ship combat, set a handoff object so the app can enter ship combat mode. Include `environment`, `enemy_ships`, and when available `encounter_type`, `objective`, `positioning`, `immediate_complications`, and a 1-3 sentence `handoff_summary`. Optional `opening_narration` can be used for the player-facing "BEGINNING SHIP COMBAT" intro.
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
-  - Tier boundary checking: Note new tier in reason, narratively reflect the shift, show 📊 line.
+  - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show 📊 line.
   - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty.
   - Inter-NPC relationships: Track NPC-NPC dynamics (close bonds, rivalries, romances between crew). Bootstrap with "npc_set" ops.
 - **ship_ops**: Track ship state changes. Operations:
@@ -2363,7 +2359,7 @@ STATE_REPORT_TOOL = {
                         "target": {"type": "string"},
                         "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer"},
-                        "new_total": {"type": "integer"},
+                        "new_total": {"type": "integer", "description": "Backend-computed; ignored if sent by model"},
                         "reason": {"type": "string"},
                         "type": {"type": "string", "enum": ["npc", "faction"]},
                         "fields": {"type": "object"}

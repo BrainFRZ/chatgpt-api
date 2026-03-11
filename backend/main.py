@@ -6323,22 +6323,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     )
 
                 # Emit state change notifications (pipeline path)
-                if pipeline_result.events_json:
+                # Use enriched_events (post-apply_game_state) which has backend-computed
+                # new_total and tier_transition.  Falls back to re-parsing raw JSON for
+                # backward compat (enriched_events is already scene-scope filtered).
+                notif_events = pipeline_result.enriched_events
+                if not notif_events and pipeline_result.events_json:
                     try:
-                        events_parsed = json.loads(pipeline_result.events_json)
-                        # Pass npcs_present for scene-scope filtering (events_parsed is re-parsed
-                        # from raw JSON, so it has unfiltered ops unlike the applied state)
-                        ps_scene = (pipeline_result.pipeline_state or {}).get("scene_state", {})
-                        notif_npcs = set(ps_scene.get("npcs_present", []))
-                        notifs = extract_state_notifications(
-                            events_parsed, npcs_present=notif_npcs,
-                            old_character_states=pipeline_old_voice_snapshot)
-                        if notifs:
-                            yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
-                            await sync_manager.broadcast_to_chat(chat_key,
-                                SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": notifs}))
+                        notif_events = json.loads(pipeline_result.events_json)
                     except (json.JSONDecodeError, TypeError):
-                        pass
+                        notif_events = None
+                if notif_events:
+                    ps_scene = (pipeline_result.pipeline_state or {}).get("scene_state", {})
+                    notif_npcs = set(ps_scene.get("npcs_present", []))
+                    notifs = extract_state_notifications(
+                        notif_events, npcs_present=notif_npcs,
+                        old_character_states=pipeline_old_voice_snapshot)
+                    if notifs:
+                        yield f"event: state_notifications\ndata: {json.dumps(notifs)}\n\n"
+                        await sync_manager.broadcast_to_chat(chat_key,
+                            SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": notifs}))
 
                 # Emit backend-generated notifications from game system (pipeline path)
                 ps = pipeline_result.pipeline_state or {}

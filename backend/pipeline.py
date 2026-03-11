@@ -247,6 +247,7 @@ class PipelineResult:
     injected_state: Optional[str] = None  # Snapshot of pipeline_state injected into Events
     stage_usage: Optional[dict] = None  # Per-stage usage: {"events": {...}, "mechanics": {...}, "narration": {...}}
     trim_anchor_id: Optional[str] = None  # Message ID of first message in trimmed context window
+    enriched_events: Optional[dict] = None  # Post-apply events data (has backend-computed new_total, tier_transition)
 
 
 # ============================================================
@@ -2186,7 +2187,8 @@ def run_pipeline(
             service_tier_label="standard",
             injected_state=injected_state_snapshot,
             stage_usage=_build_stage_usage(stage_results, provider),
-            trim_anchor_id=new_trim_anchor_id
+            trim_anchor_id=new_trim_anchor_id,
+            enriched_events=events_data,
         ))
         return
 
@@ -2355,7 +2357,8 @@ def run_pipeline(
             service_tier_label="standard",
             injected_state=injected_state_snapshot,
             stage_usage=_build_stage_usage(stage_results, provider),
-            trim_anchor_id=new_trim_anchor_id
+            trim_anchor_id=new_trim_anchor_id,
+            enriched_events=events_data,
         ))
         return
 
@@ -2425,7 +2428,8 @@ def run_pipeline(
         service_tier_label="flex+standard",
         injected_state=injected_state_snapshot,
         stage_usage=_build_stage_usage(stage_results, provider),
-        trim_anchor_id=new_trim_anchor_id
+        trim_anchor_id=new_trim_anchor_id,
+        enriched_events=events_data,
     ))
 
 
@@ -3869,22 +3873,28 @@ def extract_state_notifications(ops_source: dict, npcs_present: set = None,
             if op.get("target") not in npcs_present:
                 continue
         if op_type in ("rs", "roms", "fr"):
-            notifications.append({
+            notif = {
                 "type": f"{op_type}_change",
                 "target": op.get("target"),
                 "change": op.get("change"),
                 "new_total": op.get("new_total"),
                 "reason": op.get("reason"),
-            })
+            }
+            if "tier_transition" in op:
+                notif["tier_transition"] = op["tier_transition"]
+            notifications.append(notif)
         elif op_type in ("npc_rs", "npc_roms"):
-            notifications.append({
+            notif = {
                 "type": f"{op_type}_change",
                 "target": op.get("target"),
                 "other": op.get("other"),
                 "change": op.get("change"),
                 "new_total": op.get("new_total"),
                 "reason": op.get("reason"),
-            })
+            }
+            if "tier_transition" in op:
+                notif["tier_transition"] = op["tier_transition"]
+            notifications.append(notif)
 
     for op in ops_source.get("npc_memory_ops", []):
         if op.get("action") != "add":

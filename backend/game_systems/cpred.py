@@ -119,7 +119,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     {"edgerunner": "<name>", "op": "hp|humanity|therapy|luck|luck_reset|armor|armor_repair|eurobucks|critical_injury|cyberware|set", ...}
   ],
   "relationship_ops": [
-    {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
+    {"op": "rs", "target": "<NPC>", "change": <int>, "reason": "<why>"}
   ],
   "arc_label": "<string or null>",
   "current_player": "<name of the edgerunner whose turn this is>",
@@ -223,32 +223,28 @@ OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — b
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
 - Use "relationship_ops" to update scores. Operations:
-  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Relationship Score change (PC → NPC). Clamped -100 to +100.
-  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Romance Score change (PC → NPC). Clamped 0 to 100.
-  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context. Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
-  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
-  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
   * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
     Bootstrap inter-NPC relationship.
 - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (crew bonds, rivalries, romances).
-- "new_total" is for Narration display only — the system uses "change" to compute the actual score.
 - Scoring guidelines:
   * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
   * Opposition: -3 to -10, Betrayals: -15 to -30
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
 - Maximum combined bonus from relationship systems: +5 to any single check (d10 calibration).
-- Tier boundary checking: After computing new_total, compare against tier boundaries. If the score crosses into a new tier:
-  1. Append the new tier name to the reason field (e.g. "Saved her crew → T4: Good")
-  2. Narration should narratively acknowledge the relationship shift
-  3. Narration displays: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
+- The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
 - Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
@@ -450,9 +446,9 @@ OUTPUT STRUCTURE:
    📊 **Humanity** V -4 (44/70) · Cyberarm | **EB** Crew -500 (1,850) · Ammo buy
    📊 **Critical** V +Broken Ribs (-2 movement, Death Save +1)
    If "relationship_ops" contains changes, format them on a line just above the HUD:
-   📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew | **FR** Tyger Claws -10 (20) · Refused their job
+   📊 **RS** Rogue +5 (55) · Saved her crew | **FR** Tyger Claws -10 (20) · Refused their job
    - Pipe-separate multiple changes on one line
-   - If a tier boundary was crossed, include the new tier
+   - The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
    - Omit this line entirely if relationship_ops is empty
 4. HUD appended verbatim at the end
 5. current_player attribution and next_player closing hook per standard pipeline
@@ -544,16 +540,16 @@ HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons 
 
 ### Relationship Ops (in report_state):
 Use the "relationship_ops" array to track RS/RomS/FR changes:
-- `{"op": "rs", "target": "<NPC>", "change": 5, "new_total": 45, "reason": "Defended her honor"}`
-- `{"op": "roms", "target": "<NPC>", "change": 3, "new_total": 28, "reason": "Intimate conversation"}`
-- `{"op": "fr", "target": "<Faction>", "change": -10, "new_total": 20, "reason": "Refused their job"}`
+- `{"op": "rs", "target": "<NPC>", "change": 5, "reason": "Defended her honor"}`
+- `{"op": "roms", "target": "<NPC>", "change": 3, "reason": "Intimate conversation"}`
+- `{"op": "fr", "target": "<Faction>", "change": -10, "reason": "Refused their job"}`
 - `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {"rs": 50, "roms": 0, "notes": "Crew fixer"}}`
-- `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": 3, "new_total": 33, "reason": "Fought together"}`
-- `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": 5, "new_total": 15, "reason": "Flirting"}`
+- `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": 3, "reason": "Fought together"}`
+- `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": 5, "reason": "Flirting"}`
 - `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": 40, "roms": 0}}`
 - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
 - Maximum combined relationship bonus: +5 to any single check (d10 calibration).
-- Tier boundary checking: When new_total crosses a tier boundary, note the new tier in reason and show: 📊 **RS** Rogue +5 (55 → T4: Good) · Saved her crew
+- The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
 - Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
@@ -885,7 +881,7 @@ STATE_REPORT_TOOL = {
                         "target": {"type": "string", "description": "NPC or faction name"},
                         "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer", "description": "Signed change amount"},
-                        "new_total": {"type": "integer", "description": "Display-only total after change"},
+                        "new_total": {"type": "integer", "description": "Backend-computed; ignored if sent by model"},
                         "reason": {"type": "string", "description": "Why the change occurred"},
                         "type": {"type": "string", "enum": ["npc", "faction"], "description": "Entity type (for set ops)"},
                         "fields": {"type": "object", "description": "Full replacement fields (for set/npc_set ops)"}

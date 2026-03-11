@@ -60,6 +60,15 @@ def _fr_tier(score):
     return ("-T5: KOS", "-5 social; assassins")
 
 
+def _enrich_rel_op(op_data, old_score, new_score, tier_fn):
+    """Write new_total and tier_transition onto op_data."""
+    op_data["new_total"] = new_score
+    old_label, _ = tier_fn(old_score)
+    new_label, _ = tier_fn(new_score)
+    if old_label != new_label:
+        op_data["tier_transition"] = {"old": old_label, "new": new_label}
+
+
 # ============================================================
 # Game State Functions
 # ============================================================
@@ -100,19 +109,28 @@ def apply_game_state(game_state, agent_json, turn):
                 change = int(op_data.get("change", 0))
                 if target not in relationships:
                     relationships[target] = {"rs": 0, "roms": 0}
-                relationships[target]["rs"] = max(-100, min(100, relationships[target].get("rs", 0) + change))
+                old_score = relationships[target].get("rs", 0)
+                new_score = max(-100, min(100, old_score + change))
+                relationships[target]["rs"] = new_score
+                _enrich_rel_op(op_data, old_score, new_score, _rs_tier)
 
             elif op == "roms":
                 change = int(op_data.get("change", 0))
                 if target not in relationships:
                     relationships[target] = {"rs": 0, "roms": 0}
-                relationships[target]["roms"] = max(0, min(100, relationships[target].get("roms", 0) + change))
+                old_score = relationships[target].get("roms", 0)
+                new_score = max(0, min(100, old_score + change))
+                relationships[target]["roms"] = new_score
+                _enrich_rel_op(op_data, old_score, new_score, _roms_tier)
 
             elif op == "fr":
                 change = int(op_data.get("change", 0))
                 if target not in factions:
                     factions[target] = {"fr": 0}
-                factions[target]["fr"] = max(-100, min(100, factions[target].get("fr", 0) + change))
+                old_score = factions[target].get("fr", 0)
+                new_score = max(-100, min(100, old_score + change))
+                factions[target]["fr"] = new_score
+                _enrich_rel_op(op_data, old_score, new_score, _fr_tier)
 
             # Inter-NPC relationship ops
             elif op == "npc_rs":
@@ -124,7 +142,10 @@ def apply_game_state(game_state, agent_json, turn):
                     npc_rels = relationships[target].setdefault("npc_relationships", {})
                     if other not in npc_rels:
                         npc_rels[other] = {"rs": 0, "roms": 0}
-                    npc_rels[other]["rs"] = max(-100, min(100, npc_rels[other].get("rs", 0) + change))
+                    old_score = npc_rels[other].get("rs", 0)
+                    new_score = max(-100, min(100, old_score + change))
+                    npc_rels[other]["rs"] = new_score
+                    _enrich_rel_op(op_data, old_score, new_score, _rs_tier)
 
             elif op == "npc_roms":
                 other = op_data.get("other")
@@ -135,7 +156,10 @@ def apply_game_state(game_state, agent_json, turn):
                     npc_rels = relationships[target].setdefault("npc_relationships", {})
                     if other not in npc_rels:
                         npc_rels[other] = {"rs": 0, "roms": 0}
-                    npc_rels[other]["roms"] = max(0, min(100, npc_rels[other].get("roms", 0) + change))
+                    old_score = npc_rels[other].get("roms", 0)
+                    new_score = max(0, min(100, old_score + change))
+                    npc_rels[other]["roms"] = new_score
+                    _enrich_rel_op(op_data, old_score, new_score, _roms_tier)
 
             elif op == "npc_set":
                 other = op_data.get("other")
@@ -279,7 +303,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     }
   },
   "relationship_ops": [
-    {"op": "rs", "target": "<NPC>", "change": <int>, "new_total": <int>, "reason": "<why>"}
+    {"op": "rs", "target": "<NPC>", "change": <int>, "reason": "<why>"}
   ],
   "arc_label": "<string or null>",
   "current_player": "<name of the character whose turn this is>",
@@ -351,31 +375,27 @@ IRRECONCILABLE PLOT BREAK:
 RELATIONSHIP OPS (RS / RomS / FR):
 - You receive a [RELATIONSHIP STATE] block with each tracked NPC's RS/RomS and each faction's FR, including current tier and mechanical bonuses. This is your authoritative source — it persists across context trims.
 - Use "relationship_ops" to update scores. Operations:
-  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "rs", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Relationship Score change (PC → NPC). Clamped -100 to +100.
-  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "roms", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}
     Romance Score change (PC → NPC). Clamped 0 to 100.
-  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
-  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
-  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}
+  * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
   * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
     Bootstrap inter-NPC relationship. Use on first turn or when inter-NPC relationships are missing.
 - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (close bonds, rivalries, romances between crew members, etc.).
-- "new_total" is for Narration display only — the system uses "change" to compute the actual score.
 - Scoring guidelines:
   * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
   * Opposition: -3 to -10, Betrayals: -15 to -30
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
-- Tier boundary checking: After computing new_total, compare against tier boundaries. If the score crosses into a new tier (up or down):
-  1. Append the new tier name to the reason field (e.g. "Defended her honor → T4: Good")
-  2. Narration should narratively acknowledge the relationship shift
-  3. Narration displays a prominent tier transition line: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
+- The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
 - Alliance cascades: When a relationship change should logically affect allied factions (e.g. helping a faction member raises that faction's FR), emit additional FR ops manually.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
@@ -651,10 +671,10 @@ OUTPUT STRUCTURE:
    Only show two die values when "advantage" or "disadvantage" is true in the roll object. If neither flag is set, show one value.
    Use the modifier names and values from the beat's "rolls" array, but OMIT any modifier with value 0 — only show modifiers that actually affect the total.
 3. If the Mechanics JSON contains non-empty "relationship_ops", format them as a brief OOC line just ABOVE the HUD:
-   📊 **RS** [Name] [+/-N] ([total]) · [reason] | **FR** [Name] [+/-N] ([total]) · [reason]
+   📊 **RS** [Name] [+/-N] ([new_total]) · [reason] | **FR** [Name] [+/-N] ([new_total]) · [reason]
    Example: 📊 **RS** Kira +2 (47) · Stood up for her | **FR** Chrome Syndicate -5 (30) · Refused their job
    - Pipe-separate multiple changes on one line
-   - If a tier boundary was crossed, include the new tier: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
+   - The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
    - Omit this line entirely if relationship_ops is empty
 4. The HUD line appended verbatim at the very end of your response (from the "hud" field)
 5. The "current_player" field tells you whose turn this was — attribute the action to them. The "next_player" field tells you who acts next. Use "next_player_prompt" to write a closing hook that sets the scene for and addresses the next player, prompting them to act.
@@ -700,30 +720,26 @@ Optional arrays (omit or leave empty when no ops occurred):
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
 - **Consolidate, don't stack**: Before adding a new memory for an NPC, check their existing memories in the injected block. If one already covers the same scene or interaction, drop it and add a single updated version that incorporates the new development. One evolving memory for a conversation is better than three incremental entries logging each turn of the same exchange.
 - **relationship_ops**: Track RS/RomS/FR changes. Operations:
-  * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "rs", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}`
     Relationship Score change (PC → NPC). Clamped -100 to +100.
-  * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "roms", "target": "<NPC>", "change": <signed int>, "reason": "<why>"}`
     Romance Score change (PC → NPC). Clamped 0 to 100.
-  * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}`
     Faction Reputation change. Clamped -100 to +100.
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
     Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
-  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
-  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "new_total": <int>, "reason": "<why>"}`
+  * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
     Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
   * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
     Bootstrap inter-NPC relationship.
   - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant.
-  - "new_total" is for your narrative display only — the system uses "change" to compute the actual score.
   - Scoring guidelines:
     * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
     * Opposition: -3 to -10, Betrayals: -15 to -30
     * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
-  - Tier boundary checking: After computing new_total, compare against tier boundaries. If the score crosses into a new tier:
-    1. Note the new tier in the reason field (e.g. "Defended her honor → T4: Good")
-    2. Narratively reflect the shift in your prose (a bond deepening, trust eroding, etc.)
-    3. Show a 📊 notification line after the narrative: 📊 **RS** Kira +3 (55 → T4: Good) · Defended her honor
+  - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
   - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize from context.
 
 ### HUD Line
@@ -944,7 +960,7 @@ STATE_REPORT_TOOL = {
                         "target": {"type": "string", "description": "NPC or faction name"},
                         "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer", "description": "Signed change amount"},
-                        "new_total": {"type": "integer", "description": "Display-only total after change"},
+                        "new_total": {"type": "integer", "description": "Backend-computed; ignored if sent by model"},
                         "reason": {"type": "string", "description": "Why the change occurred"},
                         "type": {"type": "string", "enum": ["npc", "faction"], "description": "Entity type (for set ops)"},
                         "fields": {"type": "object", "description": "Full replacement fields (for set/npc_set ops)"}
