@@ -498,7 +498,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
 - **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (role, e.g. "Solo" or "Netrunner"), `level` (null — CPRED does not use levels), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
-- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat. On the FIRST combat report, include `context`: 1-2 sentence summary of who is present, where, and why combat erupted (e.g. "Three Maelstrom gangers ambush the crew at the warehouse loading dock — retaliation for the stolen tech.").
+- **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat. On the FIRST combat report, include `context`: this is the ONLY context the combat mode will have about what led here — it won't see any prior chat history. Write 1-2 paragraphs covering: who is present and their state (injuries, conditions, emotional tension), where the fight is happening (environment, cover, lighting), why combat erupted (the trigger, the stakes), and any unresolved narrative threads the combat should carry forward.
 - **is_ooc**: true only for pure OOC turns
 
 Optional arrays:
@@ -661,7 +661,7 @@ When a Netrunner jacks into a system for a standalone hack (outside combat — Q
 - `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
 - `interface_rank`: The Netrunner's Interface ability rank from their character sheet
 - `cycles_max`: Total Cycles available for boosted actions this run (from Cyberdeck quality)
-- `context`: 1-2 sentence summary of who is present, where, and why the Netrunner is jacking in (e.g. "Nova plugs into the clinic's back-office terminal while Raze watches the door — she needs patient records to find the missing ripperdoc.")
+- `context`: This is the ONLY context hack mode will have about what led here — it won't see any prior chat history. Write 1-2 paragraphs covering: who is present and what they're doing (the Netrunner's setup, anyone watching the door, threats nearby), why they're jacking in (the objective, what's at stake if they fail), and any emotional or narrative tension the hack should carry forward.
 
 Simple Checks (single Interface + d10 check) resolve normally in the narrative — no hack_trigger needed. Only trigger hack mode for Quick Hacks and Full Runs where the Netrunner jacks into a system.
 
@@ -676,6 +676,7 @@ Describe the moment of jacking in narratively (connecting the trodes, the NET ma
 - High-octane cyberpunk tone: style over substance, Night City as character
 - Violence is consequential — armor breaks, people die ugly
 - Tech is invasive — cyberware costs humanity
+- Nudity is a social event. When a character is partially nude or nude — whether from fire, armor destruction, not having time to dress, or any other reason — everyone present reacts. It's not background flavor. NPCs stare, avert their eyes, crack jokes, freeze up, try to offer a jacket, or take advantage depending on who they are. Context matters: mid-combat it's a vulnerability and a distraction; in a social setting it's mortifying or charged. The character themselves should feel exposed — embarrassment, defiance, shock, whatever fits. Don't gloss over it.
 
 ### Mechanics Resolution (resolve_mechanics tool)
 When your turn involves skill checks, attacks, damage, or death saves, call the `resolve_mechanics` tool with ALL mechanical actions BEFORE writing narrative. Then narrate using the returned results. Then call `report_state`.
@@ -724,7 +725,7 @@ Guidelines:
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
-- `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
+- `summary`: 1-2 paragraphs — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover the recent scene and mood, the emotional arc between the characters, physical/environmental details (where they are, lighting, what they're wearing or not), and any unresolved tension or vulnerability to carry forward.
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 STATE_REPORT_TOOL = {
@@ -809,7 +810,7 @@ STATE_REPORT_TOOL = {
                 }
             },
             "combat": {
-                "description": "Initiative tracker. null when not in combat. When active: {round, initiative_order, current_turn, context}. context (string, first report only): 1-2 sentence summary — who is present, where, and why combat erupted.",
+                "description": "Initiative tracker. null when not in combat. When active: {round, initiative_order, current_turn, context}. context (string, first report only): 1-2 paragraphs — the ONLY context combat mode gets (no prior chat history). Cover who is present and their state, where the fight is, why it erupted, and any narrative threads to carry forward.",
                 "type": ["object", "null"]
             },
             "callback_ops": {
@@ -982,7 +983,7 @@ STATE_REPORT_TOOL = {
                     "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"},
                     "interface_rank": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Netrunner's Interface ability rank"},
                     "cycles_max": {"type": "integer", "minimum": 0, "description": "Total Cycles available for boosted actions"},
-                    "context": {"type": "string", "description": "1-2 sentence summary: who is present, where, and why the Netrunner is jacking in."}
+                    "context": {"type": "string", "description": "1-2 paragraphs — the ONLY context hack mode gets (no prior chat history). Cover who is present, why they're jacking in, what's at stake, and any narrative tension to carry forward."}
                 }
             },
             "sex_scene": {
@@ -996,7 +997,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
+                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
                     }
                 }
             }
@@ -1181,7 +1182,7 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
                 "properties": {
                     "netrunner": {"type": "string", "description": "Name of the netrunner going into the NET"},
                     "target": {"type": "string", "description": "What they're jacking into (architecture name, device, etc.)"},
-                    "context": {"type": "string", "description": "1-2 sentence summary: current combat situation and why the netrunner is jacking in."}
+                    "context": {"type": "string", "description": "1-2 paragraphs — the ONLY additional context net combat mode gets. Cover current tactical situation, why they're jacking in, and narrative tension to carry forward."}
                 }
             }
         }
@@ -1279,7 +1280,7 @@ Enemies act according to their type and motivation — do not apply a single tem
 
 NET-IN-MEATSPACE:
 When a netrunner declares NET actions during combat initiative:
-- Set initiate_net_combat with the netrunner's name, target architecture/device, and context (1-2 sentence summary of the current combat situation and why they're jacking in).
+- Set initiate_net_combat with the netrunner's name, target architecture/device, and context (1-2 paragraphs — this is the ONLY context net combat mode gets beyond the combat state. Cover the current tactical situation, why they're jacking in, and any narrative tension to carry forward).
 - Do NOT resolve their NET actions — end the exchange. NET-in-meatspace mode handles the interleaved resolution.
 - Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner chooses 1 meat action OR N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10).
 

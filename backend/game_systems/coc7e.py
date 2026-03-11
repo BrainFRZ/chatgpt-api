@@ -882,7 +882,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
+                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
                     }
                 }
             }

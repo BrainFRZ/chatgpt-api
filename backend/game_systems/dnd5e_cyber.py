@@ -2182,6 +2182,7 @@ When triggered, guide the player through D&D 5E character creation (reflavored f
 - The `focus` field on memories identifies who or what the memory is about
 - If the player resolves a branch point, sets a flag/variable, or triggers a decision from the plot documents, report it via plot_ops (key, value, severity). If they diverge from the planned path but can be steered back, report via plot_ops with severity "divergence" and continue normally.
 - If the player makes a decision so far from the plot documents that no defined branch can accommodate it, stop and tell them OOCly so the plot doc can be updated before continuing.
+- Nudity is a social event. When a character is partially nude or nude — whether from destroyed armor, not having time to dress, a spell effect, or any other reason — everyone present reacts. It's not background flavor. NPCs stare, avert their eyes, crack jokes, freeze up, try to offer a cloak, or take advantage depending on who they are. Context matters: mid-combat it's a vulnerability and a distraction; in a social setting it's mortifying or charged. The character themselves should feel exposed — embarrassment, defiance, shock, whatever fits. Don't gloss over it.
 
 ### Dice Mechanics (D&D 5E):
 - Handle ALL dice rolls for the player.
@@ -2224,7 +2225,7 @@ Describe the moment of jacking in narratively (the character connecting, the Mat
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
-- `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
+- `summary`: 1-2 paragraphs — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover the recent scene and mood, the emotional arc between the characters, physical/environmental details (where they are, lighting, what they're wearing or not), and any unresolved tension or vulnerability to carry forward.
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 STATE_REPORT_TOOL = {
@@ -2480,7 +2481,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
+                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
                     }
                 }
             }

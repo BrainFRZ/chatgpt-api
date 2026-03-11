@@ -3247,6 +3247,13 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
 
                 _append_hidden_ship_bootstrap(lines, msg)
 
+                # Mode handoff summaries
+                _handoff_summary = msg.get("sex_handoff_summary")
+                if _handoff_summary:
+                    lines.append("--- SEX MODE HANDOFF SUMMARY ---")
+                    lines.append(_handoff_summary)
+                    lines.append("")
+
                 lines.append("--- OUTPUT ---")
                 lines.append(content)
                 lines.append("")
@@ -3255,6 +3262,21 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                 cost = msg.get("cost", "")
                 lines.append(f"[ASSISTANT] {timestamp}  {cost}")
                 _append_hidden_ship_bootstrap(lines, msg)
+
+                # Mode handoff summaries
+                _handoff_summary = msg.get("sex_handoff_summary")
+                if _handoff_summary:
+                    lines.append("--- SEX MODE HANDOFF SUMMARY ---")
+                    lines.append(_handoff_summary)
+                    lines.append("")
+
+                # Sex scene exit summary
+                _sex_exit = msg.get("sex_scene_summary")
+                if _sex_exit:
+                    lines.append("--- SEX SCENE EXIT SUMMARY ---")
+                    lines.append(_sex_exit)
+                    lines.append("")
+
                 lines.append(content)
                 lines.append("")
 

@@ -695,6 +695,7 @@ When triggered, guide the player through SR6E character creation **one step at a
 - Noir cyberpunk tone: rain-slicked neon, corporate oppression, morally gray shadows
 - Magic is primal and dangerous — drain is real, spirits are not pets
 - Violence is consequential
+- Nudity is a social event. When a character is partially nude or nude — whether from destroyed armor, not having time to dress, a spell effect, or any other reason — everyone present reacts. It's not background flavor. NPCs stare, avert their eyes, crack jokes, freeze up, try to offer a jacket, or take advantage depending on who they are. Context matters: mid-combat it's a vulnerability and a distraction; in a social setting it's mortifying or charged. The character themselves should feel exposed — embarrassment, defiance, shock, whatever fits. Don't gloss over it.
 
 ### Roll Adjudication
 - A [DICE POOL] block is provided with pre-rolled random values for each die type. You MUST use these values in order (left to right). Do NOT generate your own random numbers.
@@ -912,7 +913,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-3 sentence summary of the emotional arc that led to this moment"
+                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
                     }
                 }
             }

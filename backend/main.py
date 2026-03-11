@@ -3415,13 +3415,15 @@ def _apply_deferred_stateful_vehicle_updates(tool_input: dict, pipeline_state: d
 # Sex Mode
 # ============================================================
 
-SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG campaign. Write with the quality and sensibility of literary erotica.
+SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG campaign. Write with the quality of bestselling literary erotica — explicit, vivid, and grounded in character.
 
 ## Voice & Style
 - Use character voice profiles from the project files. Each character should sound and react distinctly.
 - Vary pacing: build tension, use meaningful pauses, let moments breathe. Not every beat needs to escalate.
 - Ground the scene in sensory detail: environment, sounds, textures, temperature, scent.
 - Character emotions and internal reactions matter as much as physical description.
+- Be explicitly descriptive of bodies, arousal, and physical acts. Name anatomy directly — don't retreat into euphemism or fade-to-black. Describe what characters feel, where they're touched, how they respond. The reader should feel present in the scene.
+- Balance the explicit with the emotional. The best erotica works because the physical detail is inseparable from who these people are to each other — their history, their tension, their trust or lack of it. A hand on skin means something different at T3 than at T5.
 
 ## Character Fidelity
 - Reference character sheets for relevant physical descriptions, cybernetics, mutations, scars, magical features, skills, or spells.
@@ -3445,52 +3447,111 @@ SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG cam
 - Example: [SCENE COMPLETE]
 [SCENE SUMMARY: PC and Kira shared an intimate night at the safehouse after the mission. Kira revealed her fear of losing the crew.]
 
+## Vulnerability & Exposure
+- Nudity and vulnerability are not neutral states. Characters react to being exposed — and to seeing others exposed — based on who they are. Shyness, bravado, tenderness, nervousness, hunger. Read the character profiles and relationship tier to calibrate.
+- If a character entered the scene with conditions like "Partially Nude" or "Nude" from a non-intimate context (combat, interrupted sleep, not having time to dress, etc.), acknowledge the residual awkwardness or charge of that. It carries forward.
+
 ## Boundaries
 - Follow the tone established by the campaign. Do not introduce content that clashes with the established setting.
 """
 
 
-def _sex_file_list(uploads_dir: str) -> list[str]:
-    """Select project files relevant to sex mode scenes.
+def _extract_character_profiles(uploads_dir: str, participants: list[str]) -> str:
+    """Extract per-character profile sections from project files for scene participants.
 
-    Matches by filename substring (case-insensitive):
-    - Character Sheets (.md or .yaml)
-    - Character Descs
-    - NPCs and Factions / NPCs and Relationships / Campaign Bible
+    Parses character-relevant files (Character Descs, Character Sheets, Campaign Bible,
+    NPC docs) and returns only the sections matching the given participant names.
     """
-    if not os.path.exists(uploads_dir):
-        return []
+    if not participants or not os.path.exists(uploads_dir):
+        return ""
 
-    all_files = sorted(os.listdir(uploads_dir))
-    selected = []
+    participants_lower = [p.lower() for p in participants]
 
-    for fname in all_files:
+    def _name_matches_header(header: str) -> bool:
+        header_lower = header.lower()
+        return any(p in header_lower for p in participants_lower)
+
+    sections: list[str] = []
+    seen_keys: set[str] = set()  # (fname_lower, participant) dedup
+
+    for fname in sorted(os.listdir(uploads_dir)):
         lower = fname.lower()
         ext = os.path.splitext(fname)[1].lower()
         if ext not in ALLOWED_FILE_EXTENSIONS:
             continue
 
-        if "character sheet" in lower:
-            selected.append(fname)
+        # Determine file category
+        is_char_desc = "character desc" in lower
+        is_char_sheet = "character sheet" in lower
+        is_npc_or_bible = any(kw in lower for kw in ("npc", "campaign bible"))
+
+        if not (is_char_desc or is_char_sheet or is_npc_or_bible):
             continue
 
-        if "character desc" in lower:
-            selected.append(fname)
+        fpath = os.path.join(uploads_dir, fname)
+        if not os.path.exists(fpath):
             continue
+        with open(fpath, 'r', encoding='utf-8') as f:
+            content = f.read()
 
-        # NPC documents: NPCs and Factions, NPCs and Relationships, Campaign Bible
-        if any(kw in lower for kw in ("npc", "campaign bible")):
-            selected.append(fname)
-            continue
+        if is_char_sheet:
+            # YAML character sheets: split on `# ===` separator lines.
+            # Name headers (e.g. "#  REDVELVET — PC Netrunner") are short blocks
+            # (1-2 lines of YAML comments) between separators; the next block is
+            # the character data.  Skip large blocks (data/metadata) to avoid
+            # false matches on names embedded in YAML values.
+            blocks = re.split(r'^# ={3,}.*$', content, flags=re.MULTILINE)
+            for i, block in enumerate(blocks):
+                header_block = block.strip()
+                if not header_block:
+                    continue
+                # Name headers are short comment-only blocks (≤3 lines)
+                header_lines = header_block.split('\n')
+                if len(header_lines) > 3:
+                    continue
+                if _name_matches_header(header_block):
+                    dedup_key = (lower, header_block[:60].lower())
+                    if dedup_key not in seen_keys:
+                        seen_keys.add(dedup_key)
+                        body_block = blocks[i + 1].strip() if i + 1 < len(blocks) else ""
+                        merged = header_block + "\n" + body_block if body_block else header_block
+                        sections.append(f"[From: {fname}]\n{merged}")
 
-    return selected
+        elif is_char_desc:
+            # Markdown character descs: split on h2 headers (## NAME)
+            parts = re.split(r'^(## .+)$', content, flags=re.MULTILINE)
+            # parts: [preamble, header1, body1, header2, body2, ...]
+            for j in range(1, len(parts) - 1, 2):
+                header = parts[j].strip()
+                body = parts[j + 1].strip() if j + 1 < len(parts) else ""
+                if _name_matches_header(header):
+                    dedup_key = (lower, header[:60].lower())
+                    if dedup_key not in seen_keys:
+                        seen_keys.add(dedup_key)
+                        sections.append(f"[From: {fname}]\n{header}\n{body}")
+
+        elif is_npc_or_bible:
+            # Campaign Bible / NPC docs: split on h3 headers (### NPC Name)
+            parts = re.split(r'^(### .+)$', content, flags=re.MULTILINE)
+            for j in range(1, len(parts) - 1, 2):
+                header = parts[j].strip()
+                body = parts[j + 1].strip() if j + 1 < len(parts) else ""
+                if _name_matches_header(header):
+                    dedup_key = (lower, header[:60].lower())
+                    if dedup_key not in seen_keys:
+                        seen_keys.add(dedup_key)
+                        sections.append(f"[From: {fname}]\n{header}\n{body}")
+
+    if not sections:
+        return ""
+    return "=" * 60 + "\nCHARACTER PROFILES (Scene Participants)\n" + "=" * 60 + "\n\n" + "\n\n---\n\n".join(sections)
 
 
 def _build_sex_injection(pipeline_state: dict, sex_scene: dict) -> str:
     """Build injection string for sex mode user messages.
 
-    Includes: scene context, NPC memories, relationship state, callback ledger.
-    Excludes: pacing, HUD, dice pool, full character mechanical states.
+    Includes: scene context, character conditions, NPC memories, relationship state, callback ledger.
+    Excludes: pacing, HUD, dice pool, vitals/resources/equipment.
     """
     parts = []
     npcs = sex_scene.get("npcs", [])
@@ -3505,6 +3566,23 @@ def _build_sex_injection(pipeline_state: dict, sex_scene: dict) -> str:
             scene_lines.append(f"What led here: {summary}")
         scene_lines.append("[/SCENE CONTEXT]")
         parts.append("\n".join(scene_lines))
+
+    # Character conditions (nudity, injuries, cyberware effects — narratively relevant)
+    character_states = pipeline_state.get("character_states", {})
+    cond_lines = []
+    # Collect conditions for all characters involved (NPCs + PCs)
+    for char_name, char_data in character_states.items():
+        if not isinstance(char_data, dict):
+            continue
+        is_npc_in_scene = char_name in npcs
+        is_pc = char_data.get("type") == "pc"
+        if not (is_npc_in_scene or is_pc):
+            continue
+        conditions = char_data.get("conditions")
+        if conditions:
+            cond_lines.append(f"  {char_name}: {', '.join(conditions)}")
+    if cond_lines:
+        parts.append("[CHARACTER CONDITIONS]\n" + "\n".join(cond_lines) + "\n[/CHARACTER CONDITIONS]")
 
     # NPC memories (only for NPCs in the scene)
     npc_memories = pipeline_state.get("npc_memories", {})
@@ -3940,6 +4018,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if user_text_raw.lower().startswith("/sex ") and not use_sex_mode:
         _sex_handoff_npcs = [n.strip() for n in user_text_raw[5:].split(",") if n.strip()]
 
+    def _build_sex_handoff_directive(npc_list: str) -> str:
+        return (
+            f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
+            "Write your final narrative beat leading into the intimate scene. "
+            "At the end, generate a detailed summary for the scene that follows. This summary is the ONLY context "
+            "the next model will have about what just happened — it won't see any chat history before this point.\n"
+            "[SCENE HANDOFF]\n"
+            "Write 1-2 paragraphs covering:\n"
+            "- What happened in the recent scene (the last few exchanges — the situation, mood, tension)\n"
+            "- The emotional arc between the characters (how they got from where they were to this moment)\n"
+            "- Physical/environmental details (where they are, what they're wearing or not, lighting, atmosphere)\n"
+            "- Any unresolved tension, vulnerability, or emotional subtext the intimate scene should carry forward\n"
+            "[/SCENE HANDOFF]"
+        )
+
     # Refresh client if model was auto-switched
     if _original_model:
         client = provider.get_client(api_key)
@@ -4299,11 +4392,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
-            for fname in _sex_file_list(uploads_dir):
-                fpath = os.path.join(uploads_dir, fname)
-                if os.path.exists(fpath):
-                    with open(fpath, 'r', encoding='utf-8') as f:
-                        sex_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+            participants = list(sex_scene.get("npcs", []))
+            for name, cs in sex_ps.get("character_states", {}).items():
+                if isinstance(cs, dict) and cs.get("type") == "pc" and name not in participants:
+                    participants.append(name)
+            profiles = _extract_character_profiles(uploads_dir, participants)
+            if profiles:
+                sex_system_content += "\n\n" + profiles
 
         # Append scene context to system prompt (cacheable — stable across the scene)
         sex_injection = _build_sex_injection(sex_ps, sex_scene)
@@ -4398,13 +4493,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # /sex command: inject handoff directive into user message
         if _sex_handoff_npcs:
-            npc_list = ", ".join(_sex_handoff_npcs)
-            user_content += (
-                f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
-                "Write your final narrative beat leading into the intimate scene. "
-                "At the end, generate a summary of what led to this moment:\n"
-                "[SCENE HANDOFF]1-3 sentence summary of the emotional arc that led here[/SCENE HANDOFF]"
-            )
+            user_content += _build_sex_handoff_directive(", ".join(_sex_handoff_npcs))
 
         agency_reminder = build_player_agency_reminder(
             user_content, stateful_pipeline_state.get("character_states", {}))
@@ -4427,13 +4516,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # /sex command: inject handoff directive into user message (non-stateful path)
         if _sex_handoff_npcs:
-            npc_list = ", ".join(_sex_handoff_npcs)
-            user_content += (
-                f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
-                "Write your final narrative beat leading into the intimate scene. "
-                "At the end, generate a summary of what led to this moment:\n"
-                "[SCENE HANDOFF]1-3 sentence summary of the emotional arc that led here[/SCENE HANDOFF]"
-            )
+            user_content += _build_sex_handoff_directive(", ".join(_sex_handoff_npcs))
 
         new_user_msg = {"role": branch_path[-1]["role"], "content": user_content}
 
@@ -7251,6 +7334,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # ── Sex mode: detect [SCENE COMPLETE] and [SCENE HANDOFF] ──
                         sex_scene_complete = False
+                        _sex_handoff_summary_for_log = None
                         sex_scene_summary_text = None
                         sex_restore_model = None
                         if use_sex_mode and "[SCENE COMPLETE]" in assistant_message:
@@ -7283,6 +7367,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 "original_model": data.get("model", DEFAULT_MODEL),
                             }
                             data["pipeline_state"] = ps
+                            _sex_handoff_summary_for_log = _handoff_summary
 
                         # Get cross-model providers for token counting
                         gpt_provider = get_gpt_provider()
@@ -7455,6 +7540,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["sex_mode"] = True
                             if sex_scene_summary_text:
                                 assistant_msg_data["sex_scene_summary"] = sex_scene_summary_text
+
+                        # Log sex handoff summary on the handoff turn
+                        if _sex_handoff_summary_for_log:
+                            assistant_msg_data["sex_handoff_summary"] = _sex_handoff_summary_for_log
 
                         # Flag ship combat mode messages (Claude path)
                         if use_ship_combat_mode:
