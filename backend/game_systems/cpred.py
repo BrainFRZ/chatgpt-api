@@ -286,7 +286,7 @@ DICE MECHANICS (reference — use to set DVs and resolution fields):
 - Luck: spend points to add to roll (1:1). CANNOT spend on damage rolls, Death Saves, or Initiative.
 - Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
 - Armor ablation: SP drops by 1 per penetrating hit. AP ammo ablates by 2.
-- Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
+- Critical injuries: detected automatically by the backend when damage dice are rolled. Narrate from resolve_mechanics results.
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
 - Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Set appropriate DVs for social checks.
 - Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
@@ -623,7 +623,7 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 - Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
 - Armor ablation: SP -1 per penetrating hit. AP ammo ablates by 2.
 - Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
-- Critical injuries: triggered when 2+ damage dice show 6 → 5 bonus damage direct to HP (ignores SP) + injury effect from table
+- Critical injuries: detected automatically by the backend when damage dice are rolled. Narrate from resolve_mechanics results.
 - Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save (tracked via death_save op). Critical injuries add dv_mod.
 - Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
 - Social Ceiling (§11A): lifestyle/presentation caps social check totals. Degree of Success scales social outcomes by margin.
@@ -1205,11 +1205,11 @@ KEY RULES:
 - Seriously Wounded: when HP is below half max (rounded up) → −2 to ALL actions. Add condition automatically.
 - Mortally Wounded: at 0 HP → −4 to ALL actions, −6 to MOVE (min 1). Death Save each turn. Any damage taken triggers a Critical Injury. Character is conscious (not automatically unconscious).
 
-DAMAGE RESOLUTION:
+DAMAGE RESOLUTION (all computed by backend via resolve_mechanics):
 1. Roll weapon damage dice.
-2. Crit check: if TWO or more dice show 6 → critical injury triggered. 5 bonus damage direct to HP (bypasses armor). Roll 2d6 on body or head table (Ruleset §15). Report via critical_injury_add with location, effect, and dv_mod.
+2. Backend checks for critical injuries and applies bonus damage automatically.
 3. Determine hit location (body unless called shot to head).
-4. Subtract location SP from damage total. If damage ≤ SP, no penetration — no HP damage and no ablation (crit bonus from step 2 still applies).
+4. Subtract location SP from damage total. If damage ≤ SP, no penetration — no HP damage and no ablation (crit bonus damage bypasses SP and still applies).
 5. Ablation: if damage penetrates (damage > SP), SP drops by 1. AP ammo: SP drops by 2.
 6. Melee weapons: halve defender's SP before comparing (round up). Brawling does NOT halve SP.
 7. Remaining damage after SP → applied to HP.
@@ -1221,7 +1221,7 @@ At 0 HP, character must make a Death Save each round:
 - Cumulative: +1 to roll per Death Save already made this combat. Read [EDGERUNNER STATE] death_save_count for the current cumulative modifier. Emit death_save edgerunner_op after each save.
 - Critical injuries: add dv_mod from each active critical injury to the roll.
 - Fail = dead (for NPCs). For PCs, see PC death rules below.
-- Quick Fix vs Treatment: critical_injury_add records new injuries. For Quick Fix (temporary, 1 min, expires end of day), set status to "quick_fixed" via edgerunner_ops. critical_injury_remove is permanent treatment (4 hrs, can't self-treat).
+- Quick Fix vs Treatment: the backend adds critical injuries from combat damage automatically. For Quick Fix (temporary, 1 min, expires end of day), set status to "quick_fixed" via edgerunner_ops. critical_injury_remove is permanent treatment (4 hrs, can't self-treat).
 
 STATE TRACKING via report_combat_state:
 The backend tracks all dice-dependent state (hp_delta, armor_delta, critical_injury_add, luck_delta, ammo) automatically from resolve_mechanics results. Do NOT include these fields in character_updates.
@@ -1684,10 +1684,10 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - Mortally Wounded: 0 HP → −4 to ALL actions, −6 MOVE (min 1). Death Save each round.
 - Opposed check ties go to the Defender.
 
-### Damage Resolution
+### Damage Resolution (backend-computed via resolve_mechanics)
 1. Roll weapon damage dice.
-2. Crit check: 2+ dice show 6 → crit injury. +5 bonus direct to HP (ignores SP). Roll on table (§15).
-3. Subtract location SP. If damage ≤ SP, no penetration (crit bonus still applies).
+2. Backend checks for critical injuries and applies bonus damage automatically.
+3. Subtract location SP. If damage ≤ SP, no penetration (crit bonus damage bypasses SP and still applies).
 4. Ablation: penetrating hit → SP −1. AP ammo: SP −2.
 5. Melee: halve SP (round up). Brawling: full SP.
 6. Remaining after SP → HP.
