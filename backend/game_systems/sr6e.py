@@ -535,7 +535,7 @@ CHARACTER STATES:
 - DELTA OPS: Instead of rewriting the full character state, you can include delta fields to modify the existing persisted state:
   - "_conditions_add": ["Wounded"] → appends conditions to the character
   - "_conditions_remove": ["Stun Overflow"] → removes conditions from the character
-  - "_resource_deltas": [{"label": "Edge", "delta": -1}] → adjusts a resource's current value by delta (clamped to 0..max)
+  - "_resource_deltas": [{"label": "Edge", "delta": -1}] → adjusts a resource's current value by delta
   - Delta ops are merged into the existing persisted state, so you only need to specify what changed — not reproduce the entire block
   - You can combine delta ops with full fields (e.g. provide updated "vitals" alongside "_conditions_add")
 

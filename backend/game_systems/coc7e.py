@@ -285,15 +285,15 @@ You receive an [INVESTIGATOR STATE] block with each investigator's tracked mecha
 
 Use "investigator_ops" to update this state. Operations:
 - {"investigator": "<name>", "op": "san", "change": <signed int>, "reason": "<why>"}
-  SAN loss/gain. Current is clamped 0 to max. Max is always 99 - Mythos%.
+  SAN loss/gain.
 - {"investigator": "<name>", "op": "luck", "change": <signed int>, "reason": "<why>"}
   Luck spent or gained. Mechanics will output the Luck cost; you record it here.
 - {"investigator": "<name>", "op": "mythos", "change": <positive int>, "reason": "<why>"}
-  Mythos% increase (one-way ratchet — only goes up). Auto-derives new max SAN.
+  Mythos% increase (one-way ratchet — only goes up).
 - {"investigator": "<name>", "op": "bond", "name": "<bond name>", "change": <signed int>, "reason": "<why>"}
-  Bond damage or recovery. Clamped ≥ 0. Bond at 0 is destroyed.
+  Bond damage or recovery.
 - {"investigator": "<name>", "op": "skill_mark", "skill": "<skill name>"}
-  Mark a skill for development roll (deduped).
+  Mark a skill for development roll.
 - {"investigator": "<name>", "op": "phobia", "action": "add|remove", "value": "<phobia>"}
 - {"investigator": "<name>", "op": "mania", "action": "add|remove", "value": "<mania>"}
 - {"investigator": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
@@ -512,7 +512,7 @@ IMPORTANT:
 - DELTA OPS: Instead of rewriting the full character state, you can include delta fields:
   - "_conditions_add": ["Temporary Insanity"] → appends conditions
   - "_conditions_remove": ["Major Wound"] → removes conditions
-  - "_resource_deltas": [{"label": "Luck", "delta": -5}] → adjusts resource current value (clamped to 0..max)
+  - "_resource_deltas": [{"label": "Luck", "delta": -5}] → adjusts resource current value
   - Delta ops merge into existing persisted state — you only need to specify what changed
 
 ROLL ADJUDICATION:
