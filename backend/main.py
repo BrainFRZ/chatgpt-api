@@ -1782,6 +1782,14 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     # Get the branch path (messages from root to target leaf)
     if target_leaf and is_migrated(data):
         branch_messages = get_path_to_root(all_messages, target_leaf)
+        # Fallback: if target_leaf points to a deleted/missing message, use last message
+        if not branch_messages and all_messages:
+            fallback_leaf = all_messages[-1].get("id")
+            if fallback_leaf:
+                branch_messages = get_path_to_root(all_messages, fallback_leaf)
+                data["current_leaf_id"] = fallback_leaf
+            else:
+                branch_messages = all_messages
     else:
         # Fallback for non-migrated chats or no leaf specified: use linear order
         branch_messages = all_messages
@@ -7364,16 +7372,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             ps = data.get("pipeline_state", {})
                             sex_restore_model = (ps.get("sex_scene") or {}).get("original_model")
                             ps["sex_scene"] = None
+                            data["pipeline_state"] = ps
                             if sex_restore_model:
                                 data["model"] = sex_restore_model
+                            # Emit state_update so CharacterPanel clears sex scene indicator
+                            if not client_disconnected:
+                                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
 
                         # /sex handoff: detect [SCENE HANDOFF] block from the handoff turn
+                        _sex_handoff_detected = False
                         if _sex_handoff_npcs and "[SCENE HANDOFF]" in assistant_message:
+                            _sex_handoff_detected = True
                             _hm = re.search(r'\[SCENE HANDOFF\](.*?)\[/SCENE HANDOFF\]', assistant_message, re.DOTALL)
                             _handoff_summary = _hm.group(1).strip() if _hm else f"An intimate scene begins with {', '.join(_sex_handoff_npcs)}."
-                            # Strip handoff tags from displayed content
-                            assistant_message = re.sub(r'\[SCENE HANDOFF\].*?\[/SCENE HANDOFF\]', '', assistant_message, flags=re.DOTALL).strip()
-                            assistant_message = re.sub(r'\[INTIMATE SCENE TRANSITION:.*?\]', '', assistant_message).strip()
                             # Set sex_scene state for next turn
                             ps = data.get("pipeline_state", {})
                             ps["sex_scene"] = {
@@ -7383,6 +7394,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             }
                             data["pipeline_state"] = ps
                             _sex_handoff_summary_for_log = _handoff_summary
+                            # Delete handoff messages — remove user msg and don't append assistant msg
+                            data["messages"] = [m for m in data["messages"] if m.get("id") != user_msg_id]
+                            data["current_leaf_id"] = parent_id
+                            # Emit state_update so CharacterPanel shows sex scene indicator immediately
+                            if not client_disconnected:
+                                yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
 
                         # Get cross-model providers for token counting
                         gpt_provider = get_gpt_provider()
@@ -7580,8 +7597,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 elif ship_combat_bootstrap_messages_snapshot:
                                     assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(ship_combat_bootstrap_messages_snapshot)
 
-                        data["messages"].append(assistant_msg_data)
-                        data["current_leaf_id"] = assistant_msg_id
+                        if not _sex_handoff_detected:
+                            data["messages"].append(assistant_msg_data)
+                            data["current_leaf_id"] = assistant_msg_id
 
                         # Track combat start_message_id when combat begins
                         _active_combat = data.get("pipeline_state", {}).get("combat")
@@ -7663,7 +7681,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         update_persistent_stats(username, new_input_tokens, parsed.cache_read_tokens, parsed.output_tokens, parsed.reasoning_tokens, actual_cost, model=model_id, context_tokens=context_tokens)
 
                         # Calculate branch info
-                        branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
+                        if _sex_handoff_detected:
+                            branch_path_final = get_path_to_root(data["messages"], parent_id) if parent_id else data["messages"][:1]
+                        else:
+                            branch_path_final = get_path_to_root(data["messages"], assistant_msg_id)
                         branch_total_messages = len(branch_path_final)
 
                         # Calculate model-specific stats
@@ -7702,7 +7723,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Send done event with all metadata
                         done_data = {
-                            'assistant_message': assistant_message,
+                            'assistant_message': '' if _sex_handoff_detected else assistant_message,
                             'tokens': tokens_str,
                             'cost': cost_str,
                             'stats': response_stats,
@@ -7710,7 +7731,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'reasoning': reasoning_summary,
                             'user_message_id': user_msg_id,
                             'assistant_message_id': assistant_msg_id,
-                            'current_leaf_id': assistant_msg_id,
+                            'current_leaf_id': parent_id if _sex_handoff_detected else assistant_msg_id,
                             'total_messages': branch_total_messages,
                             'model': model_id
                         }
@@ -7726,7 +7747,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['sex_mode'] = True
                             if sex_scene_complete:
                                 done_data['sex_complete'] = True
-                        if _sex_handoff_npcs and data.get("pipeline_state", {}).get("sex_scene"):
+                        if _sex_handoff_detected:
                             done_data['sex_mode_handoff'] = True
                             done_data['sex_handoff_npcs'] = _sex_handoff_npcs
                         if use_ship_combat_mode:
@@ -7765,10 +7786,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 "ship_combat_init_message": copy.deepcopy(ship_combat_init_hidden_message_data) if (use_ship_combat_mode and ship_combat_started_this_turn and ship_combat_init_hidden_message_data) else None,
                                 "user_message_id": user_msg_id,
                             "assistant_message_id": assistant_msg_id,
-                            "current_leaf_id": assistant_msg_id,
+                            "current_leaf_id": parent_id if _sex_handoff_detected else assistant_msg_id,
                             "total_messages": branch_total_messages,
                             "stats": response_stats,
-                            "context_start_index": context_start_index
+                            "context_start_index": context_start_index,
+                            "sex_mode_handoff": True if _sex_handoff_detected else None,
                         }
                         if data.get("pipeline_state"):
                             stream_done_data["pipeline_state"] = data["pipeline_state"]

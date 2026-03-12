@@ -614,6 +614,17 @@ export function useMessaging(deps: UseMessagingDeps) {
           } else if (event.type === 'done') {
             const data = event.data;
 
+            if (data.sex_mode_handoff) {
+              // Sex handoff: messages were deleted backend-side — remove optimistic messages, update state only
+              deps.setMessages(prev => prev.slice(0, -2));
+              deps.setTotalMessages(prev => prev - 1); // reverse optimistic +1 from submission
+              deps.setCurrentLeafId(data.current_leaf_id);
+              deps.setStats(data.stats);
+              deps.setContextStartIndex(data.context_start_index || 1);
+              if (data.model) deps.setSelectedModel(data.model);
+              deps.fetchUserStats();
+              deps.fetchFreeTokens();
+            } else {
             // Build complete messages with IDs from response
             const userMsgWithId: ChatMessage = {
               ...optimisticUserMsg,
@@ -687,6 +698,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             deps.fetchUserStats();
             deps.fetchFreeTokens();
+            } // end non-handoff
             // Don't scroll on done - let user stay where they were reading
           } else if (event.type === 'ship_combat_auto_init') {
             // Backend chained ship combat init — add a new assistant message placeholder

@@ -145,6 +145,29 @@ export function useSync(deps: UseSyncDeps) {
       case 'stream_done': {
         // Ignore if we're the one streaming - we handle this via SSE
         if (isCurrentlyStreaming) break;
+        // Sex handoff: messages were deleted backend-side — remove user msg + placeholder
+        if (event.data.sex_mode_handoff) {
+          deps.setMessages(prev => {
+            const lastIdx = prev.length - 1;
+            if (lastIdx >= 1 && prev[lastIdx].role === 'assistant' && !prev[lastIdx].id) {
+              return prev.slice(0, -2);
+            }
+            return prev;
+          });
+          deps.setAllMessages(prev => {
+            // Remove the user message that was added by user_message_added
+            const userMsgId = event.data.user_message_id;
+            return userMsgId ? prev.filter(m => m.id !== userMsgId) : prev;
+          });
+          deps.setTotalMessages(prev => prev - 1);
+          deps.setCurrentLeafId(event.data.current_leaf_id);
+          deps.setStats(event.data.stats);
+          deps.setContextStartIndex(event.data.context_start_index || 1);
+          if (event.data.pipeline_state) {
+            deps.setPipelineState(event.data.pipeline_state);
+          }
+          break;
+        }
         // Replace streaming placeholder with complete message
         let hadPlaceholder = false;
         let hadHiddenInit = false;

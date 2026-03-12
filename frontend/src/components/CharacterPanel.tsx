@@ -670,6 +670,7 @@ export default function CharacterPanel({
     const shipCombat = state.ship_combat;
     const netCombat = state.net_combat;
     const isNetCombat = netCombat?.active;
+    const sexScene = state.sex_scene;
     const ledger = state.callback_ledger;
     const pcsPresent = scene.pcs_present || [];
     const npcsPresent = scene.npcs_present || [];
@@ -693,10 +694,13 @@ export default function CharacterPanel({
           {hackState?.active && !isNetCombat && (
             <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#00ff41', marginTop: '8px', backgroundColor: '#00ff4118', borderRadius: '8px', padding: '1px 5px' }}>H</span>
           )}
-          {shipCombat && !hackState?.active && !isNetCombat && (
+          {sexScene?.npcs && !hackState?.active && !isNetCombat && !shipCombat && (
+            <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#e88fa5', marginTop: '8px', backgroundColor: '#e88fa518', borderRadius: '8px', padding: '1px 5px' }}>XXX</span>
+          )}
+          {shipCombat && !hackState?.active && !isNetCombat && !sexScene?.npcs && (
             <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', marginTop: '8px', backgroundColor: '#38bdf818', borderRadius: '8px', padding: '1px 5px' }}>SC</span>
           )}
-          {charCount > 0 && !hackState?.active && !isNetCombat && !shipCombat && (
+          {charCount > 0 && !hackState?.active && !isNetCombat && !shipCombat && !sexScene?.npcs && (
             <span style={{ fontSize: '0.65rem', color: '#888', marginTop: '8px', backgroundColor: '#2a2a4e', borderRadius: '8px', padding: '1px 5px' }}>{charCount}</span>
           )}
         </div>
@@ -724,24 +728,27 @@ export default function CharacterPanel({
         )}
         {/* Panel header */}
         <div style={{
-          padding: '12px 12px 8px', borderBottom: `1px solid ${isNetCombat ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
+          padding: '12px 12px 8px', borderBottom: `1px solid ${sexScene?.npcs ? '#3a0a2a' : isNetCombat ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : '#333'}`, display: 'flex',
           justifyContent: 'space-between', alignItems: 'center',
-          backgroundColor: isNetCombat ? '#1a1a0a' : hackState?.active ? '#0a1f0a' : shipCombat ? '#0a0a2a' : combat ? '#2a1a1a' : 'transparent',
+          backgroundColor: sexScene?.npcs ? '#2a0a1a' : isNetCombat ? '#1a1a0a' : hackState?.active ? '#0a1f0a' : shipCombat ? '#0a0a2a' : combat ? '#2a1a1a' : 'transparent',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: isNetCombat ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
-              {isNetCombat ? `NET Combat \u2014 Round ${combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: sexScene?.npcs ? '#e88fa5' : isNetCombat ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#ccc' }}>
+              {sexScene?.npcs ? `${(sexScene.npcs as string[]).join(', ')}` : isNetCombat ? `NET Combat \u2014 Round ${combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : combat ? `Combat \u2014 Round ${combat.round || '?'}` : 'Scene'}
             </span>
-            {isNetCombat && (
+            {sexScene?.npcs && (
+              <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#e88fa5', backgroundColor: '#e88fa518', padding: '1px 5px', borderRadius: '3px' }}>XXX</span>
+            )}
+            {isNetCombat && !sexScene?.npcs && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', backgroundColor: '#f59e0b18', padding: '1px 5px', borderRadius: '3px' }}>NET COMBAT</span>
             )}
-            {hackState?.active && !isNetCombat && (
+            {hackState?.active && !isNetCombat && !sexScene?.npcs && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px' }}>HACK</span>
             )}
-            {!hackState?.active && !isNetCombat && !combat && shipCombat && (
+            {!hackState?.active && !isNetCombat && !combat && shipCombat && !sexScene?.npcs && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px' }}>SHIP COMBAT</span>
             )}
-            {!hackState?.active && !isNetCombat && combat && (
+            {!hackState?.active && !isNetCombat && combat && !sexScene?.npcs && (
               <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ef4444', backgroundColor: '#ef444422', padding: '1px 5px', borderRadius: '3px' }}>COMBAT</span>
             )}
           </div>
@@ -840,7 +847,8 @@ export default function CharacterPanel({
     const shipCombat = state.ship_combat;
     const netCombatM = state.net_combat;
     const isNetCombatM = netCombatM?.active;
-    if (allPresent.length === 0 && !hackState?.active && !isNetCombatM && !shipCombat) return null;
+    const sexSceneM = state.sex_scene;
+    if (allPresent.length === 0 && !hackState?.active && !isNetCombatM && !shipCombat && !sexSceneM?.npcs) return null;
 
     return (
       <>
@@ -857,20 +865,21 @@ export default function CharacterPanel({
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         height: mobileBottomSheetOpen ? '55vh' : '34px',
-        backgroundColor: isNetCombatM ? '#1a1a0a' : hackState?.active ? '#0a1a0a' : shipCombat ? '#0a0a2a' : '#16162a', borderTop: `1px solid ${isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}`,
+        backgroundColor: sexSceneM?.npcs ? '#2a0a1a' : isNetCombatM ? '#1a1a0a' : hackState?.active ? '#0a1a0a' : shipCombat ? '#0a0a2a' : '#16162a', borderTop: `1px solid ${sexSceneM?.npcs ? '#3a0a2a' : isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}`,
         zIndex: 1500, transition: 'height 0.25s ease',
         display: 'flex', flexDirection: 'column' as const,
       }}>
         {/* Tab handle */}
         <div
           onClick={() => setMobileBottomSheetOpen(!mobileBottomSheetOpen)}
-          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}` : 'none' }}
+          style={{ textAlign: 'center', padding: '8px', fontSize: '0.75rem', color: sexSceneM?.npcs ? '#e88fa5' : isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#888', cursor: 'pointer', flexShrink: 0, borderBottom: mobileBottomSheetOpen ? `1px solid ${sexSceneM?.npcs ? '#3a0a2a' : isNetCombatM ? '#3a2a0a' : hackState?.active ? '#0a3a0a' : shipCombat ? '#1a1a3a' : '#333'}` : 'none' }}
         >
-          <div style={{ width: '32px', height: '3px', backgroundColor: isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
-          {isNetCombatM && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', backgroundColor: '#f59e0b18', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>NET COMBAT</span>}
-          {hackState?.active && !isNetCombatM && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
-          {!hackState?.active && !isNetCombatM && shipCombat && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
-          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {isNetCombatM ? `NET Combat \u2014 Round ${state.combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
+          <div style={{ width: '32px', height: '3px', backgroundColor: sexSceneM?.npcs ? '#e88fa5' : isNetCombatM ? '#f59e0b' : hackState?.active ? '#00ff41' : shipCombat ? '#38bdf8' : '#555', borderRadius: '2px', margin: '0 auto 4px' }} />
+          {sexSceneM?.npcs && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#e88fa5', backgroundColor: '#e88fa518', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>XXX</span>}
+          {isNetCombatM && !sexSceneM?.npcs && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', backgroundColor: '#f59e0b18', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>NET COMBAT</span>}
+          {hackState?.active && !isNetCombatM && !sexSceneM?.npcs && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#00ff41', backgroundColor: '#00ff4118', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>HACK</span>}
+          {!hackState?.active && !isNetCombatM && shipCombat && !sexSceneM?.npcs && <span style={{ fontSize: '0.6rem', fontWeight: 700, color: '#38bdf8', backgroundColor: '#38bdf818', padding: '1px 5px', borderRadius: '3px', marginRight: '6px' }}>SHIP COMBAT</span>}
+          {mobileBottomSheetOpen ? '\u25BC' : '\u25B2'} {sexSceneM?.npcs ? `${(sexSceneM.npcs as string[]).join(', ')}` : isNetCombatM ? `NET Combat \u2014 Round ${state.combat?.round || '?'}` : hackState?.active ? `${hackState.cycles_remaining !== undefined ? 'NET' : 'Matrix'} \u2014 ${hackState.target_system || 'Unknown'}` : shipCombat ? `Ship Combat \u2014 Round ${shipCombat.round || '?'}` : `${allPresent.length} characters in scene`}
         </div>
         {/* Scrollable card list */}
         {mobileBottomSheetOpen && (
