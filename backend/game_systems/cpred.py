@@ -187,7 +187,9 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "critical_injury", "action": "remove", "name": "<injury>", "reason": "<surgery/treatment>"}
   Remove a critical injury permanently (full treatment — 4 hrs, can't self-treat).
 - {"edgerunner": "<name>", "op": "critical_injury", "action": "quick_fix", "name": "<injury>", "reason": "<field first aid>"}
-  Quick Fix a critical injury (temporary — 1 minute, expires end of day). Injury stays tracked but marked [QF].
+  Quick Fix a critical injury (temporary — 1 minute, expires end of day). Injury stays tracked but marked [QF]; effects and Death Save dv_mod are suspended.
+- {"edgerunner": "<name>", "op": "critical_injury", "action": "expire_qf", "name": "<injury>", "reason": "<Quick Fix expired>"}
+  Expire a Quick Fix — injury effects and Death Save dv_mod resume. Emit when 1 minute (10 combat rounds) elapses or at end of day.
 - {"edgerunner": "<name>", "op": "death_save", "reason": "<Death Save round N>"}
   Increment cumulative Death Save counter (+1 per save made). Auto-resets when HP rises above 0.
 - {"edgerunner": "<name>", "op": "death_save_reset", "reason": "<Stabilized>"}
@@ -230,7 +232,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context. Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context. Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically. For NPCs, include "faction": "<Faction Name>" to link them to a tracked faction for auto-cascade.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
@@ -245,7 +247,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
 - Maximum combined bonus from relationship systems: +5 to any single check (d10 calibration).
 - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
-- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
+- Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. When FR hits -70 (Enemy) or -90 (KOS):
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
   * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
@@ -287,7 +289,7 @@ DICE MECHANICS (reference — use to set DVs and resolution fields):
 - Seriously Wounded: -2 to all actions when HP is below half max (rounded up)
 - Armor ablation: SP drops by 1 per penetrating hit. AP ammo ablates by 2.
 - Critical injuries: detected automatically by the backend when damage dice are rolled. Narrate from resolve_mechanics results.
-- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save. Critical injuries add dv_mod.
+- Death Saves: at 0 HP, roll d10 each round via resolve_mechanics. Backend auto-applies cumulative modifier and critical injury dv_mod. Natural 10 always fails.
 - Social mechanics: Social Ceiling (§11A) caps social check totals by lifestyle/presentation tier. Degree of Success scales social outcomes by margin. Set appropriate DVs for social checks.
 - Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
   Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
@@ -403,8 +405,8 @@ Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Se
 - suppressive_fire: {"type": "suppressive_fire", "character": "<attacker>", "attacker_ref": <REF>, "attacker_autofire": <Autofire skill>, "targets": [{"name": "<target>", "will": <WILL>, "concentration": <Concentration>, "seriously_wounded": <bool>}], "seriously_wounded_attacker": <bool>, "luck_spent": <int>, "weapon_name": "<weapon>", "on_success": "<narrative if any suppressed>", "on_failure": "<narrative if none suppressed>"}
   Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt.
 
-- death_save: {"type": "death_save", "character": "<name>", "body_stat": <BODY>, "death_save_count": <cumulative count>, "active_injuries": [{"name": "<injury>", "dv_mod": <int>}, ...]}
-  Roll d10 vs BODY. Natural 10 always fails. Cumulative +1 per previous save.
+- death_save: {"type": "death_save", "character": "<name>", "body_stat": <BODY>}
+  Roll d10 vs BODY. Natural 10 always fails. Backend auto-applies cumulative modifier and critical injury penalties.
 
 - initiative: {"type": "initiative", "character": "all", "combatants": [{"name": "<name>", "ref": <REF stat>}, ...]}
   Roll d10+REF per combatant. Returns sorted initiative order.
@@ -521,8 +523,9 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "eurobucks", "change": -500, "reason": "Bought ammo"}`
 - `{"edgerunner": "<name>", "op": "critical_injury", "action": "add", "name": "Broken Ribs", "effect": "-2 movement", "dv_mod": 1}`
 - `{"edgerunner": "<name>", "op": "critical_injury", "action": "remove", "name": "Broken Ribs", "reason": "Surgery"}` (permanent treatment — 4 hrs, can't self-treat)
-- `{"edgerunner": "<name>", "op": "critical_injury", "action": "quick_fix", "name": "Broken Ribs", "reason": "Field first aid"}` (temporary — 1 min, expires end of day)
-- `{"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round 2"}` (increments cumulative counter; auto-resets when HP > 0)
+- `{"edgerunner": "<name>", "op": "critical_injury", "action": "quick_fix", "name": "Broken Ribs", "reason": "Field first aid"}` (temporary — 1 min, expires end of day; effects and Death Save dv_mod suspended)
+- `{"edgerunner": "<name>", "op": "critical_injury", "action": "expire_qf", "name": "Broken Ribs", "reason": "Quick Fix expired"}` (reactivate injury after QF expires)
+- `{"edgerunner": "<name>", "op": "death_save", "reason": "Death Save round 2"}` (auto-emitted by backend after resolve_mechanics death saves; only emit manually for non-resolve_mechanics death save scenarios)
 - `{"edgerunner": "<name>", "op": "death_save_reset", "reason": "Stabilized"}` (manual reset)
 - `{"edgerunner": "<name>", "op": "lifestyle", "value": "Generic Prepak", "reason": "Monthly upkeep"}`
 - `{"edgerunner": "<name>", "op": "housing", "value": "Two-Bedroom Apartment", "reason": "Rented in Watson"}` (immediate change — system auto-deducts at new rate if unpaid)
@@ -543,14 +546,14 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - `{"op": "rs", "target": "<NPC>", "change": 5, "reason": "Defended her honor"}`
 - `{"op": "roms", "target": "<NPC>", "change": 3, "reason": "Intimate conversation"}`
 - `{"op": "fr", "target": "<Faction>", "change": -10, "reason": "Refused their job"}`
-- `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {"rs": 50, "roms": 0, "notes": "Crew fixer"}}`
+- `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {"rs": 50, "roms": 0, "faction": "Tyger Claws", "notes": "Crew fixer"}}`
 - `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": 3, "reason": "Fought together"}`
 - `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": 5, "reason": "Flirting"}`
 - `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": 40, "roms": 0}}`
 - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
 - Maximum combined relationship bonus: +5 to any single check (d10 calibration).
 - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
-- Alliance cascades: When a faction member's RS changes significantly, emit additional FR ops for their faction. When FR hits -70 (Enemy) or -90 (KOS):
+- Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. When FR hits -70 (Enemy) or -90 (KOS):
   * Allied factions drop tiers based on alliance strength — Weak: -4 tiers, Moderate: -3 tiers, Strong: -2 tiers (minimum drops). Emit FR ops for each affected faction.
   * Rival factions gain FR: +10-20 at -70, +20-30 at -90. Emit FR ops for rivals.
   * The offended faction escalates — emit callbacks for bounty hunters (-70) or assassination attempts (-90).
@@ -624,8 +627,8 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 - Armor ablation: SP -1 per penetrating hit. AP ammo ablates by 2.
 - Melee weapons: halve defender's SP (round up) before comparing. Brawling faces full SP.
 - Critical injuries: detected automatically by the backend when damage dice are rolled. Narrate from resolve_mechanics results.
-- Death Saves: at 0 HP, roll d10 each round. Under BODY stat = survive. Equal or over = dead. Natural 10 always fails. Cumulative +1 per save (tracked via death_save op). Critical injuries add dv_mod.
-- Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF]. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
+- Death Saves: at 0 HP, roll d10 each round via resolve_mechanics. Backend auto-applies cumulative modifier and critical injury dv_mod. Natural 10 always fails.
+- Quick Fix vs Treatment: Quick Fix (action: "quick_fix") is temporary (1 min, expires end of day) — injury stays tracked as [QF], effects and Death Save dv_mod suspended. Use "expire_qf" to reactivate when time runs out. Remove (action: "remove") is permanent treatment (4 hrs, can't self-treat).
 - Social Ceiling (§11A): lifestyle/presentation caps social check totals. Degree of Success scales social outcomes by margin.
 - Lifestyle & Housing: Track via edgerunner_ops. Lifestyle + housing determines presentation tier for Social Ceiling (§11A). Monthly costs are automatically deducted by the system on the 1st of each in-game month — do NOT deduct manually. If [EXPENSE STATUS] appears in the injection, weave the consequences into the narrative (eviction, hunger, crammed). If [UPCOMING EXPENSES] appears, warn the player about upcoming costs so they can downgrade or earn more before the 1st.
   Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
@@ -696,7 +699,7 @@ Action types for resolve_mechanics:
 - ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location (head/body), is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?}
 - melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
 - autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?}
-- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+- death_save: {type, character, body_stat}
 - initiative: {type, character: "all", combatants: [{name, ref}]}
 - program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
@@ -859,7 +862,7 @@ STATE_REPORT_TOOL = {
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},
                         "value": {"type": ["string", "integer"], "description": "Cyberware name, armor repair value, or lifestyle/housing string"},
-                        "action": {"type": "string", "enum": ["add", "remove", "quick_fix"], "description": "For critical_injury/cyberware ops"},
+                        "action": {"type": "string", "enum": ["add", "remove", "quick_fix", "expire_qf"], "description": "For critical_injury/cyberware ops"},
                         "name": {"type": "string", "description": "Injury name (for critical_injury ops)"},
                         "effect": {"type": "string", "description": "Injury effect (for critical_injury add)"},
                         "dv_mod": {"type": "integer", "description": "Death Save DV modifier (for critical_injury add)"},
@@ -1218,10 +1221,9 @@ DEATH SAVES:
 At 0 HP, character must make a Death Save each round:
 - Roll: d10 vs BODY stat. Succeed if roll is UNDER BODY. Fail if equal or over.
 - Natural 10: automatic failure regardless of BODY.
-- Cumulative: +1 to roll per Death Save already made this combat. Read [EDGERUNNER STATE] death_save_count for the current cumulative modifier. Emit death_save edgerunner_op after each save.
-- Critical injuries: add dv_mod from each active critical injury to the roll.
+- Cumulative modifier and critical injury dv_mod: backend automatically applies both to the roll. Read [EDGERUNNER STATE] for current values.
 - Fail = dead (for NPCs). For PCs, see PC death rules below.
-- Quick Fix vs Treatment: the backend adds critical injuries from combat damage automatically. For Quick Fix (temporary, 1 min, expires end of day), set status to "quick_fixed" via edgerunner_ops. critical_injury_remove is permanent treatment (4 hrs, can't self-treat).
+- Quick Fix vs Treatment: the backend adds critical injuries from combat damage automatically. For Quick Fix (temporary, 1 min, expires end of day), use "quick_fix" action — effects and Death Save dv_mod are suspended while active. Use "expire_qf" to reactivate when time runs out. "remove" is permanent treatment (4 hrs, can't self-treat).
 
 STATE TRACKING via report_combat_state:
 The backend tracks all dice-dependent state (hp_delta, armor_delta, critical_injury_add, luck_delta, ammo) automatically from resolve_mechanics results. Do NOT include these fields in character_updates.
@@ -1319,7 +1321,7 @@ Action types:
 - autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
 - skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
 - opposed_check: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, attacker_label, defender_label, attacker_skill_label, defender_skill_label, seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target?, check_context?} — contested rolls (e.g. Stealth vs Concentration mid-combat)
-- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+- death_save: {type, character, body_stat}
 
 ROLL FORMAT (from resolve_mechanics results):
 - Attack: 🎲 [V attacks Borg Guard]: d10[**7**] + REF 8 + Handgun 6 = 21 vs DV 15 ✓
@@ -1982,7 +1984,7 @@ ACTION TYPES for the "actions" array:
 - melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
 - autofire: {type, character, stat_value, skill_value, weapon_type, autofire_multiplier, target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
 - skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?}
-- death_save: {type, character, body_stat, death_save_count, active_injuries: [{name, dv_mod}]}
+- death_save: {type, character, body_stat}
 
 OUTPUT: JSON with these fields:
 - actions: array of mechanical actions to resolve (will be resolved by backend)

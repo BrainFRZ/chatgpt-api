@@ -161,6 +161,21 @@ def _norm_name(value) -> str:
     return str(value or "").strip()
 
 
+def _lookup_edgerunner(edgerunner_states: dict, name: str) -> dict | None:
+    """Case-insensitive lookup into the edgerunners dict, returns state or None."""
+    if not edgerunner_states or not name:
+        return None
+    key = _norm_name(name)
+    if key in edgerunner_states:
+        val = edgerunner_states[key]
+        return val if isinstance(val, dict) else None
+    key_cf = key.casefold()
+    for k, v in edgerunner_states.items():
+        if str(k).strip().casefold() == key_cf:
+            return v if isinstance(v, dict) else None
+    return None
+
+
 def _norm_vehicle_track_key(name: str, sp: bool = False) -> str:
     """Canonical vehicle tracking key (case-insensitive, trimmed)."""
     base = _norm_name(name).casefold()
@@ -2449,7 +2464,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     active_programs=None, installed_hardware=None,
                     ice_status=None, combatant_vehicle_sdp: dict = None,
                     relationship_owner: str = "", relationship_actor_names=None,
-                    relationship_present_names=None, relationship_context: dict = None) -> dict:
+                    relationship_present_names=None, relationship_context: dict = None,
+                    edgerunner_states: dict = None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3003,12 +3019,21 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "death_save":
                 actor_name = action.get("character", "")
                 actor_key = _norm_name(actor_name)
+                # Auto-read death_save_count and active_injuries from edgerunner state
+                _er_state = _lookup_edgerunner(edgerunner_states, actor_name) if edgerunner_states else None
+                _ds_count = _er_state.get("death_save_count", 0) if _er_state else action.get("death_save_count", 0)
+                _active_inj = None
+                if _er_state:
+                    _active_inj = [ci for ci in (_er_state.get("critical_injuries") or [])
+                                   if isinstance(ci, dict) and ci.get("status") not in ("removed", "quick_fixed")]
+                else:
+                    _active_inj = action.get("active_injuries")
                 # T2 RomS: -1 to Death Save rolls (having a T2+ romantic partner)
                 _ds_roms_bonus = 1 if actor_key and actor_key == _relationship_owner_name and _romantic_partners_t2 else 0
                 result = resolve_death_save(
                     body_stat=action.get("body_stat", 6),
-                    death_save_count=action.get("death_save_count", 0),
-                    active_injuries=action.get("active_injuries"),
+                    death_save_count=_ds_count,
+                    active_injuries=_active_inj,
                     roms_death_save_bonus=_ds_roms_bonus,
                 )
                 result["character"] = actor_name
@@ -3016,7 +3041,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 all_state_ops.append({
                     "edgerunner": actor_name,
                     "op": "death_save",
-                    "reason": f"Death Save round {int(action.get('death_save_count', 0)) + 1}",
+                    "reason": f"Death Save round {_ds_count + 1}",
                 })
                 # Auto-set "dead" condition on failed Death Save (RAW backstop)
                 if not result.get("survived"):
@@ -3582,7 +3607,7 @@ RESOLVE_MECHANICS_TOOL = {
         "is_brawling?, on_hit?, on_miss?}\n"
         "- autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 SMG, 4 AR), "
         "target, target_sp, range_bracket (0-4 only, max 51-100m), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?, on_hit?, on_miss?}\n"
-        "- death_save: {type, character, body_stat, death_save_count, active_injuries? (array of {dv_mod})}\n"
+        "- death_save: {type, character, body_stat}\n"
         "- initiative: {type, character: 'all', combatants: [{name, ref}]}\n"
         "- opposed_check: {type, character, attacker_stat, attacker_skill?, defender_stat, defender_skill?, "
         "attacker_label? (stat name), defender_label? (stat name), attacker_skill_label?, defender_skill_label?, "

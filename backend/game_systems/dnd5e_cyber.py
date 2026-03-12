@@ -1800,7 +1800,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically. For NPCs, include "faction": "<Faction Name>" to link them to a tracked faction for auto-cascade.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
@@ -1814,7 +1814,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
 - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
-- Alliance cascades: When a relationship change should logically affect allied factions, emit additional FR ops manually.
+- Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. To unlink, use a "set" op without the "faction" field.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 - OPS SCOPE: Emit relationship_ops ONLY for state changes that are certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
@@ -2109,7 +2109,8 @@ Optional arrays (omit or leave empty when no ops occurred):
 - **ship_combat_trigger**: When ships engage in actual ship-to-ship combat, set a handoff object so the app can enter ship combat mode. Include `environment`, `enemy_ships`, and when available `encounter_type`, `objective`, `positioning`, `immediate_complications`, and a 1-3 sentence `handoff_summary`. Optional `opening_narration` can be used for the player-facing "BEGINNING SHIP COMBAT" intro.
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
   - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show 📊 line.
-  - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty.
+  - Alliance cascades: When an NPC has a "faction" field, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable.
+  - Bootstrap with "set" ops when [RELATIONSHIP STATE] is empty. For NPCs, include "faction": "<Faction Name>" to link to a tracked faction.
   - Inter-NPC relationships: Track NPC-NPC dynamics (close bonds, rivalries, romances between crew). Bootstrap with "npc_set" ops.
 - **ship_ops**: Track ship state changes. Operations:
   * `{"op": "hull", "change": <signed int>, "reason": "<why>"}`

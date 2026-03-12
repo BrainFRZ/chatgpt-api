@@ -2893,6 +2893,17 @@ def _strip_and_merge_resolver_ops(tool_input: dict, state_ops: list) -> None:
         tool_input["vehicle_updates"] = _merge_vehicle_updates(
             tool_input.get("vehicle_updates", []), resolver_veh
         )
+    # Merge resolver-computed edgerunner ops (death_save, etc.)
+    _RESOLVER_ER_OPS = {"death_save"}
+    existing_er = tool_input.get("edgerunner_ops") or []
+    if existing_er:
+        tool_input["edgerunner_ops"] = [
+            op for op in existing_er
+            if not (isinstance(op, dict) and op.get("op") in _RESOLVER_ER_OPS)
+        ]
+    resolver_er = [op for op in state_ops if isinstance(op, dict) and op.get("op") in _RESOLVER_ER_OPS]
+    if resolver_er:
+        tool_input["edgerunner_ops"] = (tool_input.get("edgerunner_ops") or []) + resolver_er
 
 
 def _apply_vehicle_updates_fallback(combat_dict: dict, vehicle_updates: list) -> None:
@@ -3349,7 +3360,7 @@ def _inject_resolver_ops_stateful(tool_input: dict, state_ops: list, pipeline_st
     if not state_ops:
         return
     # Strip dice-dependent ops the model may have included
-    _DICE_OPS = {"hp", "armor", "critical_injury", "luck", "ammo", "vehicle_sdp", "vehicle_sp"}
+    _DICE_OPS = {"hp", "armor", "critical_injury", "luck", "ammo", "vehicle_sdp", "vehicle_sp", "death_save"}
     existing_er_ops = tool_input.get("edgerunner_ops") or []
     if existing_er_ops:
         tool_input["edgerunner_ops"] = [
@@ -6860,6 +6871,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     combatant_hp=_rm_running_hp_map,
                                     combatant_vehicle_sdp=_rm_running_vehicle_map,
                                     relationship_context=_rm_relationship_context,
+                                    edgerunner_states=_rm_gs.get("edgerunners") or {},
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(

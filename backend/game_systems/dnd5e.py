@@ -86,6 +86,7 @@ def apply_game_state(game_state, agent_json, turn):
 
     relationships = game_state.setdefault("relationships", {})
     factions = game_state.setdefault("factions", {})
+    _cascade_ops = []
 
     for op_data in ops:
         op = op_data.get("op")
@@ -113,6 +114,23 @@ def apply_game_state(game_state, agent_json, turn):
                 new_score = max(-100, min(100, old_score + change))
                 relationships[target]["rs"] = new_score
                 _enrich_rel_op(op_data, old_score, new_score, _rs_tier)
+                # Auto-cascade RS change to affiliated faction
+                _npc_faction = relationships[target].get("faction")
+                if _npc_faction and isinstance(_npc_faction, str) and _npc_faction in factions:
+                    _cascade_change = int(change / 2)  # truncate toward zero
+                    if _cascade_change != 0:
+                        _old_fr = factions[_npc_faction].get("fr", 0)
+                        _new_fr = max(-100, min(100, _old_fr + _cascade_change))
+                        factions[_npc_faction]["fr"] = _new_fr
+                        _sign = "+" if change > 0 else ""
+                        _cascade_op = {
+                            "op": "fr", "target": _npc_faction,
+                            "change": _cascade_change,
+                            "reason": f"Alliance cascade: {target} RS {_sign}{change}",
+                            "auto_cascade": True,
+                        }
+                        _enrich_rel_op(_cascade_op, _old_fr, _new_fr, _fr_tier)
+                        _cascade_ops.append(_cascade_op)
 
             elif op == "roms":
                 change = int(op_data.get("change", 0))
@@ -176,6 +194,9 @@ def apply_game_state(game_state, agent_json, turn):
             logger.warning(f"dnd5e apply_game_state: error processing op {op_data}: {e}")
             continue
 
+    if _cascade_ops:
+        ops.extend(_cascade_ops)
+
     return game_state
 
 
@@ -195,7 +216,11 @@ def _format_npc_line(name, data):
             parts.append(f"RomS {roms} ({roms_label} \u2014 {roms_bonus})")
         else:
             parts.append(f"RomS {roms} ({roms_label})")
-    line = f"  {name}: {' | '.join(parts)}"
+    faction = data.get("faction")
+    if faction:
+        line = f"  {name} [{faction}]: {' | '.join(parts)}"
+    else:
+        line = f"  {name}: {' | '.join(parts)}"
     notes = data.get("notes")
     if notes:
         line += f"\n    notes: {notes}"
@@ -382,7 +407,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * {"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}
     Faction Reputation change. Clamped -100 to +100.
   * {"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically. For NPCs, include "faction": "<Faction Name>" to link them to a tracked faction for auto-cascade.
   * {"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * {"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}
@@ -396,7 +421,7 @@ RELATIONSHIP OPS (RS / RomS / FR):
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
 - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, Narration should narratively acknowledge the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
-- Alliance cascades: When a relationship change should logically affect allied factions (e.g. helping a faction member raises that faction's FR), emit additional FR ops manually.
+- Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. To unlink, use a "set" op without the "faction" field.
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 - OPS SCOPE: Emit relationship_ops ONLY for state changes that are certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls (e.g. skill checks that might impress or offend an NPC). Mechanics will emit its own relationship_ops for roll-dependent outcomes.
@@ -727,7 +752,7 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "fr", "target": "<Faction>", "change": <signed int>, "reason": "<why>"}`
     Faction Reputation change. Clamped -100 to +100.
   * `{"op": "set", "target": "<name>", "type": "npc|faction", "fields": {<full replacement>}}`
-    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically.
+    Bootstrap or correct values. Use on first turn or when [RELATIONSHIP STATE] is empty. fields may include a "notes" key for narrative context (first meeting, personality, history). Do NOT include tier labels or mechanical modifiers in notes — those are computed from the score and shown automatically. For NPCs, include "faction": "<Faction Name>" to link them to a tracked faction for auto-cascade.
   * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
     Inter-NPC Relationship Score change (target's feelings toward other). Clamped -100 to +100.
   * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
@@ -740,6 +765,7 @@ Optional arrays (omit or leave empty when no ops occurred):
     * Opposition: -3 to -10, Betrayals: -15 to -30
     * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
   - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
+  - Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. To unlink, use a "set" op without the "faction" field.
   - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize from context.
 
 ### HUD Line
