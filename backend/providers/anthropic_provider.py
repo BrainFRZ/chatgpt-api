@@ -380,8 +380,14 @@ class AnthropicProvider(ModelProvider):
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
 
+        # Strip date suffix for count_tokens — some dated model IDs
+        # (e.g. claude-opus-4-5-20250918) are not recognized by the
+        # count_tokens endpoint even though they work for messages.
+        import re
+        count_model = re.sub(r'-\d{8}$', '', self.MODEL_NAME)
+
         response = client.messages.count_tokens(
-            model=self.MODEL_NAME,
+            model=count_model,
             messages=[{"role": "user", "content": text}]
         )
         return response.input_tokens
