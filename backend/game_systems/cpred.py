@@ -111,8 +111,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
       "resources": [
         {"label": "Luck", "current": 5, "max": 7}
       ],
-      "conditions": ["Seriously Wounded", "Critical Injury: Broken Arm"],
-      "summary": "Medium pistol (12 rounds), light armorjack (SP 11/11)"
+      "conditions": ["Seriously Wounded", "Critical Injury: Broken Arm"]
     }
   },
   "edgerunner_ops": [
@@ -216,9 +215,9 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}
   Set current ammo for a weapon (after firing, reloading, etc.).
 - {"edgerunner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
-  Use "set" to bootstrap edgerunner state on first turn or correct errors.
+  Use "set" to bootstrap edgerunner state on first turn or correct errors. For Netrunner characters, include cyberdeck: {"tier": "Standard", "slots": 7, "cycles": 3}.
 
-IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops, NOT in character_states. character_states mirrors these for HUD display but edgerunner_ops is the authoritative source.
+IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Programs are tracked via edgerunner_ops, NOT in character_states. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source.
 
 OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Mechanics-dependent ops (HP, armor, luck-spent, critical injuries) are emitted by the backend resolver, not by Events.
 
@@ -258,14 +257,14 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - OPS SCOPE: Emit relationship_ops ONLY for state changes certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
 
 CHARACTER STATES (structured format):
-- "character_states" uses a structured object per character with type, class, level, vitals, resources, conditions, and summary
+- "character_states" uses a structured object per character with type, class, level, vitals, resources, and conditions
 - "type": "pc" for player characters, "npc" for allies/neutrals, "enemy" for hostiles
 - "class": role, e.g. "Solo" or "Netrunner"
 - "level": null (CPRED does not use levels)
 - "vitals": array of {label, current, max} for HP, Humanity
 - "resources": array of {label, current, max} for Luck (mirrored from edgerunner_ops for HUD display)
 - "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
-- "summary": brief string for weapons, armor SP, equipment
+- Weapons, armor SP, cyberware, cyberdeck, and programs are rendered from edgerunner state — do NOT include equipment in character_states
 - Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks — character_states mirrors vitals/resources for HUD rendering
 - DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
@@ -420,7 +419,7 @@ CHARACTER CREATION:
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: each beat is {"beat": "<description>", "resolution": <null or resolution object>}. Include resolution for any beat requiring dice — the backend resolves the math.
-- "character_states": structured per-character objects with type, vitals, resources, conditions, summary (Luck mirrored for HUD)
+- "character_states": structured per-character objects with type, vitals, resources, conditions (Luck mirrored for HUD). Equipment is rendered from edgerunner state — do NOT include in character_states.
 - "edgerunner_ops": pre-roll ops only (bootstrap/set, eurobucks, equipment, luck_reset). Do NOT emit HP, armor, or critical injury ops — the resolver handles those.
 - "relationship_ops": RS/RomS/FR changes (most turns: empty array). Pre-roll only — do not emit for roll-dependent outcomes.
 - "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
@@ -485,9 +484,9 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[CALLBACK LEDGER]**: Open plot threads, Fixer contacts, gig promises with IDs
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
-- **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions, equipment)
+- **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions)
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
-- **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware per edgerunner
+- **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, Programs per edgerunner
 - **[IP TRACKER]**: Running session scores per category, IP balances, and prior session awards
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior organically — an NPC at T5: Close acts warmer than one at T2: Friendly.
 
@@ -495,7 +494,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking
 - **scene_state**: Current scene. `npcs_present` controls memory injection; `pcs_present` together with `npcs_present` controls which per-character funds appear in the HUD.
-- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (role, e.g. "Solo" or "Netrunner"), `level` (null — CPRED does not use levels), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"), and `summary` (free-text for weapons/armor/equipment). Full replacement each turn.
+- **character_states**: Map of character name to structured object with `type` (pc/npc/enemy), `class` (role, e.g. "Solo" or "Netrunner"), `level` (null — CPRED does not use levels), `vitals` (array of {label, current, max} -- e.g. HP, Humanity), `resources` (array of {label, current, max} -- e.g. Luck), `conditions` (array of strings -- e.g. "Seriously Wounded", "Critical Injury: Broken Arm"). Equipment is rendered from edgerunner state — do NOT include weapons/armor/cyberware here. Full replacement each turn.
 - **combat**: Report combat state when initiative is rolled. Set to `{round, initiative_order, current_turn}` during combat. Set to `null` when combat ends or when not in combat. On the FIRST combat report, include `context`: this is the ONLY context the combat mode will have about what led here — it won't see any prior chat history. Write 1-2 paragraphs covering: who is present and their state (injuries, conditions, emotional tension), where the fight is happening (environment, cover, lighting), why combat erupted (the trigger, the stakes), and any unresolved narrative threads the combat should carry forward.
 - **is_ooc**: true only for pure OOC turns
 
@@ -537,9 +536,9 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}`
 - `{"edgerunner": "<name>", "op": "weapon_remove", "weapon": "Knife"}`
 - `{"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}`
-- `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections)
+- `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections — for Netrunner characters, include cyberdeck: {tier, slots, cycles})
 
-HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, and Weapons are tracked via edgerunner_ops. character_states mirrors vitals/resources for HUD display but edgerunner_ops is the authoritative source.
+HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Programs are tracked via edgerunner_ops. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source. Equipment is rendered from edgerunner state — do NOT include it in character_states.
 
 ### Relationship Ops (in report_state):
 Use the "relationship_ops" array to track RS/RomS/FR changes:
@@ -645,8 +644,8 @@ If the clock is empty, provide `time` and `date` once as the initial seed. Other
 ### Bootstrap (first turn or empty state):
 - Set pacing from gig/scenario context
 - Build scene_state from current location
-- Set character_states from known character sheets (structured format with type, vitals, resources, conditions, summary)
-- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if non-default.
+- Set character_states from known character sheets (structured format with type, vitals, resources, conditions — no summary, equipment comes from edgerunner state)
+- Use edgerunner_ops "set" to initialize HP, Humanity, Luck, Armor, EB from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. For Netrunner characters, include cyberdeck: {tier, slots, cycles}. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if non-default.
 - Use relationship_ops "set" to initialize tracked NPCs and factions from context
 - Add callback_ops for open gig threads, Fixer contacts
 
@@ -803,8 +802,7 @@ STATE_REPORT_TOOL = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Active conditions."
-                        },
-                        "summary": {"type": "string", "description": "Free-text for equipment, notes, or other state not captured above."}
+                        }
                     }
                 }
             },

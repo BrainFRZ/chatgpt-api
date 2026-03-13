@@ -1202,6 +1202,44 @@ export default function CharacterPanel({
                   ))}
                 </div>
               )}
+              {/* Weapons */}
+              {er.weapons && er.weapons.length > 0 && (
+                <div style={{ marginTop: '6px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Weapons</div>
+                  {er.weapons.map((w: any, i: number) => (
+                    <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                      {w.name || '?'} <span style={{ color: '#888' }}>({w.damage || '?'}{w.type === 'melee' ? '' : `, ${w.current_ammo ?? '?'}/${w.max_ammo ?? '?'}`})</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Cyberware */}
+              {er.cyberware_effects && er.cyberware_effects.length > 0 && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Cyberware</div>
+                  <div style={{ fontSize: '0.72rem', color: '#a78bfa' }}>{er.cyberware_effects.join(', ')}</div>
+                </div>
+              )}
+              {/* Cyberdeck */}
+              {er.cyberdeck && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#22d3ee' }}>
+                    Cyberdeck: {er.cyberdeck.tier || '?'} | {(er.programs || []).length}/{er.cyberdeck.slots || 0} slots | {er.cyberdeck.cycles ?? 0} cycles
+                  </div>
+                </div>
+              )}
+              {/* Programs */}
+              {er.cyberdeck && er.programs && er.programs.length > 0 && (
+                <div style={{ marginTop: '2px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Programs</div>
+                  {er.programs.map((p: any, i: number) => (
+                    <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                      {p.name || '?'} <span style={{ color: '#888' }}>({p.category || '?'})</span>
+                      {p.status && p.status !== 'stored' && <span style={{ color: '#fbbf24', marginLeft: '4px' }}>[{p.status}]</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         }
@@ -1270,7 +1308,7 @@ export default function CharacterPanel({
                   ))}
                 </div>
               )}
-              {summary && <div style={{ fontSize: '0.78rem', color: '#999', marginTop: '6px', lineHeight: 1.4 }}>{summary}</div>}
+              {summary && chatGameSystem !== 'cpred' && <div style={{ fontSize: '0.78rem', color: '#999', marginTop: '6px', lineHeight: 1.4 }}>{summary}</div>}
             </div>
           )}
 

@@ -43,6 +43,10 @@
 !backend/game_systems/coc7e.py
 !backend/game_systems/sr6e.py
 !backend/game_systems/cpred.py
+!backend/game_systems/cpred_core.py
+!backend/game_systems/cpred_combat.py
+!backend/game_systems/cpred_hack.py
+!backend/game_systems/cpred_net_combat.py
 !backend/game_systems/cpred_tables.py
 !backend/game_systems/cpred_mechanics.py
 !backend/game_systems/cpred_identity.py
@@ -51,6 +55,14 @@
 !backend/tests/test_multi_model.py
 !backend/tests/test_cpred_mechanics.py
 !backend/tests/test_cpred_fuzzing.py
+!backend/tests/test_cyberdeck_equipment_fuzz.py
+!backend/tests/test_hack_mechanics_fuzz.py
+!backend/tests/test_ice_types_fuzz.py
+!backend/tests/test_ice_types.py
+!backend/tests/test_latest_commit_fuzz.py
+!backend/tests/test_mode_pipeline.py
+!backend/tests/test_notes_removal.py
+!backend/tests/test_ship_combat_mode.py
 !backend/tests/test_pipeline_phase2.py
 !backend/tests/test_pipeline_phase3.py
 !backend/tests/test_pipeline_state.py
