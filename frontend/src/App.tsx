@@ -2741,8 +2741,8 @@ function App() {
           )}
         </div>
 
-        {/* Right Panel -- Character State */}
-        <CharacterPanel
+        {/* Right Panel -- Character State (only in active chat view) */}
+        {viewMode === 'chat' && currentChat && <CharacterPanel
           isMobile={isMobile}
           pipelineState={pipelineState}
           chatGameSystem={chatGameSystem}
@@ -2760,7 +2760,7 @@ function App() {
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
           characterSheetFiles={characterSheetFiles}
           hackState={hackState}
-        />
+        />}
       </div>
 
       {/* Modals */}
