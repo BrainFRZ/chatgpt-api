@@ -113,6 +113,9 @@ function App() {
         .editMessageButton:hover {
           background-color: rgba(255, 255, 255, 0.1);
         }
+        .deleteMessageButton:hover {
+          background-color: rgba(255, 100, 100, 0.2);
+        }
         .bookmarkButton:hover {
           background-color: rgba(100, 100, 255, 0.2);
         }
@@ -531,6 +534,73 @@ function App() {
     } catch (err) {
       console.error('Error switching branch:', err);
       setError('Could not switch branch');
+    }
+  };
+
+  const deleteMessagePair = async (messageIndex: number) => {
+    if (!user || !currentChat) return;
+    const msg = messages[messageIndex];
+    if (!msg?.id) return;
+
+    if (!window.confirm('Delete this message and everything after it? (A new branch will be created — the original messages remain accessible via branch navigation.)')) return;
+
+    const ctx = createContextGuard();
+
+    try {
+      const projectParam = ctx.project ? `&project=${encodeURIComponent(ctx.project)}` : '';
+      const response = await fetch(
+        `/api/delete-message-pair/${encodeURIComponent(user.username)}/${encodeURIComponent(ctx.chat!)}?message_id=${encodeURIComponent(msg.id)}${projectParam}`,
+        { method: 'POST' }
+      );
+
+      if (!response.ok) {
+        const data = await response.json();
+        setError(data.detail || 'Failed to delete message');
+        return;
+      }
+
+      const data = await response.json();
+
+      if (ctx.isStale()) return;
+
+      setCurrentLeafId(data.new_leaf_id);
+
+      if (data.new_leaf_id === null) {
+        // First message deleted — chat is now empty
+        setMessages([]);
+        setAllMessages([]);
+        setTotalMessages(0);
+        setHasMoreMessages(false);
+        setMessageOffset(0);
+        setPipelineState(null);
+        setHackState(null);
+        return;
+      }
+
+      // Fetch the updated chat to get the new branch path
+      const chatUrl = ctx.project
+        ? `/api/chat/${user.username}/${ctx.chat}?project=${ctx.project}&leaf_id=${data.new_leaf_id}&limit=30&offset=0`
+        : `/api/chat/${user.username}/${ctx.chat}?leaf_id=${data.new_leaf_id}&limit=30&offset=0`;
+
+      const chatResponse = await fetch(chatUrl);
+      if (!chatResponse.ok) return;
+
+      const chatData = await chatResponse.json();
+
+      if (ctx.isStale()) return;
+
+      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
+      setMessages(loadedMessages);
+      setAllMessages(chatData.all_messages || chatData.messages);
+      setTotalMessages(chatData.total_messages);
+      setHasMoreMessages(chatData.has_more_messages || false);
+      setMessageOffset(loadedMessages.length);
+      setPipelineState(chatData.pipeline_state || null);
+      setHackState(chatData.hack_state || null);
+
+    } catch (err) {
+      console.error('Error deleting message pair:', err);
+      setError('Could not delete message');
     }
   };
 
@@ -2499,6 +2569,7 @@ function App() {
                 setExpandedReasoning={setExpandedReasoning}
                 getSiblings={getSiblings}
                 switchBranch={switchBranch}
+                deleteMessagePair={deleteMessagePair}
                 isLoading={isLoading}
                 pipelineStage={pipelineStage}
                 stagedFiles={messaging.stagedFiles}

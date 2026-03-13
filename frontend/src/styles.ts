@@ -316,6 +316,16 @@ export const styles: { [key: string]: React.CSSProperties } = {
     opacity: 1,  // Fully visible always
     transition: 'background-color 0.2s',
   },
+  deleteMessageButton: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '0.9rem',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    opacity: 1,
+    transition: 'background-color 0.2s',
+  },
   bookmarkButton: {
     background: 'none',
     border: 'none',

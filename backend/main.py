@@ -8111,7 +8111,7 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
             continue
         if "hack_state_after" in msg:
             hs = msg["hack_state_after"]
-            if isinstance(hs, dict) and hs.get("active"):
+            if isinstance(hs, dict) and (hs.get("active") or hs.get("narrative_summary")):
                 restored_hack = copy.deepcopy(hs)
             break  # Found most recent assistant msg with hack snapshot
         if not msg.get("hack_mode"):
@@ -8155,6 +8155,138 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
     if restored_state is not None:
         response["pipeline_state"] = restored_state
     response["hack_state"] = restored_hack
+    return response
+
+
+@app.post("/api/delete-message-pair/{username}/{chat_name}")
+async def delete_message_pair(username: str, chat_name: str, message_id: str, project: str = None):
+    """
+    Delete a user message and everything after it by creating a new branch
+    that ends at the previous assistant message.
+
+    For non-first messages: duplicates the previous user+assistant pair into a
+    new branch with no children (the deleted message and successors don't exist
+    on this branch). The original branch remains accessible via branch navigation.
+
+    For first messages: sets current_leaf_id to None (empty chat view).
+    """
+    data = load_chat(username, chat_name, project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    all_messages = data["messages"]
+    index = build_message_index(all_messages)
+
+    if message_id not in index:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    target_msg = index[message_id]
+    if target_msg.get("role") != "user":
+        raise HTTPException(status_code=400, detail="Can only delete user messages")
+
+    a_prev_id = target_msg.get("parent_id")
+
+    # --- First message case: no parent ---
+    if a_prev_id is None:
+        data["current_leaf_id"] = None
+        data["pipeline_state"] = None
+        data["hack_state"] = None
+        data["_trim_anchor_id"] = None
+        save_chat(username, chat_name, data, project)
+        try:
+            debug_chat_path = get_chat_path(username, chat_name, project)
+            generate_debug_transcript(data, debug_chat_path, chat_name)
+        except Exception as e:
+            logger.warning(f"delete_message_pair: failed to generate debug transcript: {e}")
+
+        chat_key = sync_manager.make_chat_key(username, project, chat_name)
+        await sync_manager.broadcast_to_chat(
+            chat_key,
+            SyncEvent(type=SyncEventType.BRANCH_SWITCHED, data={"new_leaf_id": None})
+        )
+        return {"status": "ok", "new_leaf_id": None, "pipeline_state": None, "hack_state": None}
+
+    # --- Non-first message: duplicate the previous pair into a new branch ---
+    a_prev = index.get(a_prev_id)
+    if not a_prev:
+        raise HTTPException(status_code=400, detail="Previous assistant message not found")
+
+    u_prev_id = a_prev.get("parent_id")
+    u_prev = index.get(u_prev_id) if u_prev_id else None
+    if not u_prev:
+        raise HTTPException(status_code=400, detail="Previous user message not found")
+
+    now_ts = datetime.now(ZoneInfo('America/New_York')).isoformat()
+
+    # Copy previous user message as a sibling (same parent_id)
+    # Deep-copy all fields except id/parent_id/timestamp which get new values
+    u_prev_copy_id = str(uuid.uuid4())
+    u_prev_copy = copy.deepcopy(u_prev)
+    u_prev_copy["id"] = u_prev_copy_id
+    u_prev_copy["parent_id"] = u_prev.get("parent_id")
+    u_prev_copy["timestamp"] = now_ts
+
+    # Copy previous assistant message as child of the copied user message
+    a_prev_copy_id = str(uuid.uuid4())
+    a_prev_copy = copy.deepcopy(a_prev)
+    a_prev_copy["id"] = a_prev_copy_id
+    a_prev_copy["parent_id"] = u_prev_copy_id
+    a_prev_copy["timestamp"] = now_ts
+
+    all_messages.append(u_prev_copy)
+    all_messages.append(a_prev_copy)
+
+    # a_prev_copy has no children — this branch ends here
+    data["current_leaf_id"] = a_prev_copy_id
+
+    # Restore pipeline_state from the copied assistant message
+    if "pipeline_state_after" in a_prev_copy:
+        restored = a_prev_copy["pipeline_state_after"]
+        if isinstance(restored, str):
+            restored = json.loads(restored)
+        data["pipeline_state"] = copy.deepcopy(restored)
+    else:
+        data["pipeline_state"] = None
+
+    # Restore hack_state from the copied assistant message
+    if "hack_state_after" in a_prev_copy:
+        hs = a_prev_copy["hack_state_after"]
+        if isinstance(hs, dict) and (hs.get("active") or hs.get("narrative_summary")):
+            data["hack_state"] = copy.deepcopy(hs)
+        else:
+            data["hack_state"] = None
+    else:
+        data["hack_state"] = None
+
+    data["_trim_anchor_id"] = None
+
+    save_chat(username, chat_name, data, project)
+
+    try:
+        debug_chat_path = get_chat_path(username, chat_name, project)
+        generate_debug_transcript(data, debug_chat_path, chat_name)
+    except Exception as e:
+        logger.warning(f"delete_message_pair: failed to generate debug transcript: {e}")
+
+    # Broadcast to other clients
+    broadcast_data = {"new_leaf_id": a_prev_copy_id}
+    if data.get("pipeline_state") is not None:
+        broadcast_data["pipeline_state"] = data["pipeline_state"]
+    if data.get("hack_state") is not None:
+        broadcast_data["hack_state"] = data["hack_state"]
+    chat_key = sync_manager.make_chat_key(username, project, chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(type=SyncEventType.BRANCH_SWITCHED, data=broadcast_data)
+    )
+
+    response = {
+        "status": "ok",
+        "new_leaf_id": a_prev_copy_id,
+    }
+    if data.get("pipeline_state") is not None:
+        response["pipeline_state"] = data["pipeline_state"]
+    response["hack_state"] = data.get("hack_state")
     return response
 
 

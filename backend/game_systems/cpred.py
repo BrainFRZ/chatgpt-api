@@ -857,7 +857,7 @@ STATE_REPORT_TOOL = {
                     "required": ["edgerunner", "op"],
                     "properties": {
                         "edgerunner": {"type": "string"},
-                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing", "housing_pending", "lifestyle_pending", "housing_shared_with"]},
+                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing", "housing_pending", "lifestyle_pending", "housing_shared_with", "programs_set", "ammo", "add_condition", "remove_condition"]},
                         "change": {"type": "number"},
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},
