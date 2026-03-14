@@ -488,10 +488,15 @@ def _default_edgerunner():
         "housing_shared_with": None,   # name of owner whose housing this edgerunner shares
         "housing_bedrooms": None,      # per-unit bedroom override (None = use HOUSING_BEDROOMS table)
         "crammed": False,              # True if occupants > capacity at this housing
-        "programs": [],                # persistent programs: [{name, category, rez_max, status}]
+        "deck_slots": [],              # unified cyberdeck slots: programs, hardware, continuations, or null
         "cyberdeck": None,             # when set: {"tier": "Standard", "slots": 7, "cycles": 3}
         "conditions": [],              # general conditions: ["partially_nude", "seriously_wounded", etc.]
     }
+
+
+def get_deck_slots(er):
+    """Return the edgerunner's deck_slots, falling back to legacy 'programs' field."""
+    return er.get("deck_slots") or er.get("programs") or []
 
 
 def _update_seriously_wounded(er):
@@ -570,6 +575,14 @@ def apply_game_state(game_state, agent_json, turn):
                 if op == "set":
                     prev_humanity_max = _safe_int((er.get("humanity") or {}).get("max"), default=None)
                     fields = copy.deepcopy(op_data.get("fields", {}))
+                    # Migrate legacy programs → deck_slots in set ops
+                    if "programs" in fields and "deck_slots" not in fields:
+                        old_progs = fields.pop("programs")
+                        if isinstance(old_progs, list):
+                            fields["deck_slots"] = [
+                                {**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p
+                                for p in old_progs
+                            ]
                     for key, val in fields.items():
                         if key in er:
                             er[key] = val
@@ -824,8 +837,16 @@ def apply_game_state(game_state, agent_json, turn):
                         if condition in conditions:
                             conditions.remove(condition)
 
+                elif op == "deck_slots_set":
+                    er["deck_slots"] = copy.deepcopy(op_data.get("deck_slots", []))
+
                 elif op == "programs_set":
-                    er["programs"] = copy.deepcopy(op_data.get("programs", []))
+                    # Backward compat: convert old programs_set to deck_slots
+                    old_progs = op_data.get("programs", [])
+                    er["deck_slots"] = [
+                        {**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p
+                        for p in copy.deepcopy(old_progs)
+                    ]
 
             except (ValueError, TypeError, KeyError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing op {op_data}: {e}")
@@ -1188,16 +1209,23 @@ def _process_expenses(game_state, new_date_str):
     game_state["current_date"] = new_date_str
 
     if old_date is None or new_date is None:
-        # First turn: mark current month as paid to avoid retroactive charging
+        # First turn: CPR "first month free" — mark paid through NEXT month so
+        # the free period covers at least one full calendar month regardless of
+        # what day the game starts (e.g. starting March 28 → free through April).
         if new_date is not None:
-            month_str = f"{new_date.year}-{new_date.month:02d}"
+            next_m = new_date.month + 1
+            next_y = new_date.year
+            if next_m > 12:
+                next_m = 1
+                next_y += 1
+            free_through = f"{next_y}-{next_m:02d}"
             _, sharers_set = _get_housing_groups(game_state.get("edgerunners", {}))
             for er_name, er in game_state.get("edgerunners", {}).items():
                 has_housing = er.get("housing") or (er_name in sharers_set)
                 if has_housing and er.get("housing_paid_month") is None:
-                    er["housing_paid_month"] = month_str
+                    er["housing_paid_month"] = free_through
                 if er.get("lifestyle") and er.get("lifestyle_paid_month") is None:
-                    er["lifestyle_paid_month"] = month_str
+                    er["lifestyle_paid_month"] = free_through
         return  # First turn or unparseable — skip
     if new_date <= old_date:
         return  # No time advance
@@ -1240,7 +1268,7 @@ def _process_expenses(game_state, new_date_str):
             er = edgerunners[er_name]
             if er_track[er_name]["dead"] or er_name in sharers_set:
                 continue
-            if not er.get("housing") or er.get("housing_paid_month") == month_str:
+            if not er.get("housing") or (er.get("housing_paid_month") or "") >= month_str:
                 continue
             cost, base, housing, n_occ = _housing_cost_for_person(
                 er_name, er, edgerunners, groups, sharers_set)
@@ -1267,7 +1295,7 @@ def _process_expenses(game_state, new_date_str):
             er = edgerunners[er_name]
             if er_track[er_name]["dead"] or er_name not in sharers_set:
                 continue
-            if er.get("housing_paid_month") == month_str:
+            if (er.get("housing_paid_month") or "") >= month_str:
                 continue
             cost, base, housing, n_occ = _housing_cost_for_person(
                 er_name, er, edgerunners, groups, sharers_set)
@@ -1313,7 +1341,7 @@ def _process_expenses(game_state, new_date_str):
             er = edgerunners[er_name]
             if er_track[er_name]["dead"]:
                 continue
-            if not er.get("lifestyle") or er.get("lifestyle_paid_month") == month_str:
+            if not er.get("lifestyle") or (er.get("lifestyle_paid_month") or "") >= month_str:
                 continue
             cost = LIFESTYLE_COSTS.get(er["lifestyle"], 0)
             if cost > 0 and er.get("eurobucks", 0) >= cost:
@@ -1343,7 +1371,7 @@ def _process_expenses(game_state, new_date_str):
                 owner_name = er.get("housing_shared_with")
                 owner_er = edgerunners.get(owner_name, {})
                 is_street_type = owner_er.get("housing") in HOUSING_STREET_TYPES
-            is_unpaid = has_housing and er.get("housing_paid_month") != month_str and current.day >= 2
+            is_unpaid = has_housing and (er.get("housing_paid_month") or "") < month_str and current.day >= 2
 
             if is_street_type or is_unpaid:
                 er["days_on_street"] = er.get("days_on_street", 0) + 1
@@ -1366,7 +1394,7 @@ def _process_expenses(game_state, new_date_str):
                         "Evicted — endurance_base not set, skipping roll (set via bootstrap)")
 
             # Lifestyle consequences: starvation death saves
-            if er.get("lifestyle") and er.get("lifestyle_paid_month") != month_str:
+            if er.get("lifestyle") and (er.get("lifestyle_paid_month") or "") < month_str:
                 er["days_without_food"] = er.get("days_without_food", 0) + 1
                 if er["days_without_food"] > 7:
                     body = er.get("body", 0)
@@ -1403,12 +1431,12 @@ def _process_expenses(game_state, new_date_str):
                 bedrooms = 0
             capacity = 1 + bedrooms
             paid_count = sum(1 for m in group
-                             if edgerunners.get(m, {}).get("housing_paid_month") == final_month)
+                             if (edgerunners.get(m, {}).get("housing_paid_month") or "") >= final_month)
             is_crammed = paid_count > capacity
             for m in group:
                 if m in edgerunners:
                     # Only mark paid members as crammed; evicted members are on the street
-                    m_paid = edgerunners[m].get("housing_paid_month") == final_month
+                    m_paid = (edgerunners[m].get("housing_paid_month") or "") >= final_month
                     edgerunners[m]["crammed"] = is_crammed and m_paid
             if is_crammed:
                 notifs.append({
@@ -1611,10 +1639,13 @@ def build_game_injection(game_state):
 
             cyberdeck = er.get("cyberdeck")
             if isinstance(cyberdeck, dict):
-                programs = er.get("programs", [])
-                used = len(programs)
-                slots = cyberdeck.get("slots", 0)
-                lines.append(f"  Cyberdeck: {cyberdeck.get('tier', '?')} | {used}/{slots} programs | {cyberdeck.get('cycles', 0)} cycles")
+                deck_slots = get_deck_slots(er)
+                total_slots = len(deck_slots) if deck_slots else cyberdeck.get("slots", 0)
+                used_slots = sum(1 for s in deck_slots if s is not None) if deck_slots else 0
+                lines.append(f"  Cyberdeck: {cyberdeck.get('tier', '?')} | {used_slots}/{total_slots} slots | {cyberdeck.get('cycles', 0)} cycles")
+                # Extract programs and hardware from unified deck_slots
+                programs = [s for s in deck_slots if isinstance(s, dict) and s.get("type", "program") == "program" and not s.get("_continuation_of")]
+                hardware = [s for s in deck_slots if isinstance(s, dict) and s.get("type") == "hardware"]
                 if programs:
                     prog_strs = []
                     for p in programs:
@@ -1623,6 +1654,9 @@ def build_game_injection(game_state):
                         pstatus = p.get("status", "stored")
                         prog_strs.append(f"{pname} ({pcat}, {pstatus})")
                     lines.append(f"  Programs: {'; '.join(prog_strs)}")
+                if hardware:
+                    hw_strs = [f"{h.get('name', '?')} ({h.get('slots_used', 1)} slots)" for h in hardware]
+                    lines.append(f"  Hardware: {'; '.join(hw_strs)}")
 
             conditions = er.get("conditions", [])
             if conditions:

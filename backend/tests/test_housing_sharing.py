@@ -832,16 +832,17 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(gs["edgerunners"]["Jackie"]["housing_shared_with"], "V")
 
     def test_first_turn_marks_sharers_paid(self):
-        """First turn initialization marks sharers as paid too (not just owners)."""
+        """First turn initialization marks sharers as paid too (not just owners).
+        CPR first-month-free: paid through NEXT month from start date."""
         gs = _make_game_state_multi(
             V={"housing": "Two-Bedroom Apartment", "eurobucks": 5000},
             Jackie={"housing_shared_with": "V", "eurobucks": 3000},
         )
         # First turn: old_date is None, new_date is valid
         _process_expenses(gs, "2045-02-15")
-        # Both should be marked paid for 2045-02
-        self.assertEqual(gs["edgerunners"]["V"]["housing_paid_month"], "2045-02")
-        self.assertEqual(gs["edgerunners"]["Jackie"]["housing_paid_month"], "2045-02")
+        # Both should be marked paid through 2045-03 (first month free)
+        self.assertEqual(gs["edgerunners"]["V"]["housing_paid_month"], "2045-03")
+        self.assertEqual(gs["edgerunners"]["Jackie"]["housing_paid_month"], "2045-03")
 
     def test_sharer_leaves_then_next_month(self):
         """Jackie stops sharing mid-month. Next month, V pays full cost."""

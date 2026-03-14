@@ -750,50 +750,60 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(er["body"], 6)
         self.assertEqual(gs["current_date"], "2045-01-15")
 
-        # First turn auto-marks January as paid (first-turn initialization)
-        self.assertEqual(er["housing_paid_month"], "2045-01")
-        self.assertEqual(er["lifestyle_paid_month"], "2045-01")
+        # First turn: CPR "first month free" — paid through next month (Feb)
+        self.assertEqual(er["housing_paid_month"], "2045-02")
+        self.assertEqual(er["lifestyle_paid_month"], "2045-02")
 
-        # Turn 2: advance to Feb 1 — expenses deducted
+        # Turn 2: advance to Feb 1 — still within free period, no charge
         apply_game_state(gs, {
             "hud_state": {"date": "2045-02-01"}
         }, 2)
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 200)  # 3000 - 2500 - 300
+        self.assertEqual(er["eurobucks"], 3000)  # No deduction — first month free
         self.assertEqual(er["housing_paid_month"], "2045-02")
         self.assertEqual(er["lifestyle_paid_month"], "2045-02")
 
-        # Turn 3: advance to Mar 1 — can't afford housing (2500 > 300)
+        # Turn 3: advance to Mar 1 — first real charge
         gs["_pending_notifications"] = []  # Clear old notifs
         apply_game_state(gs, {
             "hud_state": {"date": "2045-03-01"}
         }, 3)
         er = gs["edgerunners"]["V"]
-        self.assertEqual(er["eurobucks"], 200)  # can't afford housing (2500) or lifestyle (300)
-        self.assertEqual(er["housing_paid_month"], "2045-02")  # Didn't pay March
-        self.assertEqual(er["lifestyle_paid_month"], "2045-02")  # Can't afford (300 > 200)
+        self.assertEqual(er["eurobucks"], 200)  # 3000 - 2500 - 300
+        self.assertEqual(er["housing_paid_month"], "2045-03")
+        self.assertEqual(er["lifestyle_paid_month"], "2045-03")
 
-        # Turn 4: advance to Mar 5 — 4 days on street with consequences
+        # Turn 4: advance to Apr 1 — can't afford housing (2500 > 200)
+        gs["_pending_notifications"] = []
+        apply_game_state(gs, {
+            "hud_state": {"date": "2045-04-01"}
+        }, 4)
+        er = gs["edgerunners"]["V"]
+        self.assertEqual(er["eurobucks"], 200)  # can't afford housing (2500) or lifestyle (300)
+        self.assertEqual(er["housing_paid_month"], "2045-03")  # Didn't pay April
+        self.assertEqual(er["lifestyle_paid_month"], "2045-03")  # Can't afford (300 > 200)
+
+        # Turn 5: advance to Apr 5 — 4 days on street with consequences
         gs["_pending_notifications"] = []
         with patch("game_systems.cpred.random.randint", return_value=10):  # All endurance checks pass
             apply_game_state(gs, {
-                "hud_state": {"date": "2045-03-05"}
-            }, 4)
+                "hud_state": {"date": "2045-04-05"}
+            }, 5)
         er = gs["edgerunners"]["V"]
         self.assertEqual(er["days_on_street"], 4)  # Days 2, 3, 4, 5
 
-        # Turn 5: gig payout + advance — catch-up pays housing
+        # Turn 6: gig payout + advance — catch-up pays housing
         gs["_pending_notifications"] = []
         apply_game_state(gs, {
             "edgerunner_ops": [
                 {"edgerunner": "V", "op": "eurobucks", "change": 5000, "reason": "Gig payout"}
             ],
-            "hud_state": {"date": "2045-03-06"}
-        }, 5)
+            "hud_state": {"date": "2045-04-06"}
+        }, 6)
         er = gs["edgerunners"]["V"]
         # 200 + 5000 = 5200, then housing catch-up -2500, lifestyle catch-up -300 = 2400
         self.assertEqual(er["eurobucks"], 2400)
-        self.assertEqual(er["housing_paid_month"], "2045-03")
+        self.assertEqual(er["housing_paid_month"], "2045-04")
         self.assertEqual(er["days_on_street"], 0)  # Reset after catch-up
 
 
