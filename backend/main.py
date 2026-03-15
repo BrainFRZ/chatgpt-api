@@ -18,6 +18,7 @@ from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
 import tiktoken
 import logging
+import logging.handlers
 import fcntl
 import uuid
 import hashlib
@@ -65,6 +66,16 @@ PIPELINE_AGENT_NAMES = ["events", "mechanics", "narration"]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# File handler so logs are readable by tooling (rotates at 5MB, keeps 2 backups)
+_log_dir = os.path.join(os.path.dirname(__file__), "..", "data", "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_file_handler = logging.handlers.RotatingFileHandler(
+    os.path.join(_log_dir, "backend.log"), maxBytes=5_000_000, backupCount=2, encoding="utf-8"
+)
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_file_handler)
 
 
 def _advance_mode_hud_clock(pipeline_state: dict, seconds: Optional[int]) -> None:
