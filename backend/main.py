@@ -4068,6 +4068,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
+    _sex_first_exchange = False
     docs_refreshed = False
 
     # GPT-5.2 hack request params (non-streaming JSON call, built separately)
@@ -4451,7 +4452,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_start_index = max(1, len(branch_path) - len(sex_history) - 1)
 
         # Set start_message_id on first sex mode exchange
-        if not sex_start_id:
+        _sex_first_exchange = not sex_start_id
+        if _sex_first_exchange:
             sex_scene["start_message_id"] = user_msg_id
 
         logger.info(f"Sex mode: {len(sex_scene.get('npcs', []))} NPCs for {username}, "
@@ -4633,13 +4635,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             use_cache=True
         )
     else:
+        # /sex handoff: cache is wasted — this one-off context won't be reused
+        # (next turn switches to the sex mode contract + isolated history)
+        _else_use_cache = False if _sex_handoff_npcs else use_cache
         request_params = provider.build_request(
             messages=messages_for_api,
             username=username,
             project=request.project,
             chat_name=request.chat_name,
             is_free_chat=is_free_chat,
-            use_cache=use_cache
+            use_cache=_else_use_cache
         )
         if use_stateful:
             tools = [gs["state_report_tool"]]
@@ -7408,6 +7413,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             # Delete handoff messages — remove user msg and don't append assistant msg
                             data["messages"] = [m for m in data["messages"] if m.get("id") != user_msg_id]
                             data["current_leaf_id"] = parent_id
+                            # Persist immediately — handoff messages are deleted, so if anything
+                            # fails before the normal save_chat at end-of-stream, sex_scene
+                            # would be lost with no trace in the chat
+                            save_chat(username, request.chat_name, data, request.project)
+                            logger.info(f"Sex handoff: saved sex_scene state for {username}, "
+                                        f"NPCs={_sex_handoff_npcs}, summary={_handoff_summary[:80]}")
                             # Emit state_update so CharacterPanel shows sex scene indicator immediately
                             if not client_disconnected:
                                 yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
@@ -7583,10 +7594,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["sex_mode"] = True
                             if sex_scene_summary_text:
                                 assistant_msg_data["sex_scene_summary"] = sex_scene_summary_text
-
-                        # Log sex handoff summary on the handoff turn
-                        if _sex_handoff_summary_for_log:
-                            assistant_msg_data["sex_handoff_summary"] = _sex_handoff_summary_for_log
+                            # Stamp handoff summary on first sex mode message for debug transcript
+                            if _sex_first_exchange:
+                                _hs = (data.get("pipeline_state", {}).get("sex_scene") or {}).get("summary")
+                                if _hs:
+                                    assistant_msg_data["sex_handoff_summary"] = _hs
 
                         # Flag ship combat mode messages (Claude path)
                         if use_ship_combat_mode:

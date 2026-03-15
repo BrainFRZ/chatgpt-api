@@ -1204,7 +1204,9 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "hud_state": {},
             "decision_flags": {},
             "combat": None,
+            "net_combat": None,
             "ship_combat": None,
+            "sex_scene": None,
             "turn_counter": 0,
             "_clock_seconds_buffer": 0
         }
@@ -1287,6 +1289,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         sc.setdefault("bootstrap_done", False)
         sc.setdefault("ship_combat_handoff_source", None)
         sc.setdefault("bootstrap_messages", [])
+    state.setdefault("sex_scene", None)
     state.setdefault("turn_counter", 0)
     if not isinstance(state.get("turn_counter"), int):
         state["turn_counter"] = 0
@@ -3924,8 +3927,9 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     # Persist combat state (initiative tracker) from tool report
     if "combat" in parsed:
         _replace_combat_dict(pipeline_state, parsed["combat"])
-    # Persist sex_scene state from tool report
-    if "sex_scene" in parsed:
+    # Persist sex_scene state from tool report (never allow tool to null it out —
+    # sex_scene is ended only by [SCENE COMPLETE] detection or the /sex endpoint)
+    if "sex_scene" in parsed and parsed["sex_scene"]:
         pipeline_state["sex_scene"] = parsed["sex_scene"]
     return pipeline_state
 
