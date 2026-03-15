@@ -1254,6 +1254,8 @@ class SendMessageRequest(BaseModel):
     model: str | None = None  # Model to use (defaults to chat's saved model or gpt-5.2)
 
 class ChatMessage(BaseModel):
+    model_config = {"extra": "allow"}  # Pass through mode flags, debug fields, etc.
+
     id: str | None = None  # Unique message ID (for branching)
     parent_id: str | None = None  # ID of parent message (for branching)
     role: str
