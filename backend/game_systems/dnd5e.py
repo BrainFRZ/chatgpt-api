@@ -386,8 +386,10 @@ ARC LABEL:
 - Set to null on all other turns (the vast majority)
 - Only set this when a NEW arc or beat is starting, not on every turn within one
 
-PLOT OPS (save-state notifications):
+PLOT OPS (persistent decision flags):
 - Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Plot ops persist as [DECISION FLAGS] injected every turn — use them to track decisions that affect downstream beats (branch paths, NPC fates, player choices with later consequences). Do NOT use callbacks for plot-level decision tracking; use plot_ops.
+- Pre-registration: On the first turn of a session, register all expected decision flags from the plot documents' "Expected Decision Flags" block by firing plot_ops with value="pending". These appear as "(pending)" in the injection every turn, reminding you to set them when the decision is made. Once set, they cannot be overwritten back to pending.
 - Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
 - "branch": a defined fork in the plot docs — report which path was taken.
 - "flag": a named variable or flag changed — report the new value.
@@ -1025,7 +1027,7 @@ STATE_REPORT_TOOL = {
                         },
                         "value": {
                             "type": ["string", "null"],
-                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                            "description": "The value or outcome chosen (e.g. 'true', 'killed', 'Masked presence'). Use 'pending' to pre-register an expected flag without resolving it. null if not applicable."
                         },
                         "decision": {
                             "type": "string",

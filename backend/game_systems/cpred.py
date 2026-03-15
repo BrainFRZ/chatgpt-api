@@ -215,9 +215,9 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}
   Set current ammo for a weapon (after firing, reloading, etc.).
 - {"edgerunner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
-  Use "set" to bootstrap edgerunner state on first turn or correct errors. For Netrunner characters, include cyberdeck: {"tier": "Standard", "slots": 7, "cycles": 3}.
+  Use "set" to bootstrap edgerunner state on first turn or correct errors. For Netrunner characters, include cyberdeck: {"tier": "Standard", "slots": 7, "cycles": 3} and deck_slots (positional array: programs as {name, type: "program", category, rez_max, status}, hardware as {name, type: "hardware", slots_used: N} followed by N-1 {_continuation_of: name} entries, null for empty slots).
 
-IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Programs are tracked via edgerunner_ops, NOT in character_states. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source.
+IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops, NOT in character_states. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source.
 
 OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Mechanics-dependent ops (HP, armor, luck-spent, critical injuries) are emitted by the backend resolver, not by Events.
 
@@ -264,7 +264,7 @@ CHARACTER STATES (structured format):
 - "vitals": array of {label, current, max} for HP, Humanity
 - "resources": array of {label, current, max} for Luck (mirrored from edgerunner_ops for HUD display)
 - "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
-- Weapons, armor SP, cyberware, cyberdeck, and programs are rendered from edgerunner state — do NOT include equipment in character_states
+- Weapons, armor SP, cyberware, cyberdeck, and deck slots (programs + hardware) are rendered from edgerunner state — do NOT include equipment in character_states
 - Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks — character_states mirrors vitals/resources for HUD rendering
 - DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
@@ -304,8 +304,10 @@ ARC LABEL:
 - Set to a short label when starting a new gig or subplot
 - null on all other turns
 
-PLOT OPS (save-state notifications):
+PLOT OPS (persistent decision flags):
 - Include "plot_ops" when the player resolves a branch point, sets a flag/variable, or triggers a decision defined or implied in the plot documents — or when they diverge from the planned path in a recoverable way.
+- Plot ops persist as [DECISION FLAGS] injected every turn — use them to track decisions that affect downstream beats (branch paths, NPC fates, player choices with later consequences). Do NOT use callbacks for plot-level decision tracking; use plot_ops.
+- Pre-registration: On the first turn of a session, register all expected decision flags from the plot documents' "Expected Decision Flags" block by firing plot_ops with value="pending". These appear as "(pending)" in the injection every turn, reminding you to set them when the decision is made. Once set, they cannot be overwritten back to pending.
 - Always fire when a decision matches plot-document structure. Use the exact variable name, flag name, or decision table label from the plot docs as the "key". Use the plot doc's defined values where applicable.
 - "branch": a defined fork in the plot docs — report which path was taken.
 - "flag": a named variable or flag changed — report the new value.
@@ -486,7 +488,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions)
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
-- **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, Programs per edgerunner
+- **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, Deck Slots (programs + hardware) per edgerunner
 - **[IP TRACKER]**: Running session scores per category, IP balances, and prior session awards
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior organically — an NPC at T5: Close acts warmer than one at T2: Friendly.
 
@@ -536,9 +538,10 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "weapon_add", "weapon": {"name": "Knife", "damage": "1d6", "skill": "Melee Weapon", "type": "melee"}}`
 - `{"edgerunner": "<name>", "op": "weapon_remove", "weapon": "Knife"}`
 - `{"edgerunner": "<name>", "op": "weapon_ammo", "weapon": "Heavy Pistol", "current": 5}`
-- `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections — for Netrunner characters, include cyberdeck: {tier, slots, cycles})
+- `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections — for Netrunner characters, include cyberdeck: {tier, slots, cycles} and deck_slots)
+- `{"edgerunner": "<name>", "op": "deck_slots_set", "deck_slots": [...]}` (replace entire deck_slots array — positional: programs, hardware + continuations, null for empty)
 
-HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Programs are tracked via edgerunner_ops. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source. Equipment is rendered from edgerunner state — do NOT include it in character_states.
+HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source. Equipment is rendered from edgerunner state — do NOT include it in character_states.
 
 ### Relationship Ops (in report_state):
 Use the "relationship_ops" array to track RS/RomS/FR changes:
@@ -855,7 +858,7 @@ STATE_REPORT_TOOL = {
                     "required": ["edgerunner", "op"],
                     "properties": {
                         "edgerunner": {"type": "string"},
-                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing", "housing_pending", "lifestyle_pending", "housing_shared_with", "programs_set", "ammo", "add_condition", "remove_condition"]},
+                        "op": {"type": "string", "enum": ["hp", "humanity", "therapy", "luck", "luck_reset", "armor", "armor_repair", "eurobucks", "critical_injury", "cyberware", "set", "weapon_set", "weapon_add", "weapon_remove", "weapon_ammo", "death_save", "death_save_reset", "lifestyle", "housing", "housing_pending", "lifestyle_pending", "housing_shared_with", "deck_slots_set", "programs_set", "ammo", "add_condition", "remove_condition"]},
                         "change": {"type": "number"},
                         "reason": {"type": "string"},
                         "location": {"type": "string", "enum": ["head", "body"], "description": "For armor/armor_repair ops"},
@@ -921,7 +924,7 @@ STATE_REPORT_TOOL = {
                         },
                         "value": {
                             "type": ["string", "null"],
-                            "description": "The value or outcome chosen (e.g. 'Damaged', 'true', 'Masked presence'). null if not applicable."
+                            "description": "The value or outcome chosen (e.g. 'true', 'killed', 'Masked presence'). Use 'pending' to pre-register an expected flag without resolving it. null if not applicable."
                         },
                         "decision": {
                             "type": "string",
@@ -1431,7 +1434,7 @@ Black ICE nodes do NOT use this DV — their stats are resolved by backend from 
 - **alert_level**: Cannot decrease mid-run. See Alert Escalation below for triggers and thresholds.
 - **cycles_remaining**: Spent on Boosted actions (§7) and Disable (§5). Refresh on Jack Out.
 - **active_programs**: Track each Program's name, category, REZ, and status. Attackers Deactivate after use. Programs only — do NOT put Hardware here.
-- **installed_hardware**: Track Cyberdeck Hardware (e.g. Backup Drive, Range Extension, Signal Scrambler). Hardware occupies Hardware Option Slots on the deck, NOT program slots. Read from the character sheet; do not change mid-run.
+- **installed_hardware**: Track Cyberdeck Hardware (e.g. Backup Drive, Range Extension, Signal Scrambler). Hardware occupies deck slots (shared pool with programs). Auto-populated from edgerunner deck_slots on hack init; do not change mid-run.
 - **ice_status**: Track per node — name, behavioral type, REZ current/max, status (active/bypassed/disabled/derezzed). When Black ICE hunts to a new node, move its entry to the new node key.
 - **brain_damage**: Cumulative HP damage from Black ICE and effects. Applied directly to HP, ignores armor, no Critical Injuries.
 - **trace_progress**: Rounds elapsed since Trace ICE detected the Netrunner. See Trace & Convergence below.
@@ -1574,7 +1577,7 @@ REPORT_HACK_STATE_TOOL = {
                     },
                     "installed_hardware": {
                         "type": "array",
-                        "description": "Cyberdeck Hardware (Backup Drive, Range Extension, etc.). Uses Hardware Option Slots, NOT program slots. Read from character sheet on first exchange.",
+                        "description": "Cyberdeck Hardware (Backup Drive, Range Extension, etc.). Shares deck slots with programs. Auto-populated from edgerunner deck_slots on hack init.",
                         "items": {"type": "string"}
                     },
                     "current_node": {"type": "string"},
@@ -1897,7 +1900,7 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                     "alert_level": {"type": "integer", "minimum": 0},
                     "cycles_remaining": {"type": "integer", "minimum": 0},
                     "active_programs": {"type": "array", "description": "Programs only — NOT Hardware.", "items": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": ["booster", "defender", "attacker", "black_ice"]}, "rez": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "deactivated", "derezzed", "destroyed"]}}}},
-                    "installed_hardware": {"type": "array", "description": "Cyberdeck Hardware (Hardware Option Slots, NOT program slots).", "items": {"type": "string"}},
+                    "installed_hardware": {"type": "array", "description": "Cyberdeck Hardware (shares deck slots with programs). Auto-populated from deck_slots.", "items": {"type": "string"}},
                     "current_node": {"type": "string"},
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
                     "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},

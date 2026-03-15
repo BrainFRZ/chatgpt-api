@@ -49,7 +49,8 @@ class TestFreshPipelineState:
         state = _fresh_pipeline_state()
         expected_keys = {
             "pacing", "callback_ledger", "npc_memories", "scene_state",
-            "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter",
+            "character_states", "game_state", "hud_state", "decision_flags",
+            "combat", "ship_combat", "turn_counter",
             "_clock_seconds_buffer"
         }
         assert set(state.keys()) == expected_keys

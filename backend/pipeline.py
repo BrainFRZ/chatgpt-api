@@ -632,7 +632,12 @@ def build_events_messages(
     if cb_injection:
         injections.append(cb_injection)
 
-    # 3. NPC memories (scene-scoped)
+    # 3. Decision flags (persistent plot decisions / branch points)
+    df_injection = build_decision_flags_injection(pipeline_state.get("decision_flags", {}))
+    if df_injection:
+        injections.append(df_injection)
+
+    # 4. NPC memories (scene-scoped)
     mem_injection = build_npc_memories_injection(
         pipeline_state.get("npc_memories", {}),
         pipeline_state.get("scene_state", {})
@@ -640,7 +645,7 @@ def build_events_messages(
     if mem_injection:
         injections.append(mem_injection)
 
-    # 4. Scene state
+    # 5. Scene state
     scene_injection = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene_injection)
 
@@ -1102,6 +1107,7 @@ def _fresh_pipeline_state() -> dict:
         "character_states": {},
         "game_state": {},
         "hud_state": {},
+        "decision_flags": {},
         "combat": None,
         "ship_combat": None,
         "turn_counter": 0,
@@ -1124,6 +1130,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "character_states": {},
             "game_state": {},
             "hud_state": {},
+            "decision_flags": {},
             "combat": None,
             "ship_combat": None,
             "turn_counter": 0,
@@ -1190,6 +1197,9 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("hud_state", {})
     if not isinstance(state.get("hud_state"), dict):
         state["hud_state"] = {}
+    state.setdefault("decision_flags", {})
+    if not isinstance(state.get("decision_flags"), dict):
+        state["decision_flags"] = {}
     state.setdefault("combat", None)
     state.setdefault("net_combat", None)
     state.setdefault("ship_combat", None)
@@ -1482,6 +1492,100 @@ def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
         if key in new_scene:
             base[key] = new_scene[key]
     return base
+
+
+def apply_decision_flags(existing_flags: dict, plot_ops: list) -> dict:
+    """Apply plot_ops to the persistent decision_flags dict.
+
+    Each plot op with a 'key' stores its value (and metadata) as a persistent flag.
+    Flags survive scene transitions and context trims — they're the campaign's
+    authoritative record of branch points, player decisions, and plot variables.
+
+    Pre-registration: ops with value=null or value="pending" register a pending
+    flag (value=None) that shows as "(pending)" in the injection. This acts as a
+    persistent reminder that the decision hasn't been made yet.
+
+    Guards:
+    - Pending cannot overwrite resolved (idempotent re-registration).
+    - Pending cannot overwrite pending (preserves original description).
+    - Resolved "branch" flags cannot be overwritten once set (permanent decisions).
+    """
+    flags = existing_flags if isinstance(existing_flags, dict) else {}
+    if not plot_ops:
+        return flags
+    for op in plot_ops:
+        key = op.get("key")
+        if not key:
+            continue
+        value = op.get("value")
+        # Normalize common values
+        if isinstance(value, str):
+            vl = value.lower()
+            if vl in ("true", "yes"):
+                value = True
+            elif vl in ("false", "no"):
+                value = False
+            elif vl in ("null", "pending", "none", ""):
+                value = None
+        existing = flags.get(key)
+        if isinstance(existing, dict):
+            existing_value = existing.get("value")
+            # Don't overwrite any existing flag with a pending one
+            if value is None:
+                continue
+            # Don't overwrite a resolved "branch" flag (permanent decisions)
+            if existing_value is not None and existing.get("severity") == "branch":
+                continue
+        # Fall back to existing metadata if the op doesn't provide it
+        existing_decision = existing.get("decision", "") if isinstance(existing, dict) else ""
+        existing_severity = existing.get("severity", "") if isinstance(existing, dict) else ""
+        existing_episode = existing.get("episode", "") if isinstance(existing, dict) else ""
+        flags[key] = {
+            "value": value,
+            "decision": op.get("decision", "") or existing_decision,
+            "severity": op.get("severity", "") or existing_severity or "flag",
+            "episode": op.get("episode", "") or existing_episode,
+        }
+    return flags
+
+
+def build_decision_flags_injection(flags: dict) -> str:
+    """Build human-readable injection of persistent decision flags.
+
+    Pending flags (value=None) are shown as "(pending)" with their description,
+    acting as a persistent reminder to the model that this decision needs recording.
+    Resolved flags show their value.
+    """
+    if not flags:
+        return ""
+    # Sort: pending flags first (reminders), then resolved
+    pending = []
+    resolved = []
+    for key, entry in flags.items():
+        if isinstance(entry, dict):
+            val = entry.get("value")
+            desc = entry.get("decision", "")
+            sev = entry.get("severity", "")
+            if val is None:
+                line = f"- {key} = (pending)"
+                if desc:
+                    line += f"  # {desc}"
+                pending.append(line)
+            else:
+                line = f"- {key} = {val}"
+                if sev and sev != "flag":
+                    line += f" ({sev})"
+                if desc:
+                    line += f"  # {desc}"
+                resolved.append(line)
+        else:
+            resolved.append(f"- {key} = {entry}")
+
+    lines = ["[DECISION FLAGS]"]
+    lines.extend(pending)
+    lines.extend(resolved)
+    lines.append("[/DECISION FLAGS]")
+    return "\n".join(lines)
 
 
 def apply_character_states(existing: dict, mechanics_output: dict, current_turn: int) -> dict:
@@ -2107,6 +2211,11 @@ def run_pipeline(
         pipeline_state["scene_state"] = apply_scene_state(
             events_data["scene_state"],
             existing_scene=pipeline_state.get("scene_state")
+        )
+    if events_data.get("plot_ops"):
+        pipeline_state["decision_flags"] = apply_decision_flags(
+            pipeline_state.get("decision_flags", {}),
+            events_data["plot_ops"]
         )
 
     # Apply game-specific state ops (relationship_ops already filtered by scene scope)
@@ -2938,6 +3047,26 @@ def _compute_state_delta(prev: dict, curr: dict) -> str:
         if scene_changes:
             parts.append("scene_state:\n" + "\n".join(scene_changes))
 
+    # Decision flags
+    prev_df = prev.get("decision_flags", {})
+    curr_df = curr.get("decision_flags", {})
+    if curr_df != prev_df:
+        df_changes = []
+        for key in curr_df:
+            if key not in prev_df:
+                entry = curr_df[key]
+                val = entry.get("value") if isinstance(entry, dict) else entry
+                df_changes.append(f"  +{key} = {val}")
+            elif curr_df[key] != prev_df[key]:
+                entry = curr_df[key]
+                val = entry.get("value") if isinstance(entry, dict) else entry
+                df_changes.append(f"  {key} → {val}")
+        for key in prev_df:
+            if key not in curr_df:
+                df_changes.append(f"  -{key}")
+        if df_changes:
+            parts.append("decision_flags:\n" + "\n".join(df_changes))
+
     # Game-specific state (e.g. CoC investigators)
     prev_gs = prev.get("game_state", {})
     curr_gs = curr.get("game_state", {})
@@ -3651,6 +3780,11 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             parsed["scene_state"],
             existing_scene=pipeline_state.get("scene_state")
         )
+    if parsed.get("plot_ops"):
+        pipeline_state["decision_flags"] = apply_decision_flags(
+            pipeline_state.get("decision_flags", {}),
+            parsed["plot_ops"]
+        )
     pipeline_state["character_states"] = apply_character_states(
         pipeline_state["character_states"],
         parsed.get("character_states") if isinstance(parsed.get("character_states"), dict) else {},
@@ -3795,7 +3929,12 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     if cb:
         injections.append(cb)
 
-    # 3. NPC memories (scene-scoped)
+    # 3. Decision flags (persistent plot decisions / branch points)
+    df = build_decision_flags_injection(pipeline_state.get("decision_flags", {}))
+    if df:
+        injections.append(df)
+
+    # 4. NPC memories (scene-scoped)
     mem = build_npc_memories_injection(
         pipeline_state.get("npc_memories", {}),
         pipeline_state.get("scene_state", {})
@@ -3803,7 +3942,7 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     if mem:
         injections.append(mem)
 
-    # 4. Scene state
+    # 5. Scene state
     scene = build_scene_state_injection(pipeline_state.get("scene_state", {}))
     injections.append(scene)
 

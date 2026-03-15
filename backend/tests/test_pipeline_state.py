@@ -292,7 +292,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "decision_flags", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
 
 
 # ============================================================
@@ -1489,7 +1489,7 @@ class TestRunPipelineE2E:
         state = result.pipeline_state
 
         # Verify full nested structure exists
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "decision_flags", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
 
         # Turn counter should be 1 (migrated from 0 + increment)
         assert state["turn_counter"] == 1
