@@ -418,6 +418,9 @@ Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Se
 CHARACTER CREATION:
 - Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
 
+NAME DICE:
+- If a [NAME DICE] block is present, use those pre-rolled values with the Name Generator document when introducing new NPCs. Consume left-to-right; do not skip or reuse.
+
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: each beat is {"beat": "<description>", "resolution": <null or resolution object>}. Include resolution for any beat requiring dice — the backend resolves the math.
@@ -491,6 +494,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[EDGERUNNER STATE]**: HP, Humanity, Luck, Armor SP, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, Deck Slots (programs + hardware) per edgerunner
 - **[IP TRACKER]**: Running session scores per category, IP balances, and prior session awards
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior organically — an NPC at T5: Close acts warmer than one at T2: Friendly.
+- **[NAME DICE]** (if present): Pre-rolled values for the Name Generator document. When introducing a new NPC, consume these left-to-right with the Name Generator tables instead of inventing names. Do not skip or reuse values.
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:

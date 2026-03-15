@@ -375,6 +375,9 @@ CHARACTER CREATION:
 - Leave callback_ops and npc_memory_ops empty during creation.
 - Maintain scene_state unchanged (or minimal) during creation.
 
+NAME DICE:
+- If a [NAME DICE] block is present, use those pre-rolled values with the Name Generator document when introducing new NPCs. Consume left-to-right; do not skip or reuse.
+
 IMPORTANT:
 - Output ONLY valid JSON
 - "beats" array: discrete narrative events
@@ -579,6 +582,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC VOICES]**: Voice/personality blurbs for improvised NPCs in the scene (not in project docs). Use for dialogue consistency.
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[INVESTIGATOR STATE]**: SAN, Luck, Mythos%, Bonds, Phobias, Manias, Skill marks per investigator
+- **[NAME DICE]** (if present): Pre-rolled values for the Name Generator document. When introducing a new NPC, consume these left-to-right with the Name Generator tables instead of inventing names. Do not skip or reuse values.
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:

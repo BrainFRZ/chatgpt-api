@@ -541,6 +541,9 @@ CHARACTER CREATION:
 - Use relationship_ops "set" ops only after creation is complete. Leave callback_ops, npc_memory_ops, and relationship_ops empty during creation.
 - Maintain scene_state unchanged (or minimal) during creation.
 
+NAME DICE:
+- If a [NAME DICE] block is present, use those pre-rolled values with the Name Generator document when introducing new NPCs. Consume left-to-right; do not skip or reuse.
+
 IMPORTANT:
 - Output ONLY valid JSON. No text before or after the JSON.
 - The "beats" array should contain discrete narrative events, not a blob of text.
@@ -727,6 +730,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC VOICES]**: Voice/personality blurbs for improvised NPCs in the scene (not in project docs). Use for dialogue consistency.
 - **[HUD STATE]**: Previous turn's date, time, location, funds, trackables (your source of truth after context trims)
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
+- **[NAME DICE]** (if present): Pre-rolled values for the Name Generator document. When introducing a new NPC, consume these left-to-right with the Name Generator tables instead of inventing names. Do not skip or reuse values.
 
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. The tool captures all state. Required sections:

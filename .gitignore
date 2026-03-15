@@ -79,6 +79,7 @@
 !backend/tests/test_monthly_expenses.py
 !backend/tests/test_housing_sharing.py
 !backend/tests/test_clock.py
+!backend/tests/test_name_dice_fuzz.py
 !data/
 !data/rulebooks/
 !data/rulebooks/cp_red/

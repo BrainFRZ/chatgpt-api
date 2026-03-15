@@ -38,7 +38,7 @@ from pipeline import (
     run_pipeline, run_mode_pipeline, PipelineResult, ModeResult, generate_debug_transcript,
     apply_single_agent_state_updates,
     build_single_agent_injections, build_player_agency_reminder,
-    generate_dice_pool,
+    generate_dice_pool, generate_name_dice,
     migrate_pipeline_state,
     get_context_pairs, extract_state_notifications, extract_ship_combat_notifications,
     collapse_hack_messages,
@@ -4504,7 +4504,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         else:
             sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
         sa_doc_stems = get_staged_project_filenames(username, request.project)
-        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems)
+        sa_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
+        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems, name_dice=sa_name_dice)
 
         # Strip transient _conversion_doc before it can be persisted
         _gs_state = stateful_pipeline_state.get("game_state")
@@ -6249,6 +6250,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Run pipeline in thread pool to avoid blocking the event loop
                 # during synchronous API calls (Events/Mechanics stages)
                 doc_stems = extract_project_file_stems(agent_files.get("narration", ""))
+                pipeline_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
                 pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,
@@ -6261,7 +6263,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     pipeline_state=pipeline_state_prev,
                     game_system=gs["id"],
                     trim_anchor_id=pipeline_trim_anchor_id,
-                    doc_file_stems=doc_stems
+                    doc_file_stems=doc_stems,
+                    name_dice=pipeline_name_dice
                 )
 
                 client_disconnected = False

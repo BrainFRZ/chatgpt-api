@@ -9,6 +9,7 @@ Only activates for GPT-5.2 project chats; Anthropic models use the existing sing
 import copy
 import json
 import logging
+import os
 import random
 import re
 from dataclasses import dataclass
@@ -310,6 +311,72 @@ def generate_dice_pool(game_system_id: str) -> str:
 
 
 # ============================================================
+# Name Dice Generation (pre-rolled for name generator docs)
+# ============================================================
+
+_NAME_GEN_PATTERN = re.compile(r'name.*generator|generator.*name', re.IGNORECASE)
+_DIE_SIZE_PATTERN = re.compile(r'\(1(?:-d?|[ ]d|d)(\d+)\)')  # matches (1-100), (1d50), (1d20), (1 d100) but NOT (100) or (1 100)
+
+NAME_DICE_COUNT = 4  # rolls per die size
+
+
+def generate_name_dice(uploads_dir: str) -> str:
+    """Generate pre-rolled dice for name generator docs in a project's uploads.
+
+    Scans uploads_dir for files whose name contains both "name" and "generator"
+    (case-insensitive). Parses die sizes from markdown table headers, pre-rolls
+    a small batch for each, and returns a formatted [NAME DICE] block.
+
+    Returns empty string if no name generator file is found or no die sizes detected.
+    """
+    if not uploads_dir or not os.path.isdir(uploads_dir):
+        return ""
+
+    # Find name generator file(s)
+    name_gen_files = []
+    try:
+        for fname in os.listdir(uploads_dir):
+            stem = os.path.splitext(fname)[0]
+            if _NAME_GEN_PATTERN.search(stem):
+                name_gen_files.append(os.path.join(uploads_dir, fname))
+    except OSError:
+        return ""
+
+    if not name_gen_files:
+        return ""
+
+    # Parse die sizes from all matching files
+    die_sizes = set()
+    for fpath in name_gen_files:
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            for match in _DIE_SIZE_PATTERN.finditer(content):
+                size = int(match.group(1))
+                if size >= 1:
+                    die_sizes.add(size)
+        except (OSError, ValueError):
+            continue
+
+    if not die_sizes:
+        return ""
+
+    # Pre-roll dice, largest first for readability
+    lines = []
+    for sides in sorted(die_sizes, reverse=True):
+        rolls = [random.randint(1, sides) for _ in range(NAME_DICE_COUNT)]
+        lines.append(f"d{sides}: {', '.join(str(r) for r in rolls)}")
+
+    return (
+        "[NAME DICE]\n"
+        "Use these with the Name Generator document when naming new NPCs.\n"
+        "Consume left-to-right; do not skip or reuse.\n"
+        + "\n".join(lines)
+        + "\n[/NAME DICE]"
+    )
+
+
+# ============================================================
 # Deterministic Mechanics Resolution (cpred only)
 # ============================================================
 
@@ -602,7 +669,8 @@ def build_events_messages(
     history_messages: list[dict],
     user_message: dict,
     pipeline_state: dict,
-    game_system: dict = None
+    game_system: dict = None,
+    name_dice: str = ""
 ) -> list[dict]:
     """
     Build the message list for the Events agent.
@@ -668,6 +736,10 @@ def build_events_messages(
         game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
         if game_injection:
             injections.append(game_injection)
+
+    # 7. Name dice (pre-rolled for name generator doc, if present)
+    if name_dice:
+        injections.append(name_dice)
 
     if injections:
         user_content = "\n\n".join(injections) + "\n\n" + user_content
@@ -2134,7 +2206,8 @@ def run_pipeline(
     pipeline_state: Optional[dict],
     game_system: str = "dnd5e",
     trim_anchor_id: Optional[str] = None,
-    doc_file_stems: set = None
+    doc_file_stems: set = None,
+    name_dice: str = ""
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -2173,7 +2246,7 @@ def run_pipeline(
         branch_path_for_events, EVENTS_THRESHOLD_PAIRS, EVENTS_TARGET_PAIRS, trim_anchor_id
     )
     user_msg = {"role": "user", "content": build_message_content(branch_path[-1])}
-    events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs)
+    events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs, name_dice=name_dice)
 
     events_result = run_pipeline_stage(
         provider, client, STAGE_CONFIGS["events"],
@@ -3912,7 +3985,7 @@ def build_player_agency_reminder(user_message: str, character_states: dict) -> s
     )
 
 
-def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "", doc_file_stems: set = None) -> str:
+def build_single_agent_injections(pipeline_state: dict, game_system: dict = None, dice_pool: str = "", doc_file_stems: set = None, name_dice: str = "") -> str:
     """Build the full injection string for a single-agent stateful user message."""
     injections = []
 
@@ -3986,6 +4059,10 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     # 8. Dice pool (always last — model consumes these for rolls)
     if dice_pool:
         injections.append(dice_pool)
+
+    # 9. Name dice (pre-rolled for name generator doc, if present)
+    if name_dice:
+        injections.append(name_dice)
 
     return "\n\n".join(injections) if injections else ""
 
