@@ -3535,27 +3535,40 @@ def _extract_character_profiles(uploads_dir: str, participants: list[str]) -> st
             content = f.read()
 
         if is_char_sheet:
-            # YAML character sheets: split on `# ===` separator lines.
-            # Name headers (e.g. "#  REDVELVET — PC Netrunner") are short blocks
-            # (1-2 lines of YAML comments) between separators; the next block is
-            # the character data.  Skip large blocks (data/metadata) to avoid
-            # false matches on names embedded in YAML values.
+            # Try YAML format first: split on `# ===` separator lines.
             blocks = re.split(r'^# ={3,}.*$', content, flags=re.MULTILINE)
-            for i, block in enumerate(blocks):
-                header_block = block.strip()
-                if not header_block:
-                    continue
-                # Name headers are short comment-only blocks (≤3 lines)
-                header_lines = header_block.split('\n')
-                if len(header_lines) > 3:
-                    continue
-                if _name_matches_header(header_block):
-                    dedup_key = (lower, header_block[:60].lower())
-                    if dedup_key not in seen_keys:
-                        seen_keys.add(dedup_key)
-                        body_block = blocks[i + 1].strip() if i + 1 < len(blocks) else ""
-                        merged = header_block + "\n" + body_block if body_block else header_block
-                        sections.append(f"[From: {fname}]\n{merged}")
+            if len(blocks) > 1:
+                # YAML character sheets with separator lines.
+                # Name headers (e.g. "#  REDVELVET — PC Netrunner") are short blocks
+                # (1-2 lines of YAML comments) between separators; the next block is
+                # the character data.  Skip large blocks (data/metadata) to avoid
+                # false matches on names embedded in YAML values.
+                for i, block in enumerate(blocks):
+                    header_block = block.strip()
+                    if not header_block:
+                        continue
+                    # Name headers are short comment-only blocks (≤3 lines)
+                    header_lines = header_block.split('\n')
+                    if len(header_lines) > 3:
+                        continue
+                    if _name_matches_header(header_block):
+                        dedup_key = (lower, header_block[:60].lower())
+                        if dedup_key not in seen_keys:
+                            seen_keys.add(dedup_key)
+                            body_block = blocks[i + 1].strip() if i + 1 < len(blocks) else ""
+                            merged = header_block + "\n" + body_block if body_block else header_block
+                            sections.append(f"[From: {fname}]\n{merged}")
+            else:
+                # Markdown character sheets: split on h2 headers (## Name)
+                parts = re.split(r'^(## .+)$', content, flags=re.MULTILINE)
+                for j in range(1, len(parts) - 1, 2):
+                    header = parts[j].strip()
+                    body = parts[j + 1].strip() if j + 1 < len(parts) else ""
+                    if _name_matches_header(header):
+                        dedup_key = (lower, header[:60].lower())
+                        if dedup_key not in seen_keys:
+                            seen_keys.add(dedup_key)
+                            sections.append(f"[From: {fname}]\n{header}\n{body}")
 
         elif is_char_desc:
             # Markdown character descs: split on h2 headers (## NAME)
@@ -4433,10 +4446,27 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
-            participants = list(sex_scene.get("npcs", []))
+            # Resolve short NPC names (e.g. "Lydia") to full canonical names
+            # from character_states (e.g. "Commander Lydia Cross") for profile matching
+            raw_npcs = list(sex_scene.get("npcs", []))
+            all_cs_names = list(sex_ps.get("character_states", {}).keys())
+            participants = []
+            for short_name in raw_npcs:
+                matched = False
+                for full_name in all_cs_names:
+                    if short_name.lower() in full_name.lower():
+                        if full_name not in participants:
+                            participants.append(full_name)
+                        matched = True
+                        break
+                if not matched and short_name not in participants:
+                    participants.append(short_name)
+            # Include PCs — check for type=="pc" or infer from character sheet data
             for name, cs in sex_ps.get("character_states", {}).items():
-                if isinstance(cs, dict) and cs.get("type") == "pc" and name not in participants:
-                    participants.append(name)
+                if isinstance(cs, dict) and name not in participants:
+                    cs_data = cs.get("data", cs)
+                    if cs_data.get("type") == "pc" or cs_data.get("class") or cs_data.get("level"):
+                        participants.append(name)
             profiles = _extract_character_profiles(uploads_dir, participants)
             if profiles:
                 sex_system_content += "\n\n" + profiles
