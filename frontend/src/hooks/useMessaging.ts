@@ -456,6 +456,8 @@ export function useMessaging(deps: UseMessagingDeps) {
           if (payload?.model) {
             deps.setSelectedModel(payload.model);
           }
+          // Clear sex_scene from pipeline state so CharacterPanel updates
+          (deps.setPipelineState as any)((prev: any) => prev ? { ...prev, sex_scene: null } : prev);
         }
       } catch (err) {
         deps.setError('Failed to end sex scene');
