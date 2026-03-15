@@ -87,7 +87,6 @@
 !data/
 !data/rulebooks/
 !data/rulebooks/cp_red/
-!data/rulebooks/cp_red/Hacking Rulebook.md
 !PIPELINE_PLAN.md
 !android/
 !android/.gitignore
