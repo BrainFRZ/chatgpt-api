@@ -5,7 +5,7 @@ import random
 
 from .cpred_mechanics import _resolve_jack_out_cascade
 from .cpred_tables import ICE_STAT_BLOCKS, SR_BASE_DV, CONVERGENCE_ICE_BY_SR
-from .cpred_core import _safe_int, _render_transition, _update_seriously_wounded, _wound_flag
+from .cpred_core import _safe_int, _render_transition, _update_seriously_wounded, _wound_flag, get_deck_slots
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +39,18 @@ def init_hack_state(
     interface_rank=4,
     hacker_name=None,
     context=None,
+    deck_slots=None,
     **_kw
 ):
     """Return initial hack_state structure for CPRED netrunning."""
     net_actions = _net_actions_for_rank(interface_rank)
+    # Auto-extract installed hardware from deck_slots
+    installed_hw = []
+    if isinstance(deck_slots, list):
+        installed_hw = [
+            s.get("name") for s in deck_slots
+            if isinstance(s, dict) and s.get("type") == "hardware" and s.get("name")
+        ]
     state = {
         "active": True,
         "tier": tier,
@@ -58,7 +66,7 @@ def init_hack_state(
         "cycles_remaining": cycles_max,
         "cycles_max": cycles_max,
         "active_programs": [],
-        "installed_hardware": [],
+        "installed_hardware": installed_hw,
         "current_node": "Gateway",
         "nodes_visited": ["Gateway"],
         "ice_status": {},
@@ -81,15 +89,17 @@ def init_hack_state(
         "active_debuffs": [],
         "destroyed_programs": [],
     }
-    # Bootstrap active_programs from edgerunner persistent programs
+    # Bootstrap active_programs from edgerunner persistent deck_slots
     if isinstance(_kw.get("game_state"), dict) and hacker_name:
         _gs_er = _kw["game_state"].get("edgerunners", {}).get(hacker_name, {})
-        _gs_progs = _gs_er.get("programs", [])
-        if isinstance(_gs_progs, list) and _gs_progs:
+        _gs_slots = get_deck_slots(_gs_er)
+        _gs_progs = [s for s in _gs_slots if isinstance(s, dict)
+                     and s.get("type", "program") == "program" and not s.get("_continuation_of")]
+        if _gs_progs:
             state["active_programs"] = [
                 {"name": p.get("name", "?"), "category": p.get("category", "attacker"),
                  "rez": p.get("rez_max", 0), "status": "deactivated"}
-                for p in _gs_progs if isinstance(p, dict) and p.get("status") != "destroyed"
+                for p in _gs_progs if p.get("status") != "destroyed"
             ]
     if context:
         state["context"] = context
@@ -1015,18 +1025,23 @@ def build_netrunner_profile(character_states, game_state=None, **_kw):
     if conditions:
         lines.append(f"Conditions: {', '.join(conditions)}")
 
-    # Cyberdeck + Programs from edgerunner state
+    # Cyberdeck + Deck Slots from edgerunner state
     if er:
         cyberdeck = er.get("cyberdeck")
         if isinstance(cyberdeck, dict):
-            progs = er.get("programs", [])
-            lines.append(f"Cyberdeck: {cyberdeck.get('tier', '?')} | {len(progs)}/{cyberdeck.get('slots', 0)} slots | {cyberdeck.get('cycles', 0)} cycles")
-            if progs:
-                prog_strs = []
-                for p in progs:
-                    if isinstance(p, dict):
-                        prog_strs.append(f"{p.get('name', '?')} ({p.get('category', '?')}, {p.get('status', 'stored')})")
+            deck_slots = get_deck_slots(er)
+            total_slots = len(deck_slots) if deck_slots else cyberdeck.get("slots", 0)
+            used_slots = sum(1 for s in deck_slots if s is not None) if deck_slots else 0
+            lines.append(f"Cyberdeck: {cyberdeck.get('tier', '?')} | {used_slots}/{total_slots} slots | {cyberdeck.get('cycles', 0)} cycles")
+            programs = [s for s in deck_slots if isinstance(s, dict)
+                        and s.get("type", "program") == "program" and not s.get("_continuation_of")]
+            if programs:
+                prog_strs = [f"{p.get('name', '?')} ({p.get('category', '?')}, {p.get('status', 'stored')})" for p in programs]
                 lines.append(f"Programs: {'; '.join(prog_strs)}")
+            hardware = [s for s in deck_slots if isinstance(s, dict) and s.get("type") == "hardware"]
+            if hardware:
+                hw_strs = [f"{h.get('name', '?')} ({h.get('slots_used', 1)} slots)" for h in hardware]
+                lines.append(f"Hardware: {'; '.join(hw_strs)}")
 
     lines.append("[/NETRUNNER PROFILE]")
     return "\n".join(lines)
@@ -1055,20 +1070,29 @@ def _writeback_cycles(runner_name, cycles, pipeline_state):
 
 
 def _writeback_destroyed_programs(runner_name, state, pipeline_state):
-    """Remove destroyed programs from edgerunner persistent state (unless Backup Drive)."""
+    """Remove destroyed programs from edgerunner persistent deck_slots (unless Backup Drive)."""
     game_state = pipeline_state.get("game_state", {})
     destroyed = state.get("destroyed_programs", [])
-    _hw = state.get("installed_hardware", [])
-    has_backup_drive = isinstance(_hw, list) and any(
-        "backup drive" in str(h).lower() for h in _hw
+    if not (isinstance(destroyed, list) and destroyed and runner_name and isinstance(game_state, dict)):
+        return
+    er = game_state.get("edgerunners", {}).get(runner_name, {})
+    deck_slots = get_deck_slots(er)
+    if not isinstance(deck_slots, list):
+        return
+    # Check for Backup Drive in deck_slots (hardware entries)
+    has_backup_drive = any(
+        isinstance(s, dict) and s.get("type") == "hardware"
+        and "backup drive" in s.get("name", "").lower()
+        for s in deck_slots
     )
-    if (isinstance(destroyed, list) and destroyed and runner_name
-            and isinstance(game_state, dict) and not has_backup_drive):
-        er = game_state.get("edgerunners", {}).get(runner_name, {})
-        er_progs = er.get("programs", [])
-        if isinstance(er_progs, list):
-            er["programs"] = [p for p in er_progs
-                              if isinstance(p, dict) and p.get("name") not in destroyed]
+    if has_backup_drive:
+        return
+    # Replace destroyed programs with null (preserving slot positions)
+    er["deck_slots"] = [
+        None if (isinstance(s, dict) and s.get("type", "program") == "program"
+                 and s.get("name") in destroyed) else s
+        for s in deck_slots
+    ]
 
 
 def apply_hack_writeback(hack_state, pipeline_state):

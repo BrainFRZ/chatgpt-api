@@ -394,9 +394,9 @@ class AnthropicProvider(ModelProvider):
 
 
 class AnthropicOpus45Provider(AnthropicProvider):
-    """Provider for Claude Opus 4.5 with adaptive thinking."""
+    """Provider for Claude Opus 4.5."""
 
-    MODEL_NAME = "claude-opus-4-5-20250918"
+    MODEL_NAME = "claude-opus-4-5"
     MAX_TOKENS = 16000
 
     BETA_HEADERS = [
@@ -439,11 +439,8 @@ class AnthropicOpus45Provider(AnthropicProvider):
         is_free_chat: bool,
         use_cache: bool = True
     ) -> dict:
-        """Build request with adaptive thinking for Opus 4.5."""
-        params = super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
-        params["thinking"] = {"type": "adaptive"}
-        params["output_config"] = {"effort": "high"}
-        return params
+        """Build request for Opus 4.5 (standard extended thinking)."""
+        return super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
 
 
 class AnthropicOpusProvider(AnthropicProvider):

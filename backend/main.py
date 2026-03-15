@@ -2424,7 +2424,7 @@ def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_op
     return apply_fn(hack_state, tool_input, **kwargs)
 
 
-def _init_hack_from_trigger(gs, ht, character_states):
+def _init_hack_from_trigger(gs, ht, character_states, pipeline_state=None):
     """Initialize hack state from a hack trigger dict. Works for all game systems."""
     def _guess_hacker_name(states):
         """Best-effort picker for which PC is doing the hack."""
@@ -2486,6 +2486,12 @@ def _init_hack_from_trigger(gs, ht, character_states):
                     break
             if _found_cycles:
                 break
+    # Extract deck_slots from edgerunner persistent state for hardware auto-population
+    deck_slots = None
+    if hacker_name and isinstance(pipeline_state, dict):
+        _er = pipeline_state.get("game_state", {}).get("edgerunners", {}).get(hacker_name, {})
+        deck_slots = _er.get("deck_slots") if isinstance(_er, dict) else None
+
     return gs["init_hack_state"](
         tier=ht.get("tier", "full_run"),
         target_system=ht.get("target_system", "Unknown"),
@@ -2495,6 +2501,7 @@ def _init_hack_from_trigger(gs, ht, character_states):
         interface_rank=ht.get("interface_rank") or 4,
         hacker_name=hacker_name,
         context=ht.get("context"),
+        deck_slots=deck_slots,
     )
 
 
@@ -3448,6 +3455,7 @@ SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG cam
 - Reference character sheets for relevant physical descriptions, cybernetics, mutations, scars, magical features, skills, or spells.
 - Respect relationship dynamics from the injected state. Characters at different relationship tiers behave differently.
 - NPCs act according to their personality profiles and memories. A guarded character doesn't suddenly become uninhibited without narrative justification.
+- For non-human sapient species (Uplifts, beast-kin, aliens, etc.), lean into xenobiology. Invent and describe anatomical differences from human baseline — how their bodies differ in structure, sensitivity, response. Don't default to "basically human but furry." These are distinct species; their physicality should reflect that.
 
 ## NPC Agency
 - NPCs are active participants. They should take initiative — suggesting, repositioning, escalating, teasing, leading, reacting with authentic desire and personality.
@@ -4057,7 +4065,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and model_id.startswith("claude") and request.project
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     docs_refreshed = False
@@ -6489,7 +6497,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _evts = json.loads(pipeline_result.events_json) if isinstance(pipeline_result.events_json, str) else pipeline_result.events_json
                         if _evts.get("hack_trigger"):
                             _cs = data.get("pipeline_state", {}).get("character_states", {})
-                            data["hack_state"] = _init_hack_from_trigger(gs, _evts["hack_trigger"], _cs)
+                            data["hack_state"] = _init_hack_from_trigger(gs, _evts["hack_trigger"], _cs, pipeline_state=data.get("pipeline_state", {}))
                             data["hack_state"]["start_message_id"] = assistant_msg_id
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Pipeline hack trigger: {_evts['hack_trigger'].get('tier')} on "
@@ -7620,7 +7628,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             _cs = (stateful_pipeline_state.get("character_states", {})
                                    if stateful_pipeline_state else
                                    data.get("pipeline_state", {}).get("character_states", {}))
-                            data["hack_state"] = _init_hack_from_trigger(gs, ht, _cs)
+                            _ps = stateful_pipeline_state or data.get("pipeline_state", {})
+                            data["hack_state"] = _init_hack_from_trigger(gs, ht, _cs, pipeline_state=_ps)
                             data["hack_state"]["start_message_id"] = assistant_msg_id
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Hack trigger: {ht.get('tier')} on {ht.get('target_system')} "

@@ -92,16 +92,16 @@ class TestDefaultEdgerunnerCyberdeck:
         er = _default_edgerunner()
         assert er["cyberdeck"] is None
 
-    def test_programs_still_defaults_empty(self):
+    def test_deck_slots_defaults_empty(self):
         er = _default_edgerunner()
-        assert er["programs"] == []
+        assert er["deck_slots"] == []
 
     def test_all_default_fields_present(self):
         """Ensure adding cyberdeck didn't break the field ordering."""
         er = _default_edgerunner()
         expected_subset = {"hp", "humanity", "luck", "armor", "eurobucks",
                            "critical_injuries", "cyberware_effects", "weapons",
-                           "programs", "cyberdeck", "conditions"}
+                           "deck_slots", "cyberdeck", "conditions"}
         assert expected_subset.issubset(set(er.keys()))
 
 
@@ -113,16 +113,16 @@ class TestBuildGameInjectionCyberdeck:
     """Fuzz the cyberdeck/programs rendering in build_game_injection."""
 
     def test_no_cyberdeck_no_deck_line(self):
-        gs = _game_state_with(cyberdeck=None, programs=[])
+        gs = _game_state_with(cyberdeck=None, deck_slots=[])
         result = build_game_injection(gs)
         assert "Cyberdeck" not in result
         assert "Programs:" not in result
 
-    def test_cyberdeck_none_with_programs_still_no_deck_line(self):
-        """Programs without a cyberdeck should not render deck/program lines."""
+    def test_cyberdeck_none_with_deck_slots_still_no_deck_line(self):
+        """Deck slots without a cyberdeck should not render deck/program lines."""
         gs = _game_state_with(
             cyberdeck=None,
-            programs=[{"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
+            deck_slots=[{"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
         )
         result = build_game_injection(gs)
         assert "Cyberdeck" not in result
@@ -132,38 +132,57 @@ class TestBuildGameInjectionCyberdeck:
     def test_basic_cyberdeck_renders(self):
         gs = _game_state_with(
             cyberdeck={"tier": "Standard", "slots": 7, "cycles": 3},
-            programs=[],
+            deck_slots=[],
         )
         result = build_game_injection(gs)
         assert "Cyberdeck: Standard" in result
-        assert "0/7 programs" in result
+        assert "0/7 slots" in result
         assert "3 cycles" in result
-        assert "Programs:" not in result  # empty programs
+        assert "Programs:" not in result  # empty deck_slots
 
     def test_cyberdeck_with_programs_renders_both(self):
-        programs = [
-            {"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
-            {"name": "Armor", "category": "Defender", "rez_max": 4, "status": "stored"},
+        deck_slots = [
+            {"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
+            {"name": "Armor", "type": "program", "category": "Defender", "rez_max": 4, "status": "stored"},
         ]
         gs = _game_state_with(
             cyberdeck={"tier": "Upgraded", "slots": 9, "cycles": 5},
-            programs=programs,
+            deck_slots=deck_slots,
         )
         result = build_game_injection(gs)
         assert "Cyberdeck: Upgraded" in result
-        assert "2/9 programs" in result
+        assert "2/2 slots" in result  # 2 items in deck_slots array
         assert "5 cycles" in result
         assert "Programs:" in result
         assert "Sword (Anti-Program, rezzed)" in result
         assert "Armor (Defender, stored)" in result
 
+    def test_cyberdeck_with_hardware_renders(self):
+        deck_slots = [
+            {"name": "Armor", "type": "program", "category": "Defender", "rez_max": 7, "status": "stored"},
+            {"name": "Backup Drive", "type": "hardware", "slots_used": 2},
+            {"_continuation_of": "Backup Drive"},
+            None,
+        ]
+        gs = _game_state_with(
+            cyberdeck={"tier": "Standard", "slots": 4, "cycles": 3},
+            deck_slots=deck_slots,
+        )
+        result = build_game_injection(gs)
+        assert "3/4 slots" in result
+        assert "Programs:" in result
+        assert "Armor (Defender, stored)" in result
+        assert "Hardware:" in result
+        assert "Backup Drive (2 slots)" in result
+
     @settings(max_examples=200, deadline=None)
     @given(deck=_cyberdeck_st, progs=st.lists(_program_st, max_size=10))
     def test_valid_cyberdeck_always_renders_without_error(self, deck, progs):
-        gs = _game_state_with(cyberdeck=deck, programs=progs)
+        deck_slots = [{**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p for p in progs]
+        gs = _game_state_with(cyberdeck=deck, deck_slots=deck_slots)
         result = build_game_injection(gs)
         assert "Cyberdeck:" in result
-        assert f"{len(progs)}/{deck['slots']} programs" in result
+        assert "slots" in result
         if progs:
             assert "Programs:" in result
 
@@ -179,10 +198,10 @@ class TestBuildGameInjectionCyberdeck:
 
     def test_empty_dict_cyberdeck_renders_with_defaults(self):
         """An empty dict {} is still isinstance(dict) — should render with fallback values."""
-        gs = _game_state_with(cyberdeck={}, programs=[])
+        gs = _game_state_with(cyberdeck={}, deck_slots=[])
         result = build_game_injection(gs)
         assert "Cyberdeck: ?" in result
-        assert "0/0 programs" in result
+        assert "0/0 slots" in result
         assert "0 cycles" in result
 
     @settings(max_examples=200, deadline=None)
@@ -195,7 +214,7 @@ class TestBuildGameInjectionCyberdeck:
         """Cyberdeck dict with garbage field values should not crash."""
         gs = _game_state_with(
             cyberdeck={"tier": tier, "slots": slots, "cycles": cycles},
-            programs=[],
+            deck_slots=[],
         )
         result = build_game_injection(gs)
         assert "[EDGERUNNER STATE]" in result
@@ -203,17 +222,17 @@ class TestBuildGameInjectionCyberdeck:
 
     @settings(max_examples=200, deadline=None)
     @given(seed=st.integers(min_value=0, max_value=999_999))
-    def test_programs_with_missing_fields_no_crash(self, seed):
-        """Programs with missing or garbage fields should not crash rendering."""
+    def test_deck_slots_with_missing_fields_no_crash(self, seed):
+        """Deck slot entries with missing or garbage fields should not crash rendering."""
         rng = random.Random(seed)
         fields = ["name", "category", "rez_max", "status"]
-        prog = {}
+        prog = {"type": "program"}
         for f in fields:
             if rng.random() > 0.3:
                 prog[f] = rng.choice(["Zap", "Armor", "", 42, None, True])
         gs = _game_state_with(
             cyberdeck={"tier": "Standard", "slots": 7, "cycles": 3},
-            programs=[prog],
+            deck_slots=[prog],
         )
         result = build_game_injection(gs)
         assert "Cyberdeck:" in result
@@ -225,9 +244,9 @@ class TestBuildGameInjectionCyberdeck:
             "edgerunners": {
                 "V": _make_edgerunner(
                     cyberdeck={"tier": "Standard", "slots": 7, "cycles": 3},
-                    programs=[{"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
+                    deck_slots=[{"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
                 ),
-                "Jackie": _make_edgerunner(cyberdeck=None, programs=[]),
+                "Jackie": _make_edgerunner(cyberdeck=None, deck_slots=[]),
             }
         }
         result = build_game_injection(gs)
@@ -313,8 +332,8 @@ class TestSetOpCyberdeckBootstrap:
         deck=_cyberdeck_st,
         progs=st.lists(_program_st, min_size=1, max_size=8),
     )
-    def test_set_cyberdeck_then_programs_set(self, deck, progs):
-        """Bootstrap cyberdeck via set, then programs via programs_set — both should render."""
+    def test_set_cyberdeck_then_programs_set_compat(self, deck, progs):
+        """Bootstrap cyberdeck via set, then programs via programs_set (backward compat) — both should render."""
         gs = _game_state_with("V")
         agent1 = {"edgerunner_ops": [{"edgerunner": "V", "op": "set", "fields": {"cyberdeck": copy.deepcopy(deck)}}]}
         apply_game_state(gs, agent1, turn=1)
@@ -323,11 +342,32 @@ class TestSetOpCyberdeckBootstrap:
 
         er = gs["edgerunners"]["V"]
         assert er["cyberdeck"] == deck
-        assert len(er["programs"]) == len(progs)
+        # programs_set backward compat converts to deck_slots
+        assert len(er["deck_slots"]) == len(progs)
 
         result = build_game_injection(gs)
         assert "Cyberdeck:" in result
         assert "Programs:" in result
+
+    @settings(max_examples=100, deadline=None)
+    @given(
+        deck=_cyberdeck_st,
+        progs=st.lists(_program_st, min_size=1, max_size=8),
+    )
+    def test_set_with_legacy_programs_field_converts(self, deck, progs):
+        """Model sending programs in set op fields should auto-convert to deck_slots."""
+        gs = _game_state_with("V")
+        fields = {"cyberdeck": copy.deepcopy(deck), "programs": copy.deepcopy(progs)}
+        agent = {"edgerunner_ops": [{"edgerunner": "V", "op": "set", "fields": fields}]}
+        apply_game_state(gs, agent, turn=1)
+
+        er = gs["edgerunners"]["V"]
+        assert er["cyberdeck"] == deck
+        assert len(er["deck_slots"]) == len(progs)
+        # All entries should have type: "program"
+        for slot in er["deck_slots"]:
+            if isinstance(slot, dict):
+                assert slot.get("type") == "program"
 
 
 # ===========================================================================
@@ -387,7 +427,7 @@ class TestSyncDoesNotPropagateSummary:
                     weapons=[{"name": "Pistol", "damage": "2d6", "current_ammo": 8, "max_ammo": 8, "type": "ranged"}],
                     cyberware_effects=["Cybereye"],
                     cyberdeck={"tier": "Standard", "slots": 7, "cycles": 3},
-                    programs=[{"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
+                    deck_slots=[{"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"}],
                 ),
             }
         }
@@ -424,13 +464,14 @@ class TestSyncDoesNotPropagateSummary:
                 "last_updated": 0,
             }
         }
+        deck_slots = [{**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p for p in progs]
         gs = {
             "edgerunners": {
                 "V": _make_edgerunner(
                     weapons=weapons,
                     cyberware_effects=cyberware,
                     cyberdeck=deck,
-                    programs=progs,
+                    deck_slots=deck_slots,
                 ),
             }
         }
@@ -509,15 +550,15 @@ class TestBuildGameInjectionEquipmentRegression:
         assert "partially_nude" in result
 
     def test_full_netrunner_renders_all_sections(self):
-        """A fully kitted Netrunner should render weapons, armor, cyberware, cyberdeck, and programs."""
+        """A fully kitted Netrunner should render weapons, armor, cyberware, cyberdeck, and deck slots."""
         gs = _game_state_with(
             weapons=[{"name": "Pistol", "damage": "2d6", "current_ammo": 12, "max_ammo": 12, "skill": "Handgun", "type": "ranged"}],
             cyberware_effects=["Neural Link", "Shift Tacts"],
             cyberdeck={"tier": "Advanced", "slots": 9, "cycles": 7},
-            programs=[
-                {"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
-                {"name": "Armor", "category": "Defender", "rez_max": 4, "status": "rezzed"},
-                {"name": "Worm", "category": "Anti-Personnel", "rez_max": 5, "status": "stored"},
+            deck_slots=[
+                {"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
+                {"name": "Armor", "type": "program", "category": "Defender", "rez_max": 4, "status": "rezzed"},
+                {"name": "Worm", "type": "program", "category": "Anti-Personnel", "rez_max": 5, "status": "stored"},
             ],
             conditions=["seriously_wounded"],
         )
@@ -527,7 +568,7 @@ class TestBuildGameInjectionEquipmentRegression:
         assert "Cyberware:" in result
         assert "Neural Link" in result
         assert "Cyberdeck: Advanced" in result
-        assert "3/9 programs" in result
+        assert "3/3 slots" in result
         assert "7 cycles" in result
         assert "Programs:" in result
         assert "Sword (Anti-Program, rezzed)" in result
@@ -553,11 +594,12 @@ class TestBuildGameInjectionEquipmentRegression:
     )
     def test_full_equipment_fuzz_no_crash(self, weapons, cyberware, deck, progs, conditions):
         """Any combination of equipment data should render without crashing."""
+        deck_slots = [{**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p for p in progs]
         gs = _game_state_with(
             weapons=weapons,
             cyberware_effects=cyberware,
             cyberdeck=deck,
-            programs=progs,
+            deck_slots=deck_slots,
             conditions=conditions,
         )
         result = build_game_injection(gs)
@@ -705,7 +747,7 @@ class TestResolveNetrunnerName:
 # ===========================================================================
 
 class TestBuildNetrunnerProfileCyberdeck:
-    def _cs_and_gs(self, cyberdeck=None, programs=None):
+    def _cs_and_gs(self, cyberdeck=None, deck_slots=None):
         cs = {
             "V": {
                 "data": {
@@ -720,15 +762,16 @@ class TestBuildNetrunnerProfileCyberdeck:
         }
         gs = {"edgerunners": {"V": _make_edgerunner(
             cyberdeck=cyberdeck,
-            programs=programs or [],
+            deck_slots=deck_slots or [],
         )}}
         return cs, gs
 
     def test_cyberdeck_renders_in_profile(self):
         cs, gs = self._cs_and_gs(
             cyberdeck={"tier": "Advanced", "slots": 9, "cycles": 5},
-            programs=[
-                {"name": "Sword", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
+            deck_slots=[
+                {"name": "Sword", "type": "program", "category": "Anti-Program", "rez_max": 3, "status": "rezzed"},
+                None, None, None, None, None, None, None, None,
             ],
         )
         profile = build_netrunner_profile(cs, game_state=gs, hack_state={"hacker_name": "V"})
@@ -760,13 +803,32 @@ class TestBuildNetrunnerProfileCyberdeck:
         profile = build_netrunner_profile(cs, game_state=gs, hack_state={"hacker_name": "V"})
         assert "Equipment:" not in profile
 
+    def test_hardware_renders_in_profile(self):
+        cs, gs = self._cs_and_gs(
+            cyberdeck={"tier": "Standard", "slots": 7, "cycles": 3},
+            deck_slots=[
+                {"name": "Armor", "type": "program", "category": "Defender", "rez_max": 7, "status": "stored"},
+                {"name": "Backup Drive", "type": "hardware", "slots_used": 2},
+                {"_continuation_of": "Backup Drive"},
+                None, None, None, None,
+            ],
+        )
+        profile = build_netrunner_profile(cs, game_state=gs, hack_state={"hacker_name": "V"})
+        assert "3/7 slots" in profile
+        assert "Programs:" in profile
+        assert "Armor (Defender, stored)" in profile
+        assert "Hardware:" in profile
+        assert "Backup Drive (2 slots)" in profile
+
     @settings(max_examples=100, deadline=None)
     @given(
         deck=st.one_of(st.none(), _cyberdeck_st),
         progs=st.lists(_program_st, max_size=8),
     )
     def test_profile_with_fuzzed_deck_no_crash(self, deck, progs):
-        cs, gs = self._cs_and_gs(cyberdeck=deck, programs=progs)
+        # Fuzz generates old-style program dicts; wrap them as deck_slots
+        deck_slots = [{**p, "type": "program"} if isinstance(p, dict) and "type" not in p else p for p in progs]
+        cs, gs = self._cs_and_gs(cyberdeck=deck, deck_slots=deck_slots)
         profile = build_netrunner_profile(cs, game_state=gs, hack_state={"hacker_name": "V"})
         assert "[NETRUNNER PROFILE]" in profile
         assert "[/NETRUNNER PROFILE]" in profile

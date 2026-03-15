@@ -1224,22 +1224,37 @@ export default function CharacterPanel({
               {er.cyberdeck && (
                 <div style={{ marginTop: '4px' }}>
                   <div style={{ fontSize: '0.72rem', color: '#22d3ee' }}>
-                    Cyberdeck: {er.cyberdeck.tier || '?'} | {(er.programs || []).length}/{er.cyberdeck.slots || 0} slots | {er.cyberdeck.cycles ?? 0} cycles
+                    Cyberdeck: {er.cyberdeck.tier || '?'} | {((er.deck_slots || er.programs || []).filter((s: any) => s != null)).length}/{(er.deck_slots || er.programs || []).length || er.cyberdeck.slots || 0} slots | {er.cyberdeck.cycles ?? 0} cycles
                   </div>
                 </div>
               )}
               {/* Programs */}
-              {er.cyberdeck && er.programs && er.programs.length > 0 && (
-                <div style={{ marginTop: '2px' }}>
-                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Programs</div>
-                  {er.programs.map((p: any, i: number) => (
-                    <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
-                      {p.name || '?'} <span style={{ color: '#888' }}>({p.category || '?'})</span>
-                      {p.status && p.status !== 'stored' && <span style={{ color: '#fbbf24', marginLeft: '4px' }}>[{p.status}]</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
+              {er.cyberdeck && (() => {
+                const slots = er.deck_slots || er.programs || [];
+                const programs = slots.filter((s: any) => s && typeof s === 'object' && (s.type === 'program' || (!s.type && !s._continuation_of)) );
+                const hardware = slots.filter((s: any) => s && typeof s === 'object' && s.type === 'hardware');
+                return (programs.length > 0 || hardware.length > 0) ? (
+                  <div style={{ marginTop: '2px' }}>
+                    {programs.length > 0 && (<>
+                      <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Programs</div>
+                      {programs.map((p: any, i: number) => (
+                        <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                          {p.name || '?'} <span style={{ color: '#888' }}>({p.category || '?'})</span>
+                          {p.status && p.status !== 'stored' && <span style={{ color: '#fbbf24', marginLeft: '4px' }}>[{p.status}]</span>}
+                        </div>
+                      ))}
+                    </>)}
+                    {hardware.length > 0 && (<>
+                      <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px', marginTop: '2px' }}>Hardware</div>
+                      {hardware.map((h: any, i: number) => (
+                        <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                          {h.name || '?'} <span style={{ color: '#888' }}>({h.slots_used || 1} slot{(h.slots_used || 1) > 1 ? 's' : ''})</span>
+                        </div>
+                      ))}
+                    </>)}
+                  </div>
+                ) : null;
+              })()}
             </div>
           );
         }
