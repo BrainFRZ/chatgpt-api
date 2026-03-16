@@ -24,6 +24,7 @@ import uuid
 import hashlib
 import copy
 import inspect
+import threading
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
@@ -9729,19 +9730,16 @@ def end_sex_scene(request: EndSexSceneRequest):
     if not sex_scene:
         raise HTTPException(status_code=400, detail="No active sex scene")
 
-    # --- Generate scene summary before clearing state ---
-    summary = None
+    # --- Gather scene info before clearing state ---
     sex_start_id = sex_scene.get("start_message_id") if isinstance(sex_scene, dict) else None
     handoff_summary = sex_scene.get("summary") if isinstance(sex_scene, dict) else None
     npc_names = sex_scene.get("npcs", []) if isinstance(sex_scene, dict) else []
 
+    # Collect scene messages for background summary generation
+    scene_messages = []
     if sex_start_id:
-        # Use branch path (not flat message list) to respect branching saves
         current_leaf = data.get("current_leaf_id")
         branch = get_path_to_root(data.get("messages", []), current_leaf) if current_leaf else data.get("messages", [])
-
-        # Gather all sex mode messages from start_message_id onward
-        scene_messages = []
         found_start = False
         for msg in branch:
             if not found_start and msg.get("id") == sex_start_id:
@@ -9749,27 +9747,43 @@ def end_sex_scene(request: EndSexSceneRequest):
             if found_start and msg.get("sex_mode"):
                 scene_messages.append({"role": msg["role"], "content": msg["content"]})
 
-        if scene_messages:
-            api_key = get_api_key(username, "anthropic")
-            if api_key:
-                summary = _generate_sex_scene_summary(
-                    api_key, scene_messages, npc_names, handoff_summary
-                )
-
-        # Stamp summary on the last assistant sex_mode message in the branch
-        if summary:
-            for msg in reversed(branch):
-                if msg.get("sex_mode") and msg.get("role") == "assistant":
-                    msg["sex_scene_summary"] = summary
-                    break
-
-    # --- Restore model and clear sex scene ---
+    # --- Restore model and clear sex scene immediately ---
     restore_model = sex_scene.get("original_model") if isinstance(sex_scene, dict) else None
     if restore_model:
         data["model"] = restore_model
     ps["sex_scene"] = None
     save_chat(username, request.chat_name, data, request.project)
-    return {"status": "ok", "model": data.get("model"), "summary_generated": bool(summary)}
+
+    # --- Generate summary in background thread ---
+    if scene_messages:
+        api_key = get_api_key(username, "anthropic")
+        if api_key:
+            chat_name = request.chat_name
+            project = request.project
+            def _bg_summary():
+                try:
+                    summary = _generate_sex_scene_summary(
+                        api_key, scene_messages, npc_names, handoff_summary
+                    )
+                    if not summary:
+                        return
+                    # Re-load chat, stamp summary, re-save
+                    bg_data = load_chat(username, chat_name, project)
+                    if not bg_data:
+                        return
+                    leaf = bg_data.get("current_leaf_id")
+                    msgs = get_path_to_root(bg_data.get("messages", []), leaf) if leaf else bg_data.get("messages", [])
+                    for msg in reversed(msgs):
+                        if msg.get("sex_mode") and msg.get("role") == "assistant":
+                            msg["sex_scene_summary"] = summary
+                            break
+                    save_chat(username, chat_name, bg_data, project)
+                    logger.info(f"Background sex scene summary saved for {username}/{chat_name}")
+                except Exception:
+                    logger.exception("Background sex scene summary failed")
+            threading.Thread(target=_bg_summary, daemon=True).start()
+
+    return {"status": "ok", "model": data.get("model")}
 
 
 @app.get("/api/character-sheet/{username}/{project}")
