@@ -2640,7 +2640,8 @@ class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
 
     FACEDOWN_KEYS = {
         "initiator_die", "opponent_die", "initiator_total", "opponent_total",
-        "success", "margin", "state_ops", "formatted", "on_outcome",
+        "success", "tie", "winner", "loser", "penalty_condition",
+        "margin", "state_ops", "formatted", "on_outcome",
     }
     SUPPRESSIVE_TARGET = st.fixed_dictionaries({
         "name": st.text(min_size=0, max_size=16),
@@ -2652,10 +2653,8 @@ class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
     @settings(max_examples=150, deadline=None)
     @given(
         initiator_cool=st.integers(min_value=-20, max_value=20),
-        initiator_concentration=st.integers(min_value=-20, max_value=20),
         initiator_rep=st.integers(min_value=-10, max_value=10),
         opponent_cool=st.integers(min_value=-20, max_value=20),
-        opponent_concentration=st.integers(min_value=-20, max_value=20),
         opponent_rep=st.integers(min_value=-10, max_value=10),
         wounded_initiator=st.booleans(),
         wounded_opponent=st.booleans(),
@@ -2664,10 +2663,8 @@ class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
     def test_facedown_invariants(
         self,
         initiator_cool,
-        initiator_concentration,
         initiator_rep,
         opponent_cool,
-        opponent_concentration,
         opponent_rep,
         wounded_initiator,
         wounded_opponent,
@@ -2675,10 +2672,8 @@ class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
     ):
         result = resolve_facedown(
             initiator_cool=initiator_cool,
-            initiator_concentration=initiator_concentration,
             initiator_rep=initiator_rep,
             opponent_cool=opponent_cool,
-            opponent_concentration=opponent_concentration,
             opponent_rep=opponent_rep,
             character="V",
             target="Target",
@@ -2690,9 +2685,24 @@ class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):
         )
         self.assertTrue(self.FACEDOWN_KEYS <= set(result.keys()))
         self.assertEqual(result["margin"], result["initiator_total"] - result["opponent_total"])
-        self.assertEqual(result["success"], result["initiator_total"] > result["opponent_total"])
         self.assertEqual(result["state_ops"], [])
-        self.assertEqual(result["on_outcome"], "back_down" if result["success"] else "stand_firm")
+
+        # RAW tie handling: tie → success=None, no winner/loser
+        if result["initiator_total"] == result["opponent_total"]:
+            self.assertIsNone(result["success"])
+            self.assertTrue(result["tie"])
+            self.assertIsNone(result["winner"])
+            self.assertIsNone(result["loser"])
+            self.assertIsNone(result["penalty_condition"])
+            self.assertEqual(result["on_outcome"], "")
+        else:
+            self.assertEqual(result["success"], result["initiator_total"] > result["opponent_total"])
+            self.assertFalse(result["tie"])
+            self.assertIsNotNone(result["winner"])
+            self.assertIsNotNone(result["loser"])
+            self.assertIsNotNone(result["penalty_condition"])
+            expected_outcome = "back_down" if result["success"] else "stand_firm"
+            self.assertEqual(result["on_outcome"], expected_outcome)
 
     @settings(max_examples=150, deadline=None)
     @given(

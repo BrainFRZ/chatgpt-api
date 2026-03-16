@@ -650,10 +650,8 @@ def resolve_haggle(
 
 def resolve_facedown(
     initiator_cool: int,
-    initiator_concentration: int,
     initiator_rep: int = 0,
     opponent_cool: int = 0,
-    opponent_concentration: int = 0,
     opponent_rep: int = 0,
     character: str = "",
     target: str = "",
@@ -664,15 +662,21 @@ def resolve_facedown(
     on_success: str = "",
     on_failure: str = "",
 ) -> dict:
-    """Resolve a Facedown (CRB §11): COOL + Concentration + d10 + Rep vs same.
+    """Resolve a Facedown (CRB p.195): COOL + Reputation + d10 vs same.
 
-    Ties favor the opponent (defender). No state ops — purely social contest.
+    RAW outcomes:
+    - Tie: stalemate — both sides are unsure, nothing happens.
+    - Winner/Loser: loser must back down OR take -2 to all actions vs the
+      winner until they defeat the winner once.
+
+    Returns *tie*, *winner*, *loser*, and *penalty_condition* fields so the
+    caller (Events agent) can decide how the loser reacts.
     """
     initiator_die = _roll_check_die()
     opponent_die = _roll_check_die()
 
     initiator_modifiers = []
-    initiator_total = initiator_die["total"] + initiator_cool + initiator_concentration + initiator_rep
+    initiator_total = initiator_die["total"] + initiator_cool + initiator_rep
 
     if seriously_wounded_initiator:
         initiator_total -= 2
@@ -689,37 +693,52 @@ def resolve_facedown(
         initiator_modifiers.append(("RS", clamped_rel))
 
     opponent_modifiers = []
-    opponent_total = opponent_die["total"] + opponent_cool + opponent_concentration + opponent_rep
+    opponent_total = opponent_die["total"] + opponent_cool + opponent_rep
 
     if seriously_wounded_opponent:
         opponent_total -= 2
         opponent_modifiers.append(("Wounded", -2))
 
-    # Ties favor opponent (defender)
-    success = initiator_total > opponent_total
     margin = initiator_total - opponent_total
+    is_tie = initiator_total == opponent_total
+
+    # RAW: tie → stalemate (no winner/loser); otherwise higher total wins
+    if is_tie:
+        success = None
+        winner = None
+        loser = None
+        penalty_condition = None
+    else:
+        success = initiator_total > opponent_total
+        init_name_r = character or "Initiator"
+        opp_name_r = target or "Opponent"
+        winner = init_name_r if success else opp_name_r
+        loser = opp_name_r if success else init_name_r
+        penalty_condition = f"Facedown: -2 vs {winner}"
 
     # Format
     init_name = character or "Initiator"
     opp_name = target or "Opponent"
 
     parts = [f"Facedown:"]
-    parts.append(f"{init_name} {_format_die(initiator_die)} +COOL {initiator_cool} +Conc {initiator_concentration} +Rep {initiator_rep}")
+    parts.append(f"{init_name} {_format_die(initiator_die)} +COOL {initiator_cool} +Rep {initiator_rep}")
     for label, val in initiator_modifiers:
         parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
     parts.append(f"= {initiator_total}")
-    parts.append(f"vs {opp_name} {_format_die(opponent_die)} +COOL {opponent_cool} +Conc {opponent_concentration} +Rep {opponent_rep}")
+    parts.append(f"vs {opp_name} {_format_die(opponent_die)} +COOL {opponent_cool} +Rep {opponent_rep}")
     for label, val in opponent_modifiers:
         parts.append(f"+{label} {val}" if val > 0 else f"{label} {val}")
     parts.append(f"= {opponent_total}")
 
-    if success:
-        parts.append(f"✓ — {opp_name} backs down (margin {margin})")
+    if is_tie:
+        parts.append("— Stalemate — both sides are unsure, nothing happens")
+    elif success:
+        parts.append(f"✓ — {opp_name} must back down or take -2 to all actions vs {init_name} until defeated")
     else:
-        parts.append(f"✗ — {init_name} fails to intimidate (margin {margin})")
+        parts.append(f"✗ — {init_name} must back down or take -2 to all actions vs {opp_name} until defeated")
 
     formatted = " ".join(parts)
-    on_outcome = on_success if success else on_failure
+    on_outcome = (on_success if success else on_failure) if success is not None else ""
 
     return {
         "initiator_die": initiator_die,
@@ -727,6 +746,10 @@ def resolve_facedown(
         "initiator_total": initiator_total,
         "opponent_total": opponent_total,
         "success": success,
+        "tie": is_tie,
+        "winner": winner,
+        "loser": loser,
+        "penalty_condition": penalty_condition,
         "margin": margin,
         "state_ops": [],
         "formatted": formatted,
@@ -3528,10 +3551,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         )
                 result = resolve_facedown(
                     initiator_cool=action.get("initiator_cool", 0),
-                    initiator_concentration=action.get("initiator_concentration", 0),
                     initiator_rep=action.get("initiator_rep", 0),
                     opponent_cool=action.get("opponent_cool", 0),
-                    opponent_concentration=action.get("opponent_concentration", 0),
                     opponent_rep=action.get("opponent_rep", 0),
                     character=actor_name,
                     target=_fd_target,
@@ -3625,7 +3646,7 @@ RESOLVE_MECHANICS_TOOL = {
         "- hustle: {type, character, role (e.g. 'Fixer'/'Solo'), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.\n"
         "- find_item: {type, character, rank (Fixer Operator rank or Streetwise skill), price_category (Cheap/Everyday/Costly/Premium/Expensive/Very Expensive/Luxury/Super Luxury), item_name, seriously_wounded?, luck_spent?, on_success?, on_failure?} — Night market availability: d10 + rank vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.\n"
         "- haggle: {type, character, buyer_cool, buyer_trading, vendor_cool, vendor_trading, item_name, item_price, base_discount? (default 10, range 5-50), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.\n"
-        "- facedown: {type, character, target (opponent name), initiator_cool, initiator_concentration, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_concentration, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (§11): COOL + Concentration + d10 + Rep vs same. For intimidation standoffs and staredowns. Ties favor opponent. Rep is optional (0 is valid).\n"
+        "- facedown: {type, character, target (opponent name), initiator_cool, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Reputation + d10 vs same. Tie = stalemate (nothing happens). Winner/loser: loser must back down or take -2 to all actions vs winner until defeated. Result includes tie, winner, loser, penalty_condition fields.\n"
         "- suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt."
     ),
     "input_schema": {

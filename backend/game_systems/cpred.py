@@ -572,15 +572,22 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - haggle: Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.
 - Typical flow: find_item → (if found) haggle to negotiate price. Haggle always deducts eurobucks.
 
-### Facedown (§11):
-When a character tries to intimidate, stare down, or threaten someone into backing off, use the `facedown` action type in resolve_mechanics. This is the CRB §11 Facedown — an opposed COOL + Concentration contest where Reputation provides an optional edge.
-- Call resolve_mechanics with: {type: "facedown", character: "<initiator>", target: "<opponent>", initiator_cool, initiator_concentration, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_concentration, opponent_rep (0 if none), on_success: "<what happens if they back down>", on_failure: "<what happens if they don't>"}
-- Backend resolves: both sides roll d10 + COOL + Concentration + Rep. Ties favor the opponent. Returns formatted roll string and success/failure.
-- Rep is a bonus, not a requirement — a zero-rep edgerunner with high COOL and Concentration can absolutely win a Facedown. Rep just tips the scales for those who have it.
+### Facedown (CRB p.195):
+When a character tries to intimidate, stare down, or threaten someone into backing off, use the `facedown` action type in resolve_mechanics. This is the CRB Facedown — an opposed COOL + Reputation + d10 contest.
+- Call resolve_mechanics with: {type: "facedown", character: "<initiator>", target: "<opponent>", initiator_cool, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_rep (0 if none), on_success: "<what happens if opponent loses>", on_failure: "<what happens if initiator loses>"}
+- Backend resolves: both sides roll d10 + COOL + Reputation. Returns formatted roll string, success/tie/failure, winner, loser, and penalty_condition.
+- RAW outcomes:
+  - Tie: Stalemate — both sides are unsure, nothing happens. success=None.
+  - Winner/Loser: The loser must either back down OR take -2 to all actions vs the winner until they defeat the winner once.
+- Rep is a bonus, not a requirement — a zero-rep edgerunner with high COOL can absolutely win a Facedown. Rep just tips the scales for those who have it.
 - When to use: Intimidation standoffs, staredowns, threats to make someone back off, "you don't want to do this" moments. Any direct confrontation where one side tries to cow the other through force of will.
 - When NOT to use: Persuasion or negotiation (use skill_check), combat actions (use attack types), contests of non-intimidation skills (use opposed_check).
 - Rep lookup: Read Rep from character sheets. For NPCs without explicit Rep, use 0 or estimate from context (street thug ~1-2, gang lieutenant ~3-4, known fixer ~4-5, corpo exec ~2-3, legend ~8+).
-- Narrative: On success, the opponent backs down, flinches, or yields. On failure, they hold firm and the initiator must escalate or retreat.
+- NPC loser decision: When writing on_success (opponent loses) or on_failure (initiator loses), decide whether the losing NPC backs down or takes the -2 penalty based on personality and stakes:
+  - NPCs with high stakes, pride, or aggression should refuse to back down and take the penalty — mention this in the on_outcome text.
+  - NPCs who are outmatched, cautious, or rational should back down.
+  - If the loser takes the penalty, include conditions_add: ["Facedown: -2 vs <winner>"] in character_states for that NPC.
+  - The -2 penalty persists until the loser defeats the winner once — remove via conditions_remove when that happens.
 
 ### Dice Mechanics (relationship modifiers):
 - Relationship bonuses are auto-applied by the backend when your action includes a `target`. For skill_check, also include `check_context` (e.g. "social", "persuasion", "perception"). Combat actions (ranged_attack, melee_attack, autofire) always use "combat" context automatically.
@@ -711,7 +718,7 @@ Action types for resolve_mechanics:
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
 - hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.
-- facedown: {type, character, target, initiator_cool, initiator_concentration, initiator_rep, opponent_cool, opponent_concentration, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Reputation Facedown (§11): COOL + Concentration + d10 + Rep vs same. For intimidation standoffs. Ties favor opponent.
+- facedown: {type, character, target, initiator_cool, initiator_rep, opponent_cool, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Reputation + d10 vs same. Tie = stalemate. Loser must back down or take -2 vs winner until defeated. Result: tie, winner, loser, penalty_condition.
 - suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed. Ties favor defender. Consumes 10 rounds. No damage.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type.

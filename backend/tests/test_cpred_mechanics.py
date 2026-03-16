@@ -5379,49 +5379,62 @@ class TestResolveFacedown(unittest.TestCase):
         # Initiator rolls 8, opponent rolls 3
         with patch(self.MOCK, side_effect=[8, 3]):
             r = resolve_facedown(
-                initiator_cool=6, initiator_concentration=4, initiator_rep=3,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=1,
+                initiator_cool=6, initiator_rep=3,
+                opponent_cool=5, opponent_rep=1,
                 character="V", target="Thug",
             )
         self.assertTrue(r["success"])
-        self.assertEqual(r["initiator_total"], 21)  # 8 + 6 + 4 + 3
-        self.assertEqual(r["opponent_total"], 12)    # 3 + 5 + 3 + 1
-        self.assertEqual(r["margin"], 9)
+        self.assertFalse(r["tie"])
+        self.assertEqual(r["initiator_total"], 17)  # 8 + 6 + 3
+        self.assertEqual(r["opponent_total"], 9)     # 3 + 5 + 1
+        self.assertEqual(r["margin"], 8)
+        self.assertEqual(r["winner"], "V")
+        self.assertEqual(r["loser"], "Thug")
+        self.assertEqual(r["penalty_condition"], "Facedown: -2 vs V")
         self.assertIn("✓", r["formatted"])
-        self.assertIn("backs down", r["formatted"])
+        self.assertIn("must back down or take -2", r["formatted"])
 
     def test_facedown_opponent_wins(self):
         """Opponent higher total → failure."""
         # Initiator rolls 3, opponent rolls 8
         with patch(self.MOCK, side_effect=[3, 8]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=6, opponent_concentration=4, opponent_rep=2,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=6, opponent_rep=2,
                 character="V", target="Boss",
             )
         self.assertFalse(r["success"])
+        self.assertFalse(r["tie"])
         self.assertTrue(r["margin"] < 0)
+        self.assertEqual(r["winner"], "Boss")
+        self.assertEqual(r["loser"], "V")
+        self.assertEqual(r["penalty_condition"], "Facedown: -2 vs Boss")
         self.assertIn("✗", r["formatted"])
 
-    def test_facedown_tie_favors_opponent(self):
-        """Equal totals → success = False (ties favor opponent)."""
+    def test_facedown_tie_stalemate(self):
+        """Equal totals → tie, success=None, stalemate."""
         with patch(self.MOCK, side_effect=[5, 5]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=2,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=2,
+                initiator_cool=5, initiator_rep=2,
+                opponent_cool=5, opponent_rep=2,
                 character="V", target="Rival",
             )
-        self.assertFalse(r["success"])
+        self.assertIsNone(r["success"])
+        self.assertTrue(r["tie"])
+        self.assertIsNone(r["winner"])
+        self.assertIsNone(r["loser"])
+        self.assertIsNone(r["penalty_condition"])
         self.assertEqual(r["margin"], 0)
         self.assertEqual(r["initiator_total"], r["opponent_total"])
+        self.assertIn("Stalemate", r["formatted"])
 
     def test_facedown_rep_matters(self):
         """High rep swings the outcome for otherwise equal stats."""
-        # Both roll 5, same COOL/Conc, but initiator has rep 5 vs opponent rep 0
+        # Both roll 5, same COOL, but initiator has rep 5 vs opponent rep 0
         with patch(self.MOCK, side_effect=[5, 5]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=5,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=5,
+                opponent_cool=5, opponent_rep=0,
                 character="Legend", target="Nobody",
             )
         self.assertTrue(r["success"])
@@ -5431,14 +5444,14 @@ class TestResolveFacedown(unittest.TestCase):
         """Seriously wounded applies -2 to initiator."""
         with patch(self.MOCK, side_effect=[8, 5]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
                 seriously_wounded_initiator=True,
                 character="V", target="Guard",
             )
-        # initiator: 8 + 5 + 3 + 0 - 2 = 14; opponent: 5 + 5 + 3 + 0 = 13
-        self.assertEqual(r["initiator_total"], 14)
-        self.assertEqual(r["opponent_total"], 13)
+        # initiator: 8 + 5 + 0 - 2 = 11; opponent: 5 + 5 + 0 = 10
+        self.assertEqual(r["initiator_total"], 11)
+        self.assertEqual(r["opponent_total"], 10)
         self.assertTrue(r["success"])
         self.assertIn("Wounded", r["formatted"])
 
@@ -5446,30 +5459,31 @@ class TestResolveFacedown(unittest.TestCase):
         """Seriously wounded applies -2 to opponent."""
         with patch(self.MOCK, side_effect=[5, 8]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
                 seriously_wounded_opponent=True,
                 character="V", target="Guard",
             )
-        # initiator: 5 + 5 + 3 = 13; opponent: 8 + 5 + 3 - 2 = 14
-        self.assertEqual(r["initiator_total"], 13)
-        self.assertEqual(r["opponent_total"], 14)
+        # initiator: 5 + 5 + 0 = 10; opponent: 8 + 5 + 0 - 2 = 11
+        self.assertEqual(r["initiator_total"], 10)
+        self.assertEqual(r["opponent_total"], 11)
         self.assertFalse(r["success"])
 
     def test_facedown_luck(self):
         """Luck adds to initiator total."""
         with patch(self.MOCK, side_effect=[4, 7]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
                 luck_spent=3,
                 character="V", target="Thug",
             )
-        # initiator: 4 + 5 + 3 + 0 + 3(luck) = 15; opponent: 7 + 5 + 3 + 0 = 15
-        self.assertEqual(r["initiator_total"], 15)
-        self.assertEqual(r["opponent_total"], 15)
-        # Tie → opponent wins
-        self.assertFalse(r["success"])
+        # initiator: 4 + 5 + 0 + 3(luck) = 12; opponent: 7 + 5 + 0 = 12
+        self.assertEqual(r["initiator_total"], 12)
+        self.assertEqual(r["opponent_total"], 12)
+        # Tie → stalemate
+        self.assertIsNone(r["success"])
+        self.assertTrue(r["tie"])
         self.assertIn("Luck", r["formatted"])
 
     def test_facedown_relationship_bonus(self):
@@ -5480,23 +5494,22 @@ class TestResolveFacedown(unittest.TestCase):
                 "character": "V",
                 "target": "Judy",
                 "initiator_cool": 5,
-                "initiator_concentration": 3,
                 "initiator_rep": 0,
                 "opponent_cool": 5,
-                "opponent_concentration": 3,
                 "opponent_rep": 0,
             }], relationships={"Judy": {"rs": 50, "roms": 50}})
         result = batch["results"][0]
         self.assertTrue(result["success"])
-        self.assertEqual(result["initiator_total"], 15)
+        # 5(die) + 5(COOL) + 0(Rep) + 2(RS from rs=50) = 12
+        self.assertEqual(result["initiator_total"], 12)
         self.assertIn("RS", result["formatted"])
 
     def test_facedown_no_state_ops(self):
         """Facedown emits no state_ops (purely social)."""
         with patch(self.MOCK, side_effect=[5, 5]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
             )
         self.assertEqual(r["state_ops"], [])
 
@@ -5504,19 +5517,28 @@ class TestResolveFacedown(unittest.TestCase):
         """on_success/on_failure correctly selected."""
         with patch(self.MOCK, side_effect=[9, 2]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
                 on_success="They back down", on_failure="They stand firm",
             )
         self.assertEqual(r["on_outcome"], "They back down")
 
         with patch(self.MOCK, side_effect=[2, 9]):
             r = resolve_facedown(
-                initiator_cool=5, initiator_concentration=3, initiator_rep=0,
-                opponent_cool=5, opponent_concentration=3, opponent_rep=0,
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
                 on_success="They back down", on_failure="They stand firm",
             )
         self.assertEqual(r["on_outcome"], "They stand firm")
+
+        # Tie → empty on_outcome
+        with patch(self.MOCK, side_effect=[5, 5]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_rep=0,
+                opponent_cool=5, opponent_rep=0,
+                on_success="They back down", on_failure="They stand firm",
+            )
+        self.assertEqual(r["on_outcome"], "")
 
     def test_facedown_via_resolve_actions(self):
         """Dispatch through batch processor works."""
@@ -5526,10 +5548,8 @@ class TestResolveFacedown(unittest.TestCase):
                 "character": "V",
                 "target": "Thug",
                 "initiator_cool": 6,
-                "initiator_concentration": 4,
                 "initiator_rep": 3,
                 "opponent_cool": 5,
-                "opponent_concentration": 3,
                 "opponent_rep": 1,
                 "on_success": "Thug backs down",
                 "on_failure": "Thug stands firm",
@@ -5549,16 +5569,54 @@ class TestResolveFacedown(unittest.TestCase):
                 "character": "V",
                 "target": "Boss",
                 "initiator_cool": 5,
-                "initiator_concentration": 3,
                 "initiator_rep": 0,
                 "opponent_cool": 5,
-                "opponent_concentration": 3,
                 "opponent_rep": 0,
                 "luck_spent": 2,
             }])
         luck_ops = [o for o in batch["state_ops"] if o.get("op") == "luck"]
         self.assertEqual(len(luck_ops), 1)
         self.assertEqual(luck_ops[0]["change"], -2)
+
+    def test_facedown_penalty_condition(self):
+        """Winner/loser result includes correct penalty_condition string."""
+        # Initiator wins
+        with patch(self.MOCK, side_effect=[9, 3]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_rep=2,
+                opponent_cool=4, opponent_rep=0,
+                character="V", target="Thug",
+            )
+        self.assertEqual(r["penalty_condition"], "Facedown: -2 vs V")
+        self.assertEqual(r["winner"], "V")
+        self.assertEqual(r["loser"], "Thug")
+
+        # Opponent wins
+        with patch(self.MOCK, side_effect=[2, 8]):
+            r = resolve_facedown(
+                initiator_cool=4, initiator_rep=0,
+                opponent_cool=6, opponent_rep=3,
+                character="V", target="Boss",
+            )
+        self.assertEqual(r["penalty_condition"], "Facedown: -2 vs Boss")
+        self.assertEqual(r["winner"], "Boss")
+        self.assertEqual(r["loser"], "V")
+
+    def test_facedown_tie_all_fields_none(self):
+        """Tie returns success=None, tie=True, winner/loser/penalty_condition=None."""
+        with patch(self.MOCK, side_effect=[7, 7]):
+            r = resolve_facedown(
+                initiator_cool=5, initiator_rep=1,
+                opponent_cool=5, opponent_rep=1,
+                character="V", target="Rival",
+            )
+        self.assertIsNone(r["success"])
+        self.assertTrue(r["tie"])
+        self.assertIsNone(r["winner"])
+        self.assertIsNone(r["loser"])
+        self.assertIsNone(r["penalty_condition"])
+        self.assertEqual(r["on_outcome"], "")
+        self.assertIn("Stalemate", r["formatted"])
 
 
 class TestResolveMechanicsPresenceHelpers(unittest.TestCase):
