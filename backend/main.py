@@ -1868,6 +1868,18 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         proj_meta = load_project_metadata(username, project)
         chat_game_system = proj_meta.get("game_system")
 
+    # Auto-recover pipeline_state if it was wiped (e.g., by deleting a mode message)
+    if data.get("pipeline_state") is None and branch_messages:
+        for msg in reversed(branch_messages):
+            if msg.get("role") == "assistant" and "pipeline_state_after" in msg:
+                recovered = msg["pipeline_state_after"]
+                if isinstance(recovered, str):
+                    recovered = json.loads(recovered)
+                data["pipeline_state"] = copy.deepcopy(recovered)
+                logger.info(f"Auto-recovered pipeline_state for {username}/{chat_name} from message {msg.get('id', '?')}")
+                save_chat(username, chat_name, data, project)
+                break
+
     # Only return hack_state if the hack is still active
     active_hack_state = data.get("hack_state")
     if active_hack_state and not active_hack_state.get("active"):
@@ -8362,24 +8374,28 @@ async def delete_message_pair(username: str, chat_name: str, message_id: str, pr
     # a_prev_copy has no children — this branch ends here
     data["current_leaf_id"] = a_prev_copy_id
 
-    # Restore pipeline_state from the copied assistant message
-    if "pipeline_state_after" in a_prev_copy:
-        restored = a_prev_copy["pipeline_state_after"]
-        if isinstance(restored, str):
-            restored = json.loads(restored)
-        data["pipeline_state"] = copy.deepcopy(restored)
-    else:
-        data["pipeline_state"] = None
+    # Restore pipeline_state from the nearest ancestor with a snapshot
+    # (sex/hack/combat mode messages lack pipeline_state_after, so walk back)
+    branch_path = get_path_to_root(all_messages, a_prev_copy_id)
+    data["pipeline_state"] = None
+    for msg in reversed(branch_path):
+        if msg.get("role") == "assistant" and "pipeline_state_after" in msg:
+            restored = msg["pipeline_state_after"]
+            if isinstance(restored, str):
+                restored = json.loads(restored)
+            data["pipeline_state"] = copy.deepcopy(restored)
+            break
 
-    # Restore hack_state from the copied assistant message
-    if "hack_state_after" in a_prev_copy:
-        hs = a_prev_copy["hack_state_after"]
-        if isinstance(hs, dict) and (hs.get("active") or hs.get("narrative_summary")):
-            data["hack_state"] = copy.deepcopy(hs)
-        else:
-            data["hack_state"] = None
-    else:
-        data["hack_state"] = None
+    # Restore hack_state from the nearest ancestor with a snapshot
+    data["hack_state"] = None
+    for msg in reversed(branch_path):
+        if msg.get("role") != "assistant":
+            continue
+        if "hack_state_after" in msg:
+            hs = msg["hack_state_after"]
+            if isinstance(hs, dict) and (hs.get("active") or hs.get("narrative_summary")):
+                data["hack_state"] = copy.deepcopy(hs)
+            break
 
     data["_trim_anchor_id"] = None
 
