@@ -3496,6 +3496,61 @@ SEX_MODE_CONTRACT = """You are narrating an intimate scene in an adult TTRPG cam
 """
 
 
+def _generate_sex_scene_summary(
+    api_key: str,
+    scene_messages: list[dict],
+    npc_names: list[str],
+    handoff_summary: str | None,
+) -> str | None:
+    """Generate a multi-paragraph summary of a sex scene for context collapse.
+
+    Called when the user manually exits sex mode via /sex so that
+    collapse_sex_messages() can produce an informative FADE TO BLACK block
+    instead of a bare one.
+    """
+    try:
+        import anthropic
+
+        system_prompt = (
+            "You are a campaign record-keeper for an adult TTRPG. "
+            "Summarize the intimate scene below in 2-4 paragraphs for continuity purposes. "
+            "Cover:\n"
+            "- What happened during the scene (key moments, progression)\n"
+            "- Emotional arc and relationship developments\n"
+            "- Physical/environmental details at scene's end\n"
+            "- How the scene concluded — especially the final exchange, "
+            "since the next narrative turn will respond to it\n\n"
+            "Write in past tense, third person. Be specific about character names "
+            "and actions. This summary replaces the full scene in the AI's context, "
+            "so it must contain enough detail for the narrative to continue seamlessly."
+        )
+
+        # Build user message with handoff context + full scene
+        parts = []
+        if handoff_summary:
+            parts.append(f"Scene context (how the scene began):\n{handoff_summary}")
+        if npc_names:
+            parts.append(f"NPC participants: {', '.join(npc_names)}")
+        parts.append("--- Full scene transcript ---")
+        for msg in scene_messages:
+            role_label = "Player" if msg["role"] == "user" else "Narrator"
+            parts.append(f"{role_label}: {msg['content']}")
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": "\n\n".join(parts)}],
+        )
+        summary = response.content[0].text.strip()
+        logger.info(f"Sex scene summary generated: {len(summary)} chars")
+        return summary
+    except Exception:
+        logger.exception("Failed to generate sex scene summary")
+        return None
+
+
 def _extract_character_profiles(uploads_dir: str, participants: list[str]) -> str:
     """Extract per-character profile sections from project files for scene participants.
 
@@ -9674,12 +9729,47 @@ def end_sex_scene(request: EndSexSceneRequest):
     if not sex_scene:
         raise HTTPException(status_code=400, detail="No active sex scene")
 
+    # --- Generate scene summary before clearing state ---
+    summary = None
+    sex_start_id = sex_scene.get("start_message_id") if isinstance(sex_scene, dict) else None
+    handoff_summary = sex_scene.get("summary") if isinstance(sex_scene, dict) else None
+    npc_names = sex_scene.get("npcs", []) if isinstance(sex_scene, dict) else []
+
+    if sex_start_id:
+        # Use branch path (not flat message list) to respect branching saves
+        current_leaf = data.get("current_leaf_id")
+        branch = get_path_to_root(data.get("messages", []), current_leaf) if current_leaf else data.get("messages", [])
+
+        # Gather all sex mode messages from start_message_id onward
+        scene_messages = []
+        found_start = False
+        for msg in branch:
+            if not found_start and msg.get("id") == sex_start_id:
+                found_start = True
+            if found_start and msg.get("sex_mode"):
+                scene_messages.append({"role": msg["role"], "content": msg["content"]})
+
+        if scene_messages:
+            api_key = get_api_key(username, "anthropic")
+            if api_key:
+                summary = _generate_sex_scene_summary(
+                    api_key, scene_messages, npc_names, handoff_summary
+                )
+
+        # Stamp summary on the last assistant sex_mode message in the branch
+        if summary:
+            for msg in reversed(branch):
+                if msg.get("sex_mode") and msg.get("role") == "assistant":
+                    msg["sex_scene_summary"] = summary
+                    break
+
+    # --- Restore model and clear sex scene ---
     restore_model = sex_scene.get("original_model") if isinstance(sex_scene, dict) else None
     if restore_model:
         data["model"] = restore_model
     ps["sex_scene"] = None
     save_chat(username, request.chat_name, data, request.project)
-    return {"status": "ok", "model": data.get("model")}
+    return {"status": "ok", "model": data.get("model"), "summary_generated": bool(summary)}
 
 
 @app.get("/api/character-sheet/{username}/{project}")

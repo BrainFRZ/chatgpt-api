@@ -438,6 +438,7 @@ export function useMessaging(deps: UseMessagingDeps) {
     const trimmedMsg = newMessage.trim();
     if (trimmedMsg.toLowerCase() === '/sex' && deps.currentProject) {
       setNewMessage('');
+      deps.setIsLoading(prev => new Set(prev).add(ctx.chat!));
       try {
         const response = await fetch('/api/end-sex-scene', {
           method: 'POST',
@@ -461,6 +462,8 @@ export function useMessaging(deps: UseMessagingDeps) {
         }
       } catch (err) {
         deps.setError('Failed to end sex scene');
+      } finally {
+        deps.setIsLoading(prev => { const next = new Set(prev); next.delete(ctx.chat!); return next; });
       }
       return;
     }
