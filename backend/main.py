@@ -9741,7 +9741,7 @@ def end_sex_scene(request: EndSexSceneRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    ps = data.get("pipeline_state", {})
+    ps = data.get("pipeline_state") or {}
     sex_scene = ps.get("sex_scene")
     if not sex_scene:
         raise HTTPException(status_code=400, detail="No active sex scene")
