@@ -2666,6 +2666,7 @@ function App() {
                 handleDeleteChat={handleDeleteChat}
                 creatingChat={creatingChat}
                 saveNewChat={saveNewChat}
+                isMobile={isMobile}
               />
             ) : (
               <div style={styles.noChat}>
@@ -2737,6 +2738,7 @@ function App() {
               handleDeleteChat={handleDeleteChat}
               creatingChat={creatingChat}
               saveNewChat={saveNewChat}
+              isMobile={isMobile}
             />
           )}
         </div>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { styles } from '../styles';
 import { ChatCardInfo, ModelInfo, ProjectFileInfo, formatTimestamp } from '../types';
 
@@ -71,6 +71,7 @@ interface ProjectLandingProps {
   handleDeleteChat: (name: string) => void;
   creatingChat: boolean;
   saveNewChat: () => void;
+  isMobile?: boolean;
 }
 
 export default function ProjectLanding(props: ProjectLandingProps) {
@@ -100,7 +101,10 @@ export default function ProjectLanding(props: ProjectLandingProps) {
     chats, editingChat, editingName, setEditingName,
     startRenameChat, saveRename, cancelRename,
     handleDeleteChat, creatingChat, saveNewChat,
+    isMobile,
   } = props;
+
+  const [configOpen, setConfigOpen] = useState(false);
 
   if (viewMode === 'chat' && currentProject) {
     // Project landing page
@@ -215,8 +219,89 @@ export default function ProjectLanding(props: ProjectLandingProps) {
                     </div>
                   </div>
 
+                  {/* Mobile toggle button for config */}
+                  {isMobile && !configOpen && (
+                    <button
+                      onClick={() => setConfigOpen(true)}
+                      style={{
+                        position: 'fixed',
+                        bottom: 16,
+                        right: 16,
+                        zIndex: 1001,
+                        width: 48,
+                        height: 48,
+                        borderRadius: '50%',
+                        backgroundColor: '#4a4a8a',
+                        color: '#fff',
+                        border: 'none',
+                        fontSize: '20px',
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      title="Project settings"
+                    >
+                      ⚙
+                    </button>
+                  )}
+
+                  {/* Overlay for mobile config panel */}
+                  {isMobile && configOpen && (
+                    <div
+                      onClick={() => setConfigOpen(false)}
+                      style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        backgroundColor: 'rgba(0,0,0,0.5)',
+                        zIndex: 999,
+                      }}
+                    />
+                  )}
+
                   {/* Right column: Model + Instructions + Files */}
-                  <div style={styles.projectConfigColumn}>
+                  <div style={{
+                    ...styles.projectConfigColumn,
+                    ...(isMobile ? {
+                      position: 'fixed' as const,
+                      top: 0,
+                      right: 0,
+                      bottom: 0,
+                      width: '85vw',
+                      maxWidth: '380px',
+                      zIndex: 1000,
+                      transform: configOpen ? 'translateX(0)' : 'translateX(100%)',
+                      transition: 'transform 0.3s ease',
+                      boxShadow: configOpen ? '-4px 0 16px rgba(0,0,0,0.3)' : 'none',
+                    } : {}),
+                  }}>
+                    {/* Mobile close button */}
+                    {isMobile && (
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '12px 16px',
+                        borderBottom: '1px solid #333',
+                      }}>
+                        <h3 style={{ margin: 0, color: '#e0e0e0', fontSize: '1rem' }}>Settings</h3>
+                        <button
+                          onClick={() => setConfigOpen(false)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#aaa',
+                            fontSize: '24px',
+                            cursor: 'pointer',
+                            padding: '0 4px',
+                          }}
+                        >×</button>
+                      </div>
+                    )}
                     {/* Default Model section */}
                     <div style={styles.projectSection}>
                       <div style={styles.projectSectionHeader}>
