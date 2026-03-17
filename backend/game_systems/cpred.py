@@ -386,34 +386,36 @@ ROUTING RULES:
 - Route to "output" for pure OOC questions, IP awards, or IP spending
 
 RESOLUTION TYPES (for beats):
-Events decides WHAT rolls happen and sets DVs. The backend resolves the math. Set "resolution" to null for narrative-only beats (dialogue, movement, scene description). Set "resolution" to a typed object for any beat requiring mechanical adjudication.
+Events decides WHAT rolls happen and chooses difficulty tiers. The backend resolves the math. Set "resolution" to null for narrative-only beats (dialogue, movement, scene description). Set "resolution" to a typed object for any beat requiring mechanical adjudication.
 
-- skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "stat_value": <int>, "skill": "<Skill>", "skill_value": <int>, "dv": <int>, "seriously_wounded": <bool>, "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
-  Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation.
+Backend auto-lookup: For PCs in edgerunner state and NPCs in character_states, the backend resolves stat_value/skill_value/seriously_wounded from state using the stat/skill name fields. You only need to provide numeric overrides (stat_value, skill_value) for ad-hoc NPCs not tracked in any state.
 
-- opposed_check: {"type": "opposed_check", "character": "<name>", "attacker_stat": <int>, "attacker_skill": <int>, "defender_stat": <int>, "defender_skill": <int>, "attacker_label": "<stat name>", "defender_label": "<stat name>", "attacker_skill_label": "<skill name>", "defender_skill_label": "<skill name>", "seriously_wounded_attacker": <bool>, "seriously_wounded_defender": <bool>, "luck_spent": <0-N>, "target": "<NPC name for rel bonus>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative>", "on_failure": "<narrative>"}
-  Use for contested rolls where both sides roll d10+STAT+Skill: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Ties go to defender.
+- skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "skill": "<Skill>", "difficulty": "<simple|everyday|difficult|professional|heroic|incredible|legendary>", "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
+  Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation. Difficulty tiers: simple (DV 9), everyday (DV 13), difficult (DV 15), professional (DV 17), heroic (DV 21), incredible (DV 24), legendary (DV 29). For NPCs not in state, add stat_value/skill_value overrides.
 
-- ranged_attack: {"type": "ranged_attack", "character": "<attacker>", "stat_value": <REF>, "skill_value": <weapon skill>, "weapon_type": "<Pistol|SMG|Shotgun|Assault Rifle|Sniper Rifle|Bows & Crossbow|Grenade Launcher|Rocket Launcher>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-7>, "hit_location": "head|body", "is_ap": <bool>, "is_rubber": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "aimed_shot": "head|leg|held_item|null", "on_hit": "<narrative>", "on_miss": "<narrative>"}
-  Range brackets: 0=0-6m, 1=7-12m, 2=13-25m, 3=26-50m, 4=51-100m, 5=101-200m, 6=201-400m, 7=401-800m.
+- opposed_check: {"type": "opposed_check", "character": "<name>", "attacker_label": "<STAT name>", "attacker_skill_label": "<Skill name>", "defender_label": "<STAT name>", "defender_skill_label": "<Skill name>", "target": "<NPC name for rel bonus>", "seriously_wounded_attacker": <bool>?, "seriously_wounded_defender": <bool>?, "luck_spent": <0-N>, "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative>", "on_failure": "<narrative>"}
+  Use for contested rolls where both sides roll d10+STAT+Skill: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Ties go to defender. Backend resolves stat values from attacker_label/defender_label + attacker_skill_label/defender_skill_label names. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides.
 
-- melee_attack: {"type": "melee_attack", "character": "<attacker>", "attacker_stat": <DEX>, "attacker_skill": <weapon skill>, "defender_stat": <DEX>, "defender_skill": <Evasion>, "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "hit_location": "head|body", "seriously_wounded_attacker": <bool>, "seriously_wounded_defender": <bool>, "is_brawling": <bool>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
-  Opposed roll: attacker d10+DEX+skill vs defender d10+DEX+Evasion. Melee halves SP (round up). Brawling faces full SP.
+- ranged_attack: {"type": "ranged_attack", "character": "<attacker>", "stat": "<STAT e.g. REF>", "skill": "<Skill e.g. Handgun>", "weapon_type": "<Pistol|SMG|Shotgun|Assault Rifle|Sniper Rifle|Bows & Crossbow|Grenade Launcher|Rocket Launcher>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-7>, "hit_location": "head|body", "is_ap": <bool>, "is_rubber": <bool>, "luck_spent": <int>, "aimed_shot": "head|leg|held_item|null", "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Range brackets: 0=0-6m, 1=7-12m, 2=13-25m, 3=26-50m, 4=51-100m, 5=101-200m, 6=201-400m, 7=401-800m. Backend auto-resolves stat_value/skill_value/seriously_wounded from state. For NPCs not in state, add stat_value/skill_value overrides.
 
-- autofire: {"type": "autofire", "character": "<attacker>", "stat_value": <REF>, "skill_value": <Autofire skill>, "weapon_type": "<SMG|Assault Rifle>", "autofire_multiplier": <3|4>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-4>, "hit_location": "head|body", "is_ap": <bool>, "seriously_wounded": <bool>, "luck_spent": <int>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
-  Autofire multiplier: 3 for SMG, 4 for AR. Consumes 10 rounds. Damage = 2d6 × margin, capped by multiplier.
+- melee_attack: {"type": "melee_attack", "character": "<attacker>", "attacker_label": "<STAT e.g. DEX>", "attacker_skill_label": "<Skill e.g. Martial Arts>", "defender_label": "<STAT e.g. DEX>", "defender_skill_label": "<Skill e.g. Evasion>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "hit_location": "head|body", "is_brawling": <bool>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Opposed roll: attacker d10+DEX+skill vs defender d10+DEX+Evasion. Melee halves SP (round up). Brawling faces full SP. Backend auto-resolves stat values and seriously_wounded for both sides. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides.
 
-- suppressive_fire: {"type": "suppressive_fire", "character": "<attacker>", "attacker_ref": <REF>, "attacker_autofire": <Autofire skill>, "targets": [{"name": "<target>", "will": <WILL>, "concentration": <Concentration>, "seriously_wounded": <bool>}], "seriously_wounded_attacker": <bool>, "luck_spent": <int>, "weapon_name": "<weapon>", "on_success": "<narrative if any suppressed>", "on_failure": "<narrative if none suppressed>"}
-  Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt.
+- autofire: {"type": "autofire", "character": "<attacker>", "stat": "<STAT e.g. REF>", "skill": "<Skill e.g. Autofire>", "weapon_type": "<SMG|Assault Rifle>", "autofire_multiplier": <3|4>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-4>, "hit_location": "head|body", "is_ap": <bool>, "luck_spent": <int>, "on_hit": "<narrative>", "on_miss": "<narrative>"}
+  Autofire multiplier: 3 for SMG, 4 for AR. Consumes 10 rounds. Damage = 2d6 × margin, capped by multiplier. Backend auto-resolves stat_value/skill_value/seriously_wounded from state.
+
+- suppressive_fire: {"type": "suppressive_fire", "character": "<attacker>", "targets": [{"name": "<target>"}], "luck_spent": <int>, "weapon_name": "<weapon>", "on_success": "<narrative if any suppressed>", "on_failure": "<narrative if none suppressed>"}
+  Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt. Backend auto-resolves attacker_ref, attacker_autofire, seriously_wounded_attacker, and each target's will/concentration/seriously_wounded from state. For NPCs not in state, add numeric overrides (attacker_ref, attacker_autofire for attacker; will, concentration for targets).
 
 - death_save: {"type": "death_save", "character": "<name>", "body_stat": <BODY>}
   Roll d10 vs BODY. Natural 10 always fails. Backend auto-applies cumulative modifier and critical injury penalties.
 
-- initiative: {"type": "initiative", "character": "all", "combatants": [{"name": "<name>", "ref": <REF stat>}, ...]}
-  Roll d10+REF per combatant. Returns sorted initiative order.
+- initiative: {"type": "initiative", "character": "all", "combatants": [{"name": "<name>"}]}
+  Roll d10+REF per combatant. Returns sorted initiative order. Backend auto-resolves REF from state. For NPCs not in state, add "ref": <int> to each combatant entry.
 
-- hustle: {"type": "hustle", "character": "<name>", "role": "<Role name>", "role_ability_rank": <int>, "dv": <int>, "payout": <int eurobucks>, "seriously_wounded": <bool>, "luck_spent": <0-N>, "on_success": "<narrative>", "on_failure": "<narrative>"}
-  Downtime income roll: d10 + Role Ability Rank vs DV. Backend auto-emits eurobucks on success — do NOT also emit a eurobucks edgerunner_op (the resolver handles payout). On success, update character_states to reflect the new funds balance.
+- hustle: {"type": "hustle", "character": "<name>", "role": "<Role name>", "role_ability_rank": <int>, "dv": <int>, "payout": <int eurobucks>, "luck_spent": <0-N>, "on_success": "<narrative>", "on_failure": "<narrative>"}
+  Downtime income roll: d10 + Role Ability Rank vs DV. Backend auto-emits eurobucks on success — do NOT also emit a eurobucks edgerunner_op (the resolver handles payout). On success, update character_states to reflect the new funds balance. Backend auto-resolves seriously_wounded from state.
 
 CHARACTER CREATION:
 - Character creation is handled externally. If [CHARACTER STATES] and [EDGERUNNER STATE] are both empty and no character sheets are in the system prompt, route to "output" and inform the player that character sheets are required to begin the campaign.
@@ -428,7 +430,7 @@ IMPORTANT:
 - "edgerunner_ops": pre-roll ops only (bootstrap/set, eurobucks, equipment, luck_reset). Do NOT emit HP, armor, or critical injury ops — the resolver handles those.
 - "relationship_ops": RS/RomS/FR changes (most turns: empty array). Pre-roll only — do not emit for roll-dependent outcomes.
 - "ip_ops": running score updates (most turns: empty array), session-end awards, or IP spending
-- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. Include body (BODY stat) and endurance_base (BODY + Endurance skill level) — needed for automated expense consequence rolls. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if the specific unit has non-default bedrooms. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
+- Bootstrap: On first turn with empty [EDGERUNNER STATE], use "set" ops to initialize all edgerunners from character sheets. Include body (BODY stat), endurance_base (BODY + Endurance skill level), stats (all 10 stats as {"INT": N, "REF": N, "DEX": N, "TECH": N, "COOL": N, "WILL": N, "LUCK": N, "BODY": N, "EMP": N, "MOVE": N}), skills (all trained skills as {"Handgun": N, "Evasion": N, ...}), and rep (Reputation rank, 0 if none) — the backend uses these for automatic stat/skill resolution on all checks. When characters share housing, use housing_shared_with ops after setting the owner's housing. Set housing_bedrooms via set op if the specific unit has non-default bedrooms. When [RELATIONSHIP STATE] is empty, use relationship_ops "set" to initialize tracked NPCs and factions."""
 
 NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pipeline for Cyberpunk RED. You are the final stage.
 
@@ -574,7 +576,8 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 
 ### Facedown (CRB p.195):
 When a character tries to intimidate, stare down, or threaten someone into backing off, use the `facedown` action type in resolve_mechanics. This is the CRB Facedown — an opposed COOL + Reputation + d10 contest.
-- Call resolve_mechanics with: {type: "facedown", character: "<initiator>", target: "<opponent>", initiator_cool, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_rep (0 if none), on_success: "<what happens if opponent loses>", on_failure: "<what happens if initiator loses>"}
+- Call resolve_mechanics with: {type: "facedown", character: "<initiator>", target: "<opponent>", on_success: "<what happens if opponent loses>", on_failure: "<what happens if initiator loses>"}
+  Backend auto-resolves initiator_cool, initiator_rep, opponent_cool, opponent_rep, and seriously_wounded from state. For NPCs not in state, add numeric overrides (initiator_cool, initiator_rep, opponent_cool, opponent_rep).
 - Backend resolves: both sides roll d10 + COOL + Reputation. Returns formatted roll string, success/tie/failure, winner, loser, and penalty_condition.
 - RAW outcomes:
   - Tie: Stalemate — both sides are unsure, nothing happens. success=None.
@@ -706,20 +709,20 @@ Turn flow:
 
 When NO mechanical actions are needed (dialogue, scene description, OOC), skip `resolve_mechanics` and go directly to narrative + `report_state`.
 
-Action types for resolve_mechanics:
-- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
-- opposed_check: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, attacker_label (stat name e.g. "COOL"), defender_label (stat name e.g. "COOL"), attacker_skill_label (e.g. "Persuasion"), defender_skill_label (e.g. "Concentration"), seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target? (NPC name for rel bonus), check_context? (social/persuasion/combat/perception)} — for contested rolls: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Both sides roll d10+stat+skill; ties go to defender.
-- ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location (head/body), is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?}
-- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
-- autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?}
+Action types for resolve_mechanics (backend auto-resolves stat/skill values and seriously_wounded from edgerunner state for PCs; provide numeric overrides only for NPCs not in state):
+- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context? (social/persuasion/combat/perception)} — Difficulty tiers: simple=9, everyday=13, difficult=15, professional=17, heroic=21, incredible=24, legendary=29.
+- opposed_check: {type, character, attacker_label (STAT name e.g. "COOL"), attacker_skill_label (e.g. "Persuasion"), defender_label (STAT name e.g. "COOL"), defender_skill_label (e.g. "Concentration"), target? (NPC name), luck_spent?, check_context?} — contested rolls. Ties go to defender. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides.
+- ranged_attack: {type, character, stat (e.g. "REF"), skill (e.g. "Handgun"), weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, luck_spent?, aimed_shot?}
+- melee_attack: {type, character, attacker_label (e.g. "DEX"), attacker_skill_label (e.g. "Martial Arts"), defender_label (e.g. "DEX"), defender_skill_label (e.g. "Evasion"), damage_dice, rof, target, target_sp, hit_location, is_brawling?}
+- autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type (SMG/Assault Rifle), autofire_multiplier (3/4), target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?}
 - death_save: {type, character, body_stat}
-- initiative: {type, character: "all", combatants: [{name, ref}]}
+- initiative: {type, character: "all", combatants: [{name}]} — Backend auto-resolves REF. For NPCs not in state, add "ref": <int>.
 - program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
-- hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.
-- facedown: {type, character, target, initiator_cool, initiator_rep, opponent_cool, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Reputation + d10 vs same. Tie = stalemate. Loser must back down or take -2 vs winner until defeated. Result: tie, winner, loser, penalty_condition.
-- suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed. Ties favor defender. Consumes 10 rounds. No damage.
+- hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout, luck_spent?, on_success?, on_failure?} — Downtime income. Backend auto-resolves seriously_wounded.
+- facedown: {type, character, target, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Rep + d10 vs same. Backend auto-resolves initiator_cool/rep, opponent_cool/rep, and seriously_wounded from state. For NPCs not in state, add numeric overrides.
+- suppressive_fire: {type, character, targets: [{name}], luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174). Backend auto-resolves attacker REF/Autofire and target WILL/Concentration/wounded. For NPCs not in state, add numeric overrides.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type.
 Active effects shown in injection — narrate them, do NOT manually track them. Giant's forced Jack Out cascades all rezzed Black ICE effects — this can be lethal. KRASH Barrier = immune to forced Jack Out. When programs are DESTROYED, narrate dramatically. Fire extinguish → backend auto-sets nudity condition.
@@ -1325,14 +1328,14 @@ COMBAT FLOW (each exchange):
 IMPORTANT: Call resolve_mechanics ONCE per combatant turn, not batched.
 Narrate AFTER receiving dice results, never before.
 
-Action types:
-- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}
-- initiative: {type, character: "all", combatants: [{name, ref}], surprised?: [names]}
-- ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?, weapon_name?}
-- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
-- autofire: {type, character, stat_value, skill_value, weapon_type (SMG/Assault Rifle), autofire_multiplier (3 for SMG, 4 for AR), target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
-- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}
-- opposed_check: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, attacker_label, defender_label, attacker_skill_label, defender_skill_label, seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target?, check_context?} — contested rolls (e.g. Stealth vs Concentration mid-combat)
+Action types (backend auto-resolves stat/skill values and seriously_wounded from state; provide numeric overrides only for NPCs not in state):
+- ambush: {type, character, targets: [{name}]} — Backend auto-resolves DEX/Stealth and target INT/Concentration. For NPCs not in state, add stealth_stat, stealth_skill, perception_stat, perception_skill.
+- initiative: {type, character: "all", combatants: [{name}], surprised?: [names]} — Backend auto-resolves REF. For NPCs not in state, add "ref": <int>.
+- ranged_attack: {type, character, stat (e.g. "REF"), skill (e.g. "Handgun"), weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, luck_spent?, aimed_shot?, weapon_name?}
+- melee_attack: {type, character, attacker_label (e.g. "DEX"), attacker_skill_label (e.g. "Martial Arts"), defender_label (e.g. "DEX"), defender_skill_label (e.g. "Evasion"), damage_dice, rof, target, target_sp, hit_location, is_brawling?}
+- autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type (SMG/Assault Rifle), autofire_multiplier (3/4), target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?, weapon_name?}
+- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context?}
+- opposed_check: {type, character, attacker_label (STAT name), attacker_skill_label (Skill name), defender_label (STAT name), defender_skill_label (Skill name), target?, luck_spent?, check_context?} — contested rolls. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill.
 - death_save: {type, character, body_stat}
 
 ROLL FORMAT (from resolve_mechanics results):
@@ -1989,13 +1992,13 @@ NPC STAT GENERATION:
 | Mini-Boss   | 14–16   | 35–45 | 11–13    | Experienced solo, cyberpsycho, elite |
 | Boss        | 16–18   | 45–60 | 13–18    | Borg, veteran solo, event boss       |
 
-ACTION TYPES for the "actions" array:
-- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}
-- initiative: {type, character: "all", combatants: [{name, ref}], surprised?: [names]}
-- ranged_attack: {type, character, stat_value, skill_value, weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot?, weapon_name?}
-- melee_attack: {type, character, attacker_stat, attacker_skill, defender_stat, defender_skill, damage_dice, rof, target, target_sp, hit_location, seriously_wounded_attacker?, seriously_wounded_defender?, is_brawling?}
-- autofire: {type, character, stat_value, skill_value, weapon_type, autofire_multiplier, target, target_sp, range_bracket (0-4), hit_location, is_ap?, seriously_wounded?, luck_spent?, weapon_name?}
-- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?}
+ACTION TYPES for the "actions" array (backend auto-resolves stat/skill values and seriously_wounded from state; provide numeric overrides only for NPCs not in state):
+- ambush: {type, character, targets: [{name}]} — Backend auto-resolves stealth_stat (DEX), stealth_skill (Stealth), and each target's perception_stat (INT), perception_skill (Concentration). For NPCs not in state, add numeric overrides.
+- initiative: {type, character: "all", combatants: [{name}], surprised?: [names]} — Backend auto-resolves REF. For NPCs not in state, add "ref": <int>.
+- ranged_attack: {type, character, stat (e.g. "REF"), skill (e.g. "Handgun"), weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, luck_spent?, aimed_shot?, weapon_name?}
+- melee_attack: {type, character, attacker_label (e.g. "DEX"), attacker_skill_label (e.g. "Martial Arts"), defender_label (e.g. "DEX"), defender_skill_label (e.g. "Evasion"), damage_dice, rof, target, target_sp, hit_location, is_brawling?}
+- autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type, autofire_multiplier, target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?, weapon_name?}
+- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?}
 - death_save: {type, character, body_stat}
 
 OUTPUT: JSON with these fields:
@@ -2119,8 +2122,8 @@ Each exchange covers one combatant's turn:
 
 The backend resolves all dice deterministically.
 
-MEATSPACE ACTION TYPES:
-- ranged_attack, melee_attack, autofire, skill_check, death_save, initiative (same schemas as combat planning)
+MEATSPACE ACTION TYPES (same schemas as combat planning — backend auto-resolves stats from state):
+- ranged_attack, melee_attack, autofire, skill_check, death_save, initiative
 
 NET ACTION TYPES:
 - skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true)

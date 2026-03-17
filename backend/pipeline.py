@@ -385,6 +385,7 @@ def resolve_pipeline_mechanics(
     game_state: dict,
     relationship_owner: str = "",
     relationship_present_names=None,
+    character_states: dict = None,
 ) -> tuple:
     """Resolve structured beats from Events using deterministic code.
 
@@ -458,6 +459,8 @@ def resolve_pipeline_mechanics(
                 relationships=shadow_state.get("relationships"),
                 factions=shadow_state.get("factions"),
                 relationship_context=_relationship_context,
+                edgerunner_states=shadow_state.get("edgerunners"),
+                character_states=character_states,
             )
             action_results = result.get("results", [])
             action_ops = result.get("state_ops", [])
@@ -2396,6 +2399,7 @@ def run_pipeline(
             new_pipeline_state.get("game_state", {}),
             relationship_owner=events_data.get("current_player", ""),
             relationship_present_names=_relationship_present_names,
+            character_states=new_pipeline_state.get("character_states"),
         )
 
         # Apply character_states from Events
@@ -2734,6 +2738,7 @@ def run_mode_pipeline(
         # Resolve ambush first if present. TAR can only be consumed once across
         # the entire exchange, so carry the remaining stacks across phases.
         _phase_tar = _tar_stacks
+        _er_states = game_state.get("edgerunners") if isinstance(game_state, dict) else None
         ambush_result = resolve_actions(
             ambush_actions,
             relationships=_rels,
@@ -2744,6 +2749,8 @@ def run_mode_pipeline(
             installed_hardware=installed_hardware,
             ice_status=ice_status,
             relationship_context=_relationship_context,
+            edgerunner_states=_er_states,
+            character_states=character_states,
         ) if ambush_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if ambush_result.get("tar_consumed"):
             _phase_tar = 0
@@ -2770,6 +2777,8 @@ def run_mode_pipeline(
             installed_hardware=installed_hardware,
             ice_status=ice_status,
             relationship_context=_relationship_context,
+            edgerunner_states=_er_states,
+            character_states=character_states,
         ) if init_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if init_result.get("tar_consumed"):
             _phase_tar = 0
@@ -2828,6 +2837,8 @@ def run_mode_pipeline(
             active_programs=active_programs, installed_hardware=installed_hardware,
             ice_status=ice_status,
             relationship_context=_relationship_context,
+            edgerunner_states=_er_states,
+            character_states=character_states,
         ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results

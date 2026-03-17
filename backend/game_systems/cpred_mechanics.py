@@ -37,6 +37,20 @@ from .cpred_tables import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# DV tier map (skill_check difficulty names → numeric DVs)
+# ---------------------------------------------------------------------------
+
+_DV_TIERS = {
+    "simple": 9,
+    "everyday": 13,
+    "difficult": 15,
+    "professional": 17,
+    "heroic": 21,
+    "incredible": 24,
+    "legendary": 29,
+}
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -174,6 +188,169 @@ def _lookup_edgerunner(edgerunner_states: dict, name: str) -> dict | None:
         if str(k).strip().casefold() == key_cf:
             return v if isinstance(v, dict) else None
     return None
+
+
+def _find_character_state(name, edgerunner_states, character_states):
+    """Look up a character in edgerunner_states then character_states.
+
+    Returns (stats_dict, skills_dict, hp_current, hp_max, rep) with values
+    from whichever source matches first, or (None, None, None, None, None)
+    if not found.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return None, None, None, None, None
+
+    er = _lookup_edgerunner(edgerunner_states, name) if edgerunner_states else None
+    if isinstance(er, dict):
+        stats = er.get("stats") or {}
+        skills = er.get("skills") or {}
+        hp = er.get("hp") or {}
+        return stats, skills, hp.get("current"), hp.get("max", 40), er.get("rep", 0)
+
+    if isinstance(character_states, dict):
+        char_cf = name.strip().casefold()
+        for cs_name, cs_val in character_states.items():
+            if str(cs_name).strip().casefold() == char_cf:
+                if isinstance(cs_val, dict):
+                    d = cs_val.get("data", cs_val) if isinstance(cs_val.get("data"), dict) else cs_val
+                    cd = d.get("combat_data") if isinstance(d, dict) else None
+                    if isinstance(cd, dict):
+                        stats = cd.get("stats") or {}
+                        hp_max = cd.get("hp_max")
+                        hp_cur = None
+                        for v in (d.get("vitals") or []):
+                            if isinstance(v, dict) and v.get("label") == "HP":
+                                hp_cur = v.get("current")
+                                break
+                        return stats, {}, hp_cur, hp_max, 0
+                break
+
+    return None, None, None, None, None
+
+
+def _derive_seriously_wounded(hp_current, hp_max):
+    """Derive seriously_wounded flag from HP values. Returns bool or None if indeterminate."""
+    if not isinstance(hp_current, (int, float)) or not isinstance(hp_max, (int, float)):
+        return None
+    hp_current = int(hp_current)
+    hp_max = int(hp_max)
+    if hp_current < 0 or hp_max <= 0:
+        return None
+    if hp_current == 0:
+        return False  # mortally wounded — separate condition
+    return hp_current < (hp_max + 1) // 2
+
+
+def _lookup_stat_ci(stats_dict: dict, stat_name: str):
+    """Case-insensitive stat lookup. Returns int value or None."""
+    if not isinstance(stats_dict, dict) or not stat_name:
+        return None
+    # Try exact match first
+    val = stats_dict.get(stat_name)
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    # Case-insensitive fallback
+    key_cf = stat_name.strip().casefold()
+    for k, v in stats_dict.items():
+        if str(k).strip().casefold() == key_cf:
+            try:
+                return int(v)
+            except (TypeError, ValueError, OverflowError):
+                return None
+    return None
+
+
+def _hydrate_stats_from_state(
+    action: dict,
+    edgerunner_states: dict,
+    character_states: dict,
+    *,
+    character_key: str = "character",
+    stat_value_key: str = "stat_value",
+    skill_value_key: str = "skill_value",
+    stat_name_key: str = "stat",
+    skill_name_key: str = "skill",
+    wounded_key: str = "seriously_wounded",
+):
+    """Resolve name-based stat/skill fields to numeric values from state.
+
+    Mutates `action` in-place. Falls back to model-provided numeric values
+    when the character is not found in any state source.
+    """
+    char_name = action.get(character_key)
+    if not isinstance(char_name, str) or not char_name.strip():
+        return
+
+    stat_name = action.get(stat_name_key)
+    skill_name = action.get(skill_name_key)
+
+    # 1. Try edgerunner state (PCs)
+    er = _lookup_edgerunner(edgerunner_states, char_name) if edgerunner_states else None
+    if isinstance(er, dict):
+        er_stats = er.get("stats") or {}
+        er_skills = er.get("skills") or {}
+
+        if isinstance(stat_name, str) and stat_name.strip():
+            resolved = _lookup_stat_ci(er_stats, stat_name)
+            if resolved is not None:
+                action[stat_value_key] = resolved
+
+        if isinstance(skill_name, str) and skill_name.strip():
+            resolved = _lookup_stat_ci(er_skills, skill_name)
+            if resolved is not None:
+                action[skill_value_key] = resolved
+
+        # Derive seriously_wounded from HP
+        hp = er.get("hp")
+        if isinstance(hp, dict):
+            sw = _derive_seriously_wounded(hp.get("current", -1), hp.get("max", 40))
+            if sw is not None:
+                action[wounded_key] = sw
+        return
+
+    # 2. Try character_states (NPCs with combat_data)
+    if isinstance(character_states, dict):
+        cs_entry = None
+        # Case-insensitive lookup
+        char_cf = char_name.strip().casefold()
+        for cs_name, cs_val in character_states.items():
+            if str(cs_name).strip().casefold() == char_cf:
+                cs_entry = cs_val
+                break
+
+        if isinstance(cs_entry, dict):
+            d = cs_entry.get("data", cs_entry) if isinstance(cs_entry.get("data"), dict) else cs_entry
+            cd = d.get("combat_data") if isinstance(d, dict) else None
+            if isinstance(cd, dict):
+                npc_stats = cd.get("stats") or {}
+
+                if isinstance(stat_name, str) and stat_name.strip():
+                    resolved = _lookup_stat_ci(npc_stats, stat_name)
+                    if resolved is not None:
+                        action[stat_value_key] = resolved
+
+                if isinstance(skill_name, str) and skill_name.strip():
+                    # NPCs typically don't have separate skills in combat_data.stats,
+                    # but if present, use them
+                    resolved = _lookup_stat_ci(npc_stats, skill_name)
+                    if resolved is not None:
+                        action[skill_value_key] = resolved
+
+                # Derive seriously_wounded from vitals HP
+                for v in d.get("vitals", []):
+                    if isinstance(v, dict) and v.get("label") == "HP":
+                        hp_cur = v.get("current")
+                        hp_max = cd.get("hp_max")
+                        sw = _derive_seriously_wounded(hp_cur, hp_max)
+                        if sw is not None:
+                            action[wounded_key] = sw
+                        break
+            return
+
+    # 3. Not found — leave model-provided values as-is
 
 
 def _norm_vehicle_track_key(name: str, sp: bool = False) -> str:
@@ -2488,7 +2665,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     ice_status=None, combatant_vehicle_sdp: dict = None,
                     relationship_owner: str = "", relationship_actor_names=None,
                     relationship_present_names=None, relationship_context: dict = None,
-                    edgerunner_states: dict = None) -> dict:
+                    edgerunner_states: dict = None,
+                    character_states: dict = None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -2850,6 +3028,173 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             "formatted": _skip_note,
                         })
                         continue
+            # ----- Hydrate stat/skill values from state -----
+            # Resolve difficulty tier → numeric DV for skill_check
+            if action_type == "skill_check":
+                _difficulty = action.get("difficulty")
+                if isinstance(_difficulty, str) and _difficulty.strip():
+                    _tier_dv = _DV_TIERS.get(_difficulty.strip().lower())
+                    if _tier_dv is not None:
+                        action["dv"] = _tier_dv
+                elif isinstance(_difficulty, (int, float)):
+                    action["dv"] = int(_difficulty)
+
+            # Standard stat/skill hydration per action type
+            if action_type in ("skill_check", "ranged_attack", "autofire", "driving_check", "vehicle_weak_point"):
+                _hydrate_stats_from_state(
+                    action, edgerunner_states, character_states,
+                    character_key="character",
+                    stat_value_key="stat_value", skill_value_key="skill_value",
+                    stat_name_key="stat", skill_name_key="skill",
+                    wounded_key="seriously_wounded",
+                )
+            elif action_type == "opposed_check":
+                # Hydrate attacker
+                _hydrate_stats_from_state(
+                    action, edgerunner_states, character_states,
+                    character_key="character",
+                    stat_value_key="attacker_stat", skill_value_key="attacker_skill",
+                    stat_name_key="attacker_label", skill_name_key="attacker_skill_label",
+                    wounded_key="seriously_wounded_attacker",
+                )
+                # Hydrate defender
+                _hydrate_stats_from_state(
+                    action, edgerunner_states, character_states,
+                    character_key="target",
+                    stat_value_key="defender_stat", skill_value_key="defender_skill",
+                    stat_name_key="defender_label", skill_name_key="defender_skill_label",
+                    wounded_key="seriously_wounded_defender",
+                )
+            elif action_type == "melee_attack":
+                # Hydrate attacker
+                _hydrate_stats_from_state(
+                    action, edgerunner_states, character_states,
+                    character_key="character",
+                    stat_value_key="attacker_stat", skill_value_key="attacker_skill",
+                    stat_name_key="attacker_label", skill_name_key="attacker_skill_label",
+                    wounded_key="seriously_wounded_attacker",
+                )
+                # Hydrate defender
+                _hydrate_stats_from_state(
+                    action, edgerunner_states, character_states,
+                    character_key="target",
+                    stat_value_key="defender_stat", skill_value_key="defender_skill",
+                    stat_name_key="defender_label", skill_name_key="defender_skill_label",
+                    wounded_key="seriously_wounded_defender",
+                )
+            elif action_type == "facedown":
+                # Initiator: COOL, rep, seriously_wounded
+                _fd_i_stats, _, _fd_i_hp, _fd_i_hpmax, _fd_i_rep = _find_character_state(
+                    action.get("character", ""), edgerunner_states, character_states)
+                if _fd_i_stats is not None:
+                    _v = _lookup_stat_ci(_fd_i_stats, "COOL")
+                    if _v is not None:
+                        action["initiator_cool"] = _v
+                    # Only override rep when stats are bootstrapped (non-empty)
+                    if _fd_i_stats and isinstance(_fd_i_rep, (int, float)):
+                        action["initiator_rep"] = int(_fd_i_rep)
+                    _sw = _derive_seriously_wounded(_fd_i_hp, _fd_i_hpmax)
+                    if _sw is not None:
+                        action["seriously_wounded_initiator"] = _sw
+                # Opponent: COOL, rep, seriously_wounded
+                _fd_o_stats, _, _fd_o_hp, _fd_o_hpmax, _fd_o_rep = _find_character_state(
+                    action.get("target", ""), edgerunner_states, character_states)
+                if _fd_o_stats is not None:
+                    _v = _lookup_stat_ci(_fd_o_stats, "COOL")
+                    if _v is not None:
+                        action["opponent_cool"] = _v
+                    if _fd_o_stats and isinstance(_fd_o_rep, (int, float)):
+                        action["opponent_rep"] = int(_fd_o_rep)
+                    _sw = _derive_seriously_wounded(_fd_o_hp, _fd_o_hpmax)
+                    if _sw is not None:
+                        action["seriously_wounded_opponent"] = _sw
+            elif action_type == "suppressive_fire":
+                # Attacker: REF, Autofire, seriously_wounded
+                _sf_stats, _sf_skills, _sf_hp, _sf_hpmax, _ = _find_character_state(
+                    action.get("character", ""), edgerunner_states, character_states)
+                if _sf_stats is not None:
+                    _v = _lookup_stat_ci(_sf_stats, "REF")
+                    if _v is not None:
+                        action["attacker_ref"] = _v
+                    _v = _lookup_stat_ci(_sf_skills or _sf_stats, "Autofire")
+                    if _v is not None:
+                        action["attacker_autofire"] = _v
+                    _sw = _derive_seriously_wounded(_sf_hp, _sf_hpmax)
+                    if _sw is not None:
+                        action["seriously_wounded_attacker"] = _sw
+                # Each target: WILL, Concentration, seriously_wounded
+                for _sf_tgt in action.get("targets", []):
+                    if not isinstance(_sf_tgt, dict):
+                        continue
+                    _ts, _tsk, _thp, _thpmax, _ = _find_character_state(
+                        _sf_tgt.get("name", ""), edgerunner_states, character_states)
+                    if _ts is not None:
+                        _v = _lookup_stat_ci(_ts, "WILL")
+                        if _v is not None:
+                            _sf_tgt["will"] = _v
+                        _v = _lookup_stat_ci(_tsk or _ts, "Concentration")
+                        if _v is not None:
+                            _sf_tgt["concentration"] = _v
+                        _sw = _derive_seriously_wounded(_thp, _thpmax)
+                        if _sw is not None:
+                            _sf_tgt["seriously_wounded"] = _sw
+            elif action_type == "initiative":
+                # Each combatant: REF
+                for _init_c in action.get("combatants", []):
+                    if not isinstance(_init_c, dict):
+                        continue
+                    _is, _, _, _, _ = _find_character_state(
+                        _init_c.get("name", ""), edgerunner_states, character_states)
+                    if _is is not None:
+                        _v = _lookup_stat_ci(_is, "REF")
+                        if _v is not None:
+                            _init_c["ref"] = _v
+            elif action_type == "ambush":
+                # Ambusher: DEX, Stealth
+                _as, _ask, _, _, _ = _find_character_state(
+                    action.get("character", ""), edgerunner_states, character_states)
+                if _as is not None:
+                    _v = _lookup_stat_ci(_as, "DEX")
+                    if _v is not None:
+                        action["stealth_stat"] = _v
+                    _v = _lookup_stat_ci(_ask or _as, "Stealth")
+                    if _v is not None:
+                        action["stealth_skill"] = _v
+                # Each target: INT, Concentration
+                for _amb_tgt in action.get("targets", []):
+                    if not isinstance(_amb_tgt, dict):
+                        continue
+                    _ts, _tsk, _, _, _ = _find_character_state(
+                        _amb_tgt.get("name", ""), edgerunner_states, character_states)
+                    if _ts is not None:
+                        _v = _lookup_stat_ci(_ts, "INT")
+                        if _v is not None:
+                            _amb_tgt["perception_stat"] = _v
+                        _v = _lookup_stat_ci(_tsk or _ts, "Concentration")
+                        if _v is not None:
+                            _amb_tgt["perception_skill"] = _v
+            elif action_type == "haggle":
+                # Buyer: COOL, Trading, seriously_wounded
+                _hs, _hsk, _hhp, _hhpmax, _ = _find_character_state(
+                    action.get("character", ""), edgerunner_states, character_states)
+                if _hs is not None:
+                    _v = _lookup_stat_ci(_hs, "COOL")
+                    if _v is not None:
+                        action["buyer_cool"] = _v
+                    _v = _lookup_stat_ci(_hsk or _hs, "Trading")
+                    if _v is not None:
+                        action["buyer_trading"] = _v
+                    _sw = _derive_seriously_wounded(_hhp, _hhpmax)
+                    if _sw is not None:
+                        action["seriously_wounded"] = _sw
+            elif action_type in ("hustle", "find_item"):
+                # Only auto-derive seriously_wounded
+                _, _, _hf_hp, _hf_hpmax, _ = _find_character_state(
+                    action.get("character", ""), edgerunner_states, character_states)
+                _sw = _derive_seriously_wounded(_hf_hp, _hf_hpmax)
+                if _sw is not None:
+                    action["seriously_wounded"] = _sw
+
             # Apply TAR penalty to next NET check only (auto-enforced by backend)
             if tar_stacks > 0 and action.get("net") and not _tar_consumed:
                 _tar_penalty = tar_stacks * 2

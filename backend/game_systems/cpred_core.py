@@ -491,6 +491,9 @@ def _default_edgerunner():
         "deck_slots": [],              # unified cyberdeck slots: programs, hardware, continuations, or null
         "cyberdeck": None,             # when set: {"tier": "Standard", "slots": 7, "cycles": 3}
         "conditions": [],              # general conditions: ["partially_nude", "seriously_wounded", etc.]
+        "stats": {},                   # {"INT": 7, "REF": 8, "DEX": 8, "TECH": 5, "COOL": 6, "WILL": 5, "LUCK": 7, "BODY": 6, "EMP": 6, "MOVE": 6}
+        "skills": {},                  # {"Handgun": 6, "Evasion": 6, "Athletics": 4, "Stealth": 2, "Interface": 6, ...}
+        "rep": 0,                      # Reputation rank (for facedowns)
     }
 
 

@@ -7007,6 +7007,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     combatant_vehicle_sdp=_rm_running_vehicle_map,
                                     relationship_context=_rm_relationship_context,
                                     edgerunner_states=_rm_gs.get("edgerunners") or {},
+                                    character_states=(_rm_tracking_ps or {}).get("character_states"),
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(
