@@ -7,8 +7,12 @@ from .dnd5e_cyber import GAME_SYSTEM as DND5E_CYBER
 from .coc7e import GAME_SYSTEM as COC7E
 from .sr6e import GAME_SYSTEM as SR6E
 from .cpred import GAME_SYSTEM as CPRED
+from .novels import GAME_SYSTEM as NOVELS
+from .chats import GAME_SYSTEM as CHATS
 
 GAME_SYSTEMS = {
+    "novels": NOVELS,
+    "chats": CHATS,
     "dnd5e": DND5E,
     "dnd5e_cyber": DND5E_CYBER,
     "coc7e": COC7E,

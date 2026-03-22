@@ -2743,8 +2743,8 @@ function App() {
           )}
         </div>
 
-        {/* Right Panel -- Character State (only in active chat view) */}
-        {viewMode === 'chat' && currentChat && <CharacterPanel
+        {/* Right Panel -- Character State (only in active chat view, hidden for novels/chats) */}
+        {viewMode === 'chat' && currentChat && chatGameSystem !== 'novels' && chatGameSystem !== 'chats' && <CharacterPanel
           isMobile={isMobile}
           pipelineState={pipelineState}
           chatGameSystem={chatGameSystem}

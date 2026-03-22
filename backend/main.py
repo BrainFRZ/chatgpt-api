@@ -957,21 +957,52 @@ def get_base_instructions(username: str) -> str:
             return base
     return ""
 
-def build_system_content(username: str, project: str) -> str:
+def build_system_content(username: str, project: str, include_base: bool = True,
+                         default_instructions: str = None,
+                         fallback_to_user_instructions: bool = False) -> str:
     """Build the full system prompt: instructions + project files + base instructions.
-    Base instructions go LAST (after project files) for maximum end-of-prompt salience."""
+    Base instructions go LAST (after project files) for maximum end-of-prompt salience.
+
+    Args:
+        include_base: If False, skip base_instructions.di entirely.
+        default_instructions: Custom fallback when project has no instructions.di.
+        fallback_to_user_instructions: If True and project instructions.di is missing,
+            fall back to user-level instructions.di before the hardcoded default.
+    """
     instructions = get_instructions(username, project)
+    # If project instructions.di was missing (got hardcoded default), apply overrides
     if project:
+        project_instructions_path = os.path.join(get_user_dir(username), "projects", project, "instructions.di")
+        has_project_instructions = os.path.exists(project_instructions_path)
+        if not has_project_instructions:
+            if fallback_to_user_instructions:
+                # Fall back to user-level instructions.di (same as free chats)
+                instructions = get_instructions(username, None)
+            elif default_instructions:
+                instructions = default_instructions
+
         project_files = load_project_files(username, project)
-        base = get_base_instructions(username)
         parts = [instructions]
         if project_files:
             parts.append(project_files)
-        if base:
-            parts.append(base)
+        if include_base:
+            base = get_base_instructions(username)
+            if base:
+                parts.append(base)
         return "\n\n".join(parts)
     else:
         return instructions
+
+def _system_content_kwargs(gs) -> dict:
+    """Extract build_system_content kwargs from a game system dict."""
+    if not gs:
+        return {}
+    return {
+        "include_base": gs.get("use_base_instructions", True),
+        "default_instructions": gs.get("default_instructions"),
+        "fallback_to_user_instructions": gs.get("fallback_to_user_instructions", False),
+    }
+
 
 def get_instructions_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load per-agent instructions file, falling back to shared instructions.di."""
@@ -1728,8 +1759,15 @@ async def create_chat(request: CreateChatRequest):
     if os.path.exists(path):
         raise HTTPException(status_code=400, detail="Chat already exists")
 
+    # Look up game system for build_system_content flags
+    gs_kwargs = {}
+    if request.project:
+        proj_meta = load_project_metadata(username, request.project)
+        gs = get_game_system(proj_meta.get("game_system", DEFAULT_GAME_SYSTEM))
+        gs_kwargs = _system_content_kwargs(gs)
+
     # Build system message: instructions + project files + base instructions (at end for salience)
-    system_content = build_system_content(username, request.project)
+    system_content = build_system_content(username, request.project, **gs_kwargs)
 
     data = {
         "messages": [{"role": "system", "content": system_content}],
@@ -1740,10 +1778,9 @@ async def create_chat(request: CreateChatRequest):
     if request.model:
         data["model"] = request.model
     elif request.project:
-        # Inherit from project's default model if set
-        project_metadata = load_project_metadata(username, request.project)
-        if project_metadata.get("model"):
-            data["model"] = project_metadata["model"]
+        # Inherit from project's default model if set (proj_meta loaded above)
+        if proj_meta.get("model"):
+            data["model"] = proj_meta["model"]
         else:
             data["model"] = get_default_model_for_user(username)
     else:
@@ -4159,7 +4196,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         client = provider.get_client(api_key)
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project
+    # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project and gs.get("trimming", "pair") == "pair"
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     _sex_first_exchange = False
@@ -4572,15 +4610,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     elif use_stateful:
         # Pair-based context trimming (sawtooth pattern for cache efficiency)
-        stateful_pipeline_state = migrate_pipeline_state(copy.deepcopy(data.get("pipeline_state")))
-        stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
+        _has_game_state = gs.get("use_game_state", True)
 
-        # Load conversion doc for feature injection (transient — after snapshot, stripped after injection)
-        if gs and request.project:
-            conv_path = os.path.join(get_project_dir(username, request.project), "uploads", "Core Conversion.md")
-            if os.path.exists(conv_path):
-                with open(conv_path, 'r', encoding='utf-8') as f:
-                    stateful_pipeline_state.setdefault("game_state", {})["_conversion_doc"] = f.read()
+        if _has_game_state:
+            stateful_pipeline_state = migrate_pipeline_state(copy.deepcopy(data.get("pipeline_state")))
+            stateful_injected_snapshot = json.dumps(stateful_pipeline_state, indent=2)
+
+            # Load conversion doc for feature injection (transient — after snapshot, stripped after injection)
+            if gs and request.project:
+                conv_path = os.path.join(get_project_dir(username, request.project), "uploads", "Core Conversion.md")
+                if os.path.exists(conv_path):
+                    with open(conv_path, 'r', encoding='utf-8') as f:
+                        stateful_pipeline_state.setdefault("game_state", {})["_conversion_doc"] = f.read()
 
         trim_anchor_id = data.get("_trim_anchor_id")
         # Collapse hack and combat messages into summary pairs before context trimming
@@ -4593,7 +4634,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         if did_trim:
             docs_refreshed = True
-            fresh_system = build_system_content(username, request.project)
+            fresh_system = build_system_content(username, request.project, **_system_content_kwargs(gs))
             branch_path[0]["content"] = fresh_system
             branch_path[0].pop("total_tokens", None)
             branch_path[0].pop("total_gpt_tokens", None)
@@ -4611,41 +4652,47 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         else:
             context_start_index = 1
 
-        # Build injections for user message
-        if gs and gs.get("id") == "cpred":
-            sa_dice_pool = ""  # No pool needed — resolve_mechanics tool uses direct RNG
+        if _has_game_state:
+            # Build injections for user message (game systems only)
+            if gs and gs.get("id") == "cpred":
+                sa_dice_pool = ""  # No pool needed — resolve_mechanics tool uses direct RNG
+            else:
+                sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+            sa_doc_stems = get_staged_project_filenames(username, request.project)
+            sa_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
+            injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems, name_dice=sa_name_dice)
+
+            # Strip transient _conversion_doc before it can be persisted
+            _gs_state = stateful_pipeline_state.get("game_state")
+            if _gs_state:
+                _gs_state.pop("_conversion_doc", None)
+
+            # System prompt: contract + original
+            system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
+            system_msg = {"role": branch_path[0]["role"], "content": system_content}
+
+            # User message with injections prepended + player agency reminder for multi-PC
+            user_content = build_message_content(branch_path[-1])
+
+            # /sex command: inject handoff directive into user message
+            if _sex_handoff_npcs:
+                user_content += _build_sex_handoff_directive(", ".join(_sex_handoff_npcs))
+
+            agency_reminder = build_player_agency_reminder(
+                user_content, stateful_pipeline_state.get("character_states", {}))
+            parts = []
+            if injections_str:
+                parts.append(injections_str)
+            if agency_reminder:
+                parts.append(agency_reminder)
+            parts.append(user_content)
+            user_content = "\n\n".join(parts)
+            new_user_msg = {"role": "user", "content": user_content}
         else:
-            sa_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
-        sa_doc_stems = get_staged_project_filenames(username, request.project)
-        sa_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
-        injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems, name_dice=sa_name_dice)
-
-        # Strip transient _conversion_doc before it can be persisted
-        _gs_state = stateful_pipeline_state.get("game_state")
-        if _gs_state:
-            _gs_state.pop("_conversion_doc", None)
-
-        # System prompt: contract + original
-        system_content = gs["single_agent_contract"] + "\n\n" + branch_path[0]["content"]
-        system_msg = {"role": branch_path[0]["role"], "content": system_content}
-
-        # User message with injections prepended + player agency reminder for multi-PC
-        user_content = build_message_content(branch_path[-1])
-
-        # /sex command: inject handoff directive into user message
-        if _sex_handoff_npcs:
-            user_content += _build_sex_handoff_directive(", ".join(_sex_handoff_npcs))
-
-        agency_reminder = build_player_agency_reminder(
-            user_content, stateful_pipeline_state.get("character_states", {}))
-        parts = []
-        if injections_str:
-            parts.append(injections_str)
-        if agency_reminder:
-            parts.append(agency_reminder)
-        parts.append(user_content)
-        user_content = "\n\n".join(parts)
-        new_user_msg = {"role": "user", "content": user_content}
+            # No game state (e.g., Novels) — plain system prompt and user message
+            system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
+            user_content = build_message_content(branch_path[-1])
+            new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
     else:
@@ -4757,7 +4804,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             is_free_chat=is_free_chat,
             use_cache=_else_use_cache
         )
-        if use_stateful:
+        if use_stateful and gs.get("use_game_state", True) and gs.get("state_report_tool"):
             tools = [gs["state_report_tool"]]
             if gs.get("id") == "cpred":
                 from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
@@ -5227,9 +5274,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
-            use_pipeline = model_id.startswith("gpt") and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode
+            use_pipeline = model_id.startswith("gpt") and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode and gs.get("use_pipeline", True)
             # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
-            use_mode_pipeline = model_id.startswith("gpt") and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics")
+            use_mode_pipeline = model_id.startswith("gpt") and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics") and gs.get("use_pipeline", True)
 
             if use_mode_pipeline and use_hack_mode:
                 # ============================================================
@@ -7332,7 +7379,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         stateful_tool_input = None
                         stateful_tool_retried = False
                         old_voice_snapshot = None
-                        if use_stateful and stateful_pipeline_state is not None:
+                        if use_stateful and stateful_pipeline_state is not None and gs.get("use_game_state", True):
                             # Snapshot old voice values for voice_update notifications
                             old_voice_snapshot = {
                                 name: entry.get("data", entry).get("voice")
@@ -8611,8 +8658,15 @@ def reload_chat(request: ReloadChatRequest):
     if not data:
         raise HTTPException(status_code=404, detail="Chat not found")
 
+    # Look up game system for build_system_content flags
+    gs_kwargs = {}
+    if request.project:
+        proj_meta = load_project_metadata(username, request.project)
+        gs = get_game_system(proj_meta.get("game_system", DEFAULT_GAME_SYSTEM))
+        gs_kwargs = _system_content_kwargs(gs)
+
     # Rebuild system message: instructions + project files + base instructions (at end for salience)
-    system_content = build_system_content(username, request.project)
+    system_content = build_system_content(username, request.project, **gs_kwargs)
 
     # Update the system message content while preserving other fields (id, parent_id, tokens)
     # This maintains the tree structure and cached token counts

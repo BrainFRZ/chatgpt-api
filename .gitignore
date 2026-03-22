@@ -55,6 +55,8 @@
 !backend/game_systems/cpred_mechanics.py
 !backend/game_systems/cpred_identity.py
 !backend/game_systems/dnd5e_cyber.py
+!backend/game_systems/novels.py
+!backend/game_systems/chats.py
 !backend/tests/
 !backend/tests/test_multi_model.py
 !backend/tests/test_cpred_mechanics.py
