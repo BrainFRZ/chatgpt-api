@@ -1004,6 +1004,99 @@ def _system_content_kwargs(gs) -> dict:
     }
 
 
+def _build_artifact_summary(artifacts: dict) -> str:
+    """Build a [DOCUMENTS] summary block for injecting into user messages."""
+    if not artifacts:
+        return ""
+    lines = ["[DOCUMENTS]"]
+    for doc_id, doc in artifacts.items():
+        word_count = len(doc.get("content", "").split())
+        doc_type = doc.get("type", "prose")
+        version = doc.get("version", 1)
+        lines.append(f'- {doc_id}: "{doc.get("title", doc_id)}" ({doc_type}, ~{word_count} words, v{version})')
+    lines.append("[/DOCUMENTS]")
+    return "\n".join(lines)
+
+
+def _process_doc_tool_calls(tool_uses: list, artifacts: dict) -> list:
+    """Process document tool calls, mutating the artifacts dict.
+
+    Returns a list of {action, doc_id, title, version, error?} dicts describing what happened,
+    plus any read_doc results that need tool_result follow-up.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    ops = []
+
+    for tool_call in tool_uses:
+        name = tool_call.get("name", "")
+        inp = tool_call.get("input", {})
+        tool_id = tool_call.get("id", "")
+
+        if name == "create_doc":
+            doc_id = inp.get("doc_id", "")
+            if not doc_id:
+                continue
+            artifacts[doc_id] = {
+                "doc_id": doc_id,
+                "title": inp.get("title", doc_id),
+                "content": inp.get("content", ""),
+                "type": inp.get("type", "prose"),
+                "format": inp.get("format"),
+                "version": 1,
+                "created_at": now,
+                "updated_at": now,
+            }
+            ops.append({"action": "created", "doc_id": doc_id, "title": artifacts[doc_id]["title"],
+                         "version": 1, "tool_use_id": tool_id})
+
+        elif name == "replace_doc":
+            doc_id = inp.get("doc_id", "")
+            if doc_id not in artifacts:
+                ops.append({"action": "error", "doc_id": doc_id, "error": "not found", "tool_use_id": tool_id})
+                continue
+            doc = artifacts[doc_id]
+            if inp.get("title"):
+                doc["title"] = inp["title"]
+            doc["content"] = inp.get("content", "")
+            doc["version"] = doc.get("version", 1) + 1
+            doc["updated_at"] = now
+            ops.append({"action": "replaced", "doc_id": doc_id, "title": doc["title"],
+                         "version": doc["version"], "tool_use_id": tool_id})
+
+        elif name == "edit_doc":
+            doc_id = inp.get("doc_id", "")
+            if doc_id not in artifacts:
+                ops.append({"action": "error", "doc_id": doc_id, "error": "not found", "tool_use_id": tool_id})
+                continue
+            doc = artifacts[doc_id]
+            content = doc["content"]
+            edit_count = 0
+            for edit in inp.get("edits", []):
+                old_text = edit.get("old_text", "")
+                new_text = edit.get("new_text", "")
+                if old_text and old_text in content:
+                    content = content.replace(old_text, new_text, 1)
+                    edit_count += 1
+            if edit_count > 0:
+                doc["content"] = content
+                doc["version"] = doc.get("version", 1) + 1
+                doc["updated_at"] = now
+            ops.append({"action": "edited", "doc_id": doc_id, "title": doc["title"],
+                         "version": doc["version"], "edit_count": edit_count, "tool_use_id": tool_id})
+
+        elif name == "read_doc":
+            doc_id = inp.get("doc_id", "")
+            if doc_id in artifacts:
+                doc = artifacts[doc_id]
+                ops.append({"action": "read", "doc_id": doc_id, "title": doc["title"],
+                             "content": doc["content"], "tool_use_id": tool_id})
+            else:
+                ops.append({"action": "error", "doc_id": doc_id, "error": "not found", "tool_use_id": tool_id})
+
+    return ops
+
+
 def get_instructions_for_agent(username: str, project: str, agent_name: str) -> str:
     """Load per-agent instructions file, falling back to shared instructions.di."""
     agent_path = os.path.join(get_user_dir(username), "projects", project, f"instructions_{agent_name}.di")
@@ -1318,6 +1411,7 @@ class ChatResponse(BaseModel):
     pipeline_state: dict | None = None  # Character/scene state for right panel
     game_system: str | None = None  # Game system ID for this chat's project
     hack_state: dict | None = None  # Active hack encounter state for overlay
+    artifacts: dict | None = None  # Document artifacts for Novels system
 
 class MessageResponse(BaseModel):
     assistant_message: str
@@ -1933,7 +2027,8 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         anthropic_sync=data.get("anthropic_sync", True),
         pipeline_state=data.get("pipeline_state"),
         game_system=chat_game_system,
-        hack_state=active_hack_state
+        hack_state=active_hack_state,
+        artifacts=data.get("artifacts")
     )
 
 @app.post("/api/send-message", response_model=MessageResponse)
@@ -4689,9 +4784,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             user_content = "\n\n".join(parts)
             new_user_msg = {"role": "user", "content": user_content}
         else:
-            # No game state (e.g., Novels) — plain system prompt and user message
-            system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
+            # No game state (e.g., Novels) — contract + artifact summary, no game injections
+            base_content = branch_path[0]["content"]
+            contract = gs.get("single_agent_contract", "")
+            if contract:
+                base_content = contract + "\n\n" + base_content
+            system_msg = {"role": branch_path[0]["role"], "content": base_content}
+
             user_content = build_message_content(branch_path[-1])
+            # Inject artifact summary so Claude knows what docs exist
+            if gs.get("doc_tools"):
+                doc_summary = _build_artifact_summary(data.get("artifacts", {}))
+                if doc_summary:
+                    user_content = doc_summary + "\n\n" + user_content
             new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
@@ -4812,6 +4917,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             request_params["tools"] = tools
             # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
             # Auto + strong contract instructions achieves the same result.
+            request_params["tool_choice"] = {"type": "auto"}
+        elif gs.get("doc_tools"):
+            request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
 
     # Store for use inside event_generator (assignments there make it local)
@@ -7526,6 +7634,95 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
 
+                        # ── Artifact/doc tool processing (Novels system) ──
+                        artifact_ops = []
+                        if gs.get("doc_tools") and usage.get('tool_uses'):
+                            doc_tool_names = {t["name"] for t in gs["doc_tools"]}
+                            doc_calls = [t for t in usage['tool_uses'] if t.get("name") in doc_tool_names]
+                            if doc_calls:
+                                artifacts = data.setdefault("artifacts", {})
+                                artifact_ops = _process_doc_tool_calls(doc_calls, artifacts)
+                                # Emit artifact updates for the frontend panel
+                                for op in artifact_ops:
+                                    if op["action"] in ("created", "replaced", "edited"):
+                                        doc = artifacts.get(op["doc_id"])
+                                        if doc and not client_disconnected:
+                                            yield f"event: artifact_update\ndata: {json.dumps(doc)}\n\n"
+                                # Handle read_doc follow-up: send tool_results and get continuation
+                                read_ops = [op for op in artifact_ops if op["action"] == "read"]
+                                error_ops = [op for op in artifact_ops if op["action"] == "error"]
+                                if read_ops or error_ops:
+                                    tool_results = []
+                                    for op in read_ops:
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": op["tool_use_id"],
+                                            "content": op["content"]
+                                        })
+                                    for op in error_ops:
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": op["tool_use_id"],
+                                            "content": f"Error: document '{op['doc_id']}' not found.",
+                                            "is_error": True
+                                        })
+                                    # Build follow-up messages: assistant tool_use + user tool_results
+                                    # Convert SDK content blocks to plain dicts for the API
+                                    followup_content = []
+                                    for block in (usage.get('content_blocks') or []):
+                                        if getattr(block, 'type', None) == 'thinking':
+                                            followup_content.append({"type": "thinking", "thinking": block.thinking,
+                                                                      "signature": getattr(block, 'signature', '')})
+                                        elif getattr(block, 'type', None) == 'redacted_thinking':
+                                            followup_content.append({"type": "redacted_thinking",
+                                                                      "data": getattr(block, 'data', '')})
+                                        elif getattr(block, 'type', None) == 'text':
+                                            followup_content.append({"type": "text", "text": block.text})
+                                        elif getattr(block, 'type', None) == 'tool_use':
+                                            followup_content.append({"type": "tool_use", "id": block.id,
+                                                                      "name": block.name, "input": block.input})
+                                    followup_assistant = {"role": "assistant", "content": followup_content}
+                                    followup_user = {"role": "user", "content": tool_results}
+                                    followup_messages = messages_for_api + [followup_assistant, followup_user]
+                                    try:
+                                        followup_params = provider.build_request(
+                                            messages=followup_messages,
+                                            username=username,
+                                            project=request.project,
+                                            chat_name=request.chat_name,
+                                            is_free_chat=is_free_chat,
+                                            use_cache=False
+                                        )
+                                        followup_params["tools"] = gs["doc_tools"]
+                                        followup_params["tool_choice"] = {"type": "auto"}
+                                        followup_stream = provider.send_request_stream(client, followup_params)
+                                        for followup_event in followup_stream:
+                                            if followup_event.event_type == 'content_delta' and not client_disconnected:
+                                                accumulated_content += followup_event.content
+                                                yield f"event: content\ndata: {json.dumps({'delta': followup_event.content})}\n\n"
+                                            elif followup_event.event_type == 'thinking_delta' and not client_disconnected:
+                                                accumulated_thinking += followup_event.content
+                                                yield f"event: thinking\ndata: {json.dumps({'delta': followup_event.content})}\n\n"
+                                            elif followup_event.event_type == 'done':
+                                                followup_usage = followup_event.usage
+                                                usage['input_tokens'] = usage.get('input_tokens', 0) + followup_usage.get('input_tokens', 0)
+                                                usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + followup_usage.get('cache_read_tokens', 0)
+                                                usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + followup_usage.get('cache_creation_tokens', 0)
+                                                usage['output_tokens'] = usage.get('output_tokens', 0) + followup_usage.get('output_tokens', 0)
+                                                # Process any additional doc tool calls from the follow-up
+                                                followup_tool_uses = followup_usage.get('tool_uses', [])
+                                                followup_doc_calls = [t for t in followup_tool_uses if t.get("name") in doc_tool_names]
+                                                if followup_doc_calls:
+                                                    followup_ops = _process_doc_tool_calls(followup_doc_calls, artifacts)
+                                                    artifact_ops.extend(followup_ops)
+                                                    for op in followup_ops:
+                                                        if op["action"] in ("created", "replaced", "edited"):
+                                                            doc = artifacts.get(op["doc_id"])
+                                                            if doc and not client_disconnected:
+                                                                yield f"event: artifact_update\ndata: {json.dumps(doc)}\n\n"
+                                    except Exception as followup_err:
+                                        logger.error(f"Doc tool follow-up error for {username}: {followup_err}")
+
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
                         reasoning_summary = accumulated_thinking or usage.get('reasoning')
@@ -7727,6 +7924,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 assistant_msg_data["state_tool_retried"] = True
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
+
+                        # Flag artifact operations on message (for inline cards)
+                        if artifact_ops:
+                            assistant_msg_data["artifact_ops"] = [
+                                {k: v for k, v in op.items() if k != 'content'}
+                                for op in artifact_ops
+                            ]
 
                         # Flag hack mode messages
                         if use_hack_mode:
@@ -7960,6 +8164,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if use_ship_combat_mode and ship_combat_tool_input:
                             if ship_combat_tool_input.get("ship_combat_complete") or ship_combat_tool_input.get("ship_combat") is None:
                                 done_data['ship_combat_complete'] = True
+                        if artifact_ops:
+                            # Include artifact operations summary (without full content) for inline cards
+                            done_data['artifact_ops'] = [
+                                {k: v for k, v in op.items() if k != 'content'}
+                                for op in artifact_ops
+                            ]
+                            # Include full artifacts dict for panel state
+                            done_data['artifacts'] = data.get("artifacts", {})
                         if not client_disconnected:
                             yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 

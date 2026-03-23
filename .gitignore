@@ -15,6 +15,7 @@
 !frontend/src/components/Sidebar.tsx
 !frontend/src/components/ChatView.tsx
 !frontend/src/components/CharacterPanel.tsx
+!frontend/src/components/ArtifactPanel.tsx
 !frontend/src/components/ProjectLanding.tsx
 !frontend/src/components/Modals.tsx
 !frontend/src/components/NetMapPopup.tsx

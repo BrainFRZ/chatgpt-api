@@ -53,6 +53,28 @@ export interface ChatMessage {
   bookmark?: string;  // User-defined bookmark annotation
   hack_mode?: boolean;  // True for messages during a hack mode encounter
   sex_mode?: boolean;  // True for messages during an intimate scene
+  artifact_ops?: ArtifactOp[];  // Document operations for inline cards (Novels system)
+}
+
+export interface Artifact {
+  doc_id: string;
+  title: string;
+  content: string;
+  type: 'prose' | 'outline' | 'notes' | 'character' | 'json' | 'pdf';
+  format?: 'md' | 'txt' | 'json' | 'pdf';  // Explicit render format; inferred from type if absent
+  version: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ArtifactOp {
+  action: 'created' | 'replaced' | 'edited' | 'read' | 'error';
+  doc_id: string;
+  title?: string;
+  version?: number;
+  edit_count?: number;
+  error?: string;
+  tool_use_id?: string;
 }
 
 export interface SystemMapNode {

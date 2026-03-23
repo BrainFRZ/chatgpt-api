@@ -67,6 +67,8 @@ interface ChatViewProps {
   deleteBookmark: (i: number) => void;
   bookmarkTooltip: {index: number, x: number, y: number} | null;
   setBookmarkTooltip: (v: {index: number, x: number, y: number} | null) => void;
+  onSelectArtifact?: (docId: string) => void;
+  onDownloadArtifact?: (docId: string) => void;
 }
 
 export default function ChatView({
@@ -131,6 +133,8 @@ export default function ChatView({
   deleteBookmark,
   bookmarkTooltip,
   setBookmarkTooltip,
+  onSelectArtifact,
+  onDownloadArtifact,
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
 
@@ -458,6 +462,42 @@ export default function ChatView({
                   <div style={styles.messageContent} className="messageContent">
                     <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
                   </div>
+                  {/* Inline artifact cards */}
+                  {msg.artifact_ops && msg.artifact_ops.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '6px', marginTop: '8px', marginBottom: '4px' }}>
+                      {msg.artifact_ops.map((op: any, i: number) => {
+                        if (op.action === 'error') return null;
+                        const actionLabel = op.action === 'created' ? 'Created' : op.action === 'replaced' ? 'Updated' : op.action === 'edited' ? 'Edited' : 'Read';
+                        const actionColor = op.action === 'created' ? '#34d399' : op.action === 'read' ? '#38bdf8' : '#fbbf24';
+                        return (
+                          <div key={i} style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '6px',
+                            padding: '4px 10px', borderRadius: '6px',
+                            backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e',
+                            fontSize: '0.72rem', color: '#ccc', cursor: 'pointer',
+                            userSelect: 'none',
+                          }}
+                          onClick={() => {
+                            // Delay single-click to allow double-click to cancel it
+                            const timer = setTimeout(() => {
+                              if (onSelectArtifact) onSelectArtifact(op.doc_id);
+                            }, 250);
+                            (window as any).__artifactClickTimer = timer;
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            clearTimeout((window as any).__artifactClickTimer);
+                            if (onDownloadArtifact) onDownloadArtifact(op.doc_id);
+                          }}
+                          >
+                            <span style={{ color: actionColor, fontWeight: 600 }}>{actionLabel}</span>
+                            <span>{op.title || op.doc_id}</span>
+                            {op.version && <span style={{ color: '#666' }}>v{op.version}</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div style={styles.messageFooter}>
                     {msg.tokens && (
                       <span style={styles.messageTokens}>

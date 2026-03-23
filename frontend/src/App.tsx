@@ -10,6 +10,7 @@ import { useSync } from './hooks/useSync';
 import Sidebar from './components/Sidebar';
 import ChatView from './components/ChatView';
 import CharacterPanel from './components/CharacterPanel';
+import ArtifactPanel, { downloadArtifact } from './components/ArtifactPanel';
 import ProjectLanding from './components/ProjectLanding';
 import Modals from './components/Modals';
 
@@ -256,6 +257,8 @@ function App() {
   const [stateNotifications, setStateNotifications] = useState<any[]>([]);
   const [chatGameSystem, setChatGameSystem] = useState<string | null>(null);
   const [hackState, setHackState] = useState<any>(null);
+  const [artifacts, setArtifacts] = useState<Record<string, import('./types').Artifact>>({});
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [selectedCharacter, setSelectedCharacter] = useState<string | null>(null);
   const [showCharacterSheet, setShowCharacterSheet] = useState(false);
   const [showAllCharactersModal, setShowAllCharactersModal] = useState(false);
@@ -361,6 +364,8 @@ function App() {
     setStateNotifications([]);
     setChatGameSystem(null);
     setHackState(null);
+    setArtifacts({});
+    setSelectedArtifactId(null);
     setSelectedCharacter(null);
     setShowCharacterSheet(false);
     setShowAllCharactersModal(false);
@@ -530,6 +535,7 @@ function App() {
       // Restore branch-local state from the target branch
       setPipelineState(chatData.pipeline_state || null);
       setHackState(chatData.hack_state || null);
+      setArtifacts(chatData.artifacts || {});
 
     } catch (err) {
       console.error('Error switching branch:', err);
@@ -1749,10 +1755,11 @@ function App() {
       setSelectedModel(data.model || projectModel || 'claude-opus-4.5');
       setAnthropicSync(data.anthropic_sync !== false);
 
-      // Load pipeline state, game system, and hack state for right panel
+      // Load pipeline state, game system, hack state, and artifacts for right panel
       setPipelineState(data.pipeline_state || null);
       setChatGameSystem(data.game_system || null);
       setHackState(data.hack_state || null);
+      setArtifacts(data.artifacts || {});
 
       // Validate total_messages from backend
       if (!data.total_messages || data.total_messages < 1) {
@@ -2310,7 +2317,7 @@ function App() {
     selectedModel, setSelectedModel, contextStartIndex, setContextStartIndex,
     stats, setStats,
     isLoading, setIsLoading,
-    setPipelineStage, setPipelineState, setStateNotifications, setHackState, setDocsRefreshed, setError,
+    setPipelineStage, setPipelineState, setStateNotifications, setHackState, setDocsRefreshed, setError, setArtifacts,
     editingMessageIndex, editingMessageContent,
     setEditingMessageIndex, setEditingMessageContent,
     fetchUserStats, fetchFreeTokens,
@@ -2600,6 +2607,11 @@ function App() {
                 deleteBookmark={deleteBookmark}
                 bookmarkTooltip={bookmarkTooltip}
                 setBookmarkTooltip={setBookmarkTooltip}
+                onSelectArtifact={(docId: string) => { setSelectedArtifactId(docId); setRightPanelOpen(true); }}
+                onDownloadArtifact={(docId: string) => {
+                  const doc = artifacts[docId];
+                  if (doc) downloadArtifact(doc);
+                }}
               />
             ) : currentProject ? (
               <ProjectLanding
@@ -2762,6 +2774,18 @@ function App() {
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
           characterSheetFiles={characterSheetFiles}
           hackState={hackState}
+        />}
+
+        {/* Right Panel -- Artifact viewer (Novels system) */}
+        {viewMode === 'chat' && currentChat && (chatGameSystem === 'novels') && <ArtifactPanel
+          isMobile={isMobile}
+          artifacts={artifacts}
+          selectedArtifactId={selectedArtifactId}
+          setSelectedArtifactId={setSelectedArtifactId}
+          rightPanelOpen={rightPanelOpen}
+          setRightPanelOpen={setRightPanelOpen}
+          mobileBottomSheetOpen={mobileBottomSheetOpen}
+          setMobileBottomSheetOpen={setMobileBottomSheetOpen}
         />}
       </div>
 

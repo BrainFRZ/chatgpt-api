@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { ChatMessage, ChatStats } from '../types';
+import { ChatMessage, ChatStats, Artifact } from '../types';
 
 interface UseMessagingDeps {
   user: { username: string } | null;
@@ -31,6 +31,7 @@ interface UseMessagingDeps {
   setHackState: (v: any) => void;
   setDocsRefreshed: (v: boolean) => void;
   setError: (v: string) => void;
+  setArtifacts: React.Dispatch<React.SetStateAction<Record<string, Artifact>>>;
   editingMessageIndex: number | null;
   editingMessageContent: string;
   setEditingMessageIndex: (v: number | null) => void;
@@ -263,6 +264,11 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
             deps.setHackState(null);
+          } else if (event.type === 'artifact_update') {
+            const doc = event.data as Artifact;
+            if (doc.doc_id) {
+              deps.setArtifacts(prev => ({ ...prev, [doc.doc_id]: doc }));
+            }
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -297,6 +303,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            if (data.artifact_ops) assistantMessage.artifact_ops = data.artifact_ops;
+            if (data.artifacts) deps.setArtifacts(data.artifacts);
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
               ? (data.ship_combat_init_message as ChatMessage)
               : null;
@@ -616,6 +624,11 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
             deps.setHackState(null);
+          } else if (event.type === 'artifact_update') {
+            const doc = event.data as Artifact;
+            if (doc.doc_id) {
+              deps.setArtifacts(prev => ({ ...prev, [doc.doc_id]: doc }));
+            }
           } else if (event.type === 'done') {
             const data = event.data;
 
@@ -661,6 +674,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (typeof data.ship_combat_opening_embedded === 'boolean') {
               (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
             }
+            if (data.artifact_ops) assistantMessage.artifact_ops = data.artifact_ops;
+            if (data.artifacts) deps.setArtifacts(data.artifacts);
             if (data.hack_mode) {
               userMsgWithId.hack_mode = true;
             }
