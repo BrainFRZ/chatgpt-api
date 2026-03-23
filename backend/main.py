@@ -4792,8 +4792,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             system_msg = {"role": branch_path[0]["role"], "content": base_content}
 
             user_content = build_message_content(branch_path[-1])
-            # Inject artifact summary so Claude knows what docs exist
-            if gs.get("doc_tools"):
+            # Inject artifact summary so Claude knows what docs exist (Claude only — GPT doesn't get doc tools)
+            if gs.get("doc_tools") and model_id.startswith("claude"):
                 doc_summary = _build_artifact_summary(data.get("artifacts", {}))
                 if doc_summary:
                     user_content = doc_summary + "\n\n" + user_content
@@ -4918,7 +4918,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
             # Auto + strong contract instructions achieves the same result.
             request_params["tool_choice"] = {"type": "auto"}
-        elif gs.get("doc_tools"):
+        elif gs.get("doc_tools") and model_id.startswith("claude"):
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
 
@@ -7634,9 +7634,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
 
-                        # ── Artifact/doc tool processing (Novels system) ──
+                        # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
-                        if gs.get("doc_tools") and usage.get('tool_uses'):
+                        if gs.get("doc_tools") and model_id.startswith("claude") and usage.get('tool_uses'):
                             doc_tool_names = {t["name"] for t in gs["doc_tools"]}
                             doc_calls = [t for t in usage['tool_uses'] if t.get("name") in doc_tool_names]
                             if doc_calls:
