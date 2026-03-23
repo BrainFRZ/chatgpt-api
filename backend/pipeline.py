@@ -1111,11 +1111,28 @@ def collapse_sex_messages(branch_path: list[dict]) -> list[dict]:
     return result
 
 
+def _filter_unstaged_pairs(messages: list[dict]) -> list[dict]:
+    """Remove message pairs where the user message has staged=False.
+    Skips both the user and its following assistant message to keep pairs intact."""
+    filtered = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "user" and msg.get("staged") is False:
+            # Skip this user message and the next assistant message
+            i += 2
+        else:
+            filtered.append(msg)
+            i += 1
+    return filtered
+
+
 def get_context_pairs(
     branch_path: list[dict],
     threshold_pairs: int,
     target_pairs: int,
-    trim_anchor_id: Optional[str] = None
+    trim_anchor_id: Optional[str] = None,
+    manual_staging: bool = False
 ) -> tuple[list[dict], Optional[str], bool]:
     """
     Extract context pairs using a sawtooth trim pattern for cache efficiency.
@@ -1124,6 +1141,10 @@ def get_context_pairs(
     Context grows from the anchor until it exceeds threshold_pairs, then
     trims to target_pairs and sets a new anchor. The prefix stays stable
     between trims (~20 turns), maximizing Anthropic prompt cache hits.
+
+    Args:
+        manual_staging: If True, filter out message pairs where the user
+            message has staged=False before counting pairs.
 
     Returns (pairs, new_anchor_id, did_trim):
     - pairs: flat list of {role, content} dicts
@@ -1148,12 +1169,17 @@ def get_context_pairs(
             trim_anchor_id = None
 
     context = history[anchor_idx:]
+
+    # Filter out manually unstaged pairs (Novels system)
+    if manual_staging:
+        context = _filter_unstaged_pairs(context)
+
     context_pair_count = len(context) // 2
 
     if context_pair_count > threshold_pairs:
-        # Trim to target_pairs from the end of history
-        new_start = len(history) - target_pairs * 2
-        pair_messages = history[new_start:]
+        # Trim to target_pairs from the end of context (already filtered)
+        new_start = len(context) - target_pairs * 2
+        pair_messages = context[new_start:]
         new_anchor_id = pair_messages[0].get("id") if pair_messages else None
         return (
             [{"role": msg["role"], "content": build_message_content(msg)} for msg in pair_messages],

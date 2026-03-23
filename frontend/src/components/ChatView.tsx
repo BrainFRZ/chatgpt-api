@@ -69,6 +69,9 @@ interface ChatViewProps {
   setBookmarkTooltip: (v: {index: number, x: number, y: number} | null) => void;
   onSelectArtifact?: (docId: string) => void;
   onDownloadArtifact?: (docId: string) => void;
+  onToggleMessageStaged?: (messageId: string, staged: boolean) => void;
+  onUnstageAll?: () => void;
+  chatGameSystem?: string | null;
 }
 
 export default function ChatView({
@@ -135,6 +138,9 @@ export default function ChatView({
   setBookmarkTooltip,
   onSelectArtifact,
   onDownloadArtifact,
+  onToggleMessageStaged,
+  onUnstageAll,
+  chatGameSystem,
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
 
@@ -214,6 +220,15 @@ export default function ChatView({
         >
           🔄
         </button>
+        {chatGameSystem === 'novels' && onUnstageAll && (
+          <button
+            onClick={onUnstageAll}
+            style={{ ...styles.reloadButton, fontSize: '0.68rem', padding: '3px 8px', color: '#888' }}
+            title="Exclude all messages from context"
+          >
+            Unselect All
+          </button>
+        )}
       </div>
 
       <div ref={messagesContainerRef} style={styles.messagesContainer}>
@@ -256,8 +271,12 @@ export default function ChatView({
           const isHackMode = !!(msg as any).hack_mode;
           const isShipCombatMode = !!(msg as any).ship_combat_mode;
           const isSexMode = !!(msg as any).sex_mode;
-          if (!isInContext) {
-            // Out of context: grayed out versions
+          // Check if this message pair is manually unstaged (Novels)
+          const isUnstaged = msg.role === 'user' ? msg.staged === false
+            : (i > 0 && messages[i - 1]?.role === 'user' && messages[i - 1]?.staged === false);
+
+          if (!isInContext || isUnstaged) {
+            // Out of context or manually unstaged: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
           } else if (isHackMode) {
             // Hack mode: matrix-themed green/dark tint
@@ -334,6 +353,24 @@ export default function ChatView({
                         <path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4-8 4V4a2 2 0 0 1 2-2z"/>
                       </svg>
                     )}
+                  </button>
+                )}
+                {/* Context staging checkbox (Novels only) */}
+                {msg.role === 'user' && msg.id && chatGameSystem === 'novels' && editingMessageIndex !== i && (
+                  <button
+                    onClick={() => {
+                      if (onToggleMessageStaged && msg.id) {
+                        onToggleMessageStaged(msg.id, msg.staged === false);
+                      }
+                    }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', marginLeft: '2px', opacity: 0.7, display: 'flex', alignItems: 'center' }}
+                    title={msg.staged === false ? 'Include in context' : 'Exclude from context'}
+                    className="bookmarkButton"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={msg.staged === false ? '#555' : '#4a4ae8'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      {msg.staged !== false && <polyline points="9 11 12 14 22 4" />}
+                    </svg>
                   </button>
                 )}
               </div>

@@ -54,6 +54,7 @@ export interface ChatMessage {
   hack_mode?: boolean;  // True for messages during a hack mode encounter
   sex_mode?: boolean;  // True for messages during an intimate scene
   artifact_ops?: ArtifactOp[];  // Document operations for inline cards (Novels system)
+  staged?: boolean;  // False = excluded from API context (Novels manual staging)
 }
 
 export interface Artifact {
@@ -63,6 +64,7 @@ export interface Artifact {
   type: 'prose' | 'outline' | 'notes' | 'character' | 'json' | 'pdf';
   format?: 'md' | 'txt' | 'json' | 'pdf';  // Explicit render format; inferred from type if absent
   version: number;
+  pinned?: boolean;
   created_at?: string;
   updated_at?: string;
 }

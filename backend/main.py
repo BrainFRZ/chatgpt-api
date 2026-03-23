@@ -1013,9 +1013,25 @@ def _build_artifact_summary(artifacts: dict) -> str:
         word_count = len(doc.get("content", "").split())
         doc_type = doc.get("type", "prose")
         version = doc.get("version", 1)
-        lines.append(f'- {doc_id}: "{doc.get("title", doc_id)}" ({doc_type}, ~{word_count} words, v{version})')
+        pinned_tag = " [pinned]" if doc.get("pinned") else ""
+        lines.append(f'- {doc_id}: "{doc.get("title", doc_id)}" ({doc_type}, ~{word_count} words, v{version}){pinned_tag}')
     lines.append("[/DOCUMENTS]")
     return "\n".join(lines)
+
+
+def _build_pinned_artifacts(artifacts: dict) -> str:
+    """Build a block containing full content of pinned documents for system prompt injection."""
+    if not artifacts:
+        return ""
+    parts = []
+    for doc_id, doc in artifacts.items():
+        if doc.get("pinned"):
+            title = doc.get("title", doc_id)
+            content = doc.get("content", "")
+            parts.append(f"[PINNED: {doc_id} — {title}]\n{content}\n[/PINNED: {doc_id}]")
+    if not parts:
+        return ""
+    return "[PINNED DOCUMENTS]\n" + "\n\n".join(parts) + "\n[/PINNED DOCUMENTS]"
 
 
 def _process_doc_tool_calls(tool_uses: list, artifacts: dict) -> list:
@@ -1758,6 +1774,120 @@ async def set_bookmark(request: SetBookmarkRequest):
     )
 
     return {"success": True}
+
+class SetMessageStagedRequest(BaseModel):
+    username: str
+    chat_name: str
+    message_id: str
+    staged: bool
+    project: str | None = None
+
+@app.post("/api/set-message-staged")
+async def set_message_staged(request: SetMessageStagedRequest):
+    """Toggle whether a message pair is included in API context (Novels manual staging)."""
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    found = False
+    for msg in data.get("messages", []):
+        if msg.get("id") == request.message_id:
+            if request.staged:
+                msg.pop("staged", None)  # Default is staged — remove field
+            else:
+                msg["staged"] = False
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    save_chat(username, request.chat_name, data, request.project)
+
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.BOOKMARK_UPDATED,  # Reuse existing event type for message field updates
+            data={"message_id": request.message_id, "staged": request.staged}
+        )
+    )
+
+    return {"success": True}
+
+
+class UnstageAllRequest(BaseModel):
+    username: str
+    chat_name: str
+    project: str | None = None
+
+@app.post("/api/unstage-all-messages")
+async def unstage_all_messages(request: UnstageAllRequest):
+    """Set all non-system messages to staged=False (Novels manual staging)."""
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    count = 0
+    for msg in data.get("messages", []):
+        if msg.get("role") != "system" and msg.get("staged") is not False:
+            msg["staged"] = False
+            count += 1
+
+    if count > 0:
+        save_chat(username, request.chat_name, data, request.project)
+
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.BOOKMARK_UPDATED,
+            data={"unstage_all": True}
+        )
+    )
+
+    return {"success": True, "count": count}
+
+
+class SetArtifactPinnedRequest(BaseModel):
+    username: str
+    chat_name: str
+    doc_id: str
+    pinned: bool
+    project: str | None = None
+
+@app.post("/api/set-artifact-pinned")
+async def set_artifact_pinned(request: SetArtifactPinnedRequest):
+    """Toggle whether an artifact's full content is pinned in the system prompt."""
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    artifacts = data.get("artifacts", {})
+    if request.doc_id not in artifacts:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    if request.pinned:
+        artifacts[request.doc_id]["pinned"] = True
+    else:
+        artifacts[request.doc_id].pop("pinned", None)
+
+    save_chat(username, request.chat_name, data, request.project)
+
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(
+            type=SyncEventType.BOOKMARK_UPDATED,
+            data={"artifact_pinned": request.doc_id, "pinned": request.pinned}
+        )
+    )
+
+    return {"success": True}
+
 
 class SetAnthropicSyncRequest(BaseModel):
     username: str
@@ -4722,7 +4852,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Collapse hack and combat messages into summary pairs before context trimming
         branch_path_for_context = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
         context_pairs, new_anchor_id, did_trim = get_context_pairs(
-            branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
+            branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id,
+            manual_staging=gs.get("manual_staging", False)
         )
         data["_trim_anchor_id"] = new_anchor_id
         data.pop("_stateful_trimming", None)  # clean up legacy flag
@@ -4784,11 +4915,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             user_content = "\n\n".join(parts)
             new_user_msg = {"role": "user", "content": user_content}
         else:
-            # No game state (e.g., Novels) — contract + artifact summary, no game injections
+            # No game state (e.g., Novels) — contract + pinned artifacts in system, no game injections
             base_content = branch_path[0]["content"]
             contract = gs.get("single_agent_contract", "")
             if contract:
                 base_content = contract + "\n\n" + base_content
+            # Inject pinned artifact content into system prompt (cached across turns)
+            if gs.get("doc_tools") and model_id.startswith("claude"):
+                pinned = _build_pinned_artifacts(data.get("artifacts", {}))
+                if pinned:
+                    base_content = base_content + "\n\n" + pinned
             system_msg = {"role": branch_path[0]["role"], "content": base_content}
 
             user_content = build_message_content(branch_path[-1])

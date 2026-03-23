@@ -2612,6 +2612,38 @@ function App() {
                   const doc = artifacts[docId];
                   if (doc) downloadArtifact(doc);
                 }}
+                chatGameSystem={chatGameSystem}
+                onToggleMessageStaged={async (messageId: string, staged: boolean) => {
+                  // Optimistic update
+                  const updateStaged = (msgs: ChatMessage[]) => msgs.map(m =>
+                    m.id === messageId ? { ...m, staged: staged ? undefined : false } : m
+                  );
+                  setMessages(prev => updateStaged(prev));
+                  setAllMessages(prev => updateStaged(prev));
+                  try {
+                    await fetch('/api/set-message-staged', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ username: user!.username, chat_name: currentChat, message_id: messageId, staged, project: currentProject })
+                    });
+                  } catch (e) {
+                    console.error('Failed to toggle staging:', e);
+                  }
+                }}
+                onUnstageAll={async () => {
+                  // Optimistic update
+                  setMessages(prev => prev.map(m => m.role !== 'system' ? { ...m, staged: false } : m));
+                  setAllMessages(prev => prev.map(m => m.role !== 'system' ? { ...m, staged: false } : m));
+                  try {
+                    await fetch('/api/unstage-all-messages', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ username: user!.username, chat_name: currentChat, project: currentProject })
+                    });
+                  } catch (e) {
+                    console.error('Failed to unstage all:', e);
+                  }
+                }}
               />
             ) : currentProject ? (
               <ProjectLanding
@@ -2786,6 +2818,23 @@ function App() {
           setRightPanelOpen={setRightPanelOpen}
           mobileBottomSheetOpen={mobileBottomSheetOpen}
           setMobileBottomSheetOpen={setMobileBottomSheetOpen}
+          onTogglePin={async (docId: string, pinned: boolean) => {
+            // Optimistic update
+            setArtifacts(prev => {
+              const doc = prev[docId];
+              if (!doc) return prev;
+              return { ...prev, [docId]: { ...doc, pinned: pinned ? true : undefined } };
+            });
+            try {
+              await fetch('/api/set-artifact-pinned', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user!.username, chat_name: currentChat, doc_id: docId, pinned, project: currentProject })
+              });
+            } catch (e) {
+              console.error('Failed to toggle pin:', e);
+            }
+          }}
         />}
       </div>
 

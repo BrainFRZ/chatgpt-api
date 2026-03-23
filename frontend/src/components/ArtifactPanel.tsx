@@ -11,6 +11,7 @@ export interface ArtifactPanelProps {
   setRightPanelOpen: (v: boolean) => void;
   mobileBottomSheetOpen: boolean;
   setMobileBottomSheetOpen: (v: boolean) => void;
+  onTogglePin?: (docId: string, pinned: boolean) => void;
 }
 
 // ── VS Code Dark+ Colors ───────────────────────────────────────────
@@ -146,6 +147,7 @@ function CodeBlock({ children, className }: { children?: React.ReactNode; classN
 export default function ArtifactPanel({
   isMobile, artifacts, selectedArtifactId, setSelectedArtifactId,
   rightPanelOpen, setRightPanelOpen, mobileBottomSheetOpen, setMobileBottomSheetOpen,
+  onTogglePin,
 }: ArtifactPanelProps) {
   const [copied, setCopied] = useState(false);
   const docList = useMemo(() => Object.values(artifacts), [artifacts]);
@@ -274,7 +276,7 @@ export default function ArtifactPanel({
               onMouseEnter={e => { if (!isActive) e.currentTarget.style.color = '#ccc'; }}
               onMouseLeave={e => { if (!isActive) e.currentTarget.style.color = '#888'; }}
             >
-              {doc.title.length > 24 ? doc.title.slice(0, 22) + '\u2026' : doc.title}
+              {doc.pinned ? '\uD83D\uDCCC ' : ''}{doc.title.length > 24 ? doc.title.slice(0, 22) + '\u2026' : doc.title}
             </button>
           );
         })}
@@ -336,6 +338,21 @@ export default function ArtifactPanel({
               >
                 {'\u2B73'}
               </button>
+              {onTogglePin && (
+                <button
+                  onClick={() => onTogglePin(effectiveDoc.doc_id, !effectiveDoc.pinned)}
+                  title={effectiveDoc.pinned ? 'Unpin from context' : 'Pin to context (always in system prompt)'}
+                  style={{
+                    padding: '4px 8px', fontSize: '0.7rem',
+                    color: effectiveDoc.pinned ? '#f59e0b' : '#888',
+                    backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e', borderRadius: '4px', cursor: 'pointer',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#2a2a4e'; }}
+                  onMouseLeave={e => { e.currentTarget.style.backgroundColor = '#1e1e3a'; }}
+                >
+                  {'\uD83D\uDCCC'}
+                </button>
+              )}
             </>
           )}
           <button

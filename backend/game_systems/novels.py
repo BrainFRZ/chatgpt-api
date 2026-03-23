@@ -167,6 +167,7 @@ GAME_SYSTEM = {
     "use_pipeline": False,
     "use_game_state": False,
     "use_base_instructions": False,
+    "manual_staging": True,
     "trimming": "pair",
 
     # Document tools
