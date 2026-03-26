@@ -736,7 +736,7 @@ def build_events_messages(
 
     # 6. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
-        game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
+        game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}), pipeline_state.get("scene_state"))
         if game_injection:
             injections.append(game_injection)
 
@@ -2441,11 +2441,17 @@ def run_pipeline(
                 op for op in resolver_ops
                 if isinstance(op, dict) and state_op_has_subject_kind(op, "edgerunner", canonical_edgerunners)
             ]
+            resolver_rel_ops = [
+                op for op in resolver_ops
+                if isinstance(op, dict) and op.get("type") == "relationship_op"
+            ]
         else:
             resolver_ops_for_state = []
-        if gs.get("apply_game_state") and resolver_ops_for_state:
+            resolver_rel_ops = []
+        if gs.get("apply_game_state") and (resolver_ops_for_state or resolver_rel_ops):
             gs["apply_game_state"](new_pipeline_state["game_state"],
-                                    {"edgerunner_ops": resolver_ops_for_state}, current_turn)
+                                    {"edgerunner_ops": resolver_ops_for_state,
+                                     "relationship_ops": resolver_rel_ops}, current_turn)
 
         new_pipeline_state["character_states"] = _apply_resolver_character_state_deltas(
             new_pipeline_state.get("character_states", {}),
@@ -2513,7 +2519,7 @@ def run_pipeline(
         # Build game injection for Mechanics (relationship tiers, game-specific state)
         mechanics_game_injection = ""
         if gs.get("build_game_injection"):
-            mechanics_game_injection = gs["build_game_injection"](new_pipeline_state.get("game_state", {})) or ""
+            mechanics_game_injection = gs["build_game_injection"](new_pipeline_state.get("game_state", {}), new_pipeline_state.get("scene_state")) or ""
         mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool, game_injection=mechanics_game_injection)
 
         mechanics_result = run_pipeline_stage(
@@ -4093,7 +4099,7 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
 
     # 7. Game-specific state injection (e.g. [INVESTIGATOR STATE] for CoC 7E)
     if game_system and game_system.get("build_game_injection"):
-        game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}))
+        game_injection = game_system["build_game_injection"](pipeline_state.get("game_state", {}), pipeline_state.get("scene_state"))
         if game_injection:
             injections.append(game_injection)
 

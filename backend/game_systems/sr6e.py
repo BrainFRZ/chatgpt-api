@@ -183,7 +183,7 @@ def apply_game_state(game_state, agent_json, turn):
     return game_state
 
 
-def build_game_injection(game_state):
+def build_game_injection(game_state, scene_state=None):
     """Build [RUNNER STATE] injection block from structured state."""
     runners = game_state.get("runners", {})
     if not runners:

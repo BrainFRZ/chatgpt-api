@@ -523,6 +523,7 @@ def resolve_check(
     seriously_wounded: bool = False,
     luck_spent: int = 0,
     rel_bonus: int = 0,
+    wb_boost: int = 0,
 ) -> dict:
     """Resolve a skill check: d10 + STAT + Skill vs DV.
 
@@ -543,15 +544,19 @@ def resolve_check(
 
     # Luck spends are uncapped (bounded by available Luck in state layer).
     # Relationship bonus is clamped to [-5, +5].
+    # WB boost (+1 from Buoyant/Excellent NPC) counts against the +5 rel cap.
     clamped_luck = max(0, luck_spent)
-    clamped_rel = max(-5, min(5, rel_bonus))
+    clamped_rel = max(-5, min(5, rel_bonus + (1 if wb_boost else 0)))
 
     if clamped_luck > 0:
         total += clamped_luck
         modifiers.append(("Luck", clamped_luck))
     if clamped_rel != 0:
         total += clamped_rel
-        modifiers.append(("RS", clamped_rel))
+        label = "RS"
+        if wb_boost:
+            label = "RS+WB"
+        modifiers.append((label, clamped_rel))
 
     success = total > dv  # must BEAT the DV
 
@@ -1545,6 +1550,7 @@ def resolve_opposed_check(
     seriously_wounded_defender: bool = False,
     luck_spent: int = 0,
     rel_bonus: int = 0,
+    wb_boost: int = 0,
 ) -> dict:
     """Resolve an opposed check: both sides roll d10 + stat (+ skill).
 
@@ -1567,10 +1573,11 @@ def resolve_opposed_check(
     if clamped_luck > 0:
         atk_total += clamped_luck
         atk_mods.append(("Luck", clamped_luck))
-    clamped_rel = max(-5, min(5, rel_bonus))
+    clamped_rel = max(-5, min(5, rel_bonus + (1 if wb_boost else 0)))
     if clamped_rel != 0:
         atk_total += clamped_rel
-        atk_mods.append(("RS", clamped_rel))
+        label = "RS+WB" if wb_boost else "RS"
+        atk_mods.append((label, clamped_rel))
 
     # --- Defender total ---
     def_total = def_die["total"] + defender_stat + defender_skill
@@ -3222,6 +3229,13 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             relationships, factions, target,
                             check_context=action.get("check_context"),
                         )
+                # Wellbeing Boost: +1 if the named NPC has an available boost
+                _wb_boost = 0
+                _wb_boost_npc = action.get("wb_boost_used")
+                if _wb_boost_npc and relationships:
+                    _wb_npc_data = relationships.get(_wb_boost_npc, {})
+                    if isinstance(_wb_npc_data, dict) and _wb_npc_data.get("wb_boost"):
+                        _wb_boost = 1
                 result = resolve_check(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -3229,9 +3243,18 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=rel_bonus,
+                    wb_boost=_wb_boost,
                 )
                 result["type"] = "skill_check"
                 result["character"] = actor_name
+                # Emit wb_boost_spend op to consume the boost
+                if _wb_boost:
+                    all_state_ops.append({
+                        "type": "relationship_op",
+                        "op": "wb_boost_spend",
+                        "target": _wb_boost_npc,
+                        "reason": f"Wellbeing boost spent on skill check by {actor_name}",
+                    })
                 results.append(result)
                 _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
                                         action.get("luck_spent", 0), "Luck spent on skill check")
@@ -3431,6 +3454,13 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             relationships, factions, _opp_target,
                             check_context=action.get("check_context"),
                         )
+                # Wellbeing Boost
+                _opp_wb = 0
+                _opp_wb_npc = action.get("wb_boost_used")
+                if _opp_wb_npc and relationships:
+                    _opp_wb_data = relationships.get(_opp_wb_npc, {})
+                    if isinstance(_opp_wb_data, dict) and _opp_wb_data.get("wb_boost"):
+                        _opp_wb = 1
                 result = resolve_opposed_check(
                     attacker_stat=action.get("attacker_stat", 0),
                     defender_stat=action.get("defender_stat", 0),
@@ -3444,8 +3474,16 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     seriously_wounded_defender=action.get("seriously_wounded_defender", False),
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=_opp_rel,
+                    wb_boost=_opp_wb,
                 )
                 result["character"] = actor_name
+                if _opp_wb:
+                    all_state_ops.append({
+                        "type": "relationship_op",
+                        "op": "wb_boost_spend",
+                        "target": _opp_wb_npc,
+                        "reason": f"Wellbeing boost spent on opposed check by {actor_name}",
+                    })
                 # Zap damage: on hit, roll 1d6 (flat, per Hacking Rulebook §7)
                 if action.get("zap") and result["success"]:
                     _zap_dice = 1

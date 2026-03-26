@@ -654,8 +654,9 @@ def apply_game_state(game_state, agent_json, turn):
 
                 elif op == "luck":
                     change = int(op_data.get("change", 0))
+                    ceiling = er["luck"]["max"] * 2
                     er["luck"]["current"] = max(0, min(
-                        er["luck"]["max"],
+                        ceiling,
                         er["luck"]["current"] + change
                     ))
 
@@ -664,7 +665,7 @@ def apply_game_state(game_state, agent_json, turn):
                     # T3/T4 RomS bonus: +1 LUCK/session
                     if max_roms_score(game_state.get("relationships", {})) >= 45:
                         base += 1
-                    er["luck"]["current"] = base
+                    er["luck"]["current"] = min(er["luck"]["max"] * 2, base)
 
                 elif op == "armor":
                     location = op_data.get("location", "body")
@@ -1018,7 +1019,7 @@ def apply_game_state(game_state, agent_json, turn):
                 elif op == "rs":
                     change = int(op_data.get("change", 0))
                     if target not in relationships:
-                        relationships[target] = {"rs": 0, "roms": 0}
+                        relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
                     old_score = relationships[target].get("rs", 0)
                     new_score = max(-100, min(100, old_score + change))
                     relationships[target]["rs"] = new_score
@@ -1044,7 +1045,7 @@ def apply_game_state(game_state, agent_json, turn):
                 elif op == "roms":
                     change = int(op_data.get("change", 0))
                     if target not in relationships:
-                        relationships[target] = {"rs": 0, "roms": 0}
+                        relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
                     old_score = relationships[target].get("roms", 0)
                     new_score = max(0, min(100, old_score + change))
                     relationships[target]["roms"] = new_score
@@ -1064,7 +1065,7 @@ def apply_game_state(game_state, agent_json, turn):
                     change = int(op_data.get("change", 0))
                     if target and isinstance(other, str) and other:
                         if target not in relationships:
-                            relationships[target] = {"rs": 0, "roms": 0}
+                            relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
                         npc_rels = relationships[target].setdefault("npc_relationships", {})
                         if other not in npc_rels:
                             npc_rels[other] = {"rs": 0, "roms": 0}
@@ -1078,7 +1079,7 @@ def apply_game_state(game_state, agent_json, turn):
                     change = int(op_data.get("change", 0))
                     if target and isinstance(other, str) and other:
                         if target not in relationships:
-                            relationships[target] = {"rs": 0, "roms": 0}
+                            relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
                         npc_rels = relationships[target].setdefault("npc_relationships", {})
                         if other not in npc_rels:
                             npc_rels[other] = {"rs": 0, "roms": 0}
@@ -1094,9 +1095,20 @@ def apply_game_state(game_state, agent_json, turn):
                         fields = {}
                     if target and isinstance(other, str) and other:
                         if target not in relationships:
-                            relationships[target] = {"rs": 0, "roms": 0}
+                            relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
                         npc_rels = relationships[target].setdefault("npc_relationships", {})
                         npc_rels[other] = fields
+
+                elif op == "wb_mod":
+                    change = int(op_data.get("change", 0))
+                    if target not in relationships:
+                        relationships[target] = {"rs": 0, "roms": 0, "wb_mod": 0}
+                    current_mod = relationships[target].get("wb_mod", 0)
+                    relationships[target]["wb_mod"] = current_mod + change
+
+                elif op == "wb_boost_spend":
+                    if target in relationships:
+                        relationships[target]["wb_boost"] = False
 
             except (ValueError, TypeError, KeyError, AttributeError) as e:
                 logger.warning(f"CPRED apply_game_state: error processing rel op {op_data}: {e}")
@@ -1192,6 +1204,19 @@ def _mark_housing_free(er, month_str, housing):
     # Don't reset days_on_street for street types — they're still sleeping rough
     if housing not in HOUSING_STREET_TYPES:
         er["days_on_street"] = 0
+
+
+def _wb_state_from_roll(total):
+    """Map a 2d10+mod total to a Wellbeing state string."""
+    if total <= 3:
+        return "Rough"
+    if total <= 6:
+        return "Frayed"
+    if total <= 15:
+        return "Even"
+    if total <= 18:
+        return "Buoyant"
+    return "Excellent"
 
 
 def _process_expenses(game_state, new_date_str):
@@ -1416,6 +1441,48 @@ def _process_expenses(game_state, new_date_str):
                         er_track[er_name]["consequences"].append(
                             "Starving (day 8+) — body stat not set, skipping death save (set via bootstrap)")
 
+        # --- Daily Wellbeing (6AM) ---
+        relationships = game_state.get("relationships", {})
+        wb_parts = []
+        luck_granted = False
+        for npc_name in sorted(relationships.keys()):
+            npc = relationships[npc_name]
+            if not isinstance(npc, dict):
+                continue
+            d1 = random.randint(1, 10)
+            d2 = random.randint(1, 10)
+            raw = d1 + d2
+            mod = max(-2, min(2, npc.get("wb_mod", 0)))
+            total = max(2, min(20, raw + mod))
+            state = _wb_state_from_roll(total)
+            npc["wb"] = state
+            npc["wb_boost"] = state in ("Buoyant", "Excellent")
+            npc["wb_mod"] = 0  # reset after applying
+
+            mod_str = f"{mod:+d}" if mod else ""
+            part = f"{npc_name} 2d10[{d1},{d2}]{mod_str}={total} → {state}"
+
+            # Excellent + T3+ romance: grant +1 bonus LUCK to first PC only
+            if state == "Excellent" and npc.get("roms", 0) >= 45:
+                for er_name in sorted(edgerunners.keys()):
+                    er = edgerunners[er_name]
+                    luck = er.get("luck", {})
+                    ceiling = luck.get("max", 0) * 2
+                    if luck.get("current", 0) < ceiling:
+                        luck["current"] = min(ceiling, luck.get("current", 0) + 1)
+                        luck_granted = True
+                        part += " (+1 LUCK)"
+                    break  # only first PC
+
+            wb_parts.append(part)
+
+        if wb_parts:
+            notifs.append({
+                "type": "wellbeing_rolled",
+                "summary": "WB: " + "; ".join(wb_parts),
+                "luck_granted": luck_granted,
+            })
+
     # --- Crammed post-pass ---
     if new_date > old_date:
         final_month = f"{new_date.year}-{new_date.month:02d}"
@@ -1498,6 +1565,15 @@ def _format_npc_line(name, data):
     parts = [_format_score_with_bonus("RS", rs, _rs_tier)]
     if roms > 0:
         parts.append(_format_score_with_bonus("RomS", roms, _roms_tier))
+    wb = data.get("wb")
+    if wb and wb != "Even":
+        if wb == "Buoyant":
+            wb_label = "Buoyant (+1 social, once)" if data.get("wb_boost") else "Buoyant (spent)"
+        elif wb == "Excellent":
+            wb_label = "Excellent (+1 social, once; +1 LUCK)" if data.get("wb_boost") else "Excellent (spent)"
+        else:
+            wb_label = wb
+        parts.append(f"WB: {wb_label}")
     faction = data.get("faction")
     if faction:
         line = f"  {name} [{faction}]: {' | '.join(parts)}"
@@ -1555,7 +1631,7 @@ def _build_relationship_injection(game_state):
     return "\n".join(lines)
 
 
-def build_game_injection(game_state):
+def build_game_injection(game_state, scene_state=None):
     """Build [EDGERUNNER STATE] injection block from structured state."""
     edgerunners = game_state.get("edgerunners", {})
     if not edgerunners:
@@ -1575,6 +1651,16 @@ def build_game_injection(game_state):
             lines.append(f"  HP: {hp.get('current', 0)}/{hp.get('max', 40)}{_wound_flag(hp.get('current', 0), seriously_wounded=hp.get('seriously_wounded'), long=True)}")
             lines.append(f"  Humanity: {humanity.get('current', 0)}/{humanity.get('max', 0)}")
             lines.append(f"  Luck: {luck.get('current', 0)}/{luck.get('max', 0)}")
+            # Wellbeing Boosts: consumable +1 from Buoyant/Excellent NPCs (scene-scoped)
+            _npcs_present = set(scene_state.get("npcs_present", [])) if scene_state else None
+            wb_boosts = []
+            for npc_name, npc_data in sorted(game_state.get("relationships", {}).items()):
+                if isinstance(npc_data, dict) and npc_data.get("wb_boost"):
+                    if _npcs_present is not None and npc_name not in _npcs_present:
+                        continue
+                    wb_boosts.append(f"{npc_name} ({npc_data.get('wb', '?')})")
+            if wb_boosts:
+                lines.append(f"  Wellbeing Boosts: {', '.join(wb_boosts)}")
             lines.append(f"  Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
             lines.append(f"  Eurobucks: {eb:,}")
 

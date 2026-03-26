@@ -103,7 +103,7 @@ def apply_game_state(game_state, agent_json, turn):
     return game_state
 
 
-def build_game_injection(game_state):
+def build_game_injection(game_state, scene_state=None):
     """Build [RELATIONSHIP STATE] + [SHIP STATE] injection blocks."""
     parts = []
 

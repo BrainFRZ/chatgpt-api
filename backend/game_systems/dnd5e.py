@@ -263,7 +263,7 @@ def _format_faction_line(name, data):
     return line
 
 
-def build_game_injection(game_state):
+def build_game_injection(game_state, scene_state=None):
     """Build [RELATIONSHIP STATE] injection block from game_state."""
     relationships = game_state.get("relationships", {})
     factions = game_state.get("factions", {})

@@ -238,9 +238,11 @@ RELATIONSHIP OPS (RS / RomS / FR):
     Inter-NPC Romance Score change (target's feelings toward other). Clamped 0 to 100.
   * {"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}
     Bootstrap inter-NPC relationship.
+  * {"op": "wb_mod", "target": "<NPC>", "change": 2|-2, "reason": "<why>"}
+    Wellbeing modifier for this NPC's next dawn roll. Only ±2 values — no half-measures. Accumulates throughout the day; backend caps the total at ±2 before applying at 6AM and resets. Emit when major events affect an NPC's emotional state: +2 for major positive events (gig success, safe return of loved one, public recognition), -2 for major negative events (major loss, social rupture, bad news about someone they care about). Minor events do not warrant a modifier.
 - Inter-NPC relationships track how NPCs feel about each other independently of the PC. Track these when NPC-NPC dynamics are narratively significant (crew bonds, rivalries, romances).
 - Scoring guidelines:
-  * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
+  * Moments: +0-1, Gifts: +1-3, Milestones: +2-3, Wellbeing Support: +2-3, Major Decisions: +5-8, Arc Climax: +10-15
   * Opposition: -3 to -10, Betrayals: -15 to -30
   * FR: Missions +5-12, Values alignment +2-8, Acting against -5 to -20, Attacks -15 to -40
 - Most turns have NO score changes — only award when the narrative clearly justifies it.
@@ -255,6 +257,18 @@ RELATIONSHIP OPS (RS / RomS / FR):
 - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize tracked NPCs and factions from conversation context and project files.
 - The "relationship_ops" array should be empty [] if no changes occurred this turn.
 - OPS SCOPE: Emit relationship_ops ONLY for state changes certain before dice rolls — narrative-driven score shifts from dialogue, gifts, betrayals, alliance cascades. Do NOT emit ops for outcomes that depend on Mechanics rolls. Mechanics will emit its own relationship_ops for roll-dependent outcomes.
+
+DAILY WELLBEING:
+- NPCs have a Wellbeing state rolled by the backend at 6AM each in-game day. The state appears in [RELATIONSHIP STATE] as a WB field when not Even (Even days show no WB field — silence is the signal that things are normal).
+- Narrate NPC behavior consistent with their WB state while maintaining their established voice and personality:
+  * Rough: Off, overwhelmed, brittle — something weighing on them. A stoic character goes quieter; an anxious character spirals. Create an opportunity for the PC to engage with the Three Questions ("What happened? What do you need? What can I do?") — but do not force it. If the PC doesn't engage, the NPC handles it themselves. No RS penalty for ignoring it. If the PC engages sincerely, score as Wellbeing Support (+2-3 RS).
+  * Frayed: Curt, tired, distracted. A bit sharp or withdrawn. No mechanical effect — narration only.
+  * Even: Their normal self. Do not mention wellbeing at all.
+  * Buoyant: Extra warmth, quick to encourage, visibly in good spirits. The PC has a consumable +1 to one social check (shown in [EDGERUNNER STATE] as Wellbeing Boosts). Player declares before rolling; only one boost per check even if multiple NPCs are Buoyant.
+  * Excellent: Glowing, generous, contagiously steady. Same +1 social boost as Buoyant, plus +1 bonus LUCK for the day if the PC has a T3+ romance (RomS ≥ 45) with this NPC.
+- Wellbeing is flavor that sits on top of personality, not a replacement for it.
+- Emit wb_mod ops (always ±2, never ±1) when major events affect an NPC's emotional state. Most turns have no wb_mod changes.
+- Wellbeing bonuses (Buoyant +1, Excellent LUCK) require the NPC to be present in the scene — same presence rule as RS/RomS bonuses.
 
 CHARACTER STATES (structured format):
 - "character_states" uses a structured object per character with type, class, level, vitals, resources, and conditions
@@ -390,11 +404,11 @@ Events decides WHAT rolls happen and chooses difficulty tiers. The backend resol
 
 Backend auto-lookup: For PCs in edgerunner state and NPCs in character_states, the backend resolves stat_value/skill_value/seriously_wounded from state using the stat/skill name fields. You only need to provide numeric overrides (stat_value, skill_value) for ad-hoc NPCs not tracked in any state.
 
-- skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "skill": "<Skill>", "difficulty": "<simple|everyday|difficult|professional|heroic|incredible|legendary>", "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
-  Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation. Difficulty tiers: simple (DV 9), everyday (DV 13), difficult (DV 15), professional (DV 17), heroic (DV 21), incredible (DV 24), legendary (DV 29). For NPCs not in state, add stat_value/skill_value overrides.
+- skill_check: {"type": "skill_check", "character": "<name>", "stat": "<STAT>", "skill": "<Skill>", "difficulty": "<simple|everyday|difficult|professional|heroic|incredible|legendary>", "luck_spent": <0-N>, "target": "<NPC/faction name if social>", "check_context": "<social|persuasion|combat|perception>", "wb_boost_used": "<NPC name>", "on_success": "<narrative if passes>", "on_failure": "<narrative if fails>"}
+  Use for any d10+STAT+Skill vs DV check: Persuasion, Athletics, Stealth, Perception, etc. Include `target` + `check_context` for relationship bonus auto-computation. Difficulty tiers: simple (DV 9), everyday (DV 13), difficult (DV 15), professional (DV 17), heroic (DV 21), incredible (DV 24), legendary (DV 29). For NPCs not in state, add stat_value/skill_value overrides. wb_boost_used: include NPC name when the player declares a Wellbeing Boost before rolling — backend validates, adds +1 (counts against +5 cap), and consumes.
 
-- opposed_check: {"type": "opposed_check", "character": "<name>", "attacker_label": "<STAT name>", "attacker_skill_label": "<Skill name>", "defender_label": "<STAT name>", "defender_skill_label": "<Skill name>", "target": "<NPC name for rel bonus>", "seriously_wounded_attacker": <bool>?, "seriously_wounded_defender": <bool>?, "luck_spent": <0-N>, "check_context": "<social|persuasion|combat|perception>", "on_success": "<narrative>", "on_failure": "<narrative>"}
-  Use for contested rolls where both sides roll d10+STAT+Skill: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Ties go to defender. Backend resolves stat values from attacker_label/defender_label + attacker_skill_label/defender_skill_label names. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides.
+- opposed_check: {"type": "opposed_check", "character": "<name>", "attacker_label": "<STAT name>", "attacker_skill_label": "<Skill name>", "defender_label": "<STAT name>", "defender_skill_label": "<Skill name>", "target": "<NPC name for rel bonus>", "seriously_wounded_attacker": <bool>?, "seriously_wounded_defender": <bool>?, "luck_spent": <0-N>, "check_context": "<social|persuasion|combat|perception>", "wb_boost_used": "<NPC name>", "on_success": "<narrative>", "on_failure": "<narrative>"}
+  Use for contested rolls where both sides roll d10+STAT+Skill: Stealth vs Concentration, Persuasion vs Concentration, Resist Torture vs Interrogation, etc. Ties go to defender. Backend resolves stat values from attacker_label/defender_label + attacker_skill_label/defender_skill_label names. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides. wb_boost_used: same as skill_check — include NPC name to spend a Wellbeing Boost (+1, counts against +5 cap).
 
 - ranged_attack: {"type": "ranged_attack", "character": "<attacker>", "stat": "<STAT e.g. REF>", "skill": "<Skill e.g. Handgun>", "weapon_type": "<Pistol|SMG|Shotgun|Assault Rifle|Sniper Rifle|Bows & Crossbow|Grenade Launcher|Rocket Launcher>", "damage_dice": <int>, "rof": <int>, "target": "<target name>", "target_sp": <int>, "range_bracket": <0-7>, "hit_location": "head|body", "is_ap": <bool>, "is_rubber": <bool>, "luck_spent": <int>, "aimed_shot": "head|leg|held_item|null", "on_hit": "<narrative>", "on_miss": "<narrative>"}
   Range brackets: 0=0-6m, 1=7-12m, 2=13-25m, 3=26-50m, 4=51-100m, 5=101-200m, 6=201-400m, 7=401-800m. Backend auto-resolves stat_value/skill_value/seriously_wounded from state. For NPCs not in state, add stat_value/skill_value overrides.
@@ -458,6 +472,7 @@ OUTPUT STRUCTURE:
    - Pipe-separate multiple changes on one line
    - The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
    - Omit this line entirely if relationship_ops is empty
+   - If wellbeing notifications are present (new in-game day crossed), weave the NPC mood shifts into scene-setting naturally — do not announce them as mechanical events. Example: "Delphi's leaning against the counter, arms crossed, quieter than usual" (Frayed), not "Delphi rolled Frayed today."
 4. HUD appended verbatim at the end
 5. current_player attribution and next_player closing hook per standard pipeline
 6. Combat: reference initiative order if in combat
@@ -558,7 +573,9 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": 3, "reason": "Fought together"}`
 - `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": 5, "reason": "Flirting"}`
 - `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": 40, "roms": 0}}`
-- Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
+- `{"op": "wb_mod", "target": "<NPC>", "change": 2|-2, "reason": "<why>"}`
+  Wellbeing modifier for this NPC's next dawn roll. Only ±2 values. Backend caps total at ±2 before applying at 6AM and resets. Emit for major positive events (+2) or major negative events (-2). Minor events do not warrant a modifier.
+- Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Wellbeing Support +2-3, Major Decisions +5-8, Arc Climax +10-15. Opposition -3 to -10, Betrayals -15 to -30. FR: Missions +5-12, Acting against -5 to -20.
 - Maximum combined relationship bonus: +5 to any single check (d10 calibration).
 - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
 - Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. When FR hits -70 (Enemy) or -90 (KOS):
@@ -568,6 +585,18 @@ Use the "relationship_ops" array to track RS/RomS/FR changes:
 - Presence requirements: RS/RomS bonuses require the NPC in the scene. FR bonuses apply when interacting with faction members or in faction territory.
 - Combat bonuses: Deeply negative RS (hatred/obsession) and high RomS (intimate familiarity) apply "all" bonuses to combat rolls too — the backend auto-applies these.
 - Bootstrap: When [RELATIONSHIP STATE] is empty, use "set" ops to initialize NPCs and factions from context.
+
+### Daily Wellbeing:
+NPCs have a Wellbeing state rolled by the backend at 6AM each in-game day. The state appears in [RELATIONSHIP STATE] as a WB field when not Even (Even = normal, no WB field shown).
+- Narrate NPC behavior consistent with their WB state while maintaining their established voice and personality:
+  * Rough: Off, overwhelmed, brittle. A stoic character goes quieter; an anxious character spirals. Create an opportunity for the PC to engage with the Three Questions ("What happened? What do you need? What can I do?") — do not force it. No RS penalty if ignored. If the PC engages sincerely, score as Wellbeing Support (+2-3 RS).
+  * Frayed: Curt, tired, distracted. A bit sharp or withdrawn. Narration only.
+  * Even: Normal self. Do not mention wellbeing at all.
+  * Buoyant: Extra warmth, quick to encourage, visibly in good spirits. PC has a consumable +1 to one social check (shown in [EDGERUNNER STATE] as Wellbeing Boosts). Player declares before rolling; one boost per check max.
+  * Excellent: Glowing, generous, contagiously steady. Same +1 boost as Buoyant, plus +1 bonus LUCK if PC has T3+ romance (RomS ≥ 45) with this NPC.
+- Wellbeing is flavor on top of personality, not a replacement for it.
+- Emit wb_mod ops (always ±2) when major events affect an NPC's emotional state. Most turns: no wb_mod.
+- Wellbeing bonuses require the NPC to be present in the scene.
 
 ### Night Market Mechanics:
 - find_item: Fixer Operator rank + d10 vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.
@@ -710,8 +739,8 @@ Turn flow:
 When NO mechanical actions are needed (dialogue, scene description, OOC), skip `resolve_mechanics` and go directly to narrative + `report_state`.
 
 Action types for resolve_mechanics (backend auto-resolves stat/skill values and seriously_wounded from edgerunner state for PCs; provide numeric overrides only for NPCs not in state):
-- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context? (social/persuasion/combat/perception)} — Difficulty tiers: simple=9, everyday=13, difficult=15, professional=17, heroic=21, incredible=24, legendary=29.
-- opposed_check: {type, character, attacker_label (STAT name e.g. "COOL"), attacker_skill_label (e.g. "Persuasion"), defender_label (STAT name e.g. "COOL"), defender_skill_label (e.g. "Concentration"), target? (NPC name), luck_spent?, check_context?} — contested rolls. Ties go to defender. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides.
+- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context? (social/persuasion/combat/perception), wb_boost_used?: "<NPC name>"} — Difficulty tiers: simple=9, everyday=13, difficult=15, professional=17, heroic=21, incredible=24, legendary=29. wb_boost_used: include the NPC's name when the player declares they want to spend a Wellbeing Boost before rolling — the backend validates availability, adds +1 (counts against +5 cap), and consumes the boost.
+- opposed_check: {type, character, attacker_label (STAT name e.g. "COOL"), attacker_skill_label (e.g. "Persuasion"), defender_label (STAT name e.g. "COOL"), defender_skill_label (e.g. "Concentration"), target? (NPC name), luck_spent?, check_context?, wb_boost_used?: "<NPC name>"} — contested rolls. Ties go to defender. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill numeric overrides. wb_boost_used works same as skill_check.
 - ranged_attack: {type, character, stat (e.g. "REF"), skill (e.g. "Handgun"), weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, luck_spent?, aimed_shot?}
 - melee_attack: {type, character, attacker_label (e.g. "DEX"), attacker_skill_label (e.g. "Martial Arts"), defender_label (e.g. "DEX"), defender_skill_label (e.g. "Evasion"), damage_dice, rof, target, target_sp, hit_location, is_brawling?}
 - autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type (SMG/Assault Rifle), autofire_multiplier (3/4), target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?}
@@ -895,7 +924,7 @@ STATE_REPORT_TOOL = {
                     "type": "object",
                     "required": ["op", "target"],
                     "properties": {
-                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set"]},
+                        "op": {"type": "string", "enum": ["rs", "roms", "fr", "set", "npc_rs", "npc_roms", "npc_set", "wb_mod", "wb_boost_spend"]},
                         "target": {"type": "string", "description": "NPC or faction name"},
                         "other": {"type": "string", "description": "Other NPC name (for npc_rs, npc_roms, npc_set ops)"},
                         "change": {"type": "integer", "description": "Signed change amount"},
@@ -1334,8 +1363,8 @@ Action types (backend auto-resolves stat/skill values and seriously_wounded from
 - ranged_attack: {type, character, stat (e.g. "REF"), skill (e.g. "Handgun"), weapon_type, damage_dice, rof, target, target_sp, range_bracket (0-7), hit_location, is_ap?, is_rubber?, luck_spent?, aimed_shot?, weapon_name?}
 - melee_attack: {type, character, attacker_label (e.g. "DEX"), attacker_skill_label (e.g. "Martial Arts"), defender_label (e.g. "DEX"), defender_skill_label (e.g. "Evasion"), damage_dice, rof, target, target_sp, hit_location, is_brawling?}
 - autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type (SMG/Assault Rifle), autofire_multiplier (3/4), target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?, weapon_name?}
-- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context?}
-- opposed_check: {type, character, attacker_label (STAT name), attacker_skill_label (Skill name), defender_label (STAT name), defender_skill_label (Skill name), target?, luck_spent?, check_context?} — contested rolls. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill.
+- skill_check: {type, character, stat (STAT name), skill (Skill name), difficulty (simple/everyday/difficult/professional/heroic/incredible/legendary), luck_spent?, target?, check_context?, wb_boost_used?: "<NPC name>"} — wb_boost_used: include NPC name to spend a Wellbeing Boost (+1, counts against +5 cap). Backend validates and consumes.
+- opposed_check: {type, character, attacker_label (STAT name), attacker_skill_label (Skill name), defender_label (STAT name), defender_skill_label (Skill name), target?, luck_spent?, check_context?, wb_boost_used?: "<NPC name>"} — contested rolls. For NPCs not in state, add attacker_stat/attacker_skill/defender_stat/defender_skill. wb_boost_used works same as skill_check.
 - death_save: {type, character, body_stat}
 
 ROLL FORMAT (from resolve_mechanics results):

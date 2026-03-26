@@ -6003,5 +6003,488 @@ class TestNormalizeAction(unittest.TestCase):
         self.assertEqual(r["type"], "skill_check")
 
 
+class TestDailyWellbeing(unittest.TestCase):
+    """Tests for the Daily Wellbeing system (§7 of Relationship Systems)."""
+
+    MOCK = "game_systems.cpred_core.random.randint"
+
+    def _make_game_state(self, luck_max=7, roms=0, wb_mod=0, npc_name="Delphi"):
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": luck_max, "max": luck_max},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "death_save_count": 0,
+            "critical_injuries": [],
+        }
+        gs["relationships"][npc_name] = {"rs": 50, "roms": roms, "wb_mod": wb_mod}
+        gs["current_date"] = "2045-08-21"
+        return gs
+
+    def test_wb_state_rough(self):
+        """2d10 sum ≤ 3 → Rough."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[1, 1]):  # sum = 2
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Rough")
+        self.assertFalse(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_state_frayed(self):
+        """2d10 sum 4-6 → Frayed."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[2, 2]):  # sum = 4
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Frayed")
+        self.assertFalse(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_state_even(self):
+        """2d10 sum 7-15 → Even."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[4, 5]):  # sum = 9
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Even")
+        self.assertFalse(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_state_buoyant(self):
+        """2d10 sum 16-18 → Buoyant with boost."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[8, 9]):  # sum = 17
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Buoyant")
+        self.assertTrue(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_state_excellent(self):
+        """2d10 sum 19-20 → Excellent with boost."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[10, 10]):  # sum = 20
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Excellent")
+        self.assertTrue(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_mod_applied_and_reset(self):
+        """wb_mod shifts the roll and resets to 0 after."""
+        gs = self._make_game_state(wb_mod=2)
+        with patch(self.MOCK, side_effect=[8, 8]):  # raw 16, +2 = 18
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Buoyant")
+        self.assertEqual(gs["relationships"]["Delphi"]["wb_mod"], 0)
+
+    def test_wb_mod_clamped_at_plus_2(self):
+        """wb_mod is clamped to +2 even if accumulated higher."""
+        gs = self._make_game_state(wb_mod=5)
+        # raw 14, +2 (clamped) = 16 → Buoyant
+        with patch(self.MOCK, side_effect=[7, 7]):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Buoyant")
+
+    def test_wb_mod_clamped_at_minus_2(self):
+        """wb_mod is clamped to -2 even if accumulated lower."""
+        gs = self._make_game_state(wb_mod=-5)
+        # raw 5, -2 (clamped) = 3 → Rough
+        with patch(self.MOCK, side_effect=[3, 2]):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Rough")
+
+    def test_wb_excellent_grants_luck_with_t3_romance(self):
+        """Excellent + RomS ≥ 45 → +1 LUCK to PC."""
+        gs = self._make_game_state(roms=50, luck_max=7)
+        with patch(self.MOCK, side_effect=[10, 10]):  # Excellent
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 8)
+
+    def test_wb_excellent_no_luck_without_romance(self):
+        """Excellent without T3+ romance → no LUCK bonus."""
+        gs = self._make_game_state(roms=30, luck_max=7)
+        with patch(self.MOCK, side_effect=[10, 10]):  # Excellent
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 7)
+
+    def test_wb_excellent_luck_respects_x2_cap(self):
+        """Excellent LUCK grant cannot exceed LUCK max × 2."""
+        gs = self._make_game_state(roms=50, luck_max=3)
+        gs["edgerunners"]["V"]["luck"]["current"] = 6  # already at 2x cap
+        with patch(self.MOCK, side_effect=[10, 10]):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 6)  # unchanged
+
+    def test_wb_multi_day_skip(self):
+        """Skipping multiple days rolls wellbeing for each intermediate day."""
+        gs = self._make_game_state()
+        # 3 days → 3 rolls = 6 random.randint calls
+        rolls = [5, 5, 10, 10, 3, 3]  # day1: Even, day2: Excellent, day3: Frayed
+        with patch(self.MOCK, side_effect=rolls):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-24"}}, turn=1)
+        # Final state should be from the last day's roll
+        self.assertEqual(gs["relationships"]["Delphi"]["wb"], "Frayed")
+
+    def test_wb_notification_emitted(self):
+        """Wellbeing roll emits a notification."""
+        gs = self._make_game_state()
+        with patch(self.MOCK, side_effect=[5, 5]):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        notifs = gs.get("_pending_notifications", [])
+        wb_notifs = [n for n in notifs if n.get("type") == "wellbeing_rolled"]
+        self.assertTrue(len(wb_notifs) > 0)
+        self.assertIn("Delphi", wb_notifs[-1]["summary"])
+
+
+class TestWbModOp(unittest.TestCase):
+    """Tests for the wb_mod relationship op."""
+
+    def _make_game_state(self):
+        gs = init_cpred_game_state()
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb_mod": 0}
+        return gs
+
+    def test_wb_mod_accumulates(self):
+        """Multiple wb_mod ops accumulate."""
+        gs = self._make_game_state()
+        apply_cpred_game_state(gs, {"relationship_ops": [
+            {"op": "wb_mod", "target": "Delphi", "change": 2, "reason": "Gig success"},
+            {"op": "wb_mod", "target": "Delphi", "change": -2, "reason": "Bad news"},
+        ]}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb_mod"], 0)
+
+    def test_wb_mod_positive(self):
+        gs = self._make_game_state()
+        apply_cpred_game_state(gs, {"relationship_ops": [
+            {"op": "wb_mod", "target": "Delphi", "change": 2, "reason": "Good day"},
+        ]}, turn=1)
+        self.assertEqual(gs["relationships"]["Delphi"]["wb_mod"], 2)
+
+    def test_wb_mod_creates_npc_if_missing(self):
+        gs = init_cpred_game_state()
+        apply_cpred_game_state(gs, {"relationship_ops": [
+            {"op": "wb_mod", "target": "NewNPC", "change": 2, "reason": "test"},
+        ]}, turn=1)
+        self.assertIn("NewNPC", gs["relationships"])
+        self.assertEqual(gs["relationships"]["NewNPC"]["wb_mod"], 2)
+
+
+class TestWbBoostSpendOp(unittest.TestCase):
+    """Tests for the wb_boost_spend relationship op."""
+
+    def test_wb_boost_spend(self):
+        gs = init_cpred_game_state()
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb_boost": True, "wb": "Buoyant"}
+        apply_cpred_game_state(gs, {"relationship_ops": [
+            {"op": "wb_boost_spend", "target": "Delphi", "reason": "Used on Persuasion"},
+        ]}, turn=1)
+        self.assertFalse(gs["relationships"]["Delphi"]["wb_boost"])
+
+    def test_wb_boost_spend_missing_npc(self):
+        """Spending a boost on a non-existent NPC doesn't crash."""
+        gs = init_cpred_game_state()
+        apply_cpred_game_state(gs, {"relationship_ops": [
+            {"op": "wb_boost_spend", "target": "Nobody", "reason": "test"},
+        ]}, turn=1)
+
+
+class TestLuckX2Cap(unittest.TestCase):
+    """Tests for the LUCK × 2 cap enforcement."""
+
+    def _make_game_state(self, luck_max=3, luck_current=3, roms=0):
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": luck_current, "max": luck_max},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "death_save_count": 0,
+            "critical_injuries": [],
+        }
+        if roms > 0:
+            gs["relationships"]["Judy"] = {"rs": 50, "roms": roms}
+        return gs
+
+    def test_luck_add_capped_at_2x(self):
+        """Luck increase via op cannot exceed max × 2."""
+        gs = self._make_game_state(luck_max=3, luck_current=5)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck", "change": 3, "reason": "test"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 6)  # 3 * 2
+
+    def test_luck_reset_capped_at_2x(self):
+        """luck_reset with T3 romance still capped at 2x."""
+        gs = self._make_game_state(luck_max=3, roms=50)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck_reset", "reason": "New session"},
+        ]}, turn=1)
+        # max=3, +1 romance = 4, which is < 6 (3*2), so it should be 4
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 4)
+
+    def test_luck_spend_still_works(self):
+        """Spending LUCK still clamps to 0."""
+        gs = self._make_game_state(luck_max=3, luck_current=2)
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "luck", "change": -5, "reason": "Spent"},
+        ]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 0)
+
+
+class TestResolveCheckWbBoost(unittest.TestCase):
+    """Tests for wb_boost parameter in resolve_check."""
+
+    def test_wb_boost_adds_one_to_rel_bonus(self):
+        """wb_boost=1 adds +1 that counts against +5 cap."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_check(stat_value=6, skill_value=4, dv=13, rel_bonus=3, wb_boost=1)
+        # rel_bonus=3 + wb_boost=1 = 4 (clamped to 4, under cap)
+        self.assertEqual(result["total"], 5 + 6 + 4 + 4)  # 19
+
+    def test_wb_boost_capped_with_high_rel(self):
+        """wb_boost + high rel_bonus together capped at +5."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_check(stat_value=6, skill_value=4, dv=13, rel_bonus=5, wb_boost=1)
+        # rel_bonus=5 + wb_boost=1 = 6, clamped to 5
+        self.assertEqual(result["total"], 5 + 6 + 4 + 5)  # 20
+
+    def test_wb_boost_zero_no_effect(self):
+        """wb_boost=0 has no effect."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_check(stat_value=6, skill_value=4, dv=13, rel_bonus=3, wb_boost=0)
+        self.assertEqual(result["total"], 5 + 6 + 4 + 3)  # 18
+
+    def test_wb_boost_label_in_formatted(self):
+        """When wb_boost is used, modifier label shows RS+WB."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_check(stat_value=6, skill_value=4, dv=13, rel_bonus=3, wb_boost=1)
+        self.assertIn("RS+WB", result["formatted"])
+
+
+class TestWbBoostInResolveActions(unittest.TestCase):
+    """Tests for wb_boost_used field in resolve_actions skill checks."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def test_wb_boost_used_valid(self):
+        """wb_boost_used with a valid NPC adds +1 and emits spend op."""
+        rels = {"Delphi": {"rs": 50, "roms": 0, "wb_boost": True, "wb": "Buoyant"}}
+        with patch(self.MOCK, return_value=5):
+            result = resolve_actions([{
+                "type": "skill_check",
+                "character": "V",
+                "stat_value": 6,
+                "skill_value": 4,
+                "dv": 13,
+                "wb_boost_used": "Delphi",
+            }], relationships=rels)
+        # Check the +1 was applied
+        self.assertEqual(result["results"][0]["total"], 5 + 6 + 4 + 1)  # 16
+        # Check spend op was emitted
+        rel_ops = [op for op in result["state_ops"] if op.get("type") == "relationship_op"]
+        self.assertEqual(len(rel_ops), 1)
+        self.assertEqual(rel_ops[0]["op"], "wb_boost_spend")
+        self.assertEqual(rel_ops[0]["target"], "Delphi")
+
+    def test_wb_boost_used_no_boost_available(self):
+        """wb_boost_used when NPC has no boost → no +1, no spend op."""
+        rels = {"Delphi": {"rs": 50, "roms": 0, "wb_boost": False, "wb": "Even"}}
+        with patch(self.MOCK, return_value=5):
+            result = resolve_actions([{
+                "type": "skill_check",
+                "character": "V",
+                "stat_value": 6,
+                "skill_value": 4,
+                "dv": 13,
+                "wb_boost_used": "Delphi",
+            }], relationships=rels)
+        self.assertEqual(result["results"][0]["total"], 5 + 6 + 4)  # 15, no boost
+        rel_ops = [op for op in result["state_ops"] if op.get("type") == "relationship_op"]
+        self.assertEqual(len(rel_ops), 0)
+
+
+class TestWbInjection(unittest.TestCase):
+    """Tests for WB state in relationship injection and boosts in edgerunner injection."""
+
+    def test_wb_buoyant_in_npc_line(self):
+        """Buoyant NPC with boost shows WB in relationship line."""
+        from game_systems.cpred_core import _format_npc_line
+        data = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": True}
+        line = _format_npc_line("Delphi", data)
+        self.assertIn("WB: Buoyant (+1 social, once)", line)
+
+    def test_wb_buoyant_spent_in_npc_line(self):
+        """Buoyant NPC with spent boost shows (spent)."""
+        from game_systems.cpred_core import _format_npc_line
+        data = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": False}
+        line = _format_npc_line("Delphi", data)
+        self.assertIn("WB: Buoyant (spent)", line)
+
+    def test_wb_excellent_in_npc_line(self):
+        """Excellent NPC shows WB with LUCK note."""
+        from game_systems.cpred_core import _format_npc_line
+        data = {"rs": 50, "roms": 50, "wb": "Excellent", "wb_boost": True}
+        line = _format_npc_line("Delphi", data)
+        self.assertIn("WB: Excellent (+1 social, once; +1 LUCK)", line)
+
+    def test_wb_even_not_shown(self):
+        """Even state does not show WB field."""
+        from game_systems.cpred_core import _format_npc_line
+        data = {"rs": 50, "roms": 0, "wb": "Even", "wb_boost": False}
+        line = _format_npc_line("Delphi", data)
+        self.assertNotIn("WB:", line)
+
+    def test_wb_rough_in_npc_line(self):
+        """Rough state shows as plain label."""
+        from game_systems.cpred_core import _format_npc_line
+        data = {"rs": 50, "roms": 0, "wb": "Rough", "wb_boost": False}
+        line = _format_npc_line("Delphi", data)
+        self.assertIn("WB: Rough", line)
+
+    def test_wb_boosts_in_edgerunner_injection(self):
+        """Wellbeing Boosts line appears in edgerunner state when available."""
+        from game_systems.cpred_core import build_game_injection
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40, "seriously_wounded": False},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+        }
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": True}
+        injection = build_game_injection(gs)
+        self.assertIn("Wellbeing Boosts: Delphi (Buoyant)", injection)
+
+    def test_no_wb_boosts_line_when_none(self):
+        """No Wellbeing Boosts line when no NPCs have boosts."""
+        from game_systems.cpred_core import build_game_injection
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40, "seriously_wounded": False},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+        }
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb": "Even", "wb_boost": False}
+        injection = build_game_injection(gs)
+        self.assertNotIn("Wellbeing Boosts", injection)
+
+
+class TestWbBoostOpposedCheck(unittest.TestCase):
+    """Tests for wb_boost_used in opposed_check resolve_actions path."""
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def test_opposed_check_wb_boost_valid(self):
+        """wb_boost_used on opposed_check adds +1 and emits spend op."""
+        rels = {"Delphi": {"rs": 50, "roms": 0, "wb_boost": True, "wb": "Buoyant"}}
+        with patch(self.MOCK, return_value=5):
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": 6,
+                "attacker_skill": 4,
+                "defender_stat": 5,
+                "defender_skill": 3,
+                "wb_boost_used": "Delphi",
+            }], relationships=rels)
+        # Attacker total should include +1 WB
+        self.assertIn("RS+WB", result["results"][0]["formatted"])
+        rel_ops = [op for op in result["state_ops"] if op.get("type") == "relationship_op"]
+        self.assertEqual(len(rel_ops), 1)
+        self.assertEqual(rel_ops[0]["op"], "wb_boost_spend")
+
+    def test_opposed_check_wb_boost_unavailable(self):
+        """wb_boost_used on opposed_check with no boost → no effect."""
+        rels = {"Delphi": {"rs": 50, "roms": 0, "wb_boost": False, "wb": "Even"}}
+        with patch(self.MOCK, return_value=5):
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": 6,
+                "attacker_skill": 4,
+                "defender_stat": 5,
+                "defender_skill": 3,
+                "wb_boost_used": "Delphi",
+            }], relationships=rels)
+        self.assertNotIn("RS+WB", result["results"][0]["formatted"])
+        rel_ops = [op for op in result["state_ops"] if op.get("type") == "relationship_op"]
+        self.assertEqual(len(rel_ops), 0)
+
+
+class TestWbMultiExcellentLuck(unittest.TestCase):
+    """Tests for multiple NPCs rolling Excellent with T3+ romance on same day."""
+
+    MOCK = "game_systems.cpred_core.random.randint"
+
+    def test_two_excellent_t3_npcs_grant_two_luck(self):
+        """Two Excellent T3+ NPCs each grant +1 LUCK (total +2)."""
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "death_save_count": 0,
+            "critical_injuries": [],
+        }
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 50, "wb_mod": 0}
+        gs["relationships"]["Kessler"] = {"rs": 50, "roms": 60, "wb_mod": 0}
+        gs["current_date"] = "2045-08-21"
+        # Both roll Excellent (10+10=20)
+        with patch(self.MOCK, side_effect=[10, 10, 10, 10]):
+            apply_cpred_game_state(gs, {"hud_state": {"date": "2045-08-22"}}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["luck"]["current"], 9)  # 7 + 2
+
+
+class TestWbSceneScopedBoosts(unittest.TestCase):
+    """Tests for scene-scoped wellbeing boost filtering in build_game_injection."""
+
+    def test_boosts_filtered_by_scene(self):
+        """Only NPCs in scene show wellbeing boosts."""
+        from game_systems.cpred_core import build_game_injection
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40, "seriously_wounded": False},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+        }
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": True}
+        gs["relationships"]["Kessler"] = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": True}
+        scene = {"npcs_present": ["Delphi"]}
+        injection = build_game_injection(gs, scene_state=scene)
+        self.assertIn("Delphi (Buoyant)", injection)
+        self.assertNotIn("Kessler", injection.split("Wellbeing Boosts")[1].split("\n")[0])
+
+    def test_no_scene_state_shows_all_boosts(self):
+        """Without scene_state, all boosted NPCs appear."""
+        from game_systems.cpred_core import build_game_injection
+        gs = init_cpred_game_state()
+        gs["edgerunners"]["V"] = {
+            "hp": {"current": 40, "max": 40, "seriously_wounded": False},
+            "humanity": {"current": 60, "max": 60},
+            "luck": {"current": 7, "max": 7},
+            "armor": {"head": 0, "body": 0},
+            "eurobucks": 0,
+            "critical_injuries": [],
+            "cyberware_effects": [],
+            "conditions": [],
+        }
+        gs["relationships"]["Delphi"] = {"rs": 50, "roms": 0, "wb": "Buoyant", "wb_boost": True}
+        gs["relationships"]["Kessler"] = {"rs": 50, "roms": 0, "wb": "Excellent", "wb_boost": True}
+        injection = build_game_injection(gs)
+        self.assertIn("Delphi (Buoyant)", injection)
+        self.assertIn("Kessler (Excellent)", injection)
+
+
 if __name__ == "__main__":
     unittest.main()
