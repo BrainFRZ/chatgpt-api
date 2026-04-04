@@ -3574,6 +3574,50 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
         f.write("\n".join(lines))
 
 
+def generate_plain_transcript(chat_data: dict, chat_path: str, chat_name: str) -> None:
+    """
+    Generate a plain-text transcript with only user/assistant dialogue.
+    No metadata, no pipeline internals — just the conversation.
+    """
+    transcript_path = chat_path.replace(".json", "_transcript.txt")
+
+    messages = chat_data.get("messages", [])
+    leaf_id = chat_data.get("current_leaf_id")
+    if not messages or not leaf_id:
+        return
+
+    # Build index and trace active branch (root → leaf)
+    index = {m["id"]: m for m in messages if m.get("id")}
+    path = []
+    current = leaf_id
+    while current:
+        if current not in index:
+            break
+        path.append(index[current])
+        current = index[current].get("parent_id")
+    path.reverse()
+
+    lines = []
+    for msg in path:
+        role = msg.get("role", "")
+        if role == "system":
+            continue
+
+        content = msg.get("content", "")
+
+        if role == "user":
+            lines.append("[USER]")
+            lines.append(content)
+            lines.append("")
+        elif role == "assistant":
+            lines.append("[ASSISTANT]")
+            lines.append(content)
+            lines.append("")
+
+    with open(transcript_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
 # ============================================================
 # Single-Agent Stateful Persistence (Claude project chats)
 # ============================================================

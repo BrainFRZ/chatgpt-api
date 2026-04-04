@@ -38,7 +38,7 @@ from sync_manager import sync_manager, SyncEvent, SyncEventType
 # Pipeline imports
 from pipeline import (
     run_pipeline, run_mode_pipeline, PipelineResult, ModeResult, generate_debug_transcript,
-    apply_single_agent_state_updates,
+    generate_plain_transcript, apply_single_agent_state_updates,
     build_single_agent_injections, build_player_agency_reminder,
     generate_dice_pool, generate_name_dice,
     migrate_pipeline_state,
@@ -6964,6 +6964,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 try:
                     debug_chat_path = get_chat_path(username, request.chat_name, request.project)
                     generate_debug_transcript(data, debug_chat_path, request.chat_name)
+                    generate_plain_transcript(data, debug_chat_path, request.chat_name)
                 except Exception as e:
                     logger.warning(f"Pipeline: failed to generate debug transcript: {e}")
 
@@ -8194,6 +8195,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             try:
                                 debug_chat_path = get_chat_path(username, request.chat_name, request.project)
                                 generate_debug_transcript(data, debug_chat_path, request.chat_name)
+                                generate_plain_transcript(data, debug_chat_path, request.chat_name)
                             except Exception as e:
                                 logger.warning(f"Stream: failed to generate debug transcript: {e}")
 
@@ -8665,6 +8667,7 @@ async def switch_branch(username: str, chat_name: str, target_message_id: str, p
     try:
         debug_chat_path = get_chat_path(username, chat_name, project)
         generate_debug_transcript(data, debug_chat_path, chat_name)
+        generate_plain_transcript(data, debug_chat_path, chat_name)
     except Exception as e:
         logger.warning(f"switch_branch: failed to generate debug transcript: {e}")
 
@@ -8734,6 +8737,7 @@ async def delete_message_pair(username: str, chat_name: str, message_id: str, pr
         try:
             debug_chat_path = get_chat_path(username, chat_name, project)
             generate_debug_transcript(data, debug_chat_path, chat_name)
+            generate_plain_transcript(data, debug_chat_path, chat_name)
         except Exception as e:
             logger.warning(f"delete_message_pair: failed to generate debug transcript: {e}")
 
@@ -8807,6 +8811,7 @@ async def delete_message_pair(username: str, chat_name: str, message_id: str, pr
     try:
         debug_chat_path = get_chat_path(username, chat_name, project)
         generate_debug_transcript(data, debug_chat_path, chat_name)
+        generate_plain_transcript(data, debug_chat_path, chat_name)
     except Exception as e:
         logger.warning(f"delete_message_pair: failed to generate debug transcript: {e}")
 
