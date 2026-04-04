@@ -50,6 +50,7 @@ from pipeline import (
     collapse_sex_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
     _persist_hud_state_with_backend_clock,
+    rewrite_hud_time_in_content,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 from game_systems.cpred_identity import (
@@ -7862,6 +7863,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
                         reasoning_summary = accumulated_thinking or usage.get('reasoning')
+
+                        # ── Stateful: rewrite model's HUD line with authoritative backend clock ──
+                        if use_stateful and stateful_pipeline_state is not None:
+                            _auth_hud = stateful_pipeline_state.get("hud_state")
+                            if isinstance(_auth_hud, dict) and _auth_hud.get("time"):
+                                assistant_message = rewrite_hud_time_in_content(assistant_message, _auth_hud)
 
                         # ── Sex mode: detect [SCENE COMPLETE] and [SCENE HANDOFF] ──
                         sex_scene_complete = False

@@ -548,6 +548,35 @@ def _format_cpred_hud_line(hud_state: dict) -> str:
     return "[" + " | ".join(parts) + "]"
 
 
+def rewrite_hud_time_in_content(content: str, hud_state: dict) -> str:
+    """Replace Date/Time in the model's narrative HUD line with authoritative backend values.
+
+    The single-agent path lets the model write its own HUD line, but the backend
+    owns the clock. This rewrites the *last* HUD-style bracket block's Date and
+    Time fields so the user always sees the authoritative backend clock.
+    """
+    auth_time = (hud_state or {}).get("time", "")
+    auth_date = (hud_state or {}).get("date", "")
+    if not auth_time and not auth_date:
+        return content
+
+    # Find the last HUD bracket block containing both Date: and Time:
+    hud_re = re.compile(r'\[[^\[\]]*Date:\s*[^\|\]]+[^\[\]]*Time:\s*\d{3,4}[^\]]*\]', re.DOTALL)
+    matches = list(hud_re.finditer(content))
+    if not matches:
+        return content
+
+    m = matches[-1]  # rewrite only the last (most recent) HUD line
+    hud_line = m.group(0)
+
+    if auth_date:
+        hud_line = re.sub(r'(Date:\s*)[^\|\]]+', rf'\g<1>{auth_date.strip()} ', hud_line)
+    if auth_time:
+        hud_line = re.sub(r'(Time:\s*)\d{3,4}', rf'\g<1>{auth_time.strip()}', hud_line)
+
+    return content[:m.start()] + hud_line + content[m.end():]
+
+
 def _sync_cpred_character_states_from_game_state(
     character_states: dict,
     game_state: dict,
