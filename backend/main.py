@@ -4870,11 +4870,32 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         system_msg = {"role": "system", "content": sex_system_content}
 
-        # Context isolation: only sex_mode messages from start_message_id
+        # Context isolation: only sex_mode messages from start_message_id,
+        # plus the immediately-preceding user/assistant pair as a seed so the
+        # model can see what the first sex-mode turn is replying to.
         sex_start_id = sex_scene.get("start_message_id")
         sex_history = []
+        seed_pair = []
+        # Locate the boundary index in branch_path[1:-1] where sex mode begins.
+        # On the first exchange, start_message_id isn't set yet, so the boundary
+        # is the new user message (branch_path[-1]).
+        inner = branch_path[1:-1]
+        if sex_start_id:
+            boundary_idx = next((i for i, m in enumerate(inner) if m.get("id") == sex_start_id), len(inner))
+        else:
+            boundary_idx = len(inner)
+        # Seed pair: last user/assistant pair strictly before the boundary.
+        if boundary_idx >= 2:
+            prev_a = inner[boundary_idx - 1]
+            prev_u = inner[boundary_idx - 2]
+            if prev_u.get("role") == "user" and prev_a.get("role") == "assistant":
+                seed_pair = [
+                    {"role": "user", "content": prev_u["content"]},
+                    {"role": "assistant", "content": prev_a["content"]},
+                ]
+        # Sex-mode history from start_message_id onward.
         found_start = not sex_start_id
-        for msg in branch_path[1:-1]:
+        for msg in inner:
             if not found_start and msg.get("id") == sex_start_id:
                 found_start = True
             if found_start and msg.get("sex_mode"):
@@ -4883,8 +4904,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         user_content = build_message_content(branch_path[-1])
         new_user_msg = {"role": "user", "content": user_content}
 
-        messages_for_api = [system_msg] + sex_history + [new_user_msg]
-        context_start_index = max(1, len(branch_path) - len(sex_history) - 1)
+        messages_for_api = [system_msg] + seed_pair + sex_history + [new_user_msg]
+        context_start_index = max(1, len(branch_path) - len(sex_history) - len(seed_pair) - 1)
 
         # Set start_message_id on first sex mode exchange
         _sex_first_exchange = not sex_start_id
