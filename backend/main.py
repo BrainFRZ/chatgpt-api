@@ -3849,16 +3849,29 @@ def _generate_sex_scene_summary(
 
         system_prompt = (
             "You are a campaign record-keeper for an adult TTRPG. "
-            "Summarize the intimate scene below in 2-4 paragraphs for continuity purposes. "
-            "Cover:\n"
-            "- What happened during the scene (key moments, progression)\n"
-            "- Emotional arc and relationship developments\n"
-            "- Physical/environmental details at scene's end\n"
-            "- How the scene concluded — especially the final exchange, "
-            "since the next narrative turn will respond to it\n\n"
-            "Write in past tense, third person. Be specific about character names "
-            "and actions. This summary replaces the full scene in the AI's context, "
-            "so it must contain enough detail for the narrative to continue seamlessly."
+            "Summarize the intimate scene below in **up to 1-2 paragraphs as needed** "
+            "for continuity purposes. The primary purpose of this summary is to "
+            "preserve plot-sensitive and plot-enhancing material from the scene so "
+            "the next narrative turn can build on it.\n\n"
+            "What to capture:\n"
+            "- Significant dialogue, confessions, revelations, or promises made\n"
+            "- Emotional beats and relationship shifts (who became closer, who held back, "
+            "what was said for the first time, etc.)\n"
+            "- Decisions or commitments that affect the story going forward\n"
+            "- Important context for how the scene concluded (where the characters are, "
+            "what state they're in emotionally) so the next turn can respond seamlessly\n"
+            "- That the scene happened, and at a high level *what* happened "
+            "(e.g., 'they shared a tender night', 'a passionate encounter', 'an interrupted "
+            "moment'), without going further\n\n"
+            "What NOT to include:\n"
+            "- **No explicit content.** No graphic physical descriptions, no anatomical "
+            "detail, no description of acts in progress. This summary is a campaign record, "
+            "not erotica.\n"
+            "- No play-by-play of physical actions. Acknowledge that intimacy occurred; do "
+            "not narrate it.\n\n"
+            "Write in past tense, third person. Be specific about character names. Lean "
+            "toward shorter rather than longer — only use the second paragraph if the scene "
+            "had multiple distinct plot-relevant beats."
         )
 
         # Build user message with handoff context + full scene
@@ -7951,6 +7964,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _sex_handoff_summary_for_log = None
                         sex_scene_summary_text = None
                         sex_restore_model = None
+                        # Captured for the background richer-summary generator (kicked off after save_chat).
+                        _sex_completed_start_id = None
+                        _sex_completed_npcs: list[str] = []
+                        _sex_completed_handoff_summary = None
                         if use_sex_mode and "[SCENE COMPLETE]" in assistant_message:
                             sex_scene_complete = True
                             _sm = re.search(r'\[SCENE SUMMARY:\s*(.*?)\]', assistant_message, re.DOTALL)
@@ -7959,9 +7976,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             # Strip tags from displayed content
                             assistant_message = assistant_message.replace("[SCENE COMPLETE]", "").strip()
                             assistant_message = re.sub(r'\[SCENE SUMMARY:.*?\]', '', assistant_message, flags=re.DOTALL).strip()
-                            # Clear sex_scene state and restore original model
+                            # Capture sex_scene metadata BEFORE clearing it so the background
+                            # summarizer thread (kicked off after save_chat) can re-load the chat
+                            # and gather the full transcript.
                             ps = data.get("pipeline_state", {})
-                            sex_restore_model = (ps.get("sex_scene") or {}).get("original_model")
+                            _ss = ps.get("sex_scene") or {}
+                            if isinstance(_ss, dict):
+                                _sex_completed_start_id = _ss.get("start_message_id")
+                                _sex_completed_npcs = list(_ss.get("npcs", []) or [])
+                                _sex_completed_handoff_summary = _ss.get("summary")
+                            sex_restore_model = _ss.get("original_model") if isinstance(_ss, dict) else None
                             ps["sex_scene"] = None
                             data["pipeline_state"] = ps
                             if sex_restore_model:
@@ -8273,6 +8297,54 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 generate_plain_transcript(data, debug_chat_path, request.chat_name)
                             except Exception as e:
                                 logger.warning(f"Stream: failed to generate debug transcript: {e}")
+
+                        # ── Sex mode auto-exit: kick off background richer-summary generator ──
+                        # When the model auto-exits with [SCENE COMPLETE], the inline [SCENE SUMMARY: ...]
+                        # tag is only 1-2 sentences. Generate a 2-4 paragraph summary in the background
+                        # using the same path /sex manual exit uses, and stamp it on the just-saved
+                        # assistant message — overwriting the inline one. This makes auto-exit and
+                        # manual-exit produce equivalent FADE TO BLACK content for the next normal turn.
+                        if sex_scene_complete and _sex_completed_start_id:
+                            _sex_api_key = get_api_key(username, "anthropic")
+                            if _sex_api_key:
+                                # Gather scene messages from the just-saved chat (current message is on disk now).
+                                _scene_msgs = []
+                                _branch = get_path_to_root(data.get("messages", []), assistant_msg_id)
+                                _found_start = False
+                                for _m in _branch:
+                                    if not _found_start and _m.get("id") == _sex_completed_start_id:
+                                        _found_start = True
+                                    if _found_start and _m.get("sex_mode"):
+                                        _scene_msgs.append({"role": _m["role"], "content": _m["content"]})
+                                if _scene_msgs:
+                                    _bg_chat_name = request.chat_name
+                                    _bg_project = request.project
+                                    _bg_username = username
+                                    _bg_assistant_id = assistant_msg_id
+                                    _bg_npcs = list(_sex_completed_npcs)
+                                    _bg_handoff = _sex_completed_handoff_summary
+                                    def _bg_sex_summary():
+                                        try:
+                                            _summary = _generate_sex_scene_summary(
+                                                _sex_api_key, _scene_msgs, _bg_npcs, _bg_handoff
+                                            )
+                                            if not _summary:
+                                                return
+                                            _bg_data = load_chat(_bg_username, _bg_chat_name, _bg_project)
+                                            if not _bg_data:
+                                                return
+                                            for _msg in _bg_data.get("messages", []):
+                                                if _msg.get("id") == _bg_assistant_id:
+                                                    _msg["sex_scene_summary"] = _summary
+                                                    break
+                                            save_chat(_bg_username, _bg_chat_name, _bg_data, _bg_project)
+                                            logger.info(
+                                                f"Auto-exit sex scene summary saved for "
+                                                f"{_bg_username}/{_bg_chat_name} ({len(_summary)} chars)"
+                                            )
+                                        except Exception:
+                                            logger.exception("Background sex scene summary (auto-exit) failed")
+                                    threading.Thread(target=_bg_sex_summary, daemon=True).start()
 
                         # Commit deferred updates
                         if pending_usage is not None:
