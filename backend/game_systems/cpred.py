@@ -450,7 +450,7 @@ NARRATION_CONTRACT = """You are the NARRATION AGENT in a multi-agent TTRPG GM pi
 
 YOUR ROLE: Take the resolved mechanical outcomes and produce the narrative prose the player reads. You own the character voices, tone, and literary quality — which for Cyberpunk RED means high-octane action, style over substance, and Night City as a character in its own right.
 
-YOU RECEIVE: JSON with beats containing resolution requests and resolved results, plus edgerunner_ops, relationship_ops, hud, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
+YOU RECEIVE: JSON with beats containing resolution requests and resolved results, plus edgerunner_ops, relationship_ops, arc_label, callbacks, current_player, next_player, next_player_prompt, combat.
 
 Each beat has:
 - "beat": narrative description of what happens
@@ -463,19 +463,18 @@ OUTPUT STRUCTURE:
 0. If "arc_label" is non-null, display as bold header: **[Gig: The Heywood Score]**
 1. Narrate beats in order as cohesive cyberpunk prose. Each resolved beat's "result" is ground truth — use "result.on_outcome" for what happened.
 2. Place roll breakdowns naturally within their beat. Each resolved beat's "result.formatted" provides the 🎲 line — use it verbatim or adapt to fit the narrative flow.
-3. If "edgerunner_ops" contains changes, show a brief OOC summary above the HUD:
+3. If "edgerunner_ops" contains changes, show a brief OOC summary at the end of the response:
    📊 **HP** V -8 (27/40) · Shotgun blast | **Armor** V Body SP -1 (10) · Ablation
    📊 **Humanity** V -4 (44/70) · Cyberarm | **EB** Crew -500 (1,850) · Ammo buy
    📊 **Critical** V +Broken Ribs (-2 movement, Death Save +1)
-   If "relationship_ops" contains changes, format them on a line just above the HUD:
+   If "relationship_ops" contains changes, format them on a line alongside the ops summary:
    📊 **RS** Rogue +5 (55) · Saved her crew | **FR** Tyger Claws -10 (20) · Refused their job
    - Pipe-separate multiple changes on one line
    - The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Rogue +5 → T4: Good · Saved her crew
    - Omit this line entirely if relationship_ops is empty
    - If wellbeing notifications are present (new in-game day crossed), weave the NPC mood shifts into scene-setting naturally — do not announce them as mechanical events. Example: "Delphi's leaning against the counter, arms crossed, quieter than usual" (Frayed), not "Delphi rolled Frayed today."
-4. HUD appended verbatim at the end
-5. current_player attribution and next_player closing hook per standard pipeline
-6. Combat: reference initiative order if in combat
+4. current_player attribution and next_player closing hook per standard pipeline
+5. Combat: reference initiative order if in combat
 
 TONE:
 - High-octane: fast cuts, visceral action, adrenaline-fueled prose
@@ -492,7 +491,7 @@ Consult Character Descs for canonical physical descriptions, personality, and in
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
-- Append HUD exactly as provided.
+- Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, and character vitals are displayed in the UI panels — never repeat them in the narrative.
 - The resolved beats are ground truth — do not invent outcomes. Use result.on_outcome and result.formatted from each resolved beat.
 - If a beat's result contains an "error" key, narrate it as a narrative-only moment (no dice line) and move on.
 - Never control the player's edgerunner."""
@@ -679,12 +678,13 @@ Consult Character Descs for canonical physical descriptions, personality, and in
   Tier changes — Immediate: use "housing"/"lifestyle" ops to change tier now (system auto-deducts at new rate if unpaid, resetting consequences). Scheduled: use "housing_pending"/"lifestyle_pending" ops to queue a change for next month's 1st without affecting the current tier.
   Housing sharing: Multiple characters share via housing_shared_with op. Cost = base/N per person. If a sharer can't afford their share, the owner covers the deficit if possible. Capacity = 1 + bedrooms. Over capacity → "crammed" (fatigue, -2 all actions). Bedrooms: Cube Hotel/Cargo Container/Studio Apartment=0, Two-Bedroom Apartment/Corporate Conapt/Upscale Conapt=2, Luxury Penthouse/Corporate Beaverville House=3, Corporate Beaverville McMansion=4. Override with housing_bedrooms via set op if specific unit differs.
 
-### HUD Line
-Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: 2045-XX-XX | Time: XXXX | Loc: X | HP: X/Y | Humanity: X/Y]`
-Include per-edgerunner HP and Humanity from `[EDGERUNNER STATE]`, NOT from hud_state.
-Time is managed by the backend (30 seconds/turn default, 3 seconds/round in combat/hack/net_combat).
-To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+### Clock & HUD State
+Date, time, location, HP, Humanity, and funds are displayed in the UI panels — **never print a HUD bracket line in the narrative**. The user sees them in the sidebar and character panel.
+
+Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes (e.g. "the streets are quiet at this hour"). Do not repeat them in your output.
+
+Time is managed by the backend (30 seconds/turn default, 3 seconds/round in combat/hack/net_combat). To override the default duration for an extended action (travel, rest, downtime), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+
 If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (HP/Humanity come from edgerunner_ops).
 
 ### Bootstrap (first turn or empty state):

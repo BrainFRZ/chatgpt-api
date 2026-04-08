@@ -462,13 +462,27 @@ export default function Sidebar(props: SidebarProps) {
           )}
         </div>
 
-        {pipelineState?.pacing && (
-          <div style={styles.statsBox}>
-            <p style={styles.statsText}>{pipelineState.pacing.episode}</p>
-            <p style={styles.statsText}>Beat: {pipelineState.pacing.beat}</p>
-            <p style={styles.statsText}>Responses: {pipelineState.pacing.responses}</p>
-          </div>
-        )}
+        {pipelineState?.pacing && (() => {
+          const hud = pipelineState?.hud_state || {};
+          const rawTime = typeof hud.time === 'string' ? hud.time.trim() : '';
+          let prettyTime = '';
+          if (rawTime && /^\d{3,4}$/.test(rawTime)) {
+            const h = rawTime.length === 4 ? rawTime.slice(0, 2) : rawTime.slice(0, 1);
+            const m = rawTime.slice(-2);
+            prettyTime = `${h.padStart(2, '0')}:${m}`;
+          }
+          const dateStr = typeof hud.date === 'string' ? hud.date.trim() : '';
+          const dateLine = [dateStr, prettyTime].filter(Boolean).join(' ');
+          return (
+            <div style={styles.statsBox}>
+              <p style={styles.statsText}>{pipelineState.pacing.episode}</p>
+              <p style={styles.statsText}>Beat: {pipelineState.pacing.beat}</p>
+              <p style={styles.statsText}>Responses: {pipelineState.pacing.responses}</p>
+              {dateLine && <p style={styles.statsText}>Date: {dateLine}</p>}
+              {hud.location && <p style={styles.statsText}>Loc: {hud.location}</p>}
+            </div>
+          );
+        })()}
 
         {stats && (
           <div style={styles.statsBox}>

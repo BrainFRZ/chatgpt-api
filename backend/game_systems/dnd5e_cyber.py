@@ -1947,7 +1947,6 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
     }
   ],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
-  "hud": "<the full HUD line to be appended verbatim>",
   "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
   "ship_ops": [<your ship_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events JSON unchanged>,
@@ -2056,18 +2055,17 @@ OUTPUT STRUCTURE:
 2. Place roll breakdowns naturally within their beat:
    Normal roll: 🎲 [Description]: [**selected**] +N (Mod) +N (Mod) = Total vs DC X ✓/✗
    Advantage/Disadvantage: same format as standard D&D 5E
-3. If "relationship_ops" is non-empty, format as OOC line above HUD:
+3. If "relationship_ops" is non-empty, format as OOC line at the end of your response:
    📊 **RS** [Name] [+/-N] ([new_total]) · [reason] | **FR** [Name] [+/-N] ([new_total]) · [reason]
    The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
 4. If "ship_ops" is non-empty, format ship changes as a brief line:
    🚀 Hull -15 (185/200) · Missile impact | Shields -20 (60/100) · Absorbed railgun fire
-5. HUD appended verbatim at the end
-6. current_player attribution and next_player closing hook
-7. Combat: reference initiative order if in combat
+5. current_player attribution and next_player closing hook
+6. Combat: reference initiative order if in combat
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
-- Append the HUD exactly as provided.
+- Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, trackables, and ship Hull/Shields are displayed in the UI panels — never repeat them in the narrative.
 - The beats array IS ground truth — do not invent outcomes.
 - Never control the player character."""
 
@@ -2081,7 +2079,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, spell slots, conditions, resources)
-- **[HUD STATE]**: Previous turn's date, time, location, trackables (your source of truth after context trims). Funds are auto-derived from ship.credits for the character panel only — they do NOT appear in the HUD line.
+- **[HUD STATE]**: Previous turn's date, time, location, trackables (your source of truth after context trims for narrative awareness). Funds are auto-derived from ship.credits for the character panel only.
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior and narrative tone organically — an NPC at T5: Close acts warmer and more trusting than one at T2: Friendly, without announcing the tier mechanically.
 - **[SHIP STATE]**: Hull, shields, ammo, and credits for the party's ship
 - **[NAME DICE]** (if present): Pre-rolled values for the Name Generator document. When introducing a new NPC, consume these left-to-right with the Name Generator tables instead of inventing names. Do not skip or reuse values.
@@ -2125,15 +2123,13 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "set", "fields": {<full ship state replacement>}}`
   - Bootstrap with "set" op when [SHIP STATE] is empty.
 
-### HUD Line
-Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line.
-Standard format: `[Date: X | Time: XXXX | Loc: X]`
-If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
-During active ship combat, add Hull and Shields from `[SHIP STATE]`: `[Date: X | Time: XXXX | Loc: X | Hull: X/Y | Shields: X/Y]`
-Hull/Shields appear in HUD only during active ship combat — they come from `[SHIP STATE]`, NOT from hud_state.
-**Do NOT include funds/credits in the HUD line — funds are displayed in the character panel only.**
-Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat, 30 seconds/round in ship combat).
-To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+### Clock & HUD State
+Date, time, location, trackables, ship Hull/Shields, and funds are displayed in the UI panels — **never print a HUD bracket line in the narrative**. The user sees them in the sidebar and character panel.
+
+Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes. Do not repeat them in your output.
+
+Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat, 30 seconds/round in ship combat). To override the default duration for an extended action (travel, rest, downtime, ship transit), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+
 If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
 Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override, and bootstrap-only date/time seed — funds auto-derived).
 

@@ -430,7 +430,6 @@ SCHEMA A - Route to Narration (default):
     }
   ],
   "dramatic_notes": "<tone/pacing guidance — horror emphasis>",
-  "hud": "<HUD line>",
   "investigator_ops": [<your investigator_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
@@ -549,12 +548,11 @@ OUTPUT STRUCTURE:
 3. SAN check display (when san_check is present on a beat):
    🧠 SAN Check: [**roll**] vs SAN XX — [Pass/Fail] (-N SAN)
    If bout of madness triggered (loss ≥ 5): note it dramatically in narration
-4. If "investigator_ops" contains changes, show a brief OOC summary above the HUD:
+4. If "investigator_ops" contains changes, show a brief OOC summary at the end of your response:
    📊 **SAN** Harvey -3 (52/85) · Failed SAN check | **Luck** Harvey -5 (40) · Spent on Library Use
    📊 **Mythos** Harvey +2 (14%) · max SAN now 85 | **Bond** Margaret -8 (34) · Bout of madness
-5. HUD appended verbatim at the end
-6. current_player attribution and next_player closing hook per standard pipeline
-7. Combat: reference DEX initiative order if in combat
+5. current_player attribution and next_player closing hook per standard pipeline
+6. Combat: reference DEX initiative order if in combat
 
 TONE:
 - Creeping dread, not jump scares. Wrongness in the mundane.
@@ -565,7 +563,7 @@ TONE:
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
-- Append HUD exactly as provided.
+- Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, SAN, and Luck are displayed in the UI panels — never repeat them in the narrative.
 - The beats array IS ground truth — do not invent outcomes.
 - Never control the player's investigator."""
 
@@ -615,12 +613,13 @@ Use the "investigator_ops" array to track CoC-specific mechanical state:
 
 SAN, Bonds, and Mythos% are tracked via investigator_ops, NOT in character_states. Luck is tracked via investigator_ops but mirrored in character_states resources for HUD display.
 
-### HUD Line
-Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: X | Time: XXXX | Loc: X | SAN: X/Y | Luck: Z]`
-Include per-investigator SAN and Luck from `[INVESTIGATOR STATE]`, NOT from hud_state.
-Time is managed by the backend (30 seconds/turn default).
-To override the default duration (e.g. combat rounds, travel, extended actions), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+### Clock & HUD State
+Date, time, location, SAN, Luck, and funds are displayed in the UI panels — **never print a HUD bracket line in the narrative**. The user sees them in the sidebar and character panel.
+
+Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes (atmosphere, time-of-day cues). Do not repeat them in your output.
+
+Time is managed by the backend (30 seconds/turn default). To override the default duration for an extended action (combat rounds, travel, downtime, investigation montage), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+
 If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (SAN/Luck come from investigator_ops).
 
 ### Bootstrap (first turn or empty state):

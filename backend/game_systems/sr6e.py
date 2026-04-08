@@ -457,7 +457,6 @@ SCHEMA A - Route to Narration (default):
     }
   ],
   "dramatic_notes": "<tone/pacing guidance — noir cyberpunk>",
-  "hud": "<HUD line>",
   "runner_ops": [<your runner_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events unchanged>,
   "callbacks": <pass through from Events unchanged>,
@@ -575,12 +574,11 @@ OUTPUT STRUCTURE:
    Opposed: 🎲 [Description]: [Pool Xd6] **Y hits** vs [Opponent Xd6] **Z hits** ✓/✗
    Glitch: 🎲 [Description]: [Pool Xd6] **Y hits** — GLITCH ⚠
    Critical Glitch: 🎲 [Description]: [Pool Xd6] **0 hits** — CRITICAL GLITCH 💀
-3. If "runner_ops" contains changes, show a brief OOC summary above the HUD:
+3. If "runner_ops" contains changes, show a brief OOC summary at the end of your response:
    📊 **Edge** Raven -1 (3/5) · Reroll | **Physical** Raven +3 (5/11, wound -1) · Shotgun blast
    📊 **Essence** Chrome -0.5 (3.7) · Cyberarm installed | **Nuyen** Team -5000 (23,400) · Gear buy
-4. HUD appended verbatim at the end
-5. current_player attribution and next_player closing hook per standard pipeline
-6. Combat: reference initiative order and action economy if in combat
+4. current_player attribution and next_player closing hook per standard pipeline
+5. Combat: reference initiative order and action economy if in combat
 
 TONE:
 - Noir cyberpunk: rain on chrome, neon reflecting off wet asphalt, cigarette smoke in cramped apartments
@@ -592,7 +590,7 @@ TONE:
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
-- Append HUD exactly as provided.
+- Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, Edge, and condition monitors are displayed in the UI panels — never repeat them in the narrative.
 - The beats array IS ground truth — do not invent outcomes.
 - Never control the player's runner."""
 
@@ -650,12 +648,13 @@ Essence, Nuyen, Sustained Spells, and Active Effects are tracked via runner_ops.
 - Glitch: >half dice show 1s. Critical Glitch: glitch + 0 hits
 - Format: 🎲 [Desc]: [Pool Xd6] **Y hits** vs Threshold Z ✓/✗
 
-### HUD Line
-Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: 2082-XX-XX | Time: XXXX | Loc: X | Edge: X/Y | P: X/Y | S: X/Y]`
-Include per-runner Edge and condition monitors from `[RUNNER STATE]`, NOT from hud_state.
-Time is managed by the backend (30 seconds/turn default).
-To override the default duration (e.g. combat rounds, travel, extended actions), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+### Clock & HUD State
+Date, time, location, Edge, condition monitors, and funds are displayed in the UI panels — **never print a HUD bracket line in the narrative**. The user sees them in the sidebar and character panel.
+
+Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes (e.g. neon-soaked night vs grey morning, Sixth World atmosphere). Do not repeat them in your output.
+
+Time is managed by the backend (30 seconds/turn default). To override the default duration for an extended action (combat rounds, travel, downtime, matrix operations), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+
 If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (Edge/CM come from runner_ops).
 
 ### Bootstrap (first turn or empty state):

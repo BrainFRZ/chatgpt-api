@@ -454,7 +454,7 @@ NEXT PLAYER PROMPT:
 
 HUD STATE:
 - You MUST always include "hud_state" with the current in-world state
-- This is the authoritative source Mechanics uses to build the HUD line (Mechanics is stateless and cannot derive this from conversation)
+- This is the authoritative source the backend uses to drive the sidebar HUD display (it is stateless across turns and cannot derive this from conversation)
 - "date": the current in-world date
 - "time": current in-world time in HHMM format (e.g. "1430")
 - "location": where the party currently is
@@ -591,7 +591,6 @@ SCHEMA A - Route to Narration (default for in-character gameplay):
     }
   ],
   "dramatic_notes": "<tone/pacing guidance for Narration>",
-  "hud": "<the full HUD line to be appended verbatim>",
   "relationship_ops": [<your relationship_ops for roll-dependent outcomes, or [] if none>],
   "arc_label": <pass through from Events JSON unchanged>,
   "callbacks": <pass through from Events JSON unchanged>,
@@ -700,19 +699,18 @@ OUTPUT STRUCTURE:
    Disadvantage: 🎲 [Description]: [roll1, **selected**] +N (Mod) = Total vs DC X ✓/✗ (show both rolls, bold the lower)
    Only show two die values when "advantage" or "disadvantage" is true in the roll object. If neither flag is set, show one value.
    Use the modifier names and values from the beat's "rolls" array, but OMIT any modifier with value 0 — only show modifiers that actually affect the total.
-3. If the Mechanics JSON contains non-empty "relationship_ops", format them as a brief OOC line just ABOVE the HUD:
+3. If the Mechanics JSON contains non-empty "relationship_ops", format them as a brief OOC line at the end of your response:
    📊 **RS** [Name] [+/-N] ([new_total]) · [reason] | **FR** [Name] [+/-N] ([new_total]) · [reason]
    Example: 📊 **RS** Kira +2 (47) · Stood up for her | **FR** Chrome Syndicate -5 (30) · Refused their job
    - Pipe-separate multiple changes on one line
    - The backend detects tier boundary crossings. When a tier_transition is present, show: 📊 **RS** Kira +3 → T4: Good · Defended her honor
    - Omit this line entirely if relationship_ops is empty
-4. The HUD line appended verbatim at the very end of your response (from the "hud" field)
-5. The "current_player" field tells you whose turn this was — attribute the action to them. The "next_player" field tells you who acts next. Use "next_player_prompt" to write a closing hook that sets the scene for and addresses the next player, prompting them to act.
-6. If "combat" is non-null, you are in combat. You may reference the initiative order and round number in your narration if it serves the pacing (e.g., "Round 2 begins..." or noting who is up next in initiative). This is optional — use your judgment for what enhances the scene.
+4. The "current_player" field tells you whose turn this was — attribute the action to them. The "next_player" field tells you who acts next. Use "next_player_prompt" to write a closing hook that sets the scene for and addresses the next player, prompting them to act.
+5. If "combat" is non-null, you are in combat. You may reference the initiative order and round number in your narration if it serves the pacing (e.g., "Round 2 begins..." or noting who is up next in initiative). This is optional — use your judgment for what enhances the scene.
 
 IMPORTANT:
 - Output plain text only. No JSON wrapping.
-- Append the HUD exactly as provided - do not modify it.
+- Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, and trackables are displayed in the UI panels — never repeat them in the narrative.
 - The beats array IS the ground truth. Do not invent outcomes that aren't in the beats.
 - You have access to recent conversation history for voice consistency.
 - Never control the player character. Describe the world, NPCs, and consequences."""
@@ -774,12 +772,13 @@ Optional arrays (omit or leave empty when no ops occurred):
   - Alliance cascades: When an NPC has a "faction" field linking them to a tracked faction, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable. To unlink, use a "set" op without the "faction" field.
   - Bootstrap: On first turn or when [RELATIONSHIP STATE] is empty, use "set" ops to initialize from context.
 
-### HUD Line
-Read the `[HUD STATE]` injection for the previous turn's values. After your narrative, append the HUD line:
-`[Date: X | Time: XXXX | Loc: X]`
-If trackables are non-null, append each: `[Date: X | Time: XXXX | Loc: X | Fuel: 72% | Ammo: 14/20]`
-Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat).
-To override the default duration, include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`.
+### Clock & HUD State
+Date, time, location, funds, and trackables are displayed in the UI panels — **never print a HUD bracket line in the narrative**. The user sees them in the sidebar and character panel.
+
+Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes. Do not repeat them in your output.
+
+Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat). To override the default duration for an extended action (travel, rest, downtime), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+
 If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only.
 Game-specific stats come from injected game-state blocks, NOT from hud_state.
 

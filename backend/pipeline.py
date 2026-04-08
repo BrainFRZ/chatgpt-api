@@ -518,65 +518,6 @@ def resolve_pipeline_mechanics(
     return annotated, all_state_ops
 
 
-def _format_cpred_hud_line(hud_state: dict) -> str:
-    """Format CPRED hud_state object into a single HUD line for narration."""
-    if not isinstance(hud_state, dict) or not hud_state:
-        return ""
-
-    parts = []
-    if hud_state.get("date"):
-        parts.append(f"Date: {hud_state['date']}")
-    if hud_state.get("time"):
-        parts.append(f"Time: {hud_state['time']}")
-    if hud_state.get("location"):
-        parts.append(f"Loc: {hud_state['location']}")
-
-    funds = hud_state.get("funds")
-    if isinstance(funds, dict):
-        if funds:
-            funds_text = ", ".join(f"{k}: {v}" for k, v in sorted(funds.items()))
-            parts.append(f"Funds: {funds_text}")
-    elif funds:
-        parts.append(f"Funds: {funds}")
-
-    trackables = hud_state.get("trackables")
-    if trackables:
-        parts.append(f"Trackables: {trackables}")
-
-    if not parts:
-        return ""
-    return "[" + " | ".join(parts) + "]"
-
-
-def rewrite_hud_time_in_content(content: str, hud_state: dict) -> str:
-    """Replace Date/Time in the model's narrative HUD line with authoritative backend values.
-
-    The single-agent path lets the model write its own HUD line, but the backend
-    owns the clock. This rewrites the *last* HUD-style bracket block's Date and
-    Time fields so the user always sees the authoritative backend clock.
-    """
-    auth_time = (hud_state or {}).get("time", "")
-    auth_date = (hud_state or {}).get("date", "")
-    if not auth_time and not auth_date:
-        return content
-
-    # Find the last HUD bracket block containing both Date: and Time:
-    hud_re = re.compile(r'\[[^\[\]]*Date:\s*[^\|\]]+[^\[\]]*Time:\s*\d{3,4}[^\]]*\]', re.DOTALL)
-    matches = list(hud_re.finditer(content))
-    if not matches:
-        return content
-
-    m = matches[-1]  # rewrite only the last (most recent) HUD line
-    hud_line = m.group(0)
-
-    if auth_date:
-        hud_line = re.sub(r'(Date:\s*)[^\|\]]+', rf'\g<1>{auth_date.strip()} ', hud_line)
-    if auth_time:
-        hud_line = re.sub(r'(Time:\s*)\d{3,4}', rf'\g<1>{auth_time.strip()}', hud_line)
-
-    return content[:m.start()] + hud_line + content[m.end():]
-
-
 def _sync_cpred_character_states_from_game_state(
     character_states: dict,
     game_state: dict,
@@ -1942,7 +1883,7 @@ def _rebuild_cpred_projections(
     3. rebuild/scoped HUD funds from authoritative edgerunner balances
     """
     if not isinstance(pipeline_state, dict):
-        return {"character_states": {}, "hud_state": {}, "hud_line": ""}
+        return {"character_states": {}, "hud_state": {}}
 
     character_states = _sync_cpred_character_states_from_game_state(
         pipeline_state.get("character_states", {}),
@@ -1963,7 +1904,6 @@ def _rebuild_cpred_projections(
     return {
         "character_states": character_states,
         "hud_state": hud_state,
-        "hud_line": _format_cpred_hud_line(hud_state),
     }
 
 
@@ -2522,7 +2462,6 @@ def run_pipeline(
                 name: (entry.get("data", entry) if isinstance(entry, dict) else entry)
                 for name, entry in new_pipeline_state.get("character_states", {}).items()
             },
-            "hud": (_cpred_views["hud_line"] if _cpred_views else _format_cpred_hud_line(new_pipeline_state.get("hud_state", {}))),
             "arc_label": events_data.get("arc_label"),
             "callbacks": events_data.get("callbacks") or [],
             "current_player": events_data.get("current_player"),
