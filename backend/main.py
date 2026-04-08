@@ -50,6 +50,8 @@ from pipeline import (
     collapse_sex_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
     _persist_hud_state_with_backend_clock,
+    _advance_hud_clock,
+    _format_duration,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 from game_systems.cpred_identity import (
@@ -1894,6 +1896,65 @@ class SetAnthropicSyncRequest(BaseModel):
     chat_name: str
     project: str | None = None
     sync: bool
+
+
+class ConfirmTimeJumpRequest(BaseModel):
+    username: str
+    chat_name: str
+    project: str | None = None
+    confirm: bool
+
+
+@app.post("/api/confirm-time-jump")
+async def confirm_time_jump(request: ConfirmTimeJumpRequest):
+    """Apply or dismiss a pending large time jump (>24h) requested by the model.
+
+    The pending jump is stashed in `pipeline_state["_pending_time_jump"]` by the
+    backend when the model emits an absolute time/date that implies a delta of
+    24h–30d. The frontend renders a confirmation modal and POSTs the user's
+    decision here. The pending request is cleared either way.
+    """
+    username = request.username.strip().lower()
+    data = load_chat(username, request.chat_name, request.project)
+    if not data:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    ps = data.get("pipeline_state") or {}
+    pending = ps.get("_pending_time_jump")
+    if not isinstance(pending, dict) or not pending.get("seconds"):
+        # Idempotent: nothing pending, nothing to do.
+        return {"status": "ok", "applied": False}
+
+    applied = False
+    if request.confirm:
+        seconds = int(pending.get("seconds", 0) or 0)
+        if seconds > 0:
+            _advance_hud_clock(ps, seconds)
+            ps.setdefault("_pending_time_notifications", []).append({
+                "type": "time_passed",
+                "duration": pending.get("duration", _format_duration(seconds)),
+                "reason": "",
+            })
+            applied = True
+
+    # Always clear the pending request after a confirm/cancel.
+    ps.pop("_pending_time_jump", None)
+    data["pipeline_state"] = ps
+    save_chat(username, request.chat_name, data, request.project)
+
+    # Broadcast updated state so other open clients see the change.
+    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
+    await sync_manager.broadcast_to_chat(
+        chat_key,
+        SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
+    )
+
+    return {
+        "status": "ok",
+        "applied": applied,
+        "pipeline_state": data["pipeline_state"],
+    }
+
 
 @app.post("/api/set-anthropic-sync")
 async def set_anthropic_sync(request: SetAnthropicSyncRequest):

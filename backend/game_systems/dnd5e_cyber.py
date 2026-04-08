@@ -2128,10 +2128,19 @@ Date, time, location, trackables, ship Hull/Shields, and funds are displayed in 
 
 Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes. Do not repeat them in your output.
 
-Time is managed by the backend (30 seconds/turn default, 6 seconds/round in combat, 30 seconds/round in ship combat). To override the default duration for an extended action (travel, rest, downtime, ship transit), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+Time is managed by the backend. Default advancement is 30 seconds per normal turn (6 seconds per round in combat, 30 seconds per round in ship combat).
 
-If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
-Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override, and bootstrap-only date/time seed — funds auto-derived).
+To advance time for an extended action (travel, rest, downtime, ship transit, time skip), set `hud_state.time` (and `hud_state.date` if the scene crosses midnight or skips days) to the new absolute clock value. The backend validates date and time **independently**:
+- Forward-going deltas up to 24h are auto-applied. The user gets a `📊 Time +X minutes` notification.
+- Forward-going deltas of 24h–30d trigger a UI confirmation modal — the user approves or dismisses the jump.
+- Backwards, equal, absurd (>30d), or unparseable values are silently ignored. Get the date right or omit it.
+
+You may also use `hud_state.time_override = {"minutes": N, "reason": "..."}` for explicit advancement, but the absolute time/date approach is preferred when you know the target time.
+
+**Be conservative** — only advance more than the default 30s when the scene clearly covers more in-world time. Don't slide the clock forward just because the prose feels long.
+
+If the clock is empty, provide `time` and `date` once as the initial seed. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
+Report updated values via `report_state` tool's `hud_state` field (location, trackables, time/date, time_override — funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:

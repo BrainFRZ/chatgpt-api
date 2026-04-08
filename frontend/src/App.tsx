@@ -1162,6 +1162,39 @@ function App() {
     }
   };
 
+  const handleConfirmTimeJump = async (confirm: boolean) => {
+    if (!user || !currentChat) return;
+    // Optimistically clear the pending request locally so the modal closes immediately.
+    setPipelineState((prev: any) => {
+      if (!prev || !prev._pending_time_jump) return prev;
+      const next = { ...prev };
+      delete next._pending_time_jump;
+      return next;
+    });
+    try {
+      const response = await fetch('/api/confirm-time-jump', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: user.username,
+          chat_name: currentChat,
+          project: currentProject,
+          confirm,
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.pipeline_state) {
+          setPipelineState(data.pipeline_state);
+        }
+      } else {
+        console.error('Could not confirm time jump:', response.status);
+      }
+    } catch (err) {
+      console.error('Could not confirm time jump:', err);
+    }
+  };
+
   const handleApiKeyModalSave = async () => {
     if (!user || !pendingModelSwitch || !modalApiKey.trim()) return;
 
@@ -2855,6 +2888,8 @@ function App() {
         handleApiKeyModalCancel={handleApiKeyModalCancel}
         savingApiKey={savingApiKey}
         availableModels={availableModels}
+        pendingTimeJump={pipelineState?._pending_time_jump || null}
+        onConfirmTimeJump={handleConfirmTimeJump}
       />
 
       {docsRefreshed && (

@@ -166,6 +166,112 @@ def _advance_hud_clock(pipeline_state: dict, seconds: int) -> None:
             hud["date"] = new_date
 
 
+def _parse_clock_date(s: str):
+    """Parse a date string in any of our accepted formats. Returns datetime or None."""
+    from datetime import datetime
+    if not isinstance(s, str) or not s.strip():
+        return None
+    for fmt in ("%Y-%m-%d", "%B %d, %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(s.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_clock_time(s: str):
+    """Parse an HHMM time string. Returns (h, m) tuple or None."""
+    if not isinstance(s, str):
+        return None
+    t = s.strip()
+    if not t or not t.isdigit() or len(t) > 4:
+        return None
+    try:
+        if len(t) <= 2:
+            h, m = 0, int(t)
+        else:
+            h, m = int(t[:-2]), int(t[-2:])
+    except ValueError:
+        return None
+    if 0 <= h < 24 and 0 <= m < 60:
+        return h, m
+    return None
+
+
+def _format_duration(seconds: int) -> str:
+    """Human-readable duration: '15 minutes', '2 hours 30 minutes', '3 days 4 hours'."""
+    if seconds <= 0:
+        return "0 seconds"
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes // 60
+    rem_min = minutes % 60
+    if hours < 24:
+        out = f"{hours} hour{'s' if hours != 1 else ''}"
+        if rem_min:
+            out += f" {rem_min} minute{'s' if rem_min != 1 else ''}"
+        return out
+    days = hours // 24
+    rem_hours = hours % 24
+    out = f"{days} day{'s' if days != 1 else ''}"
+    if rem_hours:
+        out += f" {rem_hours} hour{'s' if rem_hours != 1 else ''}"
+    return out
+
+
+def _compute_clock_delta_seconds(
+    prev_date: str,
+    prev_time: str,
+    new_date: str,
+    new_time: str,
+) -> Optional[int]:
+    """Compute the forward delta in seconds from (prev_date, prev_time) to a new clock,
+    validating date and time INDEPENDENTLY.
+
+    - If new_date is missing/invalid OR earlier than prev_date → fall back to prev_date.
+    - If new_time is missing/invalid → fall back to prev_time.
+    - The combined effective new clock is then compared against the prev clock.
+    - Returns the resulting delta in seconds (may be 0). Returns None if prev cannot be
+      parsed at all (no basis for comparison).
+
+    The caller decides whether the delta is small enough to auto-apply, large enough to
+    require user confirmation, or so absurd it should be ignored.
+    """
+    prev_d = _parse_clock_date(prev_date)
+    prev_t = _parse_clock_time(prev_time)
+    if prev_d is None or prev_t is None:
+        return None
+
+    new_d_parsed = _parse_clock_date(new_date)
+    new_t_parsed = _parse_clock_time(new_time)
+
+    # Date validated independently: only accept forward (or equal); else use prev.
+    effective_d = new_d_parsed if (new_d_parsed is not None and new_d_parsed >= prev_d) else prev_d
+    # Time validated independently: only accept parseable HHMM; else use prev.
+    effective_t = new_t_parsed if new_t_parsed is not None else prev_t
+
+    prev_dt = prev_d.replace(hour=prev_t[0], minute=prev_t[1])
+    new_dt = effective_d.replace(hour=effective_t[0], minute=effective_t[1])
+    return int((new_dt - prev_dt).total_seconds())
+
+
+# Implicit-advance bounds: under this, auto-apply; up to PENDING_MAX, prompt user; above, reject.
+IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS = 24 * 3600       # 24 hours
+IMPLICIT_ADVANCE_PENDING_LIMIT_SECONDS = 30 * 86400   # 30 days
+
+
+def _push_time_passed_notification(pipeline_state: dict, seconds: int, reason: str = "") -> None:
+    """Append a time_passed notification for the frontend to render."""
+    pipeline_state.setdefault("_pending_time_notifications", []).append({
+        "type": "time_passed",
+        "duration": _format_duration(seconds),
+        "reason": reason or "",
+    })
+
+
 def _persist_hud_state_with_backend_clock(
     pipeline_state: dict,
     incoming_hud_state: Optional[dict] = None,
@@ -176,10 +282,16 @@ def _persist_hud_state_with_backend_clock(
 ) -> bool:
     """Persist hud_state while keeping time/date backend-owned after initial seed.
 
-    If a previous clock seed exists, incoming time/date are ignored and the backend
-    advances the prior clock by *seconds* unless the turn is OOC.
-    If no previous seed exists, the incoming time/date are accepted once as the
-    initial seed. This is required to bootstrap a fresh chat's clock.
+    Once a clock seed exists, the model's incoming time/date are validated INDEPENDENTLY:
+
+    - If the model emits a forward-going absolute time/date and the implied delta is
+      0–24h, the backend treats it as an implicit time advancement and overrides the
+      caller-supplied *seconds*. A `time_passed` notification is queued.
+    - If the implied delta is 24h–30d, the clock advances by the default *seconds* but
+      the requested jump is stashed in `pipeline_state["_pending_time_jump"]` for the
+      frontend to surface as a confirmation modal.
+    - Backwards, equal, absurd (>30d), or unparseable model time/date is silently
+      ignored — the clock advances by the caller-supplied *seconds*.
 
     When *incoming_hud_state* is omitted, the existing HUD snapshot is preserved and
     only the clock is advanced. When *replace_snapshot* is False, incoming fields are
@@ -193,10 +305,14 @@ def _persist_hud_state_with_backend_clock(
     prev_date = prev_hud.get("date", "") if isinstance(prev_hud, dict) else ""
     hud_base = copy.deepcopy(prev_hud) if isinstance(prev_hud, dict) else {}
 
+    incoming_time = ""
+    incoming_date = ""
     if incoming_hud_state is None:
         hud = hud_base
     elif isinstance(incoming_hud_state, dict):
         incoming = copy.deepcopy(incoming_hud_state)
+        incoming_time = incoming.get("time", "") or ""
+        incoming_date = incoming.get("date", "") or ""
         hud = {**hud_base, **incoming} if not replace_snapshot else incoming
     else:
         hud = {} if replace_snapshot else hud_base
@@ -207,10 +323,41 @@ def _persist_hud_state_with_backend_clock(
     if prev_time:
         hud["time"] = prev_time
         hud["date"] = prev_date
-        if not is_ooc:
-            _advance_hud_clock(pipeline_state, seconds)
-            return True
-        return False
+        if is_ooc:
+            return False
+
+        effective_seconds = seconds
+        implicit_seconds = 0
+
+        if incoming_time or incoming_date:
+            delta = _compute_clock_delta_seconds(prev_date, prev_time, incoming_date, incoming_time)
+            if delta is not None and 0 < delta <= IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS:
+                effective_seconds = delta
+                implicit_seconds = delta
+            elif delta is not None and IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS < delta <= IMPLICIT_ADVANCE_PENDING_LIMIT_SECONDS:
+                # Stash for user confirmation; clock advances by default `seconds` only.
+                from datetime import timedelta
+                prev_d = _parse_clock_date(prev_date)
+                prev_t = _parse_clock_time(prev_time)
+                if prev_d is not None and prev_t is not None:
+                    from_dt = prev_d.replace(hour=prev_t[0], minute=prev_t[1])
+                    to_dt = from_dt + timedelta(seconds=delta)
+                    pipeline_state["_pending_time_jump"] = {
+                        "seconds": delta,
+                        "duration": _format_duration(delta),
+                        "from_date": from_dt.strftime("%Y-%m-%d"),
+                        "from_time": from_dt.strftime("%H%M"),
+                        "to_date": to_dt.strftime("%Y-%m-%d"),
+                        "to_time": to_dt.strftime("%H%M"),
+                    }
+            # else: ignore (negative, zero, >30d, or unparseable prev)
+
+        _advance_hud_clock(pipeline_state, effective_seconds)
+
+        if implicit_seconds > 0:
+            _push_time_passed_notification(pipeline_state, implicit_seconds, reason="")
+
+        return True
 
     # Fresh chat/bootstrap: accept the model-provided absolute clock once.
     if not hud.get("time"):
@@ -2306,13 +2453,18 @@ def run_pipeline(
         tp_seconds = parse_time_passed(tp_text)
         if tp_seconds == 0:
             tp_seconds = DEFAULT_TURN_SECONDS
+        # Snapshot pre-call notifications so we can detect whether the persist call
+        # itself queued an implicit-advance notification (in which case we skip the
+        # explicit one here to avoid duplicates).
+        _notif_count_before = len(pipeline_state.get("_pending_time_notifications", []))
         advanced_clock = _persist_hud_state_with_backend_clock(
             pipeline_state,
             events_data.get("hud_state"),
             seconds=tp_seconds,
             is_ooc=(events_route == "output"),
         )
-        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS:
+        _implicit_fired = len(pipeline_state.get("_pending_time_notifications", [])) > _notif_count_before
+        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS and not _implicit_fired:
             pipeline_state.setdefault("_pending_time_notifications", []).append({
                 "type": "time_passed",
                 "duration": tp_text,
@@ -3943,24 +4095,21 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
         else:
             tp_seconds = DEFAULT_TURN_SECONDS
             override_reason = None
+        # Snapshot pre-call notifications so we can detect whether the persist call
+        # itself queued an implicit-advance notification (in which case we skip the
+        # explicit one here to avoid duplicates).
+        _notif_count_before = len(pipeline_state.get("_pending_time_notifications", []))
         advanced_clock = _persist_hud_state_with_backend_clock(
             pipeline_state,
             incoming_hud,
             seconds=tp_seconds,
             is_ooc=is_ooc,
         )
-        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS and override_reason is not None:
-            # Build human-readable duration string
-            _mins = tp_seconds // 60
-            if _mins >= 60:
-                _dur_str = f"{_mins // 60} hour{'s' if _mins // 60 != 1 else ''}" + (f" {_mins % 60} minute{'s' if _mins % 60 != 1 else ''}" if _mins % 60 else "")
-            elif _mins > 0:
-                _dur_str = f"{_mins} minute{'s' if _mins != 1 else ''}"
-            else:
-                _dur_str = f"{tp_seconds} seconds"
+        _implicit_fired = len(pipeline_state.get("_pending_time_notifications", [])) > _notif_count_before
+        if advanced_clock and tp_seconds != DEFAULT_TURN_SECONDS and override_reason is not None and not _implicit_fired:
             pipeline_state.setdefault("_pending_time_notifications", []).append({
                 "type": "time_passed",
-                "duration": _dur_str,
+                "duration": _format_duration(tp_seconds),
                 "reason": override_reason or "",
             })
     # Sync CPRED character_states + HUD funds from authoritative game_state.

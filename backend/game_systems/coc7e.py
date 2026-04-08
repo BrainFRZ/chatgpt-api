@@ -618,9 +618,18 @@ Date, time, location, SAN, Luck, and funds are displayed in the UI panels — **
 
 Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes (atmosphere, time-of-day cues). Do not repeat them in your output.
 
-Time is managed by the backend (30 seconds/turn default). To override the default duration for an extended action (combat rounds, travel, downtime, investigation montage), include `time_override` in hud_state: `{"minutes": N, "reason": "..."}`. Be conservative — only override when the scene clearly covers more than ~30 seconds of in-world action.
+Time is managed by the backend. Default advancement is 30 seconds per normal turn.
 
-If the clock is empty, provide `time` and `date` once as the initial seed. Otherwise do NOT manually set them — report location, funds, trackables, and `time_override` only (SAN/Luck come from investigator_ops).
+To advance time for an extended action (combat rounds, travel, downtime, investigation montage), set `hud_state.time` (and `hud_state.date` if the scene crosses midnight or skips days) to the new absolute clock value. The backend validates date and time **independently**:
+- Forward-going deltas up to 24h are auto-applied. The user gets a `📊 Time +X minutes` notification.
+- Forward-going deltas of 24h–30d trigger a UI confirmation modal — the user approves or dismisses the jump.
+- Backwards, equal, absurd (>30d), or unparseable values are silently ignored. Get the date right or omit it.
+
+You may also use `hud_state.time_override = {"minutes": N, "reason": "..."}` for explicit advancement, but the absolute time/date approach is preferred when you know the target time.
+
+**Be conservative** — only advance more than the default 30s when the scene clearly covers more in-world time. Don't slide the clock forward just because the prose feels long.
+
+If the clock is empty, provide `time` and `date` once as the initial seed. SAN and Luck always come from investigator_ops, never from hud_state.
 
 ### Bootstrap (first turn or empty state):
 - Set pacing from scenario context
