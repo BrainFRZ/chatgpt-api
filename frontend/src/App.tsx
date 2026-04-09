@@ -1691,7 +1691,8 @@ function App() {
           name: chat.name,
           lastMessage: chat.last_message || '',
           lastActive: chat.last_active || '',
-          messageCount: chat.message_count || 0
+          messageCount: chat.message_count || 0,
+          cost: chat.cost || 0
         }));
 
         setProjectChatsDetailed(detailedChats);

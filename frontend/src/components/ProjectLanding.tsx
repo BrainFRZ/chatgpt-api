@@ -210,6 +210,7 @@ export default function ProjectLanding(props: ProjectLandingProps) {
                                 <div style={styles.chatCardMeta}>
                                   <span>{chat.lastActive ? formatTimestamp(chat.lastActive).split('  ')[1] || 'Unknown' : 'Never'}</span>
                                   <span>{chat.messageCount} msgs</span>
+                                  <span>${chat.cost.toFixed(2)}</span>
                                 </div>
                               </div>
                             ))}

@@ -538,7 +538,7 @@ export default function ChatView({
                   <div style={styles.messageFooter}>
                     {msg.tokens && (
                       <span style={styles.messageTokens}>
-                        {msg.tokens}
+                        {msg.tokens}{msg.cost && ` | ${msg.cost}`}
                         {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
                         {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model}`}
                       </span>

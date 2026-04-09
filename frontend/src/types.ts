@@ -236,4 +236,5 @@ export interface ChatCardInfo {
   lastMessage: string;
   lastActive: string;
   messageCount: number;
+  cost: number;
 }
