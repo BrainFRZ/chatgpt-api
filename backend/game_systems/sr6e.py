@@ -762,7 +762,7 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
+                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry. CRITICAL: when a character already appears in [CHARACTER STATES], reuse that EXACT name as the key — do not switch between aliases or invent a new spelling. Only add a brand-new key for a genuinely new NPC. For existing entries, do NOT change `type` or `class` — those are identity, not scene state. Do NOT change `max` values on vitals/resources without a corresponding narrative event — only `current` values reflect scene changes.",
                 "additionalProperties": {
                     "type": "object",
                     "required": ["type", "class", "level", "vitals"],

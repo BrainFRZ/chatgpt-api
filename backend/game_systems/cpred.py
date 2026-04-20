@@ -818,13 +818,13 @@ STATE_REPORT_TOOL = {
             },
             "character_states": {
                 "type": "object",
-                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry.",
+                "description": "Map of character name to structured state object. Every character in the scene MUST have an entry. CRITICAL: when a character already appears in [CHARACTER STATES], reuse that EXACT name as the key — do not switch between aliases (e.g., 'Red' vs 'RedVelvet'); do not invent a new spelling. Only add a brand-new key for a genuinely new NPC who hasn't been tracked before. For existing entries, do NOT change `type` or `class` — those are identity, not scene state; keep them consistent with what's shown in [CHARACTER STATES]. Do NOT change `max` values on vitals/resources without a corresponding narrative event (level-up, humanity loss, new armor) — only `current` values reflect scene changes.",
                 "additionalProperties": {
                     "type": "object",
                     "required": ["type", "class", "level", "vitals"],
                     "properties": {
                         "type": {"type": "string", "enum": ["pc", "npc", "enemy"]},
-                        "class": {"type": "string", "description": "Role, e.g. 'Solo' or 'Netrunner'."},
+                        "class": {"type": "string", "description": "Role, e.g. 'Solo' or 'Netrunner'. For existing characters, MUST match the class already shown in [CHARACTER STATES]."},
                         "level": {"type": ["integer", "null"], "description": "Character level or rank, if applicable."},
                         "vitals": {
                             "type": "array",

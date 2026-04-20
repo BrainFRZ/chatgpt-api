@@ -1809,7 +1809,135 @@ def build_decision_flags_injection(flags: dict) -> str:
     return "\n".join(lines)
 
 
-def apply_character_states(existing: dict, mechanics_output: dict, current_turn: int) -> dict:
+def _canonicalize_character_name(existing_keys, incoming_name: str) -> str:
+    """If incoming_name is an alias of a name already in existing_keys (or vice
+    versa), return the canonical key to use. Otherwise return incoming_name.
+
+    Alias heuristic: case-insensitive prefix match on a word boundary. E.g.,
+    "Red" aliases "RedVelvet", "Red Velvet", or "Red the Netrunner". Prefers
+    the longer name when an alias is detected, since the longer form is more
+    specific and matches the canonical edgerunner key in most cases.
+    """
+    if not isinstance(incoming_name, str) or not incoming_name:
+        return incoming_name
+    if incoming_name in existing_keys:
+        return incoming_name
+    inc_lower = incoming_name.lower()
+    # Look for a longer existing key that starts with incoming + word boundary
+    for key in existing_keys:
+        if not isinstance(key, str) or not key or key == incoming_name:
+            continue
+        key_lower = key.lower()
+        if key_lower == inc_lower:
+            return key  # case-only difference
+        # incoming is a prefix of existing (e.g., "Red" -> "RedVelvet" / "Red Velvet")
+        if key_lower.startswith(inc_lower) and len(key_lower) > len(inc_lower):
+            sep = key_lower[len(inc_lower)]
+            if not sep.isalnum():  # word boundary (space, punctuation) — reject "Redditor"
+                return key
+            # Also accept CamelCase boundary: incoming "Red" + existing "RedVelvet" → 'V' uppercase
+            if key[len(inc_lower)].isupper():
+                return key
+        # existing is a prefix of incoming — prefer existing canonical name
+        if inc_lower.startswith(key_lower) and len(inc_lower) > len(key_lower):
+            sep = inc_lower[len(key_lower)]
+            if not sep.isalnum() or incoming_name[len(key_lower)].isupper():
+                return key
+    return incoming_name
+
+
+def _merge_character_data(old_data: dict, new_data: dict) -> dict:
+    """Merge new_data into old_data, preserving identity fields and resources
+    that the LLM omitted.
+
+    - Identity fields (`type`, `class`) on an existing entry are NEVER replaced
+      by a different value from the LLM (common hallucination after sex_mode /
+      isolated contexts). New entries set them freely.
+    - `level` preserved if new omits or sends null.
+    - Vitals: `max` values are preserved per-label when the new update changes
+      them without a matching label-specific `_max_override`. `current` follows
+      the new update.
+    - Resources (Armor, Luck, Spell Slots, …): merged by label. Entries present
+      in old but absent from new are preserved. Max values preserved unless
+      explicitly set.
+    - Conditions: fully replaced by new (LLM re-asserts active conditions).
+    """
+    if not isinstance(old_data, dict):
+        return dict(new_data) if isinstance(new_data, dict) else {}
+    if not isinstance(new_data, dict):
+        return dict(old_data)
+
+    merged = dict(new_data)
+
+    # Identity: never flip type/class on an existing entry
+    for field in ("type", "class"):
+        old_val = old_data.get(field)
+        new_val = new_data.get(field)
+        if old_val and (not new_val or new_val != old_val):
+            merged[field] = old_val
+
+    # Level: preserve if new omits or nulls
+    if new_data.get("level") is None and old_data.get("level") is not None:
+        merged["level"] = old_data.get("level")
+
+    # Vitals: preserve max per label
+    old_vitals_by_label = {v.get("label"): v for v in (old_data.get("vitals") or []) if isinstance(v, dict) and v.get("label")}
+    new_vitals = new_data.get("vitals") or []
+    merged_vitals = []
+    seen_labels = set()
+    for v in new_vitals:
+        if not isinstance(v, dict) or not v.get("label"):
+            merged_vitals.append(v)
+            continue
+        label = v["label"]
+        seen_labels.add(label)
+        old_v = old_vitals_by_label.get(label)
+        if old_v and "max" in old_v and "max" in v and old_v["max"] != v["max"]:
+            # Preserve old max; keep new current (clamped)
+            new_entry = dict(v)
+            new_entry["max"] = old_v["max"]
+            if "current" in new_entry:
+                new_entry["current"] = min(new_entry["current"], old_v["max"])
+            merged_vitals.append(new_entry)
+        else:
+            merged_vitals.append(v)
+    # Preserve old vitals whose labels are missing from new update
+    for label, old_v in old_vitals_by_label.items():
+        if label not in seen_labels:
+            merged_vitals.append(dict(old_v))
+    if merged_vitals or "vitals" in new_data:
+        merged["vitals"] = merged_vitals
+
+    # Resources: merge by label, preserving missing ones and old max
+    old_res_by_label = {r.get("label"): r for r in (old_data.get("resources") or []) if isinstance(r, dict) and r.get("label")}
+    new_res = new_data.get("resources") or []
+    merged_res = []
+    seen_res = set()
+    for r in new_res:
+        if not isinstance(r, dict) or not r.get("label"):
+            merged_res.append(r)
+            continue
+        label = r["label"]
+        seen_res.add(label)
+        old_r = old_res_by_label.get(label)
+        if old_r and "max" in old_r and "max" in r and old_r["max"] != r["max"]:
+            new_entry = dict(r)
+            new_entry["max"] = old_r["max"]
+            if "current" in new_entry:
+                new_entry["current"] = min(new_entry["current"], old_r["max"])
+            merged_res.append(new_entry)
+        else:
+            merged_res.append(r)
+    for label, old_r in old_res_by_label.items():
+        if label not in seen_res:
+            merged_res.append(dict(old_r))
+    if merged_res or "resources" in new_data:
+        merged["resources"] = merged_res
+
+    return merged
+
+
+def apply_character_states(existing: dict, mechanics_output: dict, current_turn: int, scene_state: dict = None) -> dict:
     """
     Merge Mechanics' character_states into existing state and prune stale entries.
 
@@ -1823,26 +1951,43 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
       - "_conditions_remove": ["Blessed", ...] → remove from existing conditions
       - "_resource_deltas": [{"label": "Spell Slots (1st)", "delta": -1}, ...] → adjust current value
 
+    Canonicalization: incoming names are checked for alias matches against
+    existing keys (e.g., "Red" -> "RedVelvet"); the LLM's name is remapped to
+    the canonical key so duplicate entries don't proliferate.
+
+    Identity protection: on updates to an existing entry, `type`, `class`, and
+    `max` values on vitals/resources are preserved against LLM hallucination
+    (common after sex_mode / isolated contexts). New entries set these freely.
+    Resources omitted by the LLM are preserved from the old snapshot.
+
     Entries not updated in CHARACTER_STATE_TTL turns are pruned.
     """
+    # Also canonicalize against scene_state names (they're authoritative for UI)
+    alias_pool = set(existing.keys())
+    if isinstance(scene_state, dict):
+        for key in ("pcs_present", "npcs_present"):
+            for n in scene_state.get(key) or []:
+                if isinstance(n, str) and n:
+                    alias_pool.add(n)
+
     # Merge new entries from Mechanics
-    for name, state_val in mechanics_output.items():
+    for raw_name, state_val in mechanics_output.items():
+        name = _canonicalize_character_name(alias_pool, raw_name)
         if isinstance(state_val, dict):
             # Check for delta ops — apply against existing state
             cond_add = state_val.pop("_conditions_add", None)
             cond_remove = state_val.pop("_conditions_remove", None)
             res_deltas = state_val.pop("_resource_deltas", None)
 
+            old_entry = existing.get(name)
+            old_data = old_entry.get("data") if isinstance(old_entry, dict) else None
+
             if cond_add or cond_remove or res_deltas:
                 # Start from existing data if available, merge new fields on top
-                old_entry = existing.get(name)
-                if isinstance(old_entry, dict):
-                    base = dict(old_entry.get("data", {}))
-                else:
-                    base = {}
-                # Overlay any non-delta fields the model provided
-                for k, v in state_val.items():
-                    base[k] = v
+                base = dict(old_data) if isinstance(old_data, dict) else {}
+                # Overlay any non-delta fields the model provided (with identity protection)
+                if state_val:
+                    base = _merge_character_data(base, state_val) if base else dict(state_val)
                 # Apply condition deltas
                 conditions = list(base.get("conditions", []))
                 if cond_add:
@@ -1871,7 +2016,13 @@ def apply_character_states(existing: dict, mechanics_output: dict, current_turn:
                     base["resources"] = resources
                 existing[name] = {"data": base, "last_updated": current_turn}
             else:
-                existing[name] = {"data": state_val, "last_updated": current_turn}
+                # Full-update path — protect identity/max/resources when the
+                # entry already exists; otherwise accept the new entry as-is.
+                if isinstance(old_data, dict):
+                    merged = _merge_character_data(old_data, state_val)
+                    existing[name] = {"data": merged, "last_updated": current_turn}
+                else:
+                    existing[name] = {"data": state_val, "last_updated": current_turn}
         else:
             # Old string format → wrap into structured format
             existing[name] = {"data": {"summary": str(state_val)}, "last_updated": current_turn}
@@ -2183,6 +2334,14 @@ def _format_character_data(data) -> str:
     if not isinstance(data, dict):
         return str(data)
     parts = []
+    # Identity (type + class) so the LLM doesn't have to guess role on re-report
+    ident_bits = []
+    if data.get("type"):
+        ident_bits.append(str(data["type"]))
+    if data.get("class"):
+        ident_bits.append(str(data["class"]))
+    if ident_bits:
+        parts.append(" ".join(ident_bits))
     # Vitals
     for v in data.get("vitals", []):
         if "current" in v and "max" in v:
@@ -2491,7 +2650,8 @@ def run_pipeline(
             new_pipeline_state["character_states"] = apply_character_states(
                 new_pipeline_state["character_states"],
                 events_data["character_states"],
-                current_turn
+                current_turn,
+                scene_state=events_data.get("scene_state") or new_pipeline_state.get("scene_state"),
             )
         if game_system == "cpred":
             _rebuild_cpred_projections(new_pipeline_state, current_turn)
@@ -2553,7 +2713,8 @@ def run_pipeline(
         new_pipeline_state["character_states"] = apply_character_states(
             new_pipeline_state["character_states"],
             events_data.get("character_states") if isinstance(events_data.get("character_states"), dict) else {},
-            current_turn
+            current_turn,
+            scene_state=events_data.get("scene_state") or new_pipeline_state.get("scene_state"),
         )
 
         # Apply resolver's state ops (HP, armor, crit injuries, etc.)
@@ -2653,7 +2814,8 @@ def run_pipeline(
         new_pipeline_state["character_states"] = apply_character_states(
             new_pipeline_state["character_states"],
             mechanics_data.get("character_states") if isinstance(mechanics_data.get("character_states"), dict) else {},
-            current_turn
+            current_turn,
+            scene_state=new_pipeline_state.get("scene_state"),
         )
         # Scene-scope filtering for Mechanics-emitted relationship ops
         if mechanics_data.get("relationship_ops"):
@@ -4071,7 +4233,8 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     pipeline_state["character_states"] = apply_character_states(
         pipeline_state["character_states"],
         parsed.get("character_states") if isinstance(parsed.get("character_states"), dict) else {},
-        current_turn
+        current_turn,
+        scene_state=parsed.get("scene_state") or pipeline_state.get("scene_state"),
     )
     # Apply game-specific state ops (relationship_ops already filtered by scene scope)
     if game_system and game_system.get("apply_game_state"):
