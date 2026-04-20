@@ -91,6 +91,7 @@
 !data/rulebooks/
 !data/rulebooks/cp_red/
 !PIPELINE_PLAN.md
+!RAG_PLAN.md
 !android/
 !android/.gitignore
 !android/**
