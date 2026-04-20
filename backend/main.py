@@ -42,7 +42,7 @@ from pipeline import (
     build_single_agent_injections, build_player_agency_reminder,
     generate_dice_pool, generate_name_dice,
     migrate_pipeline_state,
-    get_context_pairs, extract_state_notifications, extract_ship_combat_notifications,
+    get_context_pairs, _filter_unstaged_pairs, extract_state_notifications, extract_ship_combat_notifications,
     collapse_hack_messages,
     collapse_combat_messages,
     collapse_ship_combat_messages,
@@ -4501,6 +4501,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     stateful_injected_snapshot = None
     _sex_first_exchange = False
     docs_refreshed = False
+    _novels_context_error = None
 
     # GPT-5.2 hack request params (non-streaming JSON call, built separately)
     hack_gpt_request_params = None
@@ -4943,35 +4944,42 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     with open(conv_path, 'r', encoding='utf-8') as f:
                         stateful_pipeline_state.setdefault("game_state", {})["_conversion_doc"] = f.read()
 
-        trim_anchor_id = data.get("_trim_anchor_id")
-        # Collapse hack and combat messages into summary pairs before context trimming
-        branch_path_for_context = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
-        context_pairs, new_anchor_id, did_trim = get_context_pairs(
-            branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id,
-            manual_staging=gs.get("manual_staging", False)
-        )
-        data["_trim_anchor_id"] = new_anchor_id
-        data.pop("_stateful_trimming", None)  # clean up legacy flag
-
-        if did_trim:
-            docs_refreshed = True
-            fresh_system = build_system_content(username, request.project, **_system_content_kwargs(gs))
-            branch_path[0]["content"] = fresh_system
-            branch_path[0].pop("total_tokens", None)
-            branch_path[0].pop("total_gpt_tokens", None)
-            branch_path[0].pop("total_claude_tokens", None)
-            logger.info(f"Stateful: refreshed system prompt on context trim for {username}/{request.project}/{request.chat_name}")
-
-        # Override token-based context_start_index with pair-based value
-        # so the frontend greys out messages matching what the API actually sees
-        if new_anchor_id:
-            context_start_index = 1
-            for idx, msg in enumerate(branch_path):
-                if msg.get("id") == new_anchor_id:
-                    context_start_index = idx
-                    break
+        if gs.get("manual_staging"):
+            # Novels: staging-driven context with hard token ceiling (no sawtooth)
+            history = branch_path[1:-1]
+            staged_history = _filter_unstaged_pairs(history)
+            context_pairs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in staged_history]
+            context_start_index = 1  # Dimming handled by staged field, not index
         else:
-            context_start_index = 1
+            # TTRPG systems: pair-based sawtooth context trimming
+            trim_anchor_id = data.get("_trim_anchor_id")
+            # Collapse hack and combat messages into summary pairs before context trimming
+            branch_path_for_context = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
+            context_pairs, new_anchor_id, did_trim = get_context_pairs(
+                branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
+            )
+            data["_trim_anchor_id"] = new_anchor_id
+            data.pop("_stateful_trimming", None)  # clean up legacy flag
+
+            if did_trim:
+                docs_refreshed = True
+                fresh_system = build_system_content(username, request.project, **_system_content_kwargs(gs))
+                branch_path[0]["content"] = fresh_system
+                branch_path[0].pop("total_tokens", None)
+                branch_path[0].pop("total_gpt_tokens", None)
+                branch_path[0].pop("total_claude_tokens", None)
+                logger.info(f"Stateful: refreshed system prompt on context trim for {username}/{request.project}/{request.chat_name}")
+
+            # Override token-based context_start_index with pair-based value
+            # so the frontend greys out messages matching what the API actually sees
+            if new_anchor_id:
+                context_start_index = 1
+                for idx, msg in enumerate(branch_path):
+                    if msg.get("id") == new_anchor_id:
+                        context_start_index = idx
+                        break
+            else:
+                context_start_index = 1
 
         if _has_game_state:
             # Build injections for user message (game systems only)
@@ -5031,6 +5039,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + context_pairs + [new_user_msg]
+
+        # Novels: hard token ceiling check (no auto-trimming — user controls context via staging)
+        # Sum from source messages (cached tokens) + estimate fresh system/user messages
+        if gs.get("manual_staging") and model_id.startswith("claude"):
+            _history_tokens = sum(
+                m.get("total_claude_tokens") or m.get("total_tokens") or count_tokens(m.get("content", ""))
+                for m in staged_history
+            )
+            _system_tokens = count_tokens(system_msg.get("content", ""))
+            _user_tokens = count_tokens(new_user_msg.get("content", ""))
+            _total_tokens = _system_tokens + _history_tokens + _user_tokens
+            _ceiling = provider.context_limits.threshold
+            if _total_tokens > _ceiling:
+                _novels_context_error = f"Context is ~{_total_tokens:,} tokens, exceeding the {_ceiling:,} token limit. Unstage some messages to continue."
+
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         # Collapse hack and combat messages in non-stateful path too
@@ -5600,6 +5623,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         try:
             # Send init event with user message ID
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
+
+            # Novels: hard stop if context exceeds token ceiling
+            if _novels_context_error:
+                yield f"event: error\ndata: {json.dumps({'detail': _novels_context_error})}\n\n"
+                # Remove the optimistically-added user message
+                if user_msg_id:
+                    data["messages"] = [m for m in data["messages"] if m.get("id") != user_msg_id]
+                    save_chat(username, request.chat_name, data, request.project)
+                return
 
             # Notify if docs were refreshed on context trim
             if docs_refreshed:
