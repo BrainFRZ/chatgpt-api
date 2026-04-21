@@ -238,7 +238,7 @@ class TestSendMessageStreamNonPipeline(BaseE2ETest):
         mock_provider.context_limits = MagicMock(target=100000, threshold=120000)
         mock_provider.count_tokens = MagicMock(return_value=10)
         mock_provider.count_tokens_api = MagicMock(return_value=10)
-        mock_provider.format_token_string = MagicMock(return_value="I:10 C:0 O:20 R:0 T:30")
+        mock_provider.format_token_string = MagicMock(return_value="I:10 C:0 W:0 O:20 R:0 T:30")
 
         # Mock streaming response
         def fake_stream(client, params, ttfb_timeout=30.0):
@@ -325,7 +325,7 @@ class TestSendMessageStreamPipeline(BaseE2ETest):
         mock_provider.context_limits = MagicMock(target=100000, threshold=120000)
         mock_provider.count_tokens = MagicMock(return_value=10)
         mock_provider.count_tokens_api = MagicMock(return_value=10)
-        mock_provider.format_token_string = MagicMock(return_value="I:50 C:0 O:100 R:20 T:170")
+        mock_provider.format_token_string = MagicMock(return_value="I:50 C:0 W:0 O:100 R:20 T:170")
         mock_provider.get_client = MagicMock(return_value=MagicMock())
         mock_provider.calculate_cost = MagicMock(return_value=0.005)
 
@@ -412,7 +412,7 @@ class TestSendMessageStreamPipeline(BaseE2ETest):
         mock_provider.context_limits = MagicMock(target=100000, threshold=120000)
         mock_provider.count_tokens = MagicMock(return_value=10)
         mock_provider.count_tokens_api = MagicMock(return_value=10)
-        mock_provider.format_token_string = MagicMock(return_value="I:20 C:0 O:30 R:5 T:55")
+        mock_provider.format_token_string = MagicMock(return_value="I:20 C:0 W:0 O:30 R:5 T:55")
         mock_provider.get_client = MagicMock(return_value=MagicMock())
         mock_provider.calculate_cost = MagicMock(return_value=0.001)
 
@@ -481,7 +481,7 @@ class TestEditBranchFlow(BaseE2ETest):
         mock_provider.context_limits = MagicMock(target=100000, threshold=120000)
         mock_provider.count_tokens = MagicMock(return_value=10)
         mock_provider.count_tokens_api = MagicMock(return_value=10)
-        mock_provider.format_token_string = MagicMock(return_value="I:10 C:0 O:20 R:0 T:30")
+        mock_provider.format_token_string = MagicMock(return_value="I:10 C:0 W:0 O:20 R:0 T:30")
         mock_provider.get_client = MagicMock(return_value=MagicMock())
         mock_provider.calculate_cost = MagicMock(return_value=0.001)
 
@@ -602,7 +602,7 @@ class TestPipelineEditFlow(BaseE2ETest):
         mock_provider.context_limits = MagicMock(target=100000, threshold=120000)
         mock_provider.count_tokens = MagicMock(return_value=10)
         mock_provider.count_tokens_api = MagicMock(return_value=10)
-        mock_provider.format_token_string = MagicMock(return_value="I:50 C:0 O:100 R:20 T:170")
+        mock_provider.format_token_string = MagicMock(return_value="I:50 C:0 W:0 O:100 R:20 T:170")
         mock_provider.get_client = MagicMock(return_value=MagicMock())
         mock_provider.calculate_cost = MagicMock(return_value=0.005)
 

@@ -19,6 +19,30 @@ from .cpred_tables import CYBERWARE_TABLE
 logger = logging.getLogger(__name__)
 
 
+def _detect_near_duplicate_edgerunner_name(new_name: str, existing_names) -> str | None:
+    """Return an existing edgerunner name if ``new_name`` looks like a variant.
+
+    Heuristic: case-insensitive shared-token match (whitespace-split) or
+    case-insensitive substring containment. Mirrors the character_states
+    detector in main.py. Used for logging only — never for auto-merging.
+    """
+    if not isinstance(new_name, str) or not new_name:
+        return None
+    new_lower = new_name.lower().strip()
+    new_tokens = set(new_lower.split())
+    for existing in existing_names:
+        if not isinstance(existing, str) or not existing or existing == new_name:
+            continue
+        ex_lower = existing.lower().strip()
+        if new_lower == ex_lower:
+            continue
+        if new_tokens & set(ex_lower.split()):
+            return existing
+        if new_lower in ex_lower or ex_lower in new_lower:
+            return existing
+    return None
+
+
 def _safe_int(val, default=0):
     """Coerce val to int, returning default on failure."""
     try:
@@ -569,8 +593,18 @@ def apply_game_state(game_state, agent_json, turn):
             if not isinstance(er_name, str) or not er_name or not op:
                 continue
 
-            # Auto-create edgerunner stub if not yet tracked
+            # Auto-create edgerunner stub if not yet tracked.
+            # Warn if the new name looks like a variant of an existing one —
+            # ops drifting to nickname/short-name keys creates duplicate state
+            # entries that silently lose HP deltas, conditions, and gear.
             if er_name not in edgerunners:
+                dup = _detect_near_duplicate_edgerunner_name(er_name, edgerunners.keys())
+                if dup:
+                    logger.warning(
+                        "edgerunners: new key %r looks like a variant of existing key %r; "
+                        "state will drift. Update the contract/prompt or clean up manually.",
+                        er_name, dup,
+                    )
                 edgerunners[er_name] = _default_edgerunner()
             er = edgerunners[er_name]
 

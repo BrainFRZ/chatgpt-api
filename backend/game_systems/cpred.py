@@ -512,6 +512,13 @@ You maintain persistent state across turns. This is your long-term memory — wh
 - **[RELATIONSHIP STATE]**: RS/RomS per NPC and FR per faction, with current tier and mechanical bonuses. Use tiers to shape NPC behavior organically — an NPC at T5: Close acts warmer than one at T2: Friendly.
 - **[NAME DICE]** (if present): Pre-rolled values for the Name Generator document. When introducing a new NPC, consume these left-to-right with the Name Generator tables instead of inventing names. Do not skip or reuse values.
 
+### Canonical Character Names (CRITICAL):
+When a character already exists in `[CHARACTER STATES]` or `[EDGERUNNER STATE]`, you MUST use that character's **exact existing key** as the op target. Do not use nicknames, first names, short names, handles, or prose-shortened variants when emitting ops — those create duplicate state entries that drift independently and silently lose tracked conditions, HP deltas, and relationship data.
+
+Example: if `[EDGERUNNER STATE]` shows `RedVelvet`, emit ops with `"edgerunner": "RedVelvet"` — never `"Red"`, never `"Shae"`, never `"Shae Sinclair"`, even if the narrative prose calls her by those names. The name you USE in prose and the key you TARGET in ops are two different things.
+
+This applies to both `edgerunner_ops` and `character_states` targets. When a new character first enters play, pick one canonical key (the most specific form — full name preferred) and reuse it for all future ops targeting that character.
+
 ### State Reporting (via report_state tool):
 After your narrative, you MUST call the `report_state` tool every turn. Required sections:
 - **pacing**: Episode/beat tracking

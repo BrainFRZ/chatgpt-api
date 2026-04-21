@@ -144,16 +144,27 @@ class ModelProvider(ABC):
         )
 
     def format_token_string(self, parsed: ParsedResponse) -> str:
-        """Format tokens as 'I:X C:Y O:Z R:W T:N' string.
+        """Format tokens as 'I:X C:Y W:Z O:Q R:R T:N' string.
 
         ParsedResponse.input_tokens should be TOTAL input tokens (including cache).
-        I = non-cached input (input_tokens - cache_read - cache_creation)
-        C = cache_read_tokens
+        I = non-cached fresh input (input_tokens - cache_read - cache_creation)
+        C = cache_read_tokens  (charged at cache-read rate, ~0.1x base)
+        W = cache_creation_tokens (charged at cache-write rate, ~1.25x base —
+            surfaced explicitly so cache-miss turns don't look cheap)
+        O = output_tokens
+        R = reasoning_tokens
         T = total tokens in request/response
         """
         non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
         total = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
-        return f"I:{non_cached} C:{parsed.cache_read_tokens} O:{parsed.output_tokens} R:{parsed.reasoning_tokens} T:{total}"
+        return (
+            f"I:{non_cached} "
+            f"C:{parsed.cache_read_tokens} "
+            f"W:{parsed.cache_creation_tokens} "
+            f"O:{parsed.output_tokens} "
+            f"R:{parsed.reasoning_tokens} "
+            f"T:{total}"
+        )
 
     def get_metadata(self) -> dict:
         """Return model metadata for the /api/models endpoint."""

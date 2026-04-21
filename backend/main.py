@@ -3047,6 +3047,38 @@ def _convert_state_ops_to_character_state_deltas(state_ops: list, tracked_edgeru
     return deltas
 
 
+def _detect_near_duplicate_name(new_name: str, existing_names) -> str | None:
+    """Return an existing name if ``new_name`` looks like a variant of it.
+
+    Heuristic: case-insensitive substring match in either direction, tokenized
+    on whitespace so "Red" / "RedVelvet" match but "Red" / "Fred" don't.
+    Used for logging only — never for auto-merging.
+    """
+    if not isinstance(new_name, str) or not new_name:
+        return None
+    new_lower = new_name.lower().strip()
+    new_tokens = set(new_lower.split())
+    for existing in existing_names:
+        if not isinstance(existing, str) or not existing:
+            continue
+        if existing == new_name:
+            continue
+        ex_lower = existing.lower().strip()
+        if new_lower == ex_lower:
+            continue
+        ex_tokens = set(ex_lower.split())
+        # Shared-token match: any whitespace-delimited token in common is
+        # strong evidence of the same character ("Red" vs "RedVelvet",
+        # "Kessler" vs "Marcus Kessler", "Shae" vs "Shae Sinclair").
+        if new_tokens & ex_tokens:
+            return existing
+        # No-whitespace merged-name match: "RedVelvet" contains "Red",
+        # "MamaLu" contains "Mama".
+        if new_lower in ex_lower or ex_lower in new_lower:
+            return existing
+    return None
+
+
 def _merge_character_state_deltas(existing: dict, resolver_deltas: dict) -> dict:
     """Merge resolver-generated character condition deltas into character_states payloads."""
     merged = {}
@@ -3058,6 +3090,15 @@ def _merge_character_state_deltas(existing: dict, resolver_deltas: dict) -> dict
             continue
         if not isinstance(delta, dict):
             continue
+        # Flag near-duplicate names (logging only — do not auto-merge).
+        if name not in merged:
+            dup = _detect_near_duplicate_name(name, merged.keys())
+            if dup:
+                logger.warning(
+                    "character_states: new key %r looks like a variant of existing key %r; "
+                    "state will drift. Update the contract/prompt or clean up manually.",
+                    name, dup,
+                )
         current = merged.get(name)
         if not isinstance(current, dict):
             current = {}
@@ -9471,22 +9512,25 @@ def get_user_stats(username: str):
             model = msg.get("model", "")
             is_sonnet = model.startswith("claude")
 
-            # Parse tokens string like "I:123 C:456 O:789 R:100 T:1468"
+            # Parse tokens string like "I:123 C:456 W:789 O:101 R:100 T:1468"
+            # (W = cache_creation; legacy strings without W parse fine.)
             tokens_str = msg.get("tokens", "")
-            msg_input = msg_cached = msg_output = msg_reasoning = 0
+            msg_input = msg_cached = msg_cache_write = msg_output = msg_reasoning = 0
             try:
                 for part in tokens_str.split():
                     if part.startswith("I:"):
                         msg_input = int(part[2:])
                     elif part.startswith("C:"):
                         msg_cached = int(part[2:])
+                    elif part.startswith("W:"):
+                        msg_cache_write = int(part[2:])
                     elif part.startswith("O:"):
                         msg_output = int(part[2:])
                     elif part.startswith("R:"):
                         msg_reasoning = int(part[2:])
             except (ValueError, AttributeError):
                 # Silently default to 0 for malformed token strings
-                msg_input = msg_cached = msg_output = msg_reasoning = 0
+                msg_input = msg_cached = msg_cache_write = msg_output = msg_reasoning = 0
 
             # Parse cost string like "$0.0123" or "$0.0123 (free: $0.01)" or "free"
             cost_str = msg.get("cost", "$0")

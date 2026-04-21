@@ -594,7 +594,7 @@ class TestOpenAIProvider:
         result = provider.format_token_string(parsed)
         # new_input = 1000 - 800 - 0 = 200
         # total = 1000 + 100 + 50 = 1150
-        assert result == "I:200 C:800 O:100 R:50 T:1150"
+        assert result == "I:200 C:800 W:0 O:100 R:50 T:1150"
 
     def test_count_tokens(self):
         """Test token counting with tiktoken."""
@@ -755,7 +755,7 @@ class TestAnthropicProvider:
         result = provider.format_token_string(parsed)
         # new_input = 500 - 300 - 0 = 200
         # total = 500 + 50 + 100 = 650
-        assert result == "I:200 C:300 O:50 R:100 T:650"
+        assert result == "I:200 C:300 W:0 O:50 R:100 T:650"
 
     def test_extract_usage_preserves_multiple_tool_calls(self):
         """_extract_usage should return all tool_use blocks in order."""
