@@ -146,21 +146,37 @@ class ModelProvider(ABC):
     def format_token_string(self, parsed: ParsedResponse) -> str:
         """Format tokens as 'I:X C:Y W:Z O:Q R:R T:N' string.
 
-        ParsedResponse.input_tokens should be TOTAL input tokens (including cache).
-        I = non-cached fresh input (input_tokens - cache_read - cache_creation)
-        C = cache_read_tokens  (charged at cache-read rate, ~0.1x base)
-        W = cache_creation_tokens (charged at cache-write rate, ~1.25x base —
-            surfaced explicitly so cache-miss turns don't look cheap)
-        O = output_tokens
-        R = reasoning_tokens
-        T = total tokens in request/response
+        ParsedResponse.input_tokens is the sum (non-cached + cache_read +
+        cache_creation) as extracted by providers. For display:
+          I = non-cached fresh input
+          C = cache_read_tokens  (charged at cache-read rate, ~0.1x base)
+          W = cache_creation_tokens (charged at cache-write rate)
+          O = output_tokens
+          R = reasoning_tokens
+          T = distinct total tokens processed (see cache-overlap note below)
+
+        T subtlety: on Anthropic 1h-extended-cache refresh events, the API
+        reports the SAME cached content under both cache_read AND
+        cache_creation (read from old cache, written to new cache for TTL
+        extension). Naively summing the two inflates T by the refresh amount,
+        which is misleading even though billing is correctly double-charged.
+        When read and creation are within 10% of each other in magnitude, we
+        treat them as overlap and count the content once. Otherwise (the
+        common case where one is near-zero or they're clearly disjoint) we
+        sum normally.
         """
         non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
-        total = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
+        r = parsed.cache_read_tokens
+        w = parsed.cache_creation_tokens
+        if r > 0 and w > 0 and abs(r - w) < 0.1 * max(r, w):
+            cached_portion = max(r, w)  # refresh-overlap: same content in both buckets
+        else:
+            cached_portion = r + w
+        total = non_cached + cached_portion + parsed.output_tokens + parsed.reasoning_tokens
         return (
             f"I:{non_cached} "
-            f"C:{parsed.cache_read_tokens} "
-            f"W:{parsed.cache_creation_tokens} "
+            f"C:{r} "
+            f"W:{w} "
             f"O:{parsed.output_tokens} "
             f"R:{parsed.reasoning_tokens} "
             f"T:{total}"
