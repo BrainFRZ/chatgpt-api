@@ -383,8 +383,10 @@ NPC MEMORIES:
 - Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
-- Full replacement every turn
-- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
+- Full replacement every turn — whatever you omit is erased for this turn.
+- "pcs_present": list every PC actively in the scene.
+- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing crew/allies (e.g. Delphi, Kessler on a job together) MUST appear every turn until they explicitly exit the scene in the narrative** (walk out the door, get separated, knocked unconscious, left behind at the van, etc.). If the NPC is "at the hallway door covering the corridor," they are present — list them. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection, hides their HP/armor/funds from the HUD, and makes relationship/wellbeing bonuses go dark — treat omission as a real narrative event, not an oversight.
+- Together "pcs_present" and "npcs_present" scope per-character funds in the HUD and gate memory/relationship/wellbeing injection.
 - "funds": Always use an object mapping names to funds (e.g. {"crew fund": "5,000 eb", "V": "2,350 eb", "Jackie": "1,800 eb"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize Night City: neon, chrome, smog, bass, danger
 

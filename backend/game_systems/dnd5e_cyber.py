@@ -1873,8 +1873,10 @@ NPC MEMORIES:
 - Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
-- Full replacement every turn, same as standard pipeline
-- "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the character panel (funds are derived from ship.credits and auto-scoped to scene).
+- Full replacement every turn — whatever you omit is erased for this turn.
+- "pcs_present": list every PC actively in the scene.
+- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing allies/crew MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, incapacitated, left at the ship, etc.). If the NPC is standing watch or covering an angle, they are present — list them. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
+- Together "pcs_present" and "npcs_present" control which per-character funds appear in the character panel (funds are derived from ship.credits and auto-scoped to scene).
 
 CHARACTER STATES:
 - You may receive a [CHARACTER STATES] block with each character's persisted mechanical state from the previous turn (HP, spell slots, conditions, resources, equipment)
