@@ -130,7 +130,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
     "date": "<in-world date, e.g. 2045-08-22>",
     "time": "<in-world time as HHMM>",
     "location": "<current location>",
-    "funds": "<object mapping names to funds, e.g. {\"crew fund\": \"5,000 eb\", \"V\": \"2,350 eb\"}>",
+    "funds": "<object mapping SHARED pool names to amounts, e.g. {\"crew fund\": \"5,000 eb\", \"safehouse stash\": \"300 eb\"}. Do NOT include per-edgerunner entries — per-PC funds are auto-synced from edgerunner.eurobucks by the backend every turn.>",
     "trackables": "<null or resource tracking object>"
   },
   "combat": "<null OR combat object>",
@@ -141,11 +141,11 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
-    // Presence lists — use full list on scene transition, delta ops on ongoing scene:
-    //   scene transition: "npcs_present": ["Delphi", "Kessler"]
-    //   ongoing (someone joins): "_npcs_present_add": ["Mirage"]
-    //   ongoing (someone leaves): "_npcs_present_remove": ["Kessler"]
-    //   ongoing (no change): omit presence fields entirely — prior list is retained
+    // Presence lists are delta-only — backend retains prior list:
+    //   someone joins:  "_npcs_present_add": ["Mirage"]
+    //   someone leaves: "_npcs_present_remove": ["Kessler"]
+    //   no change:      omit presence fields entirely
+    //   transition:     combine adds + removes in one emit (no full-list field exists)
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting — neon haze, rain-slick chrome, bass-heavy clubs, toxic smog>",
@@ -387,13 +387,13 @@ NPC MEMORIES:
 
 SCENE STATE:
 - Most fields (location, atmosphere, active_tensions, details, pending_actions, scene_trigger) are full-replacement — emit them every turn to keep the scene current; omitted fields retain their prior value.
-- Presence lists ("pcs_present", "npcs_present") use **delta ops by default, full list on transitions**:
-  - **Ongoing scene** (same location, same roster, one entry changing): emit only `_npcs_present_add` / `_npcs_present_remove` (or the pcs_ variants). The existing list is retained and patched — do NOT re-emit the full list just to repeat the same roster.
-  - **Scene transition** (new location, wholesale roster change): emit the full `npcs_present` / `pcs_present` list to declare who is present in the new scene. This replaces the prior list. Deltas may be combined on top.
-  - **Nothing changed**: omit presence fields entirely — the prior list is retained automatically. This is a structural safeguard against silently dropping ongoing crew/allies (Delphi, Kessler, etc.).
-- Unconscious, bleeding out, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Do NOT use `_npcs_present_remove` for injury or unconsciousness; use it only when the NPC physically exits (walks out, gets separated, left at the van, etc.).
-- The presence lists gate `[NPC MEMORIES]` injection and HUD per-character funds / HP / armor display. An NPC not in `npcs_present` goes dark in the HUD and loses their memory context, so keep allies in it until they genuinely leave.
-- "funds": Always use an object mapping names to funds (e.g. {"crew fund": "5,000 eb", "V": "2,350 eb", "Jackie": "1,800 eb"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
+- Presence lists ("pcs_present", "npcs_present") are **delta-only**:
+  - Someone enters: emit `_npcs_present_add: ["Name"]` (or `_pcs_present_add`).
+  - Someone exits: emit `_npcs_present_remove: ["Name"]` (or `_pcs_present_remove`).
+  - Roster unchanged: omit presence fields entirely — prior list is retained.
+  - Scene transition (new location, party leaves old NPCs behind, meets new ones): emit the relevant adds + removes together. Do NOT re-emit the whole roster.
+- Unconscious, bleeding out, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Do NOT use `_npcs_present_remove` for injury or unconsciousness; only when the NPC physically exits (walks out, gets separated, left at the van, etc.).
+- The presence lists gate `[NPC MEMORIES]` injection and HUD per-character display. An NPC not in `npcs_present` goes dark in the HUD and loses their memory context, so keep allies in it until they genuinely leave.
 - atmosphere should emphasize Night City: neon, chrome, smog, bass, danger
 
 HACK TRIGGER:
@@ -824,15 +824,13 @@ STATE_REPORT_TOOL = {
             "scene_state": {
                 "type": "object",
                 "required": ["location", "active_tensions", "atmosphere"],
-                "description": "Presence lists (pcs_present/npcs_present) support delta ops. Prefer _npcs_present_add / _npcs_present_remove on ongoing-scene turns where the roster is stable except for one entry changing. Emit the full npcs_present list on scene transitions (new location, new scene) to re-declare who is there. Same for pcs_present. When deltas are emitted without the full list, the retained list is patched in-place — this prevents silent drops.",
+                "description": "Presence lists (pcs_present, npcs_present) are delta-only: emit _npcs_present_add / _npcs_present_remove (and _pcs_present_* variants) as needed; omit presence fields when the roster is unchanged. The backend retains the prior list. Do not re-emit the whole roster — there is no full-list field in this schema for a reason (it re-introduces the silent-drop hallucination this schema is designed to prevent).",
                 "properties": {
                     "location": {"type": "string"},
-                    "npcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full NPC roster for this scene. Omit on ongoing-scene turns where nothing changed — use _npcs_present_add/_remove instead. Emit on scene transitions."},
                     "_npcs_present_add": {"type": "array", "items": {"type": "string"}, "description": "NPCs who just entered the scene (arrive at the door, step out of cover, etc.). Added to the retained npcs_present list."},
                     "_npcs_present_remove": {"type": "array", "items": {"type": "string"}, "description": "NPCs who just exited (walked out, got separated, left behind). Removed from the retained npcs_present list. Do NOT remove for unconsciousness/injury — they are still present."},
-                    "pcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full PC roster for this scene. Omit on ongoing-scene turns where nothing changed — use _pcs_present_add/_remove instead."},
-                    "_pcs_present_add": {"type": "array", "items": {"type": "string"}},
-                    "_pcs_present_remove": {"type": "array", "items": {"type": "string"}},
+                    "_pcs_present_add": {"type": "array", "items": {"type": "string"}, "description": "PCs who just entered the scene."},
+                    "_pcs_present_remove": {"type": "array", "items": {"type": "string"}, "description": "PCs who just exited."},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
@@ -975,7 +973,7 @@ STATE_REPORT_TOOL = {
                     "date": {"type": "string"},
                     "time": {"type": "string", "description": "HHMM format"},
                     "location": {"type": "string"},
-                    "funds": {"description": "Object mapping names to funds. Include shared pools as named entries alongside characters."},
+                    "funds": {"description": "Object mapping SHARED pool names to fund strings (e.g. \"crew fund\": \"5,000 eb\"). Per-edgerunner wallets are auto-synced from edgerunner.eurobucks by the backend — do NOT emit per-PC entries here (they will be overwritten every turn and waste tokens). Only include shared pools the model manages directly."},
                     "trackables": {"description": "null or object of resource name → value"},
                     "time_override": {
                         "type": "object",
