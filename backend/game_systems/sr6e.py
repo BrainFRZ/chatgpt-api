@@ -398,7 +398,7 @@ NPC MEMORIES:
 SCENE STATE:
 - Full replacement every turn — whatever you omit is erased for this turn.
 - "pcs_present": list every PC actively in the scene.
-- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing team/allies MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, incapacitated, left at the safehouse, etc.). If the NPC is on overwatch or covering an angle, they are present — list them. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
+- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing team/allies MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, left at the safehouse, etc.). If the NPC is on overwatch or covering an angle, they are present — list them. Unconscious, dying, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
 - Together "pcs_present" and "npcs_present" control which per-character funds appear in the HUD.
 - "funds": Always use an object mapping names to funds (e.g. {"team fund": "50,000¥", "Raven": "15,000¥", "Chrome": "8,200¥"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize noir cyberpunk: neon, rain, chrome, corporate oppression

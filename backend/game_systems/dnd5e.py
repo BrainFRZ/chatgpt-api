@@ -510,7 +510,7 @@ NPC MEMORIES:
 SCENE STATE:
 - You receive a [SCENE STATE] block showing the previous turn's scene
 - Output a complete "scene_state" object EVERY turn — this is a full replacement, not a diff
-- "npcs_present" is critical: it controls which NPC memories are injected on the NEXT turn. List every NPC actively in the scene.
+- "npcs_present" is critical: it controls which NPC memories are injected on the NEXT turn. List every NPC present in the scene. Ongoing allies/companions MUST appear every turn until they explicitly exit in the narrative (walk out, get separated, left behind, etc.). Unconscious, dying, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act.
 - "pcs_present": list every PC actively in the scene. Together with "npcs_present", controls which per-character funds appear in the HUD.
 - "active_tensions" captures unresolved dramatic tensions driving the scene
 - "details" is for transient facts that matter now but may not next scene (e.g., "disguise is active", "door is barricaded")

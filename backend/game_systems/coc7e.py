@@ -361,7 +361,7 @@ NPC MEMORIES:
 SCENE STATE:
 - Full replacement every turn — whatever you omit is erased for this turn.
 - "pcs_present": list every PC actively in the scene.
-- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing allies/companions MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, incapacitated, left behind, etc.). If the NPC is silently watching or standing in the room, they are present — list them. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
+- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing allies/companions MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, left behind, etc.). If the NPC is silently watching or standing in the room, they are present — list them. Unconscious, dying, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
 - "funds": Always use an object mapping names to funds (e.g. {"group fund": "$500", "Harvey": "$127", "Gloria": "$84"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize horror elements: dread, wrongness, sensory unease
 
