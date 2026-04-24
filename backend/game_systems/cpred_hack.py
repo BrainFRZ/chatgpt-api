@@ -525,8 +525,9 @@ def _has_dead_condition(character_name, game_state=None, pipeline_state=None):
 def _apply_disconnect_cascade(state, game_state, name_key, pipeline_state=None):
     """Fire all rezzed Black ICE effects on backend-initiated forced disconnect.
 
-    This mirrors the Giant forced_jack_out cascade but bypasses KRASH Barrier
-    (physical disconnection from death/unconsciousness cannot be blocked by software).
+    Triggered only on flatline (failed Death Save). Mirrors the Giant
+    forced_jack_out cascade but bypasses KRASH Barrier — physical
+    disconnection from death cannot be blocked by software.
     """
     try:
         ice_status = state.get("ice_status")
@@ -549,10 +550,18 @@ def _apply_disconnect_cascade(state, game_state, name_key, pipeline_state=None):
 
 
 def _check_forced_disconnect(state, game_state, name_key, pipeline_state=None):
-    """Force-disconnect netrunner if dead/flatlined (failed Death Save) or unconscious.
+    """Force-disconnect netrunner ONLY on flatline (failed Death Save = dead).
 
-    Triggers cascade of all rezzed Black ICE effects on disconnect (RAW).
-    At 0 HP the Netrunner is Mortally Wounded but still conscious — no auto-disconnect.
+    RAW (p.187):
+      - 0 HP = Mortally Wounded, still conscious — no auto-disconnect.
+      - Unconscious (sleep ammo, KO, etc.) does NOT disconnect either — the
+        Netrunner is stuck jacked in as a sitting duck, unable to take NET
+        actions, until an ally physically unplugs them or drags the body
+        out of access-point range (which is an Unsafe Jack Out, handled by
+        the model via narration + edgerunner_ops / hack_complete, not by
+        this auto-check).
+      - Only a failed Death Save (flatline) causes the backend to
+        auto-terminate the hack and cascade all rezzed Black ICE.
     """
     try:
         char_name = state.get(name_key, "")
@@ -560,19 +569,13 @@ def _check_forced_disconnect(state, game_state, name_key, pipeline_state=None):
             return
         gs = game_state if isinstance(game_state, dict) else None
         dead = _has_dead_condition(char_name, game_state=gs, pipeline_state=pipeline_state)
-        unconscious = _has_unconscious_condition(char_name, game_state=gs, pipeline_state=pipeline_state)
         if dead:
             _mark_forced_disconnect(
                 state,
                 summary=f"{char_name} is dead — forced disconnect.",
             )
-        elif unconscious:
-            _mark_forced_disconnect(
-                state,
-                summary=f"{char_name} is unconscious — forced disconnect.",
-            )
 
-        # On forced disconnect, cascade all rezzed Black ICE effects
+        # On forced disconnect (flatline only), cascade all rezzed Black ICE effects
         if state.get("_forced_disconnect") and not state.get("_cascade_applied"):
             state["_cascade_applied"] = True
             _apply_disconnect_cascade(state, game_state, name_key, pipeline_state)

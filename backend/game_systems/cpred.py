@@ -786,7 +786,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls 1d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
-Forced disconnect: the backend auto-terminates the hack/NET session ONLY when the Netrunner is flatlined (failed Death Save) or Unconscious. **0 HP alone does NOT auto-disconnect** — at 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. They can keep taking NET actions, attempt a safe Jack Out, or be stabilized by an ally.
+Forced disconnect: the backend auto-terminates the hack/NET session ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187) — they keep acting with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. An Unconscious Netrunner (sleep ammo, KO from meatspace) is stuck jacked in as a sitting duck: they cannot take NET actions, so they cannot Jack Out themselves, and rezzed ICE / Demons keep acting on them. To rescue them, an ally must spend an Action to either unplug the body or drag it out of access-point range — either counts as an Unsafe Jack Out, triggering the cascade of all rezzed ICE effects on the Netrunner. Narrate this and use resolve_mechanics / edgerunner_ops to apply the cascade damage, then set hack_complete=true.
 
 Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
@@ -1460,7 +1460,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
-Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save) or Unconscious condition. **0 HP alone does NOT auto-disconnect** — at 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. They can keep taking NET actions, attempt a safe Jack Out, or be stabilized by an ally.
+Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), acting at −4 / −6 MOVE with a Death Save each turn. An Unconscious Netrunner is stuck jacked in as a sitting duck — cannot take NET actions or Jack Out themselves, while rezzed ICE / Demons keep acting on them. To rescue: an ally spends an Action to unplug or drag the body out of access-point range (= Unsafe Jack Out, cascading all rezzed ICE effects). Narrate the cascade, apply damage via resolve_mechanics / edgerunner_ops, then set hack_complete=true.
 
 ### Roll Format
 Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
@@ -1556,7 +1556,7 @@ If meatspace combat breaks out during the hack — Convergence dispatches physic
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
-- Forced disconnect (flatline from failed Death Save, or Unconscious condition). 0 HP alone does NOT end the hack — the Netrunner is Mortally Wounded but still conscious and can act.
+- Forced disconnect: only on flatline (failed Death Save) — backend auto-cascades rezzed ICE. Neither 0 HP nor Unconscious ends the hack automatically. If the Netrunner is Unconscious, an ally must spend an Action to unplug or drag the body out of range (Unsafe Jack Out); model narrates the cascade and sets hack_complete=true.
 
 ### Black ICE Types (Backend-Enforced)
 Include "ice_type": "<name>" (e.g. "Hellhound") in resolve_mechanics calls. Backend looks up stats and resolves unique effects automatically.
@@ -1796,7 +1796,8 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
 - **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
 - **Mortally Wounded (0 HP)**: Do NOT auto-end NET at 0 HP. Netrunner can still act (with the normal 0 HP penalties), including attempting safe Jack Out.
-- **Flatlined**: immediate forced disconnect. Set net_complete=true.
+- **Unconscious** (sleep ammo, KO in meatspace): does NOT auto-disconnect. Netrunner is stuck jacked in — cannot take NET actions or Jack Out themselves. Rezzed ICE / Demons continue to act on them. To rescue, an ally spends an Action to unplug the deck or drag the body out of access-point range — this is an Unsafe Jack Out and cascades all rezzed ICE effects. Narrate the cascade, apply damage via resolve_mechanics / edgerunner_ops, then set net_complete=true.
+- **Flatlined** (failed Death Save): immediate backend-auto forced disconnect + cascade. Set net_complete=true.
 
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.

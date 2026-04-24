@@ -781,14 +781,28 @@ class TestApplyForcedDisconnectHack(unittest.TestCase):
         cpred_apply_hack_state(hs, {"hack_state": {}}, game_state=None)
         self.assertTrue(hs["active"])
 
-    def test_disconnect_from_meatspace_damage_plus_brain(self):
-        """Meatspace damage + brain damage made character unconscious → forced disconnect."""
+    def test_unconscious_netrunner_stays_jacked_in(self):
+        """RAW p.187: Unconscious does NOT auto-disconnect. The Netrunner is stuck
+        jacked in as a sitting duck; only a failed Death Save (flatline) or an ally
+        physically unplugging them ends the hack. Regression guard against the old
+        behavior that auto-disconnected unconscious netrunners."""
         hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
         hs["brain_damage"] = 5
         hs["active"] = True
         gs = _game_state_with_hp("V", 0, 25, conditions=["unconscious"])
         cpred_apply_hack_state(hs, {"hack_state": {}}, game_state=gs)
+        self.assertTrue(hs["active"], "Unconscious netrunner must NOT auto-disconnect")
+        self.assertFalse(hs.get("_forced_disconnect"))
+
+    def test_flatlined_netrunner_is_force_disconnected(self):
+        """RAW p.187: flatline (failed Death Save = dead) is the ONLY auto-disconnect
+        trigger. Cascades all rezzed Black ICE."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 0, 25, conditions=["dead"])
+        cpred_apply_hack_state(hs, {"hack_state": {}}, game_state=gs)
         self.assertFalse(hs["active"])
+        self.assertTrue(hs.get("_forced_disconnect"))
 
     def test_disconnect_garbage_game_state_no_crash(self):
         hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
@@ -826,16 +840,21 @@ class TestApplyForcedDisconnectNetCombat(unittest.TestCase):
         cpred_apply_net_combat_state(ps, tool_input, game_state=ps["game_state"])
         self.assertFalse(ps["net_combat"]["net_complete"])
 
-    def test_forced_disconnect_when_unconscious_at_one_hp(self):
-        """Unconscious netrunners must be disconnected even if HP is 1."""
+    def test_unconscious_netrunner_does_not_auto_disconnect(self):
+        """RAW p.187: Unconscious (KO, sleep ammo, etc.) does NOT auto-disconnect.
+        Netrunner is stuck jacked in — ICE/Demons keep acting on them — until an
+        ally physically unplugs or drags the body out of range (= Unsafe Jack Out,
+        model-driven via hack_complete + cascade narration). Regression guard
+        against the old auto-disconnect-on-unconscious behavior."""
         nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
         ps = _minimal_pipeline_state(nc)
         ps["game_state"] = _game_state_with_hp("V", 1, 25)
         ps["game_state"]["edgerunners"]["V"]["conditions"] = ["Unconscious"]
         tool_input = {"hack_state": {}, "net_complete": False, "combat_complete": False}
         cpred_apply_net_combat_state(ps, tool_input, game_state=ps["game_state"])
-        self.assertTrue(ps["net_combat"]["net_complete"])
-        self.assertTrue(ps["net_combat"].get("_forced_disconnect"))
+        self.assertFalse(ps["net_combat"]["net_complete"],
+                         "Unconscious must NOT auto-complete the NET track")
+        self.assertFalse(ps["net_combat"].get("_forced_disconnect"))
 
     def test_forced_disconnect_skipped_if_already_complete(self):
         """If model already set net_complete=true, disconnect check is skipped (not nc.get("net_complete"))."""
