@@ -724,11 +724,13 @@ def _sync_cpred_character_states_from_game_state(
 
         resources = data.get("resources", []) if isinstance(data.get("resources"), list) else []
         resources = _upsert_stat(resources, "Luck", _safe_int(luck.get("current", 0)), _safe_int(luck.get("max", 0)))
-        armor = er.get("armor", {}) if isinstance(er.get("armor"), dict) else {}
-        head_sp = _safe_int(armor.get("head", 0))
-        body_sp = _safe_int(armor.get("body", 0))
-        resources = _upsert_stat(resources, "Armor (Head)", head_sp, head_sp)
-        resources = _upsert_stat(resources, "Armor (Body)", body_sp, body_sp)
+        # Armor is NOT mirrored into resources. The contract (cpred.py) says armor
+        # is rendered from edgerunner state directly — the frontend reads
+        # gameState.edgerunners[name].armor for tile + modal display. Mirroring it
+        # here would (a) contradict the contract, (b) make armor show as pip-strip
+        # resources which doesn't match what SP is semantically, and (c) fight
+        # _merge_character_data's guard that strips armor* resource labels.
+        # The data is always available via game_state.edgerunners — no mirror needed.
         data["resources"] = resources
 
         existing_conditions = data.get("conditions", [])

@@ -222,7 +222,7 @@ Use "edgerunner_ops" to update this state. Operations:
 - {"edgerunner": "<name>", "op": "set", "fields": {<full field replacement for bootstrap>}}
   Use "set" to bootstrap edgerunner state on first turn or correct errors. For Netrunner characters, include cyberdeck: {"tier": "Standard", "slots": 7, "cycles": 3} and deck_slots (positional array: programs as {name, type: "program", category, rez_max, status}, hardware as {name, type: "hardware", slots_used: N} followed by N-1 {_continuation_of: name} entries, null for empty slots).
 
-IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops, NOT in character_states. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source.
+IMPORTANT: HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops, NOT in character_states — edgerunner_ops is the authoritative source. The backend auto-mirrors a SUBSET of edgerunner state into character_states for HUD rendering: HP and Humanity into vitals, Luck into resources, Critical Injuries as "Critical Injury: X" conditions, and general edgerunner conditions (unconscious, partially_nude, etc.). Armor, Eurobucks, Weapons, Cyberware, Cyberdeck, and Deck Slots are NOT mirrored into character_states — the frontend reads them directly from edgerunner state. Do not emit any of these in character_states; they will be stripped or ignored.
 
 OPS SCOPE: Emit edgerunner_ops ONLY for state changes certain before rolls — bootstrap/set, eurobucks, equipment changes (weapons, cyberware), luck_reset. Mechanics-dependent ops (HP, armor, luck-spent, critical injuries) are emitted by the backend resolver, not by Events.
 
@@ -284,7 +284,7 @@ CHARACTER STATES (structured format):
 - "resources": array of {label, current, max} for Luck (mirrored from edgerunner_ops for HUD display)
 - "conditions": array of active conditions (e.g. "Seriously Wounded", "Critical Injury: Broken Arm")
 - Weapons, armor SP, cyberware, cyberdeck, and deck slots (programs + hardware) are rendered from edgerunner state — do NOT include equipment in character_states
-- Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks — character_states mirrors vitals/resources for HUD rendering
+- Edgerunner_ops remain the authoritative source for HP, Humanity, Luck, Armor, Eurobucks. The backend auto-mirrors HP/Humanity (vitals), Luck (resources), and conditions into character_states for HUD rendering. Armor, Eurobucks, and equipment are read directly from edgerunner state by the frontend — not mirrored.
 - DELTA OPS: You can use "_conditions_add", "_conditions_remove", and "_resource_deltas" to make incremental changes instead of rewriting full state (see Mechanics contract for details)
 
 COMBAT (Cyberpunk RED):
@@ -578,7 +578,7 @@ Use the "edgerunner_ops" array to track CPRED-specific mechanical state:
 - `{"edgerunner": "<name>", "op": "set", "fields": {...}}` (bootstrap/corrections — for Netrunner characters, include cyberdeck: {tier, slots, cycles} and deck_slots)
 - `{"edgerunner": "<name>", "op": "deck_slots_set", "deck_slots": [...]}` (replace entire deck_slots array — positional: programs, hardware + continuations, null for empty)
 
-HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops. character_states mirrors vitals/resources/conditions for HUD display but edgerunner_ops is the authoritative source. Equipment is rendered from edgerunner state — do NOT include it in character_states.
+HP, Humanity, Luck, Armor, Eurobucks, Critical Injuries, Cyberware, Weapons, Cyberdeck, and Deck Slots are tracked via edgerunner_ops — edgerunner_ops is the authoritative source. The backend auto-mirrors only HP/Humanity (vitals), Luck (resources), and conditions (critical injuries + general edgerunner conditions) into character_states for HUD rendering. Armor, Eurobucks, and equipment (Weapons, Cyberware, Cyberdeck, Deck Slots) are read directly from edgerunner state by the frontend — not mirrored into character_states. Do NOT include any of these in character_states.
 
 ### Relationship Ops (in report_state):
 Use the "relationship_ops" array to track RS/RomS/FR changes:
