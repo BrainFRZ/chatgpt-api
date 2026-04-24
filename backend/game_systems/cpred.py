@@ -786,7 +786,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls 1d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
-Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack/NET session.
+Forced disconnect: the backend auto-terminates the hack/NET session ONLY when the Netrunner is flatlined (failed Death Save) or Unconscious. **0 HP alone does NOT auto-disconnect** — at 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. They can keep taking NET actions, attempt a safe Jack Out, or be stabilized by an ally.
 
 Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
@@ -1460,7 +1460,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
-Forced disconnect: if brain damage reduces Netrunner HP to 0, the backend auto-terminates the hack.
+Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save) or Unconscious condition. **0 HP alone does NOT auto-disconnect** — at 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. They can keep taking NET actions, attempt a safe Jack Out, or be stabilized by an ally.
 
 ### Roll Format
 Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
@@ -1556,7 +1556,7 @@ If meatspace combat breaks out during the hack — Convergence dispatches physic
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
-- Forced disconnect (Convergence, Trace complete, or HP reaches 0 from brain damage)
+- Forced disconnect (flatline from failed Death Save, or Unconscious condition). 0 HP alone does NOT end the hack — the Netrunner is Mortally Wounded but still conscious and can act.
 
 ### Black ICE Types (Backend-Enforced)
 Include "ice_type": "<name>" (e.g. "Hellhound") in resolve_mechanics calls. Backend looks up stats and resolves unique effects automatically.
