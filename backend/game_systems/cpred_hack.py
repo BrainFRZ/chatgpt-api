@@ -549,6 +549,45 @@ def _apply_disconnect_cascade(state, game_state, name_key, pipeline_state=None):
         pass
 
 
+def _apply_initiate_unsafe_jack_out(state, tool_input, game_state, name_key, pipeline_state=None):
+    """Handle model-signaled Unsafe Jack Out.
+
+    Fired when the crew physically severs the Netrunner's connection while
+    they're stuck in the NET — e.g. an ally spends an Action to unplug the
+    deck or drag an unconscious Netrunner's body out of access-point range,
+    or the Netrunner yanks their own plug mid-hack knowing the cost.
+
+    Applies the same cascade as flatline: all rezzed Black ICE effects hit
+    the Netrunner on the way out, then marks the hack as forcibly ended.
+    Idempotent — _cascade_applied guards against double-hits if the model
+    re-emits this across retries.
+
+    Expected tool_input shape:
+        "initiate_unsafe_jack_out": {
+            "cause": "ally_unplugged" | "ally_dragged_out_of_range" |
+                     "self_unplugged" | "connection_severed" | "other",
+            "actor": "<name of who did it, or 'self'>",
+            "reason": "<short narrative description for summary display>"
+        }
+    """
+    ujo = tool_input.get("initiate_unsafe_jack_out") if isinstance(tool_input, dict) else None
+    if not isinstance(ujo, dict):
+        return
+    try:
+        if not state.get("_cascade_applied"):
+            state["_cascade_applied"] = True
+            _apply_disconnect_cascade(state, game_state, name_key, pipeline_state)
+        reason = ujo.get("reason") or "Connection severed — unsafe jack out."
+        actor = ujo.get("actor")
+        if actor and actor != "self":
+            summary = f"Unsafe Jack Out ({actor}): {reason}"
+        else:
+            summary = f"Unsafe Jack Out: {reason}"
+        _mark_forced_disconnect(state, summary=summary)
+    except (TypeError, ValueError, OverflowError, KeyError):
+        pass
+
+
 def _check_forced_disconnect(state, game_state, name_key, pipeline_state=None):
     """Force-disconnect netrunner ONLY on flatline (failed Death Save = dead).
 
@@ -700,7 +739,13 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
     _apply_trace_auto_increment(hack_state, hack_state.get("meatspace_due"))
     _apply_alert_ice_spawn(hack_state)
 
-    # Forced disconnect
+    # Model-signaled Unsafe Jack Out (ally unplugs / drags out of range / self-yanks).
+    # Applied before flatline check so an ally rescuing an unconscious Netrunner
+    # takes precedence and gets authored narrative context in the summary.
+    if hack_state.get("active"):
+        _apply_initiate_unsafe_jack_out(hack_state, tool_input, game_state, "hacker_name", pipeline_state)
+
+    # Forced disconnect (flatline only — see _check_forced_disconnect)
     if hack_state.get("active"):
         _check_forced_disconnect(hack_state, game_state, "hacker_name", pipeline_state)
     if hack_state.get("_forced_disconnect"):

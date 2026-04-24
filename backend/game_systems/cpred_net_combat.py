@@ -11,6 +11,7 @@ from .cpred_combat import (
 from .cpred_hack import (
     _apply_alert_ice_spawn,
     _apply_brain_damage_hp,
+    _apply_initiate_unsafe_jack_out,
     _apply_net_model_fields,
     _apply_persistent_ice_effects,
     _apply_resolver_net_ops,
@@ -211,7 +212,12 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     if nc.get("_forced_disconnect"):
         _mark_forced_disconnect(nc)
 
-    # Forced disconnect on flatline or unconscious
+    # Model-signaled Unsafe Jack Out (ally unplugs / drags out / self-yanks).
+    # Applied before flatline check so model-authored narrative takes precedence.
+    if not nc.get("net_complete"):
+        _apply_initiate_unsafe_jack_out(nc, tool_input, game_state, "netrunner", pipeline_state)
+
+    # Forced disconnect on flatline only (RAW p.187)
     if not nc.get("net_complete"):
         _check_forced_disconnect(nc, game_state, "netrunner", pipeline_state)
 

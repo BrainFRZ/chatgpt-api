@@ -786,7 +786,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls 1d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
-Forced disconnect: the backend auto-terminates the hack/NET session ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187) — they keep acting with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. An Unconscious Netrunner (sleep ammo, KO from meatspace) is stuck jacked in as a sitting duck: they cannot take NET actions, so they cannot Jack Out themselves, and rezzed ICE / Demons keep acting on them. To rescue them, an ally must spend an Action to either unplug the body or drag it out of access-point range — either counts as an Unsafe Jack Out, triggering the cascade of all rezzed ICE effects on the Netrunner. Narrate this and use resolve_mechanics / edgerunner_ops to apply the cascade damage, then set hack_complete=true.
+Forced disconnect: the backend auto-terminates the hack/NET session ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187) — they keep acting with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. An Unconscious Netrunner (sleep ammo, KO from meatspace) is stuck jacked in as a sitting duck: they cannot take NET actions, so they cannot Jack Out themselves, and rezzed ICE / Demons keep acting on them. To rescue them, an ally must spend an Action to either unplug the body or drag it out of access-point range — either counts as an Unsafe Jack Out. Signal this by setting `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend will cascade all rezzed ICE effects onto the Netrunner and set hack_complete=true automatically. Same mechanism for a Netrunner voluntarily yanking their own plug mid-hack (cause="self_unplugged").
 
 Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
@@ -1460,7 +1460,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
-Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), acting at −4 / −6 MOVE with a Death Save each turn. An Unconscious Netrunner is stuck jacked in as a sitting duck — cannot take NET actions or Jack Out themselves, while rezzed ICE / Demons keep acting on them. To rescue: an ally spends an Action to unplug or drag the body out of access-point range (= Unsafe Jack Out, cascading all rezzed ICE effects). Narrate the cascade, apply damage via resolve_mechanics / edgerunner_ops, then set hack_complete=true.
+Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), acting at −4 / −6 MOVE with a Death Save each turn. An Unconscious Netrunner is stuck jacked in as a sitting duck — cannot take NET actions or Jack Out themselves, while rezzed ICE / Demons keep acting on them. To rescue: an ally spends an Action to unplug or drag the body out of access-point range (= Unsafe Jack Out). Signal via `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend cascades all rezzed ICE effects onto the Netrunner and sets net_complete=true automatically. Same mechanism for self-unplug (cause="self_unplugged").
 
 ### Roll Format
 Flat: 🎲 [Description]: d10[**roll**] +Interface X +Booster Y = Total vs DV Z ✓/✗
@@ -1556,7 +1556,7 @@ If meatspace combat breaks out during the hack — Convergence dispatches physic
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
-- Forced disconnect: only on flatline (failed Death Save) — backend auto-cascades rezzed ICE. Neither 0 HP nor Unconscious ends the hack automatically. If the Netrunner is Unconscious, an ally must spend an Action to unplug or drag the body out of range (Unsafe Jack Out); model narrates the cascade and sets hack_complete=true.
+- Forced disconnect: only on flatline (failed Death Save) — backend auto-cascades rezzed ICE and sets hack_complete. Neither 0 HP nor Unconscious ends the hack automatically. For an ally-rescue or voluntary plug-yank Unsafe Jack Out, emit `initiate_unsafe_jack_out: {cause, actor, reason}` — backend cascades the rezzed ICE and sets hack_complete for you.
 
 ### Black ICE Types (Backend-Enforced)
 Include "ice_type": "<name>" (e.g. "Hellhound") in resolve_mechanics calls. Backend looks up stats and resolves unique effects automatically.
@@ -1712,6 +1712,26 @@ REPORT_HACK_STATE_TOOL = {
                     "reason": {"type": "string"},
                     "enemies": {"type": "array", "items": {"type": "string"}}
                 }
+            },
+            "initiate_unsafe_jack_out": {
+                "type": ["object", "null"],
+                "description": "Signal that the hack ends via an Unsafe Jack Out (physical disconnection), NOT a voluntary safe Jack Out. Backend cascades all rezzed Black ICE effects against the Netrunner on the way out, then ends the hack. Use when: (a) an ally spends an Action to unplug the deck or drag an unconscious/sitting-duck Netrunner's body out of access-point range; (b) the Netrunner yanks their own plug mid-hack knowing the cascade cost; (c) the body is physically disconnected by environmental event. Do NOT set this for a voluntary safe Jack Out — that's just hack_complete=true with no cascade. The backend sets hack_complete automatically when this fires, so you do not need to also set hack_complete.",
+                "properties": {
+                    "cause": {
+                        "type": "string",
+                        "enum": ["ally_unplugged", "ally_dragged_out_of_range", "self_unplugged", "connection_severed", "other"],
+                        "description": "How the connection was severed."
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Who performed the disconnection — ally character name, 'self' if the Netrunner did it, or a short descriptor for environmental/NPC-enemy causes."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One-sentence narrative description to include in the summary. e.g. 'Kessler dragged RedVelvet out of the access point's range to escape the convergence.'"
+                    }
+                },
+                "required": ["cause", "reason"]
             }
         }
     }
@@ -1796,7 +1816,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
 - **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
 - **Mortally Wounded (0 HP)**: Do NOT auto-end NET at 0 HP. Netrunner can still act (with the normal 0 HP penalties), including attempting safe Jack Out.
-- **Unconscious** (sleep ammo, KO in meatspace): does NOT auto-disconnect. Netrunner is stuck jacked in — cannot take NET actions or Jack Out themselves. Rezzed ICE / Demons continue to act on them. To rescue, an ally spends an Action to unplug the deck or drag the body out of access-point range — this is an Unsafe Jack Out and cascades all rezzed ICE effects. Narrate the cascade, apply damage via resolve_mechanics / edgerunner_ops, then set net_complete=true.
+- **Unconscious** (sleep ammo, KO in meatspace): does NOT auto-disconnect. Netrunner is stuck jacked in — cannot take NET actions or Jack Out themselves. Rezzed ICE / Demons continue to act on them. To rescue, an ally spends an Action to unplug the deck or drag the body out of access-point range — this is an Unsafe Jack Out. Emit `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend cascades all rezzed ICE effects onto the Netrunner and sets net_complete=true automatically.
 - **Flatlined** (failed Death Save): immediate backend-auto forced disconnect + cascade. Set net_complete=true.
 
 ### State Tracking
@@ -1998,6 +2018,26 @@ REPORT_NET_COMBAT_STATE_TOOL = {
             "net_complete": {
                 "type": "boolean",
                 "description": "True when NET encounter is over (objective achieved, jacked out, or forced disconnect)."
+            },
+            "initiate_unsafe_jack_out": {
+                "type": ["object", "null"],
+                "description": "Signal that the NET track ends via an Unsafe Jack Out (physical disconnection), NOT a voluntary safe Jack Out. Backend cascades all rezzed Black ICE effects against the Netrunner on the way out, then sets net_complete=true. Use when: (a) an ally spends an Action to unplug the deck or drag an unconscious/sitting-duck Netrunner's body out of access-point range; (b) the Netrunner yanks their own plug mid-combat knowing the cascade cost; (c) the body is physically disconnected by environmental event. Do NOT set for a voluntary safe Jack Out — that's just net_complete=true with no cascade.",
+                "properties": {
+                    "cause": {
+                        "type": "string",
+                        "enum": ["ally_unplugged", "ally_dragged_out_of_range", "self_unplugged", "connection_severed", "other"],
+                        "description": "How the connection was severed."
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Who performed the disconnection — ally character name, 'self' if the Netrunner did it, or a short descriptor for environmental/NPC-enemy causes."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One-sentence narrative description to include in the summary. e.g. 'Kessler dragged RedVelvet out of the access point's range to escape the convergence.'"
+                    }
+                },
+                "required": ["cause", "reason"]
             },
             "narrative_summary": {
                 "type": "string",

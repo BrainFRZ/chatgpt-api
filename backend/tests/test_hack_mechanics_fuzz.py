@@ -811,6 +811,85 @@ class TestApplyForcedDisconnectHack(unittest.TestCase):
         for garbage in ATOMS:
             cpred_apply_hack_state(hs, {"hack_state": {}}, game_state=garbage)
 
+    def test_initiate_unsafe_jack_out_cascades_and_ends_hack(self):
+        """Model-signaled Unsafe Jack Out: backend fires ICE cascade + ends hack.
+        No flatline or unconscious needed — this is the explicit rescue path."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        # Active Black ICE with a damaging effect so we can observe the cascade
+        hs["ice_status"] = {
+            "Gateway": {"name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                        "rez_current": 20, "rez_max": 20, "status": "active"},
+        }
+        gs = _game_state_with_hp("V", 20, 30)  # conscious, 20 HP — no auto-disconnect trigger
+        tool_input = {
+            "hack_state": {},
+            "initiate_unsafe_jack_out": {
+                "cause": "ally_dragged_out_of_range",
+                "actor": "Kessler",
+                "reason": "Kessler dragged V out of the access point to save her from the Hellhound.",
+            },
+        }
+        cpred_apply_hack_state(hs, tool_input, game_state=gs)
+        self.assertFalse(hs["active"], "Unsafe Jack Out must end the hack")
+        self.assertTrue(hs.get("_forced_disconnect"))
+        self.assertTrue(hs.get("_cascade_applied"))
+        summary = hs.get("narrative_summary", "")
+        self.assertIn("Unsafe Jack Out", summary)
+        self.assertIn("Kessler", summary)
+
+    def test_initiate_unsafe_jack_out_without_actor(self):
+        """Actor field optional — summary still includes the reason."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 10, 30)
+        tool_input = {
+            "hack_state": {},
+            "initiate_unsafe_jack_out": {
+                "cause": "connection_severed",
+                "reason": "Building power cut severed the connection.",
+            },
+        }
+        cpred_apply_hack_state(hs, tool_input, game_state=gs)
+        self.assertFalse(hs["active"])
+        self.assertIn("Building power cut", hs.get("narrative_summary", ""))
+
+    def test_initiate_unsafe_jack_out_idempotent(self):
+        """Re-applying does not double-cascade. _cascade_applied guards it."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        hs["ice_status"] = {
+            "Gateway": {"name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                        "rez_current": 20, "rez_max": 20, "status": "active"},
+        }
+        gs = _game_state_with_hp("V", 30, 30)
+        tool_input = {
+            "hack_state": {},
+            "initiate_unsafe_jack_out": {
+                "cause": "self_unplugged",
+                "actor": "self",
+                "reason": "V yanked the plug before the Trace completed.",
+            },
+        }
+        cpred_apply_hack_state(hs, tool_input, game_state=gs)
+        hp_after_first = gs["edgerunners"]["V"]["hp"]["current"]
+        # Re-apply with same input — the cascade should NOT fire again
+        cpred_apply_hack_state(hs, tool_input, game_state=gs)
+        hp_after_second = gs["edgerunners"]["V"]["hp"]["current"]
+        self.assertEqual(hp_after_first, hp_after_second,
+                         "Second call must not re-apply cascade damage")
+
+    def test_initiate_unsafe_jack_out_ignored_when_not_dict(self):
+        """Malformed initiate_unsafe_jack_out (wrong type) is a no-op."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 30, 30)
+        for garbage in ["string", 42, [], True, None]:
+            hs_copy = copy.deepcopy(hs)
+            cpred_apply_hack_state(hs_copy, {"hack_state": {}, "initiate_unsafe_jack_out": garbage}, game_state=gs)
+            self.assertTrue(hs_copy["active"],
+                            f"Malformed input {garbage!r} must not end the hack")
+
 
 # ===========================================================================
 # 12. apply_net_combat_state: Forced disconnect after completion flags
