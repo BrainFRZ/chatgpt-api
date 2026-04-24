@@ -890,6 +890,68 @@ class TestApplyForcedDisconnectHack(unittest.TestCase):
             self.assertTrue(hs_copy["active"],
                             f"Malformed input {garbage!r} must not end the hack")
 
+    def test_ds_penalty_not_applied_when_attack_brings_to_mw(self):
+        """RAW p.189: the attack that first makes you Mortally Wounded does not
+        itself trigger the +1 Death Save penalty. Regression guard against the
+        old overflow-per-point rule."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 10, 30)
+        gs["edgerunners"]["V"]["death_save_count"] = 0
+        # Single attack, 25 brain damage — enough to overflow by 15.
+        # Old buggy behavior: +15 DS penalty. RAW: +0 (this attack makes them MW).
+        ops = [{"op": "brain_damage", "change": 25, "target": "V"}]
+        cpred_apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(gs["edgerunners"]["V"]["hp"]["current"], 0)
+        self.assertEqual(gs["edgerunners"]["V"]["death_save_count"], 0,
+                         "Attack that makes you MW must NOT increment DS penalty")
+
+    def test_ds_penalty_plus_one_when_hit_while_already_mw(self):
+        """RAW p.189: when hit by an attack while ALREADY at 0 HP, +1 DS
+        penalty (regardless of damage amount). Previously bug: +damage points."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 0, 30)  # already MW
+        gs["edgerunners"]["V"]["death_save_count"] = 2
+        # A massive 20-point attack: should only bump DS by +1, NOT +20.
+        ops = [{"op": "brain_damage", "change": 20, "target": "V"}]
+        cpred_apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(gs["edgerunners"]["V"]["death_save_count"], 3,
+                         "A 20-damage attack while MW must add +1 DS penalty, not +20")
+
+    def test_ds_penalty_batched_attacks_while_already_mw(self):
+        """Cascade of 3 Black ICE attacks while already Mortally Wounded → +3 DS
+        penalty (one per attack in the batch)."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 0, 30)
+        gs["edgerunners"]["V"]["death_save_count"] = 1
+        ops = [
+            {"op": "brain_damage", "change": 5, "target": "V"},
+            {"op": "brain_damage", "change": 8, "target": "V"},
+            {"op": "brain_damage", "change": 3, "target": "V"},
+        ]
+        cpred_apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(gs["edgerunners"]["V"]["death_save_count"], 4,
+                         "3 attacks while MW → +3 DS (started at 1, now 4)")
+
+    def test_ds_penalty_batched_attacks_first_brings_to_mw(self):
+        """Cascade of 3 attacks starting ABOVE 0 HP: one brings you to MW,
+        the other two are post-MW hits (+2 DS). Approximation assumes the
+        first attack in the batch is the MW-maker."""
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
+        hs["active"] = True
+        gs = _game_state_with_hp("V", 10, 30)
+        gs["edgerunners"]["V"]["death_save_count"] = 0
+        ops = [
+            {"op": "brain_damage", "change": 15, "target": "V"},
+            {"op": "brain_damage", "change": 5, "target": "V"},
+            {"op": "brain_damage", "change": 5, "target": "V"},
+        ]
+        cpred_apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(gs["edgerunners"]["V"]["death_save_count"], 2,
+                         "3 attacks starting above 0 HP, ending at MW: +2 DS")
+
 
 # ===========================================================================
 # 12. apply_net_combat_state: Forced disconnect after completion flags

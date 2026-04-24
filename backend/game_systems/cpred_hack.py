@@ -448,14 +448,22 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
     brain_damage accumulation, program_deactivate, rez_damage, ICE effects, tar_consumed."""
     if not resolver_state_ops:
         return
-    # Brain damage accumulation (resolver-authoritative)
+    # Brain damage accumulation (resolver-authoritative). Track attack count
+    # alongside total damage so _apply_brain_damage_hp can apply the RAW p.189
+    # Death Save penalty correctly (+1 per attack received while already MW,
+    # NOT +1 per damage point).
     bd_total = 0
+    bd_attacks = 0
     for op in resolver_state_ops:
         if not isinstance(op, dict) or op.get("op") != "brain_damage":
             continue
-        bd_total += abs(_safe_int(op.get("change", 0)))
+        amt = abs(_safe_int(op.get("change", 0)))
+        if amt > 0:
+            bd_total += amt
+            bd_attacks += 1
     if bd_total > 0:
         state["brain_damage"] = state.get("brain_damage", 0) + bd_total
+        state["_pending_bd_attacks"] = state.get("_pending_bd_attacks", 0) + bd_attacks
     # program_deactivate + rez_damage
     for op in resolver_state_ops:
         if not isinstance(op, dict):
@@ -483,13 +491,29 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
 
 
 def _apply_brain_damage_hp(state, game_state, name_key, pipeline_state=None):
-    """Apply brain damage delta to netrunner's HP incrementally."""
+    """Apply brain damage delta to netrunner's HP incrementally.
+
+    Death Save Penalty (RAW p.189): when a Mortally Wounded character (at 0 HP)
+    is damaged by an attack, their Death Save Penalty increases by +1 (per
+    attack, NOT per damage point). The attack that first brings them to 0 HP
+    is processed while they are still in their previous wound state — it does
+    NOT itself trigger the penalty.
+
+    Approximation: individual brain_damage ops are aggregated into a single
+    delta, so we don't know exact ordering. We count ops via
+    _pending_bd_attacks and apply the penalty with the assumption that the
+    first attack in a batch is the one that brings the Netrunner to MW (if
+    they weren't already). This matches RAW exactly for single-attack
+    exchanges (the common case) and is a close approximation for multi-ICE
+    cascades where ordering is ambiguous.
+    """
     current_bd = _safe_int(state.get("brain_damage", 0))
     prev_bd = _safe_int(state.get("_prev_brain_damage", 0))
     bd_delta = current_bd - prev_bd
     if bd_delta <= 0:
         return
     state["_prev_brain_damage"] = current_bd
+    n_attacks = _safe_int(state.pop("_pending_bd_attacks", 0))
     try:
         char_name = state.get(name_key, "")
         edgerunners = game_state.get("edgerunners", {}) if isinstance(game_state, dict) else {}
@@ -500,10 +524,22 @@ def _apply_brain_damage_hp(state, game_state, name_key, pipeline_state=None):
             old_hp = er["hp"]["current"]
             new_hp = max(0, old_hp - bd_delta)
             er["hp"]["current"] = new_hp
-            # RAW p.189: each point of damage at 0 HP adds +1 Death Save penalty
-            overflow = bd_delta - (old_hp - new_hp)
-            if overflow > 0:
-                er["death_save_count"] = er.get("death_save_count", 0) + overflow
+            # RAW p.189: +1 DS penalty per attack received while ALREADY at
+            # 0 HP. Attack that brings you TO 0 HP does not count (it makes
+            # you Mortally Wounded; subsequent attacks trigger the penalty).
+            if n_attacks > 0:
+                if old_hp == 0:
+                    # Already MW going in — every attack in this batch is a
+                    # post-MW hit.
+                    ds_penalty_delta = n_attacks
+                elif new_hp == 0:
+                    # Brought to MW by this batch — first attack makes them
+                    # MW (no penalty), remaining attacks are post-MW (+1 each).
+                    ds_penalty_delta = max(0, n_attacks - 1)
+                else:
+                    ds_penalty_delta = 0
+                if ds_penalty_delta > 0:
+                    er["death_save_count"] = er.get("death_save_count", 0) + ds_penalty_delta
             _update_seriously_wounded(er)
             if isinstance(pipeline_state, dict):
                 cs = pipeline_state.get("character_states", {})

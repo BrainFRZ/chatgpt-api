@@ -667,11 +667,18 @@ def apply_game_state(game_state, agent_json, turn):
 
                 elif op == "hp":
                     change = int(op_data.get("change", 0))
+                    old_hp = er["hp"]["current"]
                     er["hp"]["current"] = max(0, min(er["hp"]["max"], er["hp"]["current"] + change))
                     _update_seriously_wounded(er)
                     # Auto-reset death save counter when HP rises above 0
                     if er["hp"]["current"] > 0:
                         er["death_save_count"] = 0
+                    # RAW p.189: +1 DS penalty when an already-Mortally-Wounded
+                    # character (at 0 HP) is damaged by an attack. Per attack,
+                    # NOT per damage point. The attack that first brings you to
+                    # 0 HP does not count. One `hp` op = one attack.
+                    elif change < 0 and old_hp == 0:
+                        er["death_save_count"] = er.get("death_save_count", 0) + 1
 
                 elif op == "humanity":
                     change = int(op_data.get("change", 0))
