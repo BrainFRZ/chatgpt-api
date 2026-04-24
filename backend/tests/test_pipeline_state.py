@@ -598,6 +598,77 @@ class TestApplySceneState:
         assert result["location"] == "X"
 
 
+class TestApplySceneStatePresenceDeltas:
+    """Delta ops for pcs_present / npcs_present — prevents silent NPC drops."""
+
+    def _prior(self):
+        return {
+            "location": "Motel room",
+            "pcs_present": ["RedVelvet"],
+            "npcs_present": ["Delphi", "Kessler"],
+        }
+
+    def test_delta_add_npc(self):
+        out = apply_scene_state({"_npcs_present_add": ["Mirage"]}, self._prior())
+        assert out["npcs_present"] == ["Delphi", "Kessler", "Mirage"]
+
+    def test_delta_remove_npc(self):
+        out = apply_scene_state({"_npcs_present_remove": ["Kessler"]}, self._prior())
+        assert out["npcs_present"] == ["Delphi"]
+
+    def test_delta_add_and_remove(self):
+        out = apply_scene_state(
+            {"_npcs_present_add": ["Mirage"], "_npcs_present_remove": ["Delphi"]},
+            self._prior(),
+        )
+        assert out["npcs_present"] == ["Kessler", "Mirage"]
+
+    def test_full_list_replaces(self):
+        out = apply_scene_state({"npcs_present": ["Mama Lu"], "location": "Night market"}, self._prior())
+        assert out["npcs_present"] == ["Mama Lu"]
+
+    def test_full_list_plus_delta_combo(self):
+        out = apply_scene_state(
+            {"npcs_present": ["Delphi"], "_npcs_present_add": ["Kessler"]},
+            self._prior(),
+        )
+        assert out["npcs_present"] == ["Delphi", "Kessler"]
+
+    def test_presence_retained_when_omitted(self):
+        """Core fix: model emits only atmosphere, presence lists retained from prior state."""
+        out = apply_scene_state({"atmosphere": "Tense"}, self._prior())
+        assert out["npcs_present"] == ["Delphi", "Kessler"]
+        assert out["pcs_present"] == ["RedVelvet"]
+
+    def test_dedup_on_add(self):
+        out = apply_scene_state({"_npcs_present_add": ["Delphi", "Kessler"]}, self._prior())
+        assert out["npcs_present"] == ["Delphi", "Kessler"]  # no duplicates
+
+    def test_remove_nonexistent_is_noop(self):
+        out = apply_scene_state({"_npcs_present_remove": ["Ghost"]}, self._prior())
+        assert out["npcs_present"] == ["Delphi", "Kessler"]
+
+    def test_pcs_symmetry(self):
+        out = apply_scene_state({"_pcs_present_add": ["Jackie"]}, self._prior())
+        assert out["pcs_present"] == ["RedVelvet", "Jackie"]
+
+    def test_non_string_entries_skipped_on_add(self):
+        out = apply_scene_state({"_npcs_present_add": [None, "", "Mirage", 42]}, self._prior())
+        assert out["npcs_present"] == ["Delphi", "Kessler", "Mirage"]
+
+    def test_no_prior_state_delta_creates_list(self):
+        out = apply_scene_state({"_npcs_present_add": ["Delphi"]})
+        assert out["npcs_present"] == ["Delphi"]
+
+    def test_delta_remove_after_full_replace(self):
+        """Full-list baseline + delta remove on top."""
+        out = apply_scene_state(
+            {"npcs_present": ["A", "B", "C"], "_npcs_present_remove": ["B"]},
+            self._prior(),
+        )
+        assert out["npcs_present"] == ["A", "C"]
+
+
 class TestSceneScopedFunds:
     """Test that hud_state.funds dict is filtered to scene-present characters + non-character keys."""
 
@@ -1791,13 +1862,14 @@ class TestEdgeCases:
         assert result == {}
 
     def test_scene_state_with_none_values(self):
-        """Scene state with None values should get defaults."""
+        """Scene state with None for presence lists is coerced to [] (safer than None,
+        and the presence-delta path only ever produces lists)."""
         scene = {"location": "X", "npcs_present": None, "atmosphere": None}
         result = apply_scene_state(scene)
         assert result["location"] == "X"
-        # None should be replaced by default
-        assert result["npcs_present"] is None  # apply_scene_state does .get() which returns None
-        # This is actually fine - None will just mean no memories injected
+        assert result["npcs_present"] == []
+        # atmosphere is a full-replace string field, so None passes through
+        assert result["atmosphere"] is None
 
     def test_build_scene_state_none_values_handled(self):
         """Scene state injection should handle None values gracefully."""

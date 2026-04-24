@@ -141,8 +141,11 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "hack_trigger": null,
   "scene_state": {
     "location": "<current location>",
-    "npcs_present": ["<NPC name>", ...],
-    "pcs_present": ["<PC name>", ...],
+    // Presence lists — use full list on scene transition, delta ops on ongoing scene:
+    //   scene transition: "npcs_present": ["Delphi", "Kessler"]
+    //   ongoing (someone joins): "_npcs_present_add": ["Mirage"]
+    //   ongoing (someone leaves): "_npcs_present_remove": ["Kessler"]
+    //   ongoing (no change): omit presence fields entirely — prior list is retained
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting — neon haze, rain-slick chrome, bass-heavy clubs, toxic smog>",
@@ -383,10 +386,13 @@ NPC MEMORIES:
 - Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
-- Full replacement every turn — whatever you omit is erased for this turn.
-- "pcs_present": list every PC actively in the scene.
-- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing crew/allies (e.g. Delphi, Kessler on a job together) MUST appear every turn until they explicitly exit the scene in the narrative** (walk out the door, get separated, left behind at the van, etc.). If the NPC is "at the hallway door covering the corridor," they are present — list them. Unconscious, bleeding out, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection, hides their HP/armor/funds from the HUD, and makes relationship/wellbeing bonuses go dark — treat omission as a real narrative event, not an oversight.
-- Together "pcs_present" and "npcs_present" scope per-character funds in the HUD and gate memory/relationship/wellbeing injection.
+- Most fields (location, atmosphere, active_tensions, details, pending_actions, scene_trigger) are full-replacement — emit them every turn to keep the scene current; omitted fields retain their prior value.
+- Presence lists ("pcs_present", "npcs_present") use **delta ops by default, full list on transitions**:
+  - **Ongoing scene** (same location, same roster, one entry changing): emit only `_npcs_present_add` / `_npcs_present_remove` (or the pcs_ variants). The existing list is retained and patched — do NOT re-emit the full list just to repeat the same roster.
+  - **Scene transition** (new location, wholesale roster change): emit the full `npcs_present` / `pcs_present` list to declare who is present in the new scene. This replaces the prior list. Deltas may be combined on top.
+  - **Nothing changed**: omit presence fields entirely — the prior list is retained automatically. This is a structural safeguard against silently dropping ongoing crew/allies (Delphi, Kessler, etc.).
+- Unconscious, bleeding out, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Do NOT use `_npcs_present_remove` for injury or unconsciousness; use it only when the NPC physically exits (walks out, gets separated, left at the van, etc.).
+- The presence lists gate `[NPC MEMORIES]` injection and HUD per-character funds / HP / armor display. An NPC not in `npcs_present` goes dark in the HUD and loses their memory context, so keep allies in it until they genuinely leave.
 - "funds": Always use an object mapping names to funds (e.g. {"crew fund": "5,000 eb", "V": "2,350 eb", "Jackie": "1,800 eb"}). Include shared pools as named entries alongside characters. The HUD auto-scopes to characters in the scene — non-character entries always display.
 - atmosphere should emphasize Night City: neon, chrome, smog, bass, danger
 
@@ -817,11 +823,16 @@ STATE_REPORT_TOOL = {
             },
             "scene_state": {
                 "type": "object",
-                "required": ["location", "npcs_present", "active_tensions", "atmosphere"],
+                "required": ["location", "active_tensions", "atmosphere"],
+                "description": "Presence lists (pcs_present/npcs_present) support delta ops. Prefer _npcs_present_add / _npcs_present_remove on ongoing-scene turns where the roster is stable except for one entry changing. Emit the full npcs_present list on scene transitions (new location, new scene) to re-declare who is there. Same for pcs_present. When deltas are emitted without the full list, the retained list is patched in-place — this prevents silent drops.",
                 "properties": {
                     "location": {"type": "string"},
-                    "npcs_present": {"type": "array", "items": {"type": "string"}},
-                    "pcs_present": {"type": "array", "items": {"type": "string"}},
+                    "npcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full NPC roster for this scene. Omit on ongoing-scene turns where nothing changed — use _npcs_present_add/_remove instead. Emit on scene transitions."},
+                    "_npcs_present_add": {"type": "array", "items": {"type": "string"}, "description": "NPCs who just entered the scene (arrive at the door, step out of cover, etc.). Added to the retained npcs_present list."},
+                    "_npcs_present_remove": {"type": "array", "items": {"type": "string"}, "description": "NPCs who just exited (walked out, got separated, left behind). Removed from the retained npcs_present list. Do NOT remove for unconsciousness/injury — they are still present."},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full PC roster for this scene. Omit on ongoing-scene turns where nothing changed — use _pcs_present_add/_remove instead."},
+                    "_pcs_present_add": {"type": "array", "items": {"type": "string"}},
+                    "_pcs_present_remove": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},

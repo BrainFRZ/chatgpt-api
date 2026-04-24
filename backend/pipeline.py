@@ -1693,8 +1693,58 @@ def apply_npc_memory_ops(memories: dict, ops: list, current_turn: int) -> dict:
     return memories
 
 
+_PRESENCE_DELTA_KEYS = {
+    "pcs_present": ("_pcs_present_add", "_pcs_present_remove"),
+    "npcs_present": ("_npcs_present_add", "_npcs_present_remove"),
+}
+
+
+def _apply_presence_deltas(existing_list, new_scene: dict, field: str) -> list:
+    """Apply add/remove delta ops for a presence list (pcs_present / npcs_present).
+
+    Precedence:
+      - If the model emits the full list (`pcs_present: [...]`), that is treated
+        as authoritative — scene transitions / new scenes declare the full roster.
+      - If the model emits only delta ops (`_pcs_present_add`, `_pcs_present_remove`),
+        they apply on top of the retained existing list — use this during an
+        ongoing scene where one person enters/leaves and the rest of the roster
+        is stable. This prevents silent drops from "full replacement every turn."
+
+    Both may be emitted together (rare but supported): the full list sets the
+    baseline, then deltas apply on top. `remove` runs after `add`.
+    """
+    add_key, remove_key = _PRESENCE_DELTA_KEYS[field]
+    if field in new_scene:
+        base_list = list(new_scene[field]) if isinstance(new_scene[field], list) else []
+    else:
+        base_list = list(existing_list) if isinstance(existing_list, list) else []
+
+    adds = new_scene.get(add_key)
+    if isinstance(adds, list):
+        for name in adds:
+            if isinstance(name, str) and name and name not in base_list:
+                base_list.append(name)
+
+    removes = new_scene.get(remove_key)
+    if isinstance(removes, list):
+        remove_set = {n for n in removes if isinstance(n, str) and n}
+        base_list = [n for n in base_list if n not in remove_set]
+
+    return base_list
+
+
 def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
-    """Apply scene_state with merge: new keys overwrite, absent keys retain existing values."""
+    """Apply scene_state with merge: new keys overwrite, absent keys retain existing values.
+
+    Presence lists (pcs_present, npcs_present) support delta ops:
+      - `_pcs_present_add` / `_pcs_present_remove` (list of names)
+      - `_npcs_present_add` / `_npcs_present_remove` (list of names)
+    When only deltas are emitted, the retained list is updated in-place — this
+    prevents "full replacement every turn" from silently dropping NPCs on any
+    turn where the model forgets to re-list them. When the full list IS emitted,
+    it acts as a baseline (scene transitions, new scenes) and any deltas apply
+    on top.
+    """
     defaults = {
         "location": "",
         "npcs_present": [],
@@ -1710,7 +1760,9 @@ def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
     if not isinstance(new_scene, dict):
         return base
     for key in defaults:
-        if key in new_scene:
+        if key in _PRESENCE_DELTA_KEYS:
+            base[key] = _apply_presence_deltas(base[key], new_scene, key)
+        elif key in new_scene:
             base[key] = new_scene[key]
     return base
 

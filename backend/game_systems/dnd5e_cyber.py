@@ -1729,8 +1729,11 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   "ship_combat_trigger": null,
   "scene_state": {
     "location": "<current location>",
-    "npcs_present": ["<NPC name>", ...],
-    "pcs_present": ["<PC name>", ...],
+    // Presence lists — full list on scene transition, delta ops on ongoing scene:
+    //   scene transition: "npcs_present": ["Crew allies"]
+    //   ongoing (someone joins): "_npcs_present_add": ["New ally"]
+    //   ongoing (someone leaves): "_npcs_present_remove": ["Old ally"]
+    //   ongoing (no change): omit presence fields entirely — prior list is retained
     "active_tensions": ["<tension description>", ...],
     "scene_trigger": "<what initiated this scene>",
     "atmosphere": "<mood, lighting, weather, sensory details>",
@@ -1873,9 +1876,12 @@ NPC MEMORIES:
 - Before adding a memory, check existing memories for that NPC. If one covers the same scene or interaction, drop it and add an updated version instead of stacking.
 
 SCENE STATE:
-- Full replacement every turn — whatever you omit is erased for this turn.
-- "pcs_present": list every PC actively in the scene.
-- "npcs_present": list every NPC actively in the scene — same rule as pcs_present. **Ongoing allies/crew MUST appear every turn until they explicitly exit the scene in the narrative** (walk out, get separated, left at the ship, etc.). If the NPC is standing watch or covering an angle, they are present — list them. Unconscious, dying, or otherwise incapacitated NPCs are still present — they haven't left, they just can't act. Dropping a present NPC silently suppresses their `[NPC MEMORIES]` injection and hides them from the HUD — treat omission as a real narrative event, not an oversight.
+- Most fields (location, atmosphere, active_tensions, details, pending_actions, scene_trigger) are full-replacement — emit them every turn; omitted fields retain their prior value.
+- Presence lists ("pcs_present", "npcs_present") use **delta ops by default, full list on transitions**:
+  - **Ongoing scene** (same location, roster stable except for one entry changing): emit only `_npcs_present_add` / `_npcs_present_remove` (or `_pcs_present_*`). The retained list is patched — do NOT re-emit the full list to repeat the same roster.
+  - **Scene transition** (new location, wholesale roster change): emit full `npcs_present` / `pcs_present` to declare who is present. Deltas may be combined on top.
+  - **Nothing changed**: omit presence fields entirely — the prior list is retained. This prevents silently dropping ongoing allies/crew.
+- Unconscious, dying, or otherwise incapacitated NPCs are still present — do NOT remove them via `_npcs_present_remove`. Only remove when the NPC physically exits the scene.
 - Together "pcs_present" and "npcs_present" control which per-character funds appear in the character panel (funds are derived from ship.credits and auto-scoped to scene).
 
 CHARACTER STATES:
@@ -2262,11 +2268,16 @@ STATE_REPORT_TOOL = {
             },
             "scene_state": {
                 "type": "object",
-                "required": ["location", "npcs_present", "active_tensions", "atmosphere"],
+                "required": ["location", "active_tensions", "atmosphere"],
+                "description": "Presence lists (pcs_present/npcs_present) support delta ops. Prefer _npcs_present_add / _npcs_present_remove on ongoing-scene turns where the roster is stable except for one entry changing. Emit the full npcs_present list on scene transitions (new location, new scene) to re-declare who is there. Same for pcs_present.",
                 "properties": {
                     "location": {"type": "string"},
-                    "npcs_present": {"type": "array", "items": {"type": "string"}},
-                    "pcs_present": {"type": "array", "items": {"type": "string"}},
+                    "npcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full NPC roster for this scene. Omit on ongoing-scene turns where nothing changed — use _npcs_present_add/_remove instead. Emit on scene transitions."},
+                    "_npcs_present_add": {"type": "array", "items": {"type": "string"}, "description": "NPCs who just entered the scene. Added to the retained list."},
+                    "_npcs_present_remove": {"type": "array", "items": {"type": "string"}, "description": "NPCs who physically exited (walked out, separated, left behind). Do NOT remove for unconsciousness/injury — they are still present."},
+                    "pcs_present": {"type": "array", "items": {"type": "string"}, "description": "Full PC roster. Omit on ongoing-scene turns — use _pcs_present_add/_remove instead."},
+                    "_pcs_present_add": {"type": "array", "items": {"type": "string"}},
+                    "_pcs_present_remove": {"type": "array", "items": {"type": "string"}},
                     "active_tensions": {"type": "array", "items": {"type": "string"}},
                     "scene_trigger": {"type": "string"},
                     "atmosphere": {"type": "string"},
