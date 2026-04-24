@@ -1932,7 +1932,25 @@ def _merge_character_data(old_data: dict, new_data: dict) -> dict:
         if label not in seen_res:
             merged_res.append(dict(old_r))
     if merged_res or "resources" in new_data:
-        merged["resources"] = merged_res
+        # Strip resources that duplicate a vital label (e.g. Humanity as both
+        # vital and resource) or that shadow edgerunner-owned armor tracking.
+        # Model hallucinates these periodically; once they're in resources they
+        # survive forever because _merge_character_data preserves missing
+        # labels from the old snapshot.
+        vital_labels = {
+            v.get("label") for v in (merged.get("vitals") or [])
+            if isinstance(v, dict) and v.get("label")
+        }
+        merged["resources"] = [
+            r for r in merged_res
+            if not (
+                isinstance(r, dict)
+                and (
+                    r.get("label") in vital_labels
+                    or (isinstance(r.get("label"), str) and r["label"].lower().startswith("armor"))
+                )
+            )
+        ]
 
     return merged
 

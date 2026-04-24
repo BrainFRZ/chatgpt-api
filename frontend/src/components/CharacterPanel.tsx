@@ -1194,6 +1194,11 @@ export default function CharacterPanel({
                   ))}
                 </div>
               )}
+              {er.armor && (er.armor.head != null || er.armor.body != null) && (
+                <div style={{ fontSize: '0.72rem', color: '#999', marginBottom: '2px' }}>
+                  Armor: <span style={{ color: '#ccc' }}>Head SP {er.armor.head ?? 0}</span> {'·'} <span style={{ color: '#ccc' }}>Body SP {er.armor.body ?? 0}</span>
+                </div>
+              )}
               {er.eurobucks != null && <div style={{ fontSize: '0.72rem', color: '#fbbf24' }}>Eurobucks: €${er.eurobucks}</div>}
               {er.critical_injuries && er.critical_injuries.length > 0 && (
                 <div style={{ marginTop: '4px' }}>
