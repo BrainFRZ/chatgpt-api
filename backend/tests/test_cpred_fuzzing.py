@@ -2537,6 +2537,7 @@ class TestResolveNightMarketFuzz(unittest.TestCase):
     }
     HAGGLE_KEYS = {
         "buyer_die", "vendor_die", "buyer_total", "vendor_total", "success",
+        "not_eligible", "operator_rank",
         "discount_pct", "original_price", "final_price", "savings",
         "state_ops", "formatted", "on_outcome",
     }
@@ -2585,8 +2586,8 @@ class TestResolveNightMarketFuzz(unittest.TestCase):
         buyer_trading=st.integers(min_value=-20, max_value=20),
         vendor_cool=st.integers(min_value=-20, max_value=20),
         vendor_trading=st.integers(min_value=-20, max_value=20),
+        operator_rank=st.integers(min_value=-5, max_value=15),
         item_price=st.integers(min_value=-1000, max_value=20_000),
-        base_discount=st.integers(min_value=-100, max_value=100),
         wounded=st.booleans(),
         luck=st.integers(min_value=-20, max_value=20),
     )
@@ -2596,8 +2597,8 @@ class TestResolveNightMarketFuzz(unittest.TestCase):
         buyer_trading,
         vendor_cool,
         vendor_trading,
+        operator_rank,
         item_price,
-        base_discount,
         wounded,
         luck,
     ):
@@ -2606,9 +2607,9 @@ class TestResolveNightMarketFuzz(unittest.TestCase):
             buyer_trading=buyer_trading,
             vendor_cool=vendor_cool,
             vendor_trading=vendor_trading,
+            operator_rank=operator_rank,
             item_name="item",
             item_price=item_price,
-            base_discount=base_discount,
             character="V",
             seriously_wounded=wounded,
             luck_spent=luck,
@@ -2616,23 +2617,36 @@ class TestResolveNightMarketFuzz(unittest.TestCase):
             on_failure="full_price",
         )
         self.assertTrue(self.HAGGLE_KEYS <= set(result.keys()))
-        self.assertEqual(len(result["state_ops"]), 1)
-        self.assertEqual(result["state_ops"][0]["op"], "eurobucks")
-        self.assertEqual(result["state_ops"][0]["change"], -result["final_price"])
-        self.assertEqual(result["savings"], result["original_price"] - result["final_price"])
         self.assertGreaterEqual(result["original_price"], 0)
         self.assertGreaterEqual(result["final_price"], 0)
-        self.assertEqual(result["on_outcome"], "discount" if result["success"] else "full_price")
-        if result["success"]:
-            self.assertGreaterEqual(result["discount_pct"], 5)
-            self.assertLessEqual(result["discount_pct"], 50)
-            if result["original_price"] > 0:
-                self.assertGreaterEqual(result["final_price"], 1)
-                self.assertLessEqual(result["final_price"], result["original_price"])
-        else:
-            self.assertEqual(result["discount_pct"], 0)
+        self.assertEqual(result["savings"], result["original_price"] - result["final_price"])
+
+        if operator_rank <= 0:
+            # Non-Fixer gate: no roll, no eurobucks deducted, full price.
+            self.assertTrue(result["not_eligible"])
+            self.assertFalse(result["success"])
+            self.assertEqual(result["state_ops"], [])
             self.assertEqual(result["final_price"], result["original_price"])
+            self.assertEqual(result["discount_pct"], 0)
             self.assertEqual(result["savings"], 0)
+            self.assertEqual(result["on_outcome"], "full_price")
+        else:
+            # Eligible Fixer: one eurobucks op matching final_price.
+            self.assertFalse(result["not_eligible"])
+            self.assertEqual(len(result["state_ops"]), 1)
+            self.assertEqual(result["state_ops"][0]["op"], "eurobucks")
+            self.assertEqual(result["state_ops"][0]["change"], -result["final_price"])
+            self.assertEqual(result["on_outcome"], "discount" if result["success"] else "full_price")
+            if result["success"]:
+                # Fixed rank-based discount, NOT sliding scale.
+                expected_pct = 20 if operator_rank >= 9 else 10
+                self.assertEqual(result["discount_pct"], expected_pct)
+                if result["original_price"] > 0:
+                    self.assertLessEqual(result["final_price"], result["original_price"])
+            else:
+                self.assertEqual(result["discount_pct"], 0)
+                self.assertEqual(result["final_price"], result["original_price"])
+                self.assertEqual(result["savings"], 0)
 
 
 class TestResolveSocialAndSuppressiveFireFuzz(unittest.TestCase):

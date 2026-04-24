@@ -5220,125 +5220,145 @@ class TestResolveFindItem(unittest.TestCase):
 
 
 class TestResolveHaggle(unittest.TestCase):
-    """Tests for resolve_haggle — opposed COOL + Trading rolls."""
+    """Tests for resolve_haggle — RAW-exclusive to Fixer Operator ability (CRB p.160)."""
 
     MOCK = "game_systems.cpred_mechanics.random.randint"
 
-    def test_haggle_success(self):
-        """Buyer beats vendor → discount applied, eurobucks deducted at discounted price."""
-        # Buyer rolls 8, vendor rolls 3
+    def test_haggle_not_eligible_without_operator_rank(self):
+        """RAW-exclusive gate: non-Fixers cannot haggle a listed market price.
+        No roll, no eurobucks deducted, not_eligible=True in result."""
+        r = resolve_haggle(
+            buyer_cool=6, buyer_trading=4,
+            vendor_cool=5, vendor_trading=3,
+            operator_rank=0,  # not a Fixer
+            item_name="Kevlar Jacket", item_price=100, character="V",
+        )
+        self.assertTrue(r["not_eligible"])
+        self.assertFalse(r["success"])
+        self.assertEqual(r["final_price"], 100)
+        self.assertEqual(r["savings"], 0)
+        self.assertEqual(r["state_ops"], [])
+        self.assertIn("NOT ELIGIBLE", r["formatted"])
+        self.assertIn("Operator", r["formatted"])
+
+    def test_haggle_rank_1_success_is_10_pct(self):
+        """RAW p.160: Operator rank 1-8 → fixed 10% discount on success."""
+        # Buyer rolls 8, vendor rolls 3; rank 3 Fixer
         with patch(self.MOCK, side_effect=[8, 3]):
             r = resolve_haggle(
                 buyer_cool=6, buyer_trading=4,
                 vendor_cool=5, vendor_trading=3,
-                item_name="Kevlar Jacket", item_price=100,
-                base_discount=20, character="V",
+                operator_rank=3,
+                item_name="Kevlar Jacket", item_price=100, character="Delphi",
             )
         self.assertTrue(r["success"])
-        self.assertEqual(r["buyer_total"], 18)   # 8 + 6 + 4
-        self.assertEqual(r["vendor_total"], 11)   # 3 + 5 + 3
-        self.assertEqual(r["discount_pct"], 20)
-        self.assertEqual(r["original_price"], 100)
-        self.assertEqual(r["final_price"], 80)    # 100 - 20%
-        self.assertEqual(r["savings"], 20)
-        self.assertEqual(len(r["state_ops"]), 1)
-        op = r["state_ops"][0]
-        self.assertEqual(op["op"], "eurobucks")
-        self.assertEqual(op["change"], -80)
-        self.assertEqual(op["edgerunner"], "V")
-        self.assertIn("✓", r["formatted"])
+        self.assertEqual(r["buyer_total"], 8 + 6 + 4 + 3)   # d10 + COOL + Trading + Operator
+        self.assertEqual(r["vendor_total"], 3 + 5 + 3)
+        self.assertEqual(r["discount_pct"], 10)             # rank 3 → 10%
+        self.assertEqual(r["final_price"], 90)
+        self.assertEqual(r["savings"], 10)
+        self.assertEqual(r["state_ops"][0]["change"], -90)
+        self.assertIn("Operator 3", r["formatted"])
 
-    def test_haggle_failure(self):
-        """Vendor beats buyer → full price paid."""
-        # Buyer rolls 3, vendor rolls 8
-        with patch(self.MOCK, side_effect=[3, 8]):
+    def test_haggle_rank_9_success_is_20_pct(self):
+        """RAW p.160: Operator rank 9+ → fixed 20% discount on success."""
+        with patch(self.MOCK, side_effect=[8, 3]):
+            r = resolve_haggle(
+                buyer_cool=6, buyer_trading=4,
+                vendor_cool=5, vendor_trading=3,
+                operator_rank=9,
+                item_name="Kevlar Jacket", item_price=100, character="Delphi",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["discount_pct"], 20)
+        self.assertEqual(r["final_price"], 80)
+
+    def test_haggle_rank_10_still_20_pct(self):
+        """Rank 10 (max) also 20% — no further scaling."""
+        with patch(self.MOCK, side_effect=[8, 3]):
+            r = resolve_haggle(
+                buyer_cool=6, buyer_trading=4,
+                vendor_cool=5, vendor_trading=3,
+                operator_rank=10,
+                item_price=1000, character="Delphi",
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["discount_pct"], 20)
+        self.assertEqual(r["final_price"], 800)
+
+    def test_haggle_failure_pays_full_price(self):
+        """Vendor beats buyer → full list price, no discount."""
+        with patch(self.MOCK, side_effect=[3, 9]):
             r = resolve_haggle(
                 buyer_cool=5, buyer_trading=3,
                 vendor_cool=6, vendor_trading=4,
-                item_name="SMG", item_price=500,
-                base_discount=15, character="V",
+                operator_rank=4,
+                item_name="SMG", item_price=500, character="Delphi",
             )
         self.assertFalse(r["success"])
         self.assertEqual(r["discount_pct"], 0)
         self.assertEqual(r["final_price"], 500)
-        self.assertEqual(r["savings"], 0)
-        op = r["state_ops"][0]
-        self.assertEqual(op["change"], -500)
+        self.assertEqual(r["state_ops"][0]["change"], -500)
         self.assertIn("✗", r["formatted"])
 
-    def test_haggle_state_ops(self):
-        """Eurobucks op emitted with correct negative change on success."""
-        with patch(self.MOCK, side_effect=[9, 2]):
+    def test_haggle_operator_rank_adds_to_buyer_roll(self):
+        """Regression: Operator rank must be added to the buyer's opposed roll."""
+        # Without the Operator bonus, buyer would lose (11 vs 14); with +5 rank they win.
+        with patch(self.MOCK, side_effect=[3, 5]):
             r = resolve_haggle(
-                buyer_cool=5, buyer_trading=3,
-                vendor_cool=4, vendor_trading=2,
-                item_name="Cyberarm", item_price=1000,
-                base_discount=10, character="V",
+                buyer_cool=4, buyer_trading=4,
+                vendor_cool=5, vendor_trading=4,
+                operator_rank=5,
+                item_price=200, character="Delphi",
             )
+        self.assertEqual(r["buyer_total"], 3 + 4 + 4 + 5)   # 16
+        self.assertEqual(r["vendor_total"], 5 + 5 + 4)       # 14
         self.assertTrue(r["success"])
-        self.assertEqual(r["final_price"], 900)
-        op = r["state_ops"][0]
-        self.assertEqual(op["change"], -900)
-        self.assertIn("Cyberarm", op["reason"])
-
-    def test_haggle_discount_clamped_high(self):
-        """base_discount > 50 clamped to 50."""
-        with patch(self.MOCK, side_effect=[9, 2]):
-            r = resolve_haggle(
-                buyer_cool=5, buyer_trading=3,
-                vendor_cool=4, vendor_trading=2,
-                item_price=1000, base_discount=80, character="V",
-            )
-        self.assertTrue(r["success"])
-        self.assertEqual(r["discount_pct"], 50)
-        self.assertEqual(r["final_price"], 500)
-
-    def test_haggle_discount_clamped_low(self):
-        """base_discount < 5 clamped to 5."""
-        with patch(self.MOCK, side_effect=[9, 2]):
-            r = resolve_haggle(
-                buyer_cool=5, buyer_trading=3,
-                vendor_cool=4, vendor_trading=2,
-                item_price=1000, base_discount=1, character="V",
-            )
-        self.assertTrue(r["success"])
-        self.assertEqual(r["discount_pct"], 5)
-        self.assertEqual(r["final_price"], 950)
 
     def test_haggle_zero_price_stays_zero(self):
-        """Free items should not become 1eb charges on success."""
+        """Free items should not become negative charges on success."""
         with patch(self.MOCK, side_effect=[9, 2]):
             r = resolve_haggle(
                 buyer_cool=5, buyer_trading=3,
                 vendor_cool=4, vendor_trading=2,
-                item_price=0, base_discount=10, character="V",
+                operator_rank=3,
+                item_price=0, character="Delphi",
             )
         self.assertTrue(r["success"])
         self.assertEqual(r["original_price"], 0)
         self.assertEqual(r["final_price"], 0)
-        self.assertEqual(r["savings"], 0)
         self.assertEqual(r["state_ops"][0]["change"], 0)
 
-    def test_haggle_via_resolve_actions(self):
-        """Dispatch through batch processor."""
+    def test_haggle_via_resolve_actions_requires_rank(self):
+        """Batched dispatch: action without operator_rank → not_eligible, no eb deduction."""
+        batch = resolve_actions([{
+            "type": "haggle",
+            "character": "V",
+            "buyer_cool": 6, "buyer_trading": 4,
+            "vendor_cool": 5, "vendor_trading": 3,
+            "item_name": "Kevlar Jacket", "item_price": 100,
+        }])
+        result = batch["results"][0]
+        self.assertTrue(result["not_eligible"])
+        eb_ops = [o for o in batch["state_ops"] if o.get("op") == "eurobucks"]
+        self.assertEqual(eb_ops, [],
+                         "Non-eligible haggle must NOT deduct eurobucks")
+
+    def test_haggle_via_resolve_actions_with_rank(self):
+        """Batched dispatch with operator_rank → normal RAW roll + discount."""
         with patch(self.MOCK, side_effect=[8, 3]):
             batch = resolve_actions([{
                 "type": "haggle",
-                "character": "V",
-                "buyer_cool": 6,
-                "buyer_trading": 4,
-                "vendor_cool": 5,
-                "vendor_trading": 3,
-                "item_name": "Kevlar Jacket",
-                "item_price": 100,
-                "base_discount": 20,
+                "character": "Delphi",
+                "buyer_cool": 6, "buyer_trading": 4,
+                "vendor_cool": 5, "vendor_trading": 3,
+                "operator_rank": 9,
+                "item_name": "Kevlar Jacket", "item_price": 100,
             }])
-        self.assertEqual(len(batch["results"]), 1)
         result = batch["results"][0]
-        self.assertEqual(result["type"], "haggle")
         self.assertTrue(result["success"])
+        self.assertEqual(result["discount_pct"], 20)
         eb_ops = [o for o in batch["state_ops"] if o.get("op") == "eurobucks"]
-        self.assertEqual(len(eb_ops), 1)
         self.assertEqual(eb_ops[0]["change"], -80)
 
     def test_haggle_luck(self):
@@ -5347,12 +5367,13 @@ class TestResolveHaggle(unittest.TestCase):
             r = resolve_haggle(
                 buyer_cool=4, buyer_trading=3,
                 vendor_cool=5, vendor_trading=4,
-                item_price=200, luck_spent=3, character="V",
+                operator_rank=2,
+                item_price=200, luck_spent=3, character="Delphi",
             )
-        # buyer: 5 + 4 + 3 + 3(luck) = 15; vendor: 7 + 5 + 4 = 16
-        self.assertEqual(r["buyer_total"], 15)
+        # buyer: 5 + 4 + 3 + 2(op) + 3(luck) = 17; vendor: 7 + 5 + 4 = 16
+        self.assertEqual(r["buyer_total"], 17)
         self.assertEqual(r["vendor_total"], 16)
-        self.assertFalse(r["success"])
+        self.assertTrue(r["success"])
         self.assertIn("Luck", r["formatted"])
 
     def test_haggle_wounded(self):
@@ -5361,12 +5382,28 @@ class TestResolveHaggle(unittest.TestCase):
             r = resolve_haggle(
                 buyer_cool=5, buyer_trading=3,
                 vendor_cool=4, vendor_trading=3,
-                item_price=100, seriously_wounded=True, character="V",
+                operator_rank=3,
+                item_price=100, seriously_wounded=True, character="Delphi",
             )
-        # buyer: 8 + 5 + 3 - 2 = 14; vendor: 5 + 4 + 3 = 12
-        self.assertEqual(r["buyer_total"], 14)
+        # buyer: 8 + 5 + 3 + 3(op) - 2 = 17; vendor: 5 + 4 + 3 = 12
+        self.assertEqual(r["buyer_total"], 17)
         self.assertTrue(r["success"])
         self.assertIn("Wounded", r["formatted"])
+
+    def test_haggle_legacy_base_discount_ignored(self):
+        """Legacy base_discount parameter is accepted (backward compat) but
+        does NOT override the RAW rank-based discount table."""
+        with patch(self.MOCK, side_effect=[9, 2]):
+            r = resolve_haggle(
+                buyer_cool=5, buyer_trading=3,
+                vendor_cool=4, vendor_trading=2,
+                operator_rank=3,
+                item_price=1000, character="Delphi",
+                base_discount=50,  # legacy param — must be ignored
+            )
+        self.assertTrue(r["success"])
+        self.assertEqual(r["discount_pct"], 10)  # rank 3 → 10%, not 50%
+        self.assertEqual(r["final_price"], 900)
 
 
 class TestResolveFacedown(unittest.TestCase):

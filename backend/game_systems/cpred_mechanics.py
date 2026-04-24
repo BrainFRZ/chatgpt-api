@@ -737,30 +737,91 @@ def resolve_find_item(
 # resolve_haggle  — Opposed price negotiation
 # ---------------------------------------------------------------------------
 
+def _operator_discount_pct(operator_rank: int) -> int:
+    """Fixed Operator discount table (CRB p.160).
+
+    Ranks 1-8: 10% off
+    Rank 9+:   20% off
+    Ranks <=0: not eligible (caller should bail before this).
+    """
+    r = _to_int(operator_rank, 0)
+    if r >= 9:
+        return 20
+    if r >= 1:
+        return 10
+    return 0
+
+
 def resolve_haggle(
     buyer_cool: int,
     buyer_trading: int,
     vendor_cool: int,
     vendor_trading: int,
+    operator_rank: int = 0,
     item_name: str = "",
     item_price: int = 0,
-    base_discount: int = 10,
     character: str = "",
     seriously_wounded: bool = False,
     luck_spent: int = 0,
     on_success: str = "",
     on_failure: str = "",
+    # Legacy no-op (pre-RAW). Retained so old callers don't crash; ignored.
+    base_discount: int = None,
 ) -> dict:
-    """Opposed COOL + Trading rolls to negotiate item price.
+    """Negotiate a listed market price via the Fixer's Operator Role Ability (CRB p.160).
 
-    On success: price reduced by base_discount % (clamped 5–50).
-    On either outcome: auto-emits eurobucks state_op for the purchase cost.
+    RAW: only a Fixer can reduce a listed market price. Non-Fixers can use
+    Trading for a "good bargain" (p.140) — bartering, negotiating services,
+    non-listed goods, or resisting a Fixer's haggle — but not to shave the
+    published eb price of an item. For those, use a plain skill_check with
+    Trading instead of this op.
+
+    Roll: d10 + buyer_cool + buyer_trading + operator_rank vs
+          d10 + vendor_cool + vendor_trading
+
+    Discount on success: fixed by Operator rank (not a sliding scale):
+      - Ranks 1-8: 10% off
+      - Rank 9+:   20% off
+
+    If operator_rank <= 0: returns an "not_eligible" result. No roll is
+    made, no dice are rolled, no state_ops are emitted. The model should
+    not call haggle for a non-Fixer — if it does, this path fails soft
+    with a narrative explanation instead of silently granting a discount.
     """
+    rank = _to_int(operator_rank, 0)
+    price = max(0, _to_int(item_price, 0))
+    label = item_name or "item"
+
+    # Non-Fixer gate: RAW-exclusive ability. Fail soft, no roll, no purchase.
+    if rank <= 0:
+        msg = (
+            f"Haggle ({label}): NOT ELIGIBLE — reducing a listed market price "
+            f"requires a Fixer's Operator Role Ability (rank 1+). Use a "
+            f"skill_check with Trading for bartering, service negotiation, "
+            f"or non-listed goods (RAW p.140)."
+        )
+        return {
+            "buyer_die": None,
+            "vendor_die": None,
+            "buyer_total": 0,
+            "vendor_total": 0,
+            "success": False,
+            "not_eligible": True,
+            "operator_rank": rank,
+            "discount_pct": 0,
+            "original_price": price,
+            "final_price": price,
+            "savings": 0,
+            "state_ops": [],
+            "formatted": msg,
+            "on_outcome": on_failure,
+        }
+
     buyer_die = _roll_check_die()
     vendor_die = _roll_check_die()
 
     buyer_modifiers = []
-    buyer_total = buyer_die["total"] + buyer_cool + buyer_trading
+    buyer_total = buyer_die["total"] + buyer_cool + buyer_trading + rank
 
     if seriously_wounded:
         buyer_total -= 2
@@ -775,14 +836,10 @@ def resolve_haggle(
 
     success = buyer_total > vendor_total
 
-    # Clamp discount
-    discount_pct = max(5, min(50, _to_int(base_discount, 10)))
-
-    price = max(0, _to_int(item_price, 0))
+    discount_pct = _operator_discount_pct(rank) if success else 0
     if success:
         final_price = max(0, price - int(price * discount_pct / 100))
     else:
-        discount_pct = 0
         final_price = price
     savings = price - final_price
 
@@ -793,17 +850,19 @@ def resolve_haggle(
         "reason": f"Purchased {item_name}" if item_name else "Purchase",
     }]
 
-    # Format
-    label = item_name or "item"
     parts = [f"Haggle ({label}):"]
-    parts.append(f"Buyer {_format_die(buyer_die)} +COOL {buyer_cool} +Trading {buyer_trading}")
+    parts.append(
+        f"Buyer {_format_die(buyer_die)} +COOL {buyer_cool} +Trading {buyer_trading} +Operator {rank}"
+    )
     for mod_label, val in buyer_modifiers:
         parts.append(f"+{mod_label} {val}" if val > 0 else f"{mod_label} {val}")
     parts.append(f"= {buyer_total}")
-    parts.append(f"vs Vendor {_format_die(vendor_die)} +COOL {vendor_cool} +Trading {vendor_trading} = {vendor_total}")
+    parts.append(
+        f"vs Vendor {_format_die(vendor_die)} +COOL {vendor_cool} +Trading {vendor_trading} = {vendor_total}"
+    )
 
     if success:
-        parts.append(f"✓ — {discount_pct}% off! {price}eb → {final_price}eb (saved {savings}eb)")
+        parts.append(f"✓ — {discount_pct}% off (Operator rank {rank}). {price}eb → {final_price}eb (saved {savings}eb)")
     else:
         parts.append(f"✗ — no discount, paid {final_price}eb")
 
@@ -816,6 +875,8 @@ def resolve_haggle(
         "buyer_total": buyer_total,
         "vendor_total": vendor_total,
         "success": success,
+        "not_eligible": False,
+        "operator_rank": rank,
         "discount_pct": discount_pct,
         "original_price": price,
         "final_price": final_price,
@@ -3906,9 +3967,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     buyer_trading=action.get("buyer_trading", 0),
                     vendor_cool=action.get("vendor_cool", 0),
                     vendor_trading=action.get("vendor_trading", 0),
+                    operator_rank=action.get("operator_rank", 0),
                     item_name=action.get("item_name", ""),
                     item_price=action.get("item_price", 0),
-                    base_discount=action.get("base_discount", 10),
                     character=actor_name,
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
@@ -4028,7 +4089,7 @@ RESOLVE_MECHANICS_TOOL = {
         "- spike_strip: {type, character (deployer), target_driver, target_stat_value (REF), target_skill_value (Drive Land Vehicle), target_vehicle_name, target_vehicle_sp, target_vehicle_type (land only), seriously_wounded_target?, on_hit?, on_miss?}\n"
         "- hustle: {type, character, role (e.g. 'Fixer'/'Solo'), role_ability_rank, dv, payout (eurobucks on success), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Downtime income: d10 + Role Ability Rank vs DV. Resolver auto-emits eurobucks state_op on success. Do NOT emit a separate eurobucks edgerunner_op. Update character_states to reflect the new funds.\n"
         "- find_item: {type, character, rank (Fixer Operator rank or Streetwise skill), price_category (Cheap/Everyday/Costly/Premium/Expensive/Very Expensive/Luxury/Super Luxury), item_name, seriously_wounded?, luck_spent?, on_success?, on_failure?} — Night market availability: d10 + rank vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.\n"
-        "- haggle: {type, character, buyer_cool, buyer_trading, vendor_cool, vendor_trading, item_name, item_price, base_discount? (default 10, range 5-50), seriously_wounded?, luck_spent?, on_success?, on_failure?} — Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.\n"
+        "- haggle: {type, character, buyer_cool, buyer_trading, vendor_cool, vendor_trading, operator_rank (Fixer's Operator Role Ability rank, REQUIRED — 0 means not a Fixer → resolver fails soft with no roll and no eurobucks deducted), item_name, item_price, seriously_wounded?, luck_spent?, on_success?, on_failure?} — RAW CRB p.160: haggling a listed market price is exclusive to the Fixer's Operator Role Ability. Roll: d10 + COOL + Trading + Operator Rank vs d10 + vendor COOL + vendor Trading. Discount on success is FIXED by rank (1-8: 10% / 9+: 20%), NOT a sliding scale. On success, resolver auto-emits eurobucks state_op (discounted price). On failure, auto-emits full price. Do NOT emit a separate eurobucks edgerunner_op. For non-Fixer bargaining (bartering, service negotiation, non-listed goods, resisting a Fixer's haggle per RAW p.140), use a plain skill_check with Trading instead — NOT haggle.\n"
         "- facedown: {type, character, target (opponent name), initiator_cool, initiator_rep (Rep level, 0 if none), opponent_cool, opponent_rep, seriously_wounded_initiator?, seriously_wounded_opponent?, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Reputation + d10 vs same. Tie = stalemate (nothing happens). Winner/loser: loser must back down or take -2 to all actions vs winner until defeated. Result includes tie, winner, loser, penalty_condition fields.\n"
         "- suppressive_fire: {type, character, attacker_ref, attacker_autofire, targets: [{name, will, concentration, seriously_wounded?}], seriously_wounded_attacker?, luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174): Attacker rolls d10+REF+Autofire once. Each target rolls d10+WILL+Concentration. Targets who fail are suppressed (must stay in cover). Ties favor defender. Consumes 10 rounds. No damage dealt."
     ),

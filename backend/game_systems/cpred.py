@@ -616,8 +616,8 @@ NPCs have a Wellbeing state rolled by the backend at 6AM each in-game day. The s
 
 ### Night Market Mechanics:
 - find_item: Fixer Operator rank + d10 vs DV by price category. Auto-succeeds for Cheap/Everyday. Backend resolves the availability roll.
-- haggle: Opposed COOL + Trading rolls. On success, price reduced by discount %. On either outcome, resolver auto-emits eurobucks state_op (discounted or full price). Do NOT emit a separate eurobucks edgerunner_op.
-- Typical flow: find_item → (if found) haggle to negotiate price. Haggle always deducts eurobucks.
+- haggle: RAW-exclusive to the Fixer's Operator Role Ability (CRB p.160). Roll: d10 + buyer COOL + Trading + Operator Rank vs d10 + vendor COOL + vendor Trading. Discount on success is FIXED by rank: 1-8 → 10%, 9+ → 20% (NOT a sliding scale). Resolver auto-emits eurobucks state_op (discounted on success, full price on failure). Do NOT emit a separate eurobucks edgerunner_op. Pass `operator_rank` in the action — if the buyer is not a Fixer or has no Operator rank, do NOT call haggle at all; the resolver fails soft with no roll and no purchase. For non-Fixer bargaining (bartering, service negotiation, non-listed goods, resisting someone else's haggle per RAW p.140), use a plain skill_check with Trading instead.
+- Typical flow: find_item → (if found AND buyer is a Fixer) haggle to negotiate price → otherwise model narrates the purchase at list price or uses a skill_check with Trading for a narrative "good bargain" (e.g. friendly vendor, leftover stock, barter).
 
 ### Facedown (CRB p.195):
 When a character tries to intimidate, stare down, or threaten someone into backing off, use the `facedown` action type in resolve_mechanics. This is the CRB Facedown — an opposed COOL + Reputation + d10 contest.
