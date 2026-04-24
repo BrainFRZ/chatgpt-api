@@ -48,6 +48,7 @@
 !backend/game_systems/coc7e.py
 !backend/game_systems/sr6e.py
 !backend/game_systems/cpred.py
+!backend/game_systems/plot_contract.py
 !backend/game_systems/cpred_core.py
 !backend/game_systems/cpred_combat.py
 !backend/game_systems/cpred_hack.py

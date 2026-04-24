@@ -14,6 +14,7 @@ from .dnd5e import (
     build_combat_profile,
     build_combat_injection,
 )
+from .plot_contract import PLOT_TRIGGER_CONTRACT
 
 logger = logging.getLogger(__name__)
 
@@ -619,7 +620,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 Optional arrays:
 - **callback_ops**: Add/resolve Johnson deals, intel, debts, favors. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Record significant NPC moments
-- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
+- **plot_ops**: Fire when a plot-doc trigger condition is met. See **Plot Triggers (plot_ops)** section at the end of this contract for authoring formats, pre-registration, severities, and the required shape of the `decision` field (must be a self-contained narrative sentence — this is the user's save-state read-out).
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
@@ -724,6 +725,8 @@ When the narrative clearly progresses to a sexual/intimate encounter between the
 - `npcs`: list of NPC names involved
 - `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
+
+SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
 
 STATE_REPORT_TOOL = {
     "name": "report_state",

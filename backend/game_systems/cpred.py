@@ -59,6 +59,8 @@ from .cpred_net_combat import (  # noqa: F401
     apply_net_combat_writeback,
 )
 
+from .plot_contract import PLOT_TRIGGER_CONTRACT
+
 
 def __getattr__(name):
     """Backward-compatibility export shim for pre-split cpred imports.
@@ -530,7 +532,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 Optional arrays:
 - **callback_ops**: Add/resolve Fixer deals, gig intel, debts. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
 - **npc_memory_ops**: Record significant NPC moments
-- **plot_ops**: Fire when a decision matches plot-document structure (branch points, flags/variables, decision table entries). Also fire with severity "divergence" when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.
+- **plot_ops**: Fire when a plot-doc trigger condition is met. See **Plot Triggers (plot_ops)** section at the end of this contract for authoring formats, pre-registration, severities, and the required shape of the `decision` field (must be a self-contained narrative sentence — this is the user's save-state read-out).
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
 - **Impact variance**: Do not default all memories to impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges or minor revelations. Use high (4-5) only for climactic, life-changing moments. A natural distribution across a campaign is roughly 60% flavor, 30% moderate, 10% high.
 - **No duplication**: Callbacks and memories serve different purposes — do not log the same event in both. **Callbacks** track plot threads with a lifecycle: promises made, hooks introduced, foreshadowing planted → eventually resolved. They answer "what was set up that needs payoff?" **Memories** track how an NPC's view of the party shifted — emotional turns, trust gained or lost, key impressions. They answer "how does this NPC feel about us now?" Scene details, exposition, and factual information (timelines, locations, NPC descriptions) belong in scene_state and pacing notes, not in callbacks or memories.
@@ -787,6 +789,8 @@ When the narrative clearly progresses to a sexual/intimate encounter between the
 - `npcs`: list of NPC names involved
 - `summary`: 1-2 paragraphs — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover the recent scene and mood, the emotional arc between the characters, physical/environmental details (where they are, lighting, what they're wearing or not), and any unresolved tension or vulnerability to carry forward.
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
+
+SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
@@ -1340,7 +1344,7 @@ NET-IN-MEATSPACE:
 When a netrunner declares NET actions during combat initiative:
 - Set initiate_net_combat with the netrunner's name, target architecture/device, and context (1-2 paragraphs — this is the ONLY context net combat mode gets beyond the combat state. Cover the current tactical situation, why they're jacking in, and any narrative tension to carry forward).
 - Do NOT resolve their NET actions — end the exchange. NET-in-meatspace mode handles the interleaved resolution.
-- Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner chooses 1 meat action OR N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10).
+- Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner's Action becomes N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10). They still get a Move Action alongside — movement is not a Meat Action and does NOT cost NET actions.
 
 VEHICLE COMBAT:
 Reference Combat Ruleset §18 for vehicle stats, ramming, mounted weapons, and chase mechanics.
@@ -1465,7 +1469,9 @@ An exchange may cover part or all of a Netrunner turn. The player controls how m
 5. Meatspace narration goes ABOVE NET content — crew's round first, then Netrunner's situation
 
 ### Meat Actions During a Hack
-On their turn, a Netrunner chooses EITHER Meat Action(s) OR NET Actions — never both. If the player specifies a Meat Action (shoot, move, take cover, etc.), resolve it as a normal meatspace action. This consumes the Netrunner's entire turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to complete the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
+Per CPRED RAW, every character gets **1 Move Action + 1 Action** per turn. The Netrunner's Action is what becomes NET Actions — **the Move Action is always available on top**, and movement does NOT cost NET actions or consume the turn. **Taking cover is part of the Move Action** (any cover the Netrunner reaches while moving is free — not a separate Meat Action). Requires Virtuality Goggles to move while Jacked In (without them the Netrunner is Unconscious in meatspace and cannot move or dodge).
+
+If the player instead spends their **Action** on a Meat Action (shoot, reload, a skill check, etc.), that consumes the NET half of the turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to close the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
 
 ### Architecture Difficulty Rating (p.210-211)
 When generating a NET architecture, choose a Difficulty Rating based on SR:
