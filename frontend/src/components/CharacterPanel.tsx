@@ -631,6 +631,21 @@ export default function CharacterPanel({
             ))}
           </div>
         )}
+        {chatGameSystem === 'cpred' && (() => {
+          const er = state?.game_state?.edgerunners?.[name];
+          if (!er?.armor) return null;
+          const head = er.armor.head;
+          const body = er.armor.body;
+          if (head == null && body == null) return null;
+          return (
+            <div style={{ fontSize: '0.65rem', color: '#999', marginTop: '3px' }}>
+              <span>Armor: </span>
+              <span style={{ color: '#94a3b8', fontWeight: 500 }}>H {head ?? 0}</span>
+              <span style={{ color: '#444', margin: '0 5px' }}>·</span>
+              <span style={{ color: '#94a3b8', fontWeight: 500 }}>B {body ?? 0}</span>
+            </div>
+          );
+        })()}
         {conditions.length > 0 && (
           <div style={{ display: 'flex', gap: '3px', marginTop: '3px', flexWrap: 'wrap' }}>
             {conditions
