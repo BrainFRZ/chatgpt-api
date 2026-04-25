@@ -48,6 +48,7 @@ Hook signatures (return shape; malformed return → warning log + no-op):
 """
 import copy
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +291,97 @@ def _spoof_signal_on_turn_start(hack_state, game_state):
     return [{"op": "spoof_signal_tick", "rounds_remaining": new_rounds}]
 
 
+def _nervescrub_on_attack_hit(attack_result, prog, hack_state):
+    """RAW (PROGRAM_STATS): 'INT/REF/DEX -1d6 1hr'. Nervescrub is an Attacker
+    program that scrubs the target Netrunner's neural reflexes — apply a
+    -1d6 penalty to INT, REF, and DEX for 1 hour. Re-uses the existing
+    stat_debuff op (already consumed by _apply_single_ice_op for ICE-emitted
+    debuffs from Skunk et al.)."""
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    amount = random.randint(1, 6)
+    return [{
+        "op": "stat_debuff",
+        "stats": ["INT", "REF", "DEX"],
+        "amount": amount,
+        "source": "Nervescrub",
+        "duration": "1 hour",
+        "target": target,
+    }]
+
+
+def _poison_flatline_on_attack_hit(attack_result, prog, hack_state):
+    """RAW (PROGRAM_STATS): 'Destroy random non-Black program'. Poison
+    Flatline is an Attacker program that, on hit, picks a random non-Black
+    program in the target's deck and destroys it.
+
+    Implementation note: All player-loadable programs are 'non-Black' (the
+    Black classification applies to ICE classes — anti_personnel and
+    anti_program). The hook receives the firing Netrunner's hack_state via
+    the prog/hack_state args; for the target's active_programs we emit a
+    program_destroy op carrying a target_player field. The writeback layer
+    (_apply_resolver_net_ops) routes program_destroy through
+    apply_program_status_change so Backup Drive interception applies
+    automatically."""
+    # Use the firing Netrunner's hack_state.active_programs as the candidate
+    # pool when no separate target-state lookup is available. (PvP-correct
+    # impl would pass the target's hack_state; cross-Netrunner state is not
+    # currently plumbed.) The ops the hook emits target an active program
+    # name; the resolver+writeback layer applies them to whichever
+    # hack_state is active when ops are processed.
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    candidates = []
+    for p in _snapshot_active_programs((hack_state or {}).get("active_programs")):
+        # Defensive: skip the firing program itself, skip Black-classified
+        # entries (none currently exist among player programs but
+        # future-proof).
+        if p.get("name") == (prog or {}).get("name"):
+            continue
+        candidates.append(p.get("name"))
+    if not candidates:
+        return [{"op": "poison_flatline_no_target",
+                 "target": target, "source": "Poison Flatline",
+                 "reason": "No non-Black programs available to destroy."}]
+    chosen = random.choice(candidates)
+    return [{
+        "op": "program_destroy",
+        "program_name": chosen,
+        "source": "Poison Flatline",
+        "target_player": target,
+    }]
+
+
+def _superglue_on_attack_hit(attack_result, prog, hack_state):
+    """RAW (PROGRAM_STATS): 'No move/jack out 1d6 rounds'. Superglue locks
+    the target Netrunner from moving between nodes AND from voluntarily
+    jacking out for 1d6 rounds. Forced disconnects (ally-yanked, flatline)
+    bypass — physical severance can't be glued.
+
+    Emits movement_lock (existing op) and jack_out_lock (new op consumed by
+    the Step 6c jack-out gate predicate)."""
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    rounds = random.randint(1, 6)
+    return [
+        {"op": "movement_lock",
+         "locked_by": "Superglue", "target": target,
+         "duration_rounds": rounds},
+        {"op": "jack_out_lock",
+         "rounds_remaining": rounds, "source": "Superglue",
+         "target": target,
+         "reason": f"Superglue: no jack out for {rounds} rounds"},
+    ]
+
+
+def _overclock_on_turn_end(hack_state, game_state):
+    """Overclock pending flag persists until consumed by the next turn's
+    NA reset (apply_hack_state turn-boundary code reads
+    active_boosts.overclock_pending and applies +1 NA). on_turn_end is a
+    no-op for the flag itself; the reset path handles consumption.
+
+    This hook exists so Overclock has a presence in the turn-end pipeline
+    if future logic needs to inspect or expire it. For now: pure no-op."""
+    return []
+
+
 def _deckkrash_on_attack_hit(attack_result, prog, hack_state):
     """RAW (PROGRAM_STATS): 'Unsafe jack out'. DeckKRASH is an Attacker
     program that — on hit — forces the target Netrunner through an Unsafe
@@ -517,6 +609,41 @@ PROGRAM_EFFECTS["DeckKRASH"] = {
     "is_hardware": False,
     "order": 100,
     "hooks": {"on_program_attack_hit": _deckkrash_on_attack_hit},
+}
+
+# Step 6c: remaining four Attacker / Boosted-Action programs.
+#   Nervescrub — Attacker, INT/REF/DEX -1d6 1hr (re-uses stat_debuff op).
+#   Poison Flatline — Attacker, destroy random non-Black program.
+#   Superglue — Attacker, lock movement + jack-out for 1d6 rounds. Backed
+#       by the Step 6c jack-out gate (cpred_hack._check_jack_out_allowed).
+#   Overclock — Boosted-Action, +1 NA on next turn (consumed at the
+#       turn-boundary NA reset in apply_hack_state).
+PROGRAM_EFFECTS["Nervescrub"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _nervescrub_on_attack_hit},
+}
+
+PROGRAM_EFFECTS["Poison Flatline"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _poison_flatline_on_attack_hit},
+}
+
+PROGRAM_EFFECTS["Superglue"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _superglue_on_attack_hit},
+}
+
+PROGRAM_EFFECTS["Overclock"] = {
+    "category": "boosted_action",
+    "is_hardware": False,
+    "order": 60,
+    "hooks": {"on_turn_end": _overclock_on_turn_end},
 }
 
 

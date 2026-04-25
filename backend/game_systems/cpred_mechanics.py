@@ -2100,6 +2100,10 @@ _BOOSTED_ACTION_PROGRAMS = {
     "Mask":         ("mask_pending",         None, None),
     "Fortify":      ("fortify_pending",      None, None),
     "Spoof Signal": ("spoof_signal_pending", "spoof_signal_rounds_remaining", 2),
+    # Step 6c: Overclock grants +1 NA next turn. The flag is consumed by
+    # apply_hack_state's turn-boundary NA reset (cpred_hack.py); no
+    # duration field — it's a single-shot bonus on the next reset.
+    "Overclock":    ("overclock_pending",    None, None),
 }
 
 
@@ -4823,7 +4827,7 @@ RESOLVE_MECHANICS_TOOL = {
         "- deactivate_program: {type, character, program} — active → deactivated. Costs 1 NET Action.\n"
         "- reactivate_program: {type, character, program} — derezzed → active. Costs 2 NET Actions, ATOMIC: if fewer than 2 NA remain, fails soft with no actions consumed.\n"
         "- reinstall_program: {type, character, program} — destroyed → deactivated. Costs 1 Meat Action. Only valid if Backup Drive is installed (and saved this program from destruction).\n"
-        "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown.\n"
+        "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal/Overclock)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending / overclock_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown; Overclock grants +1 NET Action on the next turn (consumed at turn-boundary reset).\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}\n"

@@ -614,6 +614,27 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                 state["cycles_remaining"] = max(0, int(cur) - amount)
             except (TypeError, ValueError):
                 pass
+    # Step 6c: jack_out_lock — Superglue and similar effects set a
+    # rounds_remaining countdown on active_boosts. The
+    # _check_jack_out_allowed gate reads it; on_turn_end (or equivalent
+    # decrement) lowers it each round.
+    for op in resolver_state_ops:
+        if isinstance(op, dict) and op.get("op") == "jack_out_lock":
+            try:
+                rounds = int(op.get("rounds_remaining", 0))
+            except (TypeError, ValueError):
+                rounds = 0
+            if rounds > 0:
+                boosts = state.setdefault("active_boosts", {})
+                if isinstance(boosts, dict):
+                    cur = 0
+                    try:
+                        cur = int(boosts.get("jack_out_lock_rounds_remaining", 0))
+                    except (TypeError, ValueError):
+                        cur = 0
+                    # Stack durations? RAW is silent; pick max so a fresh
+                    # Superglue refreshes rather than truncates.
+                    boosts["jack_out_lock_rounds_remaining"] = max(cur, rounds)
 
 
 def _apply_brain_damage_hp(state, game_state, name_key, pipeline_state=None):
@@ -712,6 +733,60 @@ def _apply_disconnect_cascade(state, game_state, name_key, pipeline_state=None):
         pass
 
 
+# Step 6c: jack-out gate
+# ---------------------------------------------------------------------------
+# Causes that BYPASS the gate — physical severance can't be glued, neural
+# collapse from flatline overrides any program effect.
+_JACK_OUT_BYPASS_CAUSES = frozenset({
+    "ally_unplugged",
+    "ally_dragged_out_of_range",
+    "connection_severed",
+    "flatline",  # backend-internal cause used by _check_forced_disconnect
+})
+
+# Causes that ARE gated — voluntary self-initiated jack-outs.
+_JACK_OUT_GATED_CAUSES = frozenset({
+    "self_unplugged",
+    "voluntary_safe",  # used by the hack_complete=True voluntary path
+})
+
+
+def _check_jack_out_allowed(state, cause=None):
+    """Return (allowed: bool, reason_or_None: str) for a jack-out attempt.
+
+    Step 6c gate: Superglue (and future programs) lock voluntary jack-out
+    by setting active_boosts.jack_out_lock_rounds_remaining > 0. Forced
+    disconnects (ally physically unplugs, ally drags body, flatline)
+    bypass the gate — physical severance can't be blocked by software.
+
+    Args:
+        state: hack_state dict.
+        cause: jack-out cause (one of _JACK_OUT_BYPASS_CAUSES or
+               _JACK_OUT_GATED_CAUSES). If None, treated as gated
+               (defensive — unknown causes are blocked).
+
+    Returns:
+        (True, None) if the jack-out is allowed.
+        (False, reason_str) if the gate blocks it.
+    """
+    if cause in _JACK_OUT_BYPASS_CAUSES:
+        return True, None
+    boosts = state.get("active_boosts", {}) if isinstance(state, dict) else {}
+    if not isinstance(boosts, dict):
+        return True, None
+    rounds_left = boosts.get("jack_out_lock_rounds_remaining", 0)
+    try:
+        rounds_int = int(rounds_left)
+    except (TypeError, ValueError):
+        rounds_int = 0
+    if rounds_int > 0:
+        return False, (
+            f"Jack-out blocked by Superglue ({rounds_int} round"
+            f"{'s' if rounds_int != 1 else ''} remaining)."
+        )
+    return True, None
+
+
 def _apply_initiate_unsafe_jack_out(state, tool_input, game_state, name_key, pipeline_state=None):
     """Handle model-signaled Unsafe Jack Out.
 
@@ -725,6 +800,10 @@ def _apply_initiate_unsafe_jack_out(state, tool_input, game_state, name_key, pip
     Idempotent — _cascade_applied guards against double-hits if the model
     re-emits this across retries.
 
+    Step 6c: routed through _check_jack_out_allowed. Forced/external
+    causes (ally_*, connection_severed) bypass the Superglue lock;
+    self_unplugged is gated.
+
     Expected tool_input shape:
         "initiate_unsafe_jack_out": {
             "cause": "ally_unplugged" | "ally_dragged_out_of_range" |
@@ -735,6 +814,18 @@ def _apply_initiate_unsafe_jack_out(state, tool_input, game_state, name_key, pip
     """
     ujo = tool_input.get("initiate_unsafe_jack_out") if isinstance(tool_input, dict) else None
     if not isinstance(ujo, dict):
+        return
+    cause = ujo.get("cause")
+    allowed, gate_reason = _check_jack_out_allowed(state, cause=cause)
+    if not allowed:
+        # Surface a structured rejection on hack_state. The model receives
+        # this on its next injection and can narrate the failed escape.
+        state["_jack_out_rejected"] = {
+            "cause": cause,
+            "actor": ujo.get("actor"),
+            "attempted_reason": ujo.get("reason"),
+            "gate_reason": gate_reason,
+        }
         return
     try:
         if not state.get("_cascade_applied"):
@@ -879,17 +970,53 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
         remaining = hack_state.get("net_actions_remaining", hack_state.get("net_actions_per_turn", 3))
         remaining = max(0, remaining - net_actions_used)
         if remaining <= 0:
-            # Turn complete — reset for next turn and flag meatspace
-            hack_state["net_actions_remaining"] = hack_state.get("net_actions_per_turn", 3)
+            # Turn complete — reset for next turn and flag meatspace.
+            # Step 6c: Overclock grants +1 NA on the upcoming turn. Consume
+            # the active_boosts.overclock_pending flag here at the boundary.
+            base_na = hack_state.get("net_actions_per_turn", 3)
+            boosts = hack_state.get("active_boosts", {}) if isinstance(hack_state.get("active_boosts"), dict) else {}
+            if boosts.get("overclock_pending"):
+                hack_state["net_actions_remaining"] = base_na + 1
+                # Clear the flag (single-shot bonus)
+                boosts.pop("overclock_pending", None)
+            else:
+                hack_state["net_actions_remaining"] = base_na
+            # Step 6c: tick the Superglue jack-out lock countdown each
+            # turn boundary. The lock lives on the TARGET's state (not on
+            # the deck of whoever fired Superglue), so decrement is
+            # backend-driven here rather than via a registry on_turn_end
+            # hook (which would never fire — the target doesn't load
+            # Superglue).
+            if isinstance(boosts, dict):
+                _glue_left = boosts.get("jack_out_lock_rounds_remaining", 0)
+                try:
+                    _glue_int = int(_glue_left)
+                except (TypeError, ValueError):
+                    _glue_int = 0
+                if _glue_int > 0:
+                    if _glue_int - 1 > 0:
+                        boosts["jack_out_lock_rounds_remaining"] = _glue_int - 1
+                    else:
+                        boosts.pop("jack_out_lock_rounds_remaining", None)
             hack_state["meatspace_due"] = True
         else:
             hack_state["net_actions_remaining"] = remaining
             hack_state["meatspace_due"] = False
 
-    # Hack completion
+    # Hack completion (voluntary safe Jack Out). Step 6c: gated by
+    # _check_jack_out_allowed — Superglue blocks voluntary jack-outs.
     if tool_input.get("hack_complete"):
-        hack_state["active"] = False
-        hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
+        _allowed, _gate_reason = _check_jack_out_allowed(hack_state, cause="voluntary_safe")
+        if _allowed:
+            hack_state["active"] = False
+            hack_state["narrative_summary"] = tool_input.get("narrative_summary", "Hack completed.")
+        else:
+            hack_state["_jack_out_rejected"] = {
+                "cause": "voluntary_safe",
+                "actor": "self",
+                "attempted_reason": tool_input.get("narrative_summary", ""),
+                "gate_reason": _gate_reason,
+            }
 
     # Combat breakout — flag for dispatch to transition to net_combat mode
     initiate_combat = tool_input.get("initiate_combat")

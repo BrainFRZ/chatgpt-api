@@ -2004,5 +2004,330 @@ class TestStep6bAlertHookWriteback(unittest.TestCase):
         self.assertEqual(hs["alert_level"], 2)
 
 
+class TestStep6cAttackerEntries(unittest.TestCase):
+    """Step 6c: Nervescrub, Poison Flatline, Superglue, Overclock + the
+    Superglue jack-out gate."""
+
+    def _hs(self, programs, hardware=None, active_boosts=None):
+        return {
+            "active_programs": programs,
+            "installed_hardware": hardware or [],
+            "active_boosts": active_boosts or {},
+        }
+
+    def _attacker(self, name):
+        return {"name": name, "status": "active", "rez": 0, "category": "attacker"}
+
+    # ----- Nervescrub -----
+
+    def test_nervescrub_emits_stat_debuff(self):
+        progs = [self._attacker("Nervescrub")]
+        with patch("game_systems.cpred_program_effects.random.randint",
+                   return_value=4):
+            ops, _ = cpe.run_program_attack_hit_hooks(
+                {"hit": True, "target_name": "BlackHat"},
+                self._hs(progs), firing_program_name="Nervescrub")
+        debuff_ops = [o for o in ops if o.get("op") == "stat_debuff"]
+        self.assertEqual(len(debuff_ops), 1)
+        op = debuff_ops[0]
+        self.assertEqual(set(op["stats"]), {"INT", "REF", "DEX"})
+        self.assertEqual(op["amount"], 4)
+        self.assertEqual(op["duration"], "1 hour")
+        self.assertEqual(op["source"], "Nervescrub")
+        self.assertEqual(op["target"], "BlackHat")
+
+    def test_nervescrub_metadata(self):
+        e = cpe.PROGRAM_EFFECTS["Nervescrub"]
+        self.assertEqual(e["category"], "attacker")
+        self.assertIn("on_program_attack_hit", e["hooks"])
+
+    # ----- Poison Flatline -----
+
+    def test_poison_flatline_destroys_random_program(self):
+        progs = [
+            self._attacker("Poison Flatline"),
+            {"name": "Worm", "status": "active", "rez": 7, "category": "booster"},
+            {"name": "Armor", "status": "active", "rez": 7, "category": "defender"},
+        ]
+        firing = progs[0]
+        # Force random.choice to pick first candidate deterministically.
+        with patch("game_systems.cpred_program_effects.random.choice",
+                   side_effect=lambda seq: seq[0]):
+            ops, _ = cpe.run_program_attack_hit_hooks(
+                {"hit": True, "target_name": "BlackHat"},
+                self._hs(progs), firing_program_name="Poison Flatline")
+        destroy_ops = [o for o in ops if o.get("op") == "program_destroy"]
+        self.assertEqual(len(destroy_ops), 1)
+        self.assertEqual(destroy_ops[0]["program_name"], "Worm")
+        self.assertEqual(destroy_ops[0]["source"], "Poison Flatline")
+
+    def test_poison_flatline_skips_self(self):
+        """Poison Flatline shouldn't destroy itself when it's the firing program."""
+        progs = [self._attacker("Poison Flatline")]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True, "target_name": "X"},
+            self._hs(progs), firing_program_name="Poison Flatline")
+        destroy_ops = [o for o in ops if o.get("op") == "program_destroy"]
+        self.assertEqual(destroy_ops, [])
+        no_target = [o for o in ops if o.get("op") == "poison_flatline_no_target"]
+        self.assertEqual(len(no_target), 1)
+
+    def test_poison_flatline_metadata(self):
+        e = cpe.PROGRAM_EFFECTS["Poison Flatline"]
+        self.assertEqual(e["category"], "attacker")
+
+    # ----- Superglue -----
+
+    def test_superglue_emits_movement_lock_and_jack_out_lock(self):
+        progs = [self._attacker("Superglue")]
+        with patch("game_systems.cpred_program_effects.random.randint",
+                   return_value=4):
+            ops, _ = cpe.run_program_attack_hit_hooks(
+                {"hit": True, "target_name": "BlackHat"},
+                self._hs(progs), firing_program_name="Superglue")
+        ml = [o for o in ops if o.get("op") == "movement_lock"]
+        jl = [o for o in ops if o.get("op") == "jack_out_lock"]
+        self.assertEqual(len(ml), 1)
+        self.assertEqual(len(jl), 1)
+        self.assertEqual(jl[0]["rounds_remaining"], 4)
+        self.assertEqual(jl[0]["source"], "Superglue")
+
+    def test_superglue_duration_varies_with_d6_roll(self):
+        progs = [self._attacker("Superglue")]
+        with patch("game_systems.cpred_program_effects.random.randint",
+                   return_value=1):
+            ops, _ = cpe.run_program_attack_hit_hooks(
+                {"hit": True, "target_name": "X"},
+                self._hs(progs), firing_program_name="Superglue")
+        jl = [o for o in ops if o.get("op") == "jack_out_lock"]
+        self.assertEqual(jl[0]["rounds_remaining"], 1)
+
+    # ----- Overclock -----
+
+    def test_overclock_registered(self):
+        e = cpe.PROGRAM_EFFECTS.get("Overclock")
+        self.assertIsNotNone(e)
+        self.assertEqual(e["category"], "boosted_action")
+        self.assertEqual(e["order"], 60)
+
+    def test_overclock_on_turn_end_is_noop(self):
+        """Overclock pending flag persists until consumed at turn-boundary
+        NA reset (apply_hack_state). on_turn_end is a no-op."""
+        progs = [{"name": "Overclock", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        ops, _ = cpe.run_turn_end_hooks(
+            self._hs(progs, active_boosts={"overclock_pending": True}), {})
+        # Overclock contributes no ops (Fortify might emit its clear though,
+        # so filter to overclock-related)
+        oc_ops = [o for o in ops if o.get("source") == "Overclock"
+                  or "overclock" in str(o).lower()]
+        self.assertEqual(oc_ops, [])
+
+
+class TestStep6cJackOutGate(unittest.TestCase):
+    """Step 6c: _check_jack_out_allowed predicate + integration with
+    _apply_initiate_unsafe_jack_out and the voluntary hack_complete path."""
+
+    def test_gate_allows_with_no_lock(self):
+        from game_systems.cpred_hack import _check_jack_out_allowed
+        state = {"active_boosts": {}}
+        allowed, reason = _check_jack_out_allowed(state, cause="self_unplugged")
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+
+    def test_gate_blocks_self_unplugged_when_glued(self):
+        from game_systems.cpred_hack import _check_jack_out_allowed
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 3}}
+        allowed, reason = _check_jack_out_allowed(state, cause="self_unplugged")
+        self.assertFalse(allowed)
+        self.assertIn("Superglue", reason)
+        self.assertIn("3", reason)
+
+    def test_gate_allows_ally_unplugged_even_when_glued(self):
+        """Physical severance bypasses the glue."""
+        from game_systems.cpred_hack import _check_jack_out_allowed
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 5}}
+        for cause in ("ally_unplugged", "ally_dragged_out_of_range",
+                       "connection_severed", "flatline"):
+            allowed, _ = _check_jack_out_allowed(state, cause=cause)
+            self.assertTrue(allowed, f"cause={cause!r} wrongly blocked")
+
+    def test_gate_blocks_voluntary_safe_when_glued(self):
+        from game_systems.cpred_hack import _check_jack_out_allowed
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 1}}
+        allowed, reason = _check_jack_out_allowed(state, cause="voluntary_safe")
+        self.assertFalse(allowed)
+        self.assertIn("Superglue", reason)
+
+    def test_gate_zero_lock_allows(self):
+        from game_systems.cpred_hack import _check_jack_out_allowed
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 0}}
+        allowed, _ = _check_jack_out_allowed(state, cause="self_unplugged")
+        self.assertTrue(allowed)
+
+    # ----- Integration: _apply_initiate_unsafe_jack_out gate -----
+
+    def test_initiate_unsafe_jack_out_blocks_self_unplugged_when_glued(self):
+        from game_systems.cpred_hack import _apply_initiate_unsafe_jack_out
+        state = {
+            "active": True,
+            "active_boosts": {"jack_out_lock_rounds_remaining": 2},
+            "ice_status": {},
+        }
+        tool_input = {"initiate_unsafe_jack_out": {
+            "cause": "self_unplugged", "actor": "self",
+            "reason": "Yanking the plug",
+        }}
+        _apply_initiate_unsafe_jack_out(state, tool_input, {}, "hacker_name")
+        # Hack still active — jack-out blocked
+        self.assertTrue(state.get("active"))
+        self.assertNotIn("_cascade_applied", state)
+        # Rejection surfaced for narration
+        rej = state.get("_jack_out_rejected")
+        self.assertIsNotNone(rej)
+        self.assertEqual(rej["cause"], "self_unplugged")
+        self.assertIn("Superglue", rej["gate_reason"])
+
+    def test_initiate_unsafe_jack_out_allows_ally_unplug_when_glued(self):
+        from game_systems.cpred_hack import _apply_initiate_unsafe_jack_out
+        state = {
+            "active": True,
+            "active_boosts": {"jack_out_lock_rounds_remaining": 5},
+            "ice_status": {},
+        }
+        tool_input = {"initiate_unsafe_jack_out": {
+            "cause": "ally_unplugged", "actor": "Vincent",
+            "reason": "Vincent yanks the cable",
+        }}
+        _apply_initiate_unsafe_jack_out(state, tool_input, {}, "hacker_name")
+        # Cascade fired (ally bypasses glue)
+        self.assertTrue(state.get("_cascade_applied"))
+        self.assertNotIn("_jack_out_rejected", state)
+
+    # ----- Integration: voluntary safe Jack Out (hack_complete=True) -----
+
+    def test_hack_complete_blocked_when_glued(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run")
+        hs["active_boosts"] = {"jack_out_lock_rounds_remaining": 2}
+        apply_hack_state(hs, {
+            "hack_complete": True,
+            "narrative_summary": "Jacking out clean",
+        })
+        # Hack still active — voluntary jack-out blocked
+        self.assertTrue(hs.get("active"))
+        self.assertIsNotNone(hs.get("_jack_out_rejected"))
+
+    def test_hack_complete_allowed_when_unglued(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run")
+        apply_hack_state(hs, {
+            "hack_complete": True,
+            "narrative_summary": "Clean exit",
+        })
+        self.assertFalse(hs.get("active"))
+        self.assertEqual(hs.get("narrative_summary"), "Clean exit")
+
+    def test_hack_complete_allowed_after_glue_expires(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run")
+        hs["active_boosts"] = {"jack_out_lock_rounds_remaining": 0}
+        apply_hack_state(hs, {
+            "hack_complete": True,
+            "narrative_summary": "Out the back door",
+        })
+        self.assertFalse(hs.get("active"))
+
+
+class TestStep6cWriteback(unittest.TestCase):
+    """Resolver state ops emitted by Step 6c hooks/handlers are consumed
+    correctly by _apply_resolver_net_ops and apply_hack_state."""
+
+    def test_jack_out_lock_op_sets_active_boost_countdown(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_boosts": {}}
+        _apply_resolver_net_ops(state,
+            [{"op": "jack_out_lock", "rounds_remaining": 4,
+              "source": "Superglue"}])
+        self.assertEqual(state["active_boosts"]["jack_out_lock_rounds_remaining"], 4)
+
+    def test_jack_out_lock_takes_max_when_stacked(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 2}}
+        _apply_resolver_net_ops(state,
+            [{"op": "jack_out_lock", "rounds_remaining": 5,
+              "source": "Superglue"}])
+        self.assertEqual(state["active_boosts"]["jack_out_lock_rounds_remaining"], 5)
+
+    def test_jack_out_lock_existing_higher_keeps_existing(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_boosts": {"jack_out_lock_rounds_remaining": 6}}
+        _apply_resolver_net_ops(state,
+            [{"op": "jack_out_lock", "rounds_remaining": 2,
+              "source": "Superglue"}])
+        self.assertEqual(state["active_boosts"]["jack_out_lock_rounds_remaining"], 6)
+
+    def test_turn_boundary_decrements_jack_out_lock(self):
+        """End of turn ticks the Superglue countdown."""
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_boosts"] = {"jack_out_lock_rounds_remaining": 3}
+        # Burn the whole turn to trigger the boundary reset
+        apply_hack_state(hs, {"hack_state": {
+            "net_actions_used": hs["net_actions_per_turn"],
+        }})
+        self.assertEqual(hs["active_boosts"]["jack_out_lock_rounds_remaining"], 2)
+
+    def test_turn_boundary_clears_jack_out_lock_at_zero(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_boosts"] = {"jack_out_lock_rounds_remaining": 1}
+        apply_hack_state(hs, {"hack_state": {
+            "net_actions_used": hs["net_actions_per_turn"],
+        }})
+        self.assertNotIn("jack_out_lock_rounds_remaining", hs["active_boosts"])
+
+    # ----- Overclock turn-boundary integration -----
+
+    def test_overclock_grants_plus_one_na_at_turn_reset(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        base_na = hs["net_actions_per_turn"]
+        hs["active_boosts"] = {"overclock_pending": True}
+        # Consume all NA → triggers turn boundary reset
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na}})
+        self.assertEqual(hs["net_actions_remaining"], base_na + 1)
+        # Single-shot — flag cleared
+        self.assertNotIn("overclock_pending", hs["active_boosts"])
+
+    def test_overclock_does_not_persist_across_turns(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        base_na = hs["net_actions_per_turn"]
+        hs["active_boosts"] = {"overclock_pending": True}
+        # First turn boundary: bonus applies
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na}})
+        self.assertEqual(hs["net_actions_remaining"], base_na + 1)
+        # Second turn boundary: no more bonus
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na + 1}})
+        self.assertEqual(hs["net_actions_remaining"], base_na)
+
+    def test_overclock_flag_via_boosted_action_resolver(self):
+        """End-to-end: boosted_action sets overclock_pending."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Overclock", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "RedVelvet",
+              "program": "Overclock"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=2,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["active_boost"], "overclock_pending")
+
+
 if __name__ == "__main__":
     unittest.main()
