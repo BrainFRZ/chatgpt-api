@@ -6690,5 +6690,156 @@ class TestProgramAttackIntentOnly(unittest.TestCase):
         self.assertEqual(r["roll_result"]["defender_total"], 3 + 0)
 
 
+class TestNetAbilityEnum(unittest.TestCase):
+    """Step 0b: NET-context skill_check / opposed_check require an `ability` tag.
+
+    Closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide /
+    Virus / Zap / Initiative. Required when net=true so program effect hooks
+    (Step 4 boosters: Worm/Eraser/See Ya/Speedy) fire on the right roll.
+    """
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def test_skill_check_net_with_valid_ability_passes_through(self):
+        """net=true + valid ability → resolves normally, ability tag plumbed onto result."""
+        with patch(self.MOCK, return_value=7):
+            result = resolve_actions([{
+                "type": "skill_check",
+                "character": "RedVelvet",
+                "stat_value": 4,
+                "skill_value": 0,
+                "dv": 10,
+                "net": True,
+                "ability": "Backdoor",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("net"))
+        self.assertEqual(r.get("ability"), "Backdoor")
+
+    def test_skill_check_net_missing_ability_returns_error(self):
+        """net=true with no ability → error result, no roll."""
+        result = resolve_actions([{
+            "type": "skill_check",
+            "character": "RedVelvet",
+            "stat_value": 4,
+            "skill_value": 0,
+            "dv": 10,
+            "net": True,
+        }])
+        r = result["results"][0]
+        self.assertEqual(r.get("error"), "missing_or_invalid_ability")
+        self.assertIn("ability", r.get("reason", "").lower())
+
+    def test_skill_check_net_invalid_ability_returns_error(self):
+        """net=true with bogus ability → error result; closed enum is enforced."""
+        result = resolve_actions([{
+            "type": "skill_check",
+            "character": "RedVelvet",
+            "stat_value": 4,
+            "skill_value": 0,
+            "dv": 10,
+            "net": True,
+            "ability": "Hackeroni",  # not in INTERFACE_ABILITIES
+        }])
+        r = result["results"][0]
+        self.assertEqual(r.get("error"), "missing_or_invalid_ability")
+
+    def test_opposed_check_net_with_valid_ability_passes_through(self):
+        """NET opposed_check (Zap/Slide) requires ability tag, plumbed onto result."""
+        with patch(self.MOCK, side_effect=[7, 4, 3]):  # atk d10, def d10, zap d6
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "RedVelvet",
+                "attacker_stat": 6,
+                "defender_stat": 4,
+                "net": True,
+                "ability": "Zap",
+                "zap": True,
+                "interface_rank": 6,
+                "target": "Hellhound",
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("net"))
+        self.assertEqual(r.get("ability"), "Zap")
+
+    def test_opposed_check_net_missing_ability_returns_error(self):
+        result = resolve_actions([{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "attacker_stat": 6,
+            "defender_stat": 4,
+            "net": True,
+            "zap": True,
+        }])
+        r = result["results"][0]
+        self.assertEqual(r.get("error"), "missing_or_invalid_ability")
+
+    def test_non_net_skill_check_does_not_require_ability(self):
+        """Meatspace skill_check (no net flag) is unaffected — no ability needed."""
+        with patch(self.MOCK, return_value=8):
+            result = resolve_actions([{
+                "type": "skill_check",
+                "character": "V",
+                "stat_value": 7,
+                "skill_value": 5,
+                "dv": 13,
+                # no net, no ability
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertTrue(r["success"])
+        # ability/net keys should not be set on non-NET checks
+        self.assertNotIn("net", r)
+        self.assertNotIn("ability", r)
+
+    def test_non_net_opposed_check_does_not_require_ability(self):
+        """Meatspace opposed_check is unaffected."""
+        with patch(self.MOCK, side_effect=[8, 4]):
+            result = resolve_actions([{
+                "type": "opposed_check",
+                "character": "V",
+                "attacker_stat": 6,
+                "defender_stat": 4,
+            }])
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+
+    def test_all_nine_abilities_are_accepted(self):
+        """Closed enum sanity check: each documented ability resolves cleanly."""
+        for ability in ["Backdoor", "Cloak", "Control", "Eye-Dee",
+                        "Pathfinder", "Slide", "Virus", "Zap", "Initiative"]:
+            with patch(self.MOCK, return_value=7):
+                result = resolve_actions([{
+                    "type": "skill_check",
+                    "character": "RedVelvet",
+                    "stat_value": 4,
+                    "skill_value": 0,
+                    "dv": 10,
+                    "net": True,
+                    "ability": ability,
+                }])
+            r = result["results"][0]
+            self.assertNotIn("error", r, f"ability={ability!r} unexpectedly rejected")
+            self.assertEqual(r.get("ability"), ability)
+
+    def test_ability_is_case_sensitive(self):
+        """Closed enum is exact-match: lowercase 'backdoor' is rejected."""
+        result = resolve_actions([{
+            "type": "skill_check",
+            "character": "RedVelvet",
+            "stat_value": 4,
+            "skill_value": 0,
+            "dv": 10,
+            "net": True,
+            "ability": "backdoor",  # lowercase
+        }])
+        r = result["results"][0]
+        self.assertEqual(r.get("error"), "missing_or_invalid_ability")
+
+
 if __name__ == "__main__":
     unittest.main()

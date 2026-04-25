@@ -1453,7 +1453,7 @@ The Hacking Rulebook document covers netrunning procedures: Quick Hack structure
 - Luck: spend points to add to Interface checks (1:1).
 
 ### Mechanics Resolution (resolve_mechanics tool — INCREMENTAL)
-Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE combat) individually. Narrate AFTER receiving each result. Use skill_check action type for Interface checks (stat_value = Interface rank, skill_value = 0, dv = target DV). After all actions are resolved and narrated, call `report_hack_state`.
+Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE combat) individually. Narrate AFTER receiving each result. Use skill_check action type for Interface checks (stat_value = Interface rank, skill_value = 0, dv = target DV, **`net`: true**, **`ability`** matching the Interface Ability rolled — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative). The `ability` tag is REQUIRED on every NET skill_check / opposed_check — backend uses it to fire program effect bonuses (e.g. Worm +2 on Backdoor) on the matching roll. After all actions are resolved and narrated, call `report_hack_state`.
 When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in report_hack_state.
 For anti-program ICE (Dragon/Killer/Sabertooth) attacking programs, use `ice_attack_vs_program`: {type, character (ICE name), ice_type, target_program, target_program_def, target_program_rez}.
 When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
@@ -1837,7 +1837,7 @@ Same as standalone combat: check project files for named enemy stat blocks befor
 ### Mechanics Resolution (resolve_mechanics tool — INCREMENTAL)
 Call `resolve_mechanics` ONCE PER COMBATANT TURN for meatspace actions, and once per NET action. Narrate AFTER receiving dice results, never before.
 
-For NET Interface checks, use skill_check: {type: "skill_check", character: "<netrunner>", stat_value: <Interface rank>, skill_value: 0, dv: <target DV>}
+For NET Interface checks, use skill_check: {type: "skill_check", character: "<netrunner>", stat_value: <Interface rank>, skill_value: 0, dv: <target DV>, **`net`: true**, **`ability`** (REQUIRED — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative)}. The `ability` tag is REQUIRED on every NET skill_check / opposed_check; backend uses it to fire program effect bonuses (e.g. Worm +2 on Backdoor) on the matching roll.
 
 Turn flow:
 1. For each combatant's turn (in initiative order):
@@ -2165,8 +2165,8 @@ You decide:
 The backend resolves dice. Do NOT roll dice or calculate outcomes.
 
 DICE ACTION TYPES for the "actions" array:
-- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true} — for flat Interface checks
-- opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET checks.
+- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true, ability (REQUIRED when net=true; closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} — for flat Interface checks
+- opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, ability (REQUIRED when net=true; same closed enum), zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET checks.
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
@@ -2229,8 +2229,8 @@ MEATSPACE ACTION TYPES (same schemas as combat planning — backend auto-resolve
 - ranged_attack, melee_attack, autofire, skill_check, death_save, initiative
 
 NET ACTION TYPES:
-- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true)
-- opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET.
+- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true, ability (REQUIRED — closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative))
+- opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, ability (REQUIRED — same enum), zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET.
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.

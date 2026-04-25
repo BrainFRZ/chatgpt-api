@@ -52,6 +52,26 @@ _DV_TIERS = {
 }
 
 # ---------------------------------------------------------------------------
+# NET Interface Abilities (closed enum)
+# ---------------------------------------------------------------------------
+# Required tag on NET-context skill_check / opposed_check actions. Identifies
+# *which* Interface Ability is being rolled so program effect hooks (e.g.
+# Worm +2 on Backdoor) can fire on the right roll. "Initiative" is included
+# for Speedy Gonzalvez's NET-initiative bonus per CPRED p.205 — technically
+# not an Interface Ability, but it shares the same hook surface.
+INTERFACE_ABILITIES = frozenset({
+    "Backdoor",
+    "Cloak",
+    "Control",
+    "Eye-Dee",
+    "Pathfinder",
+    "Slide",
+    "Virus",
+    "Zap",
+    "Initiative",
+})
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -3185,6 +3205,27 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 elif isinstance(_difficulty, (int, float)):
                     action["dv"] = int(_difficulty)
 
+            # ----- Validate `ability` on NET-context skill / opposed checks -----
+            # Required tag when net=true so Interface Ability hooks can fire on
+            # the right roll (Step 4 boosters: Worm/Eraser/See Ya/Speedy Gonzalvez).
+            # Closed enum — schema validation lives at the contract layer too,
+            # but the model can drift, so reject + return a structured error here.
+            if action_type in ("skill_check", "opposed_check") and action.get("net"):
+                _ability = action.get("ability")
+                if not isinstance(_ability, str) or _ability not in INTERFACE_ABILITIES:
+                    _abilities_list = ", ".join(sorted(INTERFACE_ABILITIES))
+                    results.append({
+                        "type": action_type,
+                        "character": action.get("character", ""),
+                        "error": "missing_or_invalid_ability",
+                        "reason": (
+                            f"NET-context {action_type} requires an `ability` field "
+                            f"matching one of: {_abilities_list}. Got: {_ability!r}"
+                        ),
+                        "formatted": f"⚠ NET {action_type} missing valid `ability` tag",
+                    })
+                    continue
+
             # Standard stat/skill hydration per action type
             if action_type in ("skill_check", "ranged_attack", "autofire", "driving_check", "vehicle_weak_point"):
                 _hydrate_stats_from_state(
@@ -3390,6 +3431,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 )
                 result["type"] = "skill_check"
                 result["character"] = actor_name
+                if action.get("net"):
+                    result["net"] = True
+                    result["ability"] = action.get("ability")
                 # Emit wb_boost_spend op to consume the boost
                 if _wb_boost:
                     all_state_ops.append({
@@ -3620,6 +3664,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     wb_boost=_opp_wb,
                 )
                 result["character"] = actor_name
+                if action.get("net"):
+                    result["net"] = True
+                    result["ability"] = action.get("ability")
                 if _opp_wb:
                     all_state_ops.append({
                         "type": "relationship_op",
@@ -4146,7 +4193,8 @@ RESOLVE_MECHANICS_TOOL = {
         "Each action in the array is resolved deterministically with real dice rolls. "
         "Results include formatted roll strings for your 🎲 lines and state_ops for your edgerunner_ops.\n\n"
         "Action types:\n"
-        "- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception)}\n"
+        "- skill_check: {type, character, stat_value, skill_value, dv, seriously_wounded?, luck_spent?, target?, check_context? (social/persuasion/combat/perception), "
+        "net?: true (set on NET-context Interface checks), ability? (REQUIRED when net=true; one of: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative — tags which Interface Ability is rolling so program effect bonuses apply correctly)}\n"
         "- ranged_attack: {type, character, stat_value, skill_value, weapon_type (Pistol/SMG/Shotgun/Assault Rifle/Sniper Rifle/Bows & Crossbow/Grenade Launcher/Rocket Launcher), damage_dice, rof, "
         "target, target_sp, range_bracket (0=0-6m,1=7-12m,2=13-25m,3=26-50m,4=51-100m,5=101-200m,6=201-400m,7=401-800m), "
         "hit_location (head/body), is_ap?, is_rubber?, seriously_wounded?, luck_spent?, aimed_shot? (head/leg/held_item), weapon_name?, on_hit?, on_miss?}\n"
@@ -4160,8 +4208,9 @@ RESOLVE_MECHANICS_TOOL = {
         "- opposed_check: {type, character, attacker_stat, attacker_skill?, defender_stat, defender_skill?, "
         "attacker_label? (stat name), defender_label? (stat name), attacker_skill_label?, defender_skill_label?, "
         "seriously_wounded_attacker?, seriously_wounded_defender?, luck_spent?, target? (NPC name for rel bonus), "
-        "check_context? (social/persuasion/combat/perception)} — for contested rolls (Stealth vs Concentration, "
-        "Persuasion vs Concentration, etc.) and NET opposed checks (Zap/Slide with zap?: true, interface_rank?: N)\n"
+        "check_context? (social/persuasion/combat/perception), "
+        "net?: true (set on NET-context contests), ability? (REQUIRED when net=true; one of: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} "
+        "— for contested rolls (Stealth vs Concentration, Persuasion vs Concentration, etc.) and NET opposed checks (Zap/Slide with zap?: true, interface_rank?: N)\n"
         "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
