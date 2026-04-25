@@ -117,6 +117,113 @@ _ICE_EFFECT_OPS = {"program_destroy", "program_derez", "body_fire", "movement_lo
 _SLIDE_ICE_NAMES = {b["name"].lower() for b in ICE_STAT_BLOCKS.values() if b.get("effect") == "slide_penalty"}
 
 
+def _hud_to_datetime(time_str, date_str):
+    """Convert HUD HHMM time + date string to a comparable datetime.
+
+    Returns None if the time is unparseable. Falls back to a synthetic
+    epoch date when the date string is missing or unparseable, so two
+    same-day comparisons still work.
+    """
+    from datetime import datetime
+    if not time_str or not isinstance(time_str, str):
+        return None
+    t = time_str.strip()
+    if not t.isdigit() or len(t) > 4 or len(t) < 1:
+        return None
+    try:
+        if len(t) <= 2:
+            h, m = 0, int(t)
+        else:
+            h, m = int(t[:-2]), int(t[-2:])
+    except ValueError:
+        return None
+    if not (0 <= h < 24 and 0 <= m < 60):
+        return None
+    if isinstance(date_str, str) and date_str.strip():
+        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%d %B %Y"):
+            try:
+                d = datetime.strptime(date_str.strip(), fmt)
+                return d.replace(hour=h, minute=m)
+            except ValueError:
+                continue
+    return datetime(2000, 1, 1, h, m)
+
+
+def _stamp_debuff_expirations(state, pipeline_state):
+    """Stamp expires_at_time/date on any active_debuffs missing it.
+
+    Computed from the debuff's duration string (e.g. '1 hour') plus the
+    current HUD clock. Idempotent — debuffs already stamped are skipped.
+    No-op when the HUD clock has no seed yet.
+    """
+    debuffs = state.get("active_debuffs")
+    if not isinstance(debuffs, list):
+        return
+    if not isinstance(pipeline_state, dict):
+        return
+    hud = pipeline_state.get("hud_state", {})
+    if not isinstance(hud, dict):
+        return
+    time_str = hud.get("time", "")
+    date_str = hud.get("date", "")
+    if not time_str:
+        return
+    # Inline import: pipeline imports from game_systems, so a top-level
+    # import would be circular.
+    from pipeline import advance_clock, parse_time_passed
+    for db in debuffs:
+        if not isinstance(db, dict):
+            continue
+        if db.get("expires_at_time"):
+            continue
+        duration = db.get("duration", "")
+        if not isinstance(duration, str):
+            continue
+        seconds = parse_time_passed(duration)
+        if seconds <= 0:
+            continue
+        new_time, new_date = advance_clock(time_str, date_str, seconds)
+        db["expires_at_time"] = new_time
+        if new_date:
+            db["expires_at_date"] = new_date
+
+
+def _expire_active_debuffs(state, pipeline_state):
+    """Drop active_debuffs whose expires_at has passed per the HUD clock.
+
+    Debuffs without expires_at (legacy entries or ones with unparseable
+    durations) are kept — silent no-ops are safer than dropping them.
+    """
+    debuffs = state.get("active_debuffs")
+    if not isinstance(debuffs, list) or not debuffs:
+        return
+    if not isinstance(pipeline_state, dict):
+        return
+    hud = pipeline_state.get("hud_state", {})
+    if not isinstance(hud, dict):
+        return
+    now = _hud_to_datetime(hud.get("time", ""), hud.get("date", ""))
+    if now is None:
+        return
+    surviving = []
+    for db in debuffs:
+        if not isinstance(db, dict):
+            surviving.append(db)
+            continue
+        exp_time = db.get("expires_at_time")
+        if not exp_time:
+            surviving.append(db)
+            continue
+        exp_date = db.get("expires_at_date") or hud.get("date", "")
+        exp_dt = _hud_to_datetime(exp_time, exp_date)
+        if exp_dt is None:
+            surviving.append(db)
+            continue
+        if exp_dt > now:
+            surviving.append(db)
+    state["active_debuffs"] = surviving
+
+
 def _apply_persistent_ice_effects(state, model_hs, game_state, name_key, tick_condition):
     """Shared logic for fire tick/extinguish, wisp penalty, movement lock auto-clear, slide penalty auto-clear.
 
@@ -1047,6 +1154,8 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
     _apply_persistent_ice_effects(hack_state, hs, game_state, "hacker_name", hack_state.get("meatspace_due"))
     _apply_trace_auto_increment(hack_state, hack_state.get("meatspace_due"))
     _apply_alert_ice_spawn(hack_state)
+    _stamp_debuff_expirations(hack_state, pipeline_state)
+    _expire_active_debuffs(hack_state, pipeline_state)
 
     # Model-signaled Unsafe Jack Out (ally unplugs / drags out of range / self-yanks).
     # Applied before flatline check so an ally rescuing an unconscious Netrunner
@@ -1158,7 +1267,13 @@ def _render_active_effects(state):
         if isinstance(_db, dict):
             _stats = _db.get("stats", [])
             _stats_str = "/".join(str(s) for s in _stats) if isinstance(_stats, list) else str(_stats)
-            effects.append(f"DEBUFF: {_stats_str} -{_db.get('amount', 0)} ({_db.get('source', '?')}, {_db.get('duration', '?')})")
+            _exp_t = _db.get("expires_at_time")
+            _exp_d = _db.get("expires_at_date")
+            if _exp_t:
+                _when = f"expires {_exp_d} {_exp_t}" if _exp_d else f"expires {_exp_t}"
+            else:
+                _when = _db.get("duration", "?")
+            effects.append(f"DEBUFF: {_stats_str} -{_db.get('amount', 0)} ({_db.get('source', '?')}, {_when})")
     destroyed = state.get("destroyed_programs", [])
     if isinstance(destroyed, list) and destroyed:
         effects.append(f"DESTROYED PROGRAMS: {', '.join(str(d) for d in destroyed)} (permanently lost)")

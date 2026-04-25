@@ -16,6 +16,8 @@ from .cpred_hack import (
     _apply_persistent_ice_effects,
     _apply_resolver_net_ops,
     _apply_trace_auto_increment,
+    _expire_active_debuffs,
+    _stamp_debuff_expirations,
     _check_forced_disconnect,
     _get_alert_name,
     _mark_forced_disconnect,
@@ -205,6 +207,8 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     _apply_persistent_ice_effects(nc, hs, game_state, "netrunner", _has_net_actions)
     _apply_trace_auto_increment(nc, _has_net_actions)
     _apply_alert_ice_spawn(nc)
+    _stamp_debuff_expirations(nc, pipeline_state)
+    _expire_active_debuffs(nc, pipeline_state)
 
     # --- Completion flags ---
     nc["combat_complete"] = tool_input.get("combat_complete", nc.get("combat_complete", False))

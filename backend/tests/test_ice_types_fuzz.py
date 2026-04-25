@@ -1612,5 +1612,167 @@ class TestWispPenaltyNetCombatFuzz(unittest.TestCase):
                              f"!= nc remaining={nc['net_actions_remaining']}")
 
 
+class TestStatDebuffExpiration(unittest.TestCase):
+    """Verify Liche/Scorpion/Nervescrub debuffs expire on the HUD clock.
+
+    The duration string ('1 hour', '1h') was previously informational.
+    These tests pin the new behavior: stamp expires_at_time/date on apply,
+    drop entries whose expiration is past per the HUD clock.
+    """
+
+    def _ps(self, nc=None, gs=None, hud_time="1430", hud_date="2026-04-25"):
+        nc = nc or _make_nc_state()
+        gs = gs or _make_game_state()
+        return {
+            "net_combat": nc,
+            "combat": None,
+            "character_states": {},
+            "game_state": gs,
+            "hud_state": {"time": hud_time, "date": hud_date},
+        }
+
+    def test_stamp_on_fresh_debuff_in_hack(self):
+        """1 hour duration + 14:30 → expires_at 15:30 same date."""
+        hs = _make_hack_state()
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "1430", "date": "2026-04-25"}, "game_state": gs}
+        ops = [{"op": "stat_debuff", "stats": ["INT", "REF", "DEX"],
+                "amount": 3, "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+        db = hs["active_debuffs"][0]
+        self.assertEqual(db["expires_at_time"], "1530")
+        self.assertEqual(db["expires_at_date"], "2026-04-25")
+
+    def test_expire_past_debuff_in_hack(self):
+        """Debuff stamped to expire 14:30 dropped when HUD is 15:00 same day."""
+        hs = _make_hack_state()
+        hs["active_debuffs"] = [
+            {"stats": ["INT"], "amount": 3, "source": "Liche", "duration": "1 hour",
+             "expires_at_time": "1430", "expires_at_date": "2026-04-25"}
+        ]
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "1500", "date": "2026-04-25"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps)
+        self.assertEqual(hs["active_debuffs"], [])
+
+    def test_keep_unexpired_debuff(self):
+        """Debuff expiring 16:00 still present at 15:30."""
+        hs = _make_hack_state()
+        hs["active_debuffs"] = [
+            {"stats": ["MOVE"], "amount": 4, "source": "Scorpion", "duration": "1 hour",
+             "expires_at_time": "1600", "expires_at_date": "2026-04-25"}
+        ]
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "1530", "date": "2026-04-25"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps)
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+
+    def test_partial_expiration_keeps_some(self):
+        """Mix of expired + unexpired in same list — only expired drop."""
+        hs = _make_hack_state()
+        hs["active_debuffs"] = [
+            {"stats": ["INT"], "amount": 2, "source": "Liche-old", "duration": "1h",
+             "expires_at_time": "1400", "expires_at_date": "2026-04-25"},
+            {"stats": ["MOVE"], "amount": 3, "source": "Scorpion-new", "duration": "1h",
+             "expires_at_time": "1600", "expires_at_date": "2026-04-25"},
+        ]
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "1500", "date": "2026-04-25"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps)
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+        self.assertEqual(hs["active_debuffs"][0]["source"], "Scorpion-new")
+
+    def test_midnight_rollover(self):
+        """Debuff applied at 23:30 with 1h duration → expires 00:30 next day."""
+        hs = _make_hack_state()
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "2330", "date": "2026-04-25"}, "game_state": gs}
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        db = hs["active_debuffs"][0]
+        self.assertEqual(db["expires_at_time"], "0030")
+        self.assertEqual(db["expires_at_date"], "2026-04-26")
+        # Now advance to 00:31 next day — should expire
+        ps2 = {"hud_state": {"time": "0031", "date": "2026-04-26"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps2)
+        self.assertEqual(hs["active_debuffs"], [])
+
+    def test_no_clock_seed_skips_stamping(self):
+        """No HUD time → debuffs accumulate without expiration data (legacy fallback)."""
+        hs = _make_hack_state()
+        gs = _make_game_state()
+        ps = {"hud_state": {}, "game_state": gs}
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        db = hs["active_debuffs"][0]
+        self.assertNotIn("expires_at_time", db)
+
+    def test_unparseable_duration_persists(self):
+        """Garbage duration string → no stamp, debuff persists indefinitely."""
+        hs = _make_hack_state()
+        gs = _make_game_state()
+        ps = {"hud_state": {"time": "1430", "date": "2026-04-25"}, "game_state": gs}
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Mystery", "duration": "forever"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        db = hs["active_debuffs"][0]
+        self.assertNotIn("expires_at_time", db)
+        # Re-apply with later HUD — still there
+        ps2 = {"hud_state": {"time": "2359", "date": "2026-04-26"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps2)
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+
+    def test_stamping_idempotent(self):
+        """Re-applying with already-stamped debuff doesn't re-stamp."""
+        hs = _make_hack_state()
+        hs["active_debuffs"] = [
+            {"stats": ["INT"], "amount": 3, "source": "Liche", "duration": "1 hour",
+             "expires_at_time": "1530", "expires_at_date": "2026-04-25"}
+        ]
+        gs = _make_game_state()
+        # Different "now" time — should NOT re-stamp from the new time
+        ps = {"hud_state": {"time": "1500", "date": "2026-04-25"}, "game_state": gs}
+        apply_hack_state(hs, {"hack_state": {}}, game_state=gs, pipeline_state=ps)
+        self.assertEqual(hs["active_debuffs"][0]["expires_at_time"], "1530")
+
+    def test_in_net_combat_too(self):
+        """Same expiration logic ticks in apply_net_combat_state."""
+        nc = _make_nc_state()
+        nc["active_debuffs"] = [
+            {"stats": ["INT"], "amount": 3, "source": "Liche", "duration": "1h",
+             "expires_at_time": "1400", "expires_at_date": "2026-04-25"}
+        ]
+        gs = _make_game_state()
+        ps = self._ps(nc, gs, hud_time="1500")
+        tool = {"hack_state": {"net_actions_used": 1}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, game_state=gs)
+        self.assertEqual(nc["active_debuffs"], [])
+
+    def test_nervescrub_debuff_expires(self):
+        """Nervescrub uses the same stat_debuff op + 1h duration."""
+        nc = _make_nc_state()
+        gs = _make_game_state()
+        ps = self._ps(nc, gs, hud_time="1430")
+        ops = [{"op": "stat_debuff", "stats": ["INT", "REF", "DEX"],
+                "amount": 4, "source": "Nervescrub", "duration": "1 hour"}]
+        tool = {"hack_state": {"net_actions_used": 0}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, resolver_state_ops=ops, game_state=gs)
+        db = nc["active_debuffs"][0]
+        self.assertEqual(db["expires_at_time"], "1530")
+        # Tick forward an hour and a minute
+        ps2 = self._ps(nc, gs, hud_time="1531")
+        apply_net_combat_state(ps2, tool, game_state=gs)
+        self.assertEqual(nc["active_debuffs"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
