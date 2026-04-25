@@ -7437,6 +7437,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         _rm_active_state = _rm_nc
                                 _rm_net_actions_remaining = None
                                 _rm_active_boosts = None
+                                _rm_cycles_remaining = None
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
@@ -7447,6 +7448,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     if _rm_nar_raw is not None:
                                         _rm_net_actions_remaining = _safe_int(_rm_nar_raw)
                                     _rm_active_boosts = _rm_active_state.get("active_boosts")
+                                    _rm_cycles_raw = _rm_active_state.get("cycles_remaining")
+                                    if _rm_cycles_raw is not None:
+                                        _rm_cycles_remaining = _safe_int(_rm_cycles_raw)
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7486,6 +7490,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     character_states=(_rm_tracking_ps or {}).get("character_states"),
                                     net_actions_remaining=_rm_net_actions_remaining,
                                     active_boosts=_rm_active_boosts,
+                                    cycles_remaining=_rm_cycles_remaining,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(

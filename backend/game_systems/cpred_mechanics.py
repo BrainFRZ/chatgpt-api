@@ -2092,6 +2092,17 @@ _PROGRAM_STATUS_TRANSITIONS = {
 }
 
 
+# Step 6b: Boosted-Action programs and their pending-flag keys.
+# Each maps to (active_boosts key, optional duration_field, default_duration).
+# Boosted Actions cost 1 NET Action + 1 Cycle to activate, atomically.
+_BOOSTED_ACTION_PROGRAMS = {
+    "Surge":        ("surge_pending",        None, None),
+    "Mask":         ("mask_pending",         None, None),
+    "Fortify":      ("fortify_pending",      None, None),
+    "Spoof Signal": ("spoof_signal_pending", "spoof_signal_rounds_remaining", 2),
+}
+
+
 def _find_program_in_active(program_name, active_programs):
     """Case-insensitive lookup. Returns (entry, index) or (None, None)."""
     if not isinstance(active_programs, list) or not program_name:
@@ -3132,7 +3143,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     edgerunner_states: dict = None,
                     character_states: dict = None,
                     net_actions_remaining=None,
-                    active_boosts=None) -> dict:
+                    active_boosts=None,
+                    cycles_remaining=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3195,6 +3207,12 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     # Local handle for active_boosts (used by brain damage hooks for Fortify
     # expiry checks etc.). Coerce to dict so downstream get() calls are safe.
     _active_boosts = active_boosts if isinstance(active_boosts, dict) else {}
+    # Step 6b: running cycles counter for boosted_action atomicity. None
+    # means "skip validation" (callsites that don't pass it).
+    _cycles_remaining = (
+        int(cycles_remaining) if isinstance(cycles_remaining, (int, float))
+        else None
+    )
 
     _romantic_partners_t2 = _romantic_partner_names(25)
     _romantic_partners_t3 = _romantic_partner_names(45)
@@ -4187,6 +4205,124 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             net_actions_remaining - _psc_result.get("cost_net_actions", 0),
                         )
 
+            elif action_type == "boosted_action":
+                # Step 6b: activate a Boosted Action program (Surge / Mask /
+                # Fortify / Spoof Signal). Atomic: 1 NET Action + 1 Cycle
+                # debited together; insufficient resources fails soft with
+                # NEITHER consumed.
+                _ba_program = action.get("program") or action.get("program_name") or ""
+                _ba_char = action.get("character", "")
+                _ba_canonical = None
+                # Canonical-name lookup (case-insensitive)
+                if _ba_program:
+                    _needle = str(_ba_program).strip().lower()
+                    for _bk in _BOOSTED_ACTION_PROGRAMS:
+                        if _bk.lower() == _needle:
+                            _ba_canonical = _bk
+                            break
+                if not _ba_canonical:
+                    _valid = ", ".join(_BOOSTED_ACTION_PROGRAMS.keys())
+                    results.append({
+                        "type": "boosted_action",
+                        "character": _ba_char,
+                        "success": False,
+                        "error": "unknown_boosted_action",
+                        "reason": (
+                            f"boosted_action {_ba_program!r}: not a recognized "
+                            f"Boosted Action program. Valid: {_valid}."
+                        ),
+                        "formatted": f"⚠ Boosted Action {_ba_program}: unknown",
+                    })
+                    continue
+                # Validate program is loaded on deck (any status — Boosted
+                # Action activation implicitly turns the program on)
+                _ba_entry, _ = _find_program_in_active(_ba_canonical, active_programs)
+                if _ba_entry is None:
+                    _loaded = []
+                    if isinstance(active_programs, list):
+                        _loaded = [str(p.get("name", "")) for p in active_programs
+                                   if isinstance(p, dict) and p.get("name")]
+                    results.append({
+                        "type": "boosted_action",
+                        "character": _ba_char,
+                        "success": False,
+                        "error": "program_not_loaded",
+                        "reason": (
+                            f"Boosted {_ba_canonical}: program not loaded on this "
+                            f"deck. Currently loaded: {', '.join(_loaded) if _loaded else '(none)'}."
+                        ),
+                        "formatted": f"⚠ Boosted {_ba_canonical}: not on deck",
+                    })
+                    continue
+                # Atomic resource validation: needs 1 NA + 1 Cycle
+                if net_actions_remaining is not None and net_actions_remaining < 1:
+                    results.append({
+                        "type": "boosted_action",
+                        "character": _ba_char,
+                        "success": False,
+                        "error": "insufficient_net_actions",
+                        "reason": (
+                            f"Boosted {_ba_canonical} requires 1 NET Action; "
+                            f"{net_actions_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": f"⚠ Boosted {_ba_canonical}: insufficient NA",
+                    })
+                    continue
+                if _cycles_remaining is not None and _cycles_remaining < 1:
+                    results.append({
+                        "type": "boosted_action",
+                        "character": _ba_char,
+                        "success": False,
+                        "error": "insufficient_cycles",
+                        "reason": (
+                            f"Boosted {_ba_canonical} requires 1 Cycle; "
+                            f"{_cycles_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": f"⚠ Boosted {_ba_canonical}: insufficient Cycles",
+                    })
+                    continue
+                _flag_key, _duration_field, _duration = _BOOSTED_ACTION_PROGRAMS[_ba_canonical]
+                _ba_state_op = {
+                    "op": "active_boost_set",
+                    "boost": _flag_key,
+                    "value": True,
+                    "source": _ba_canonical,
+                    "actor": _ba_char,
+                }
+                if _duration_field and _duration:
+                    _ba_state_op["duration_field"] = _duration_field
+                    _ba_state_op["duration_value"] = _duration
+                _cycle_op = {
+                    "op": "cycle_consumed",
+                    "amount": 1,
+                    "source": f"Boosted {_ba_canonical}",
+                }
+                all_state_ops.extend([_ba_state_op, _cycle_op])
+                # Debit the running NA / Cycles counters for in-batch atomicity.
+                if net_actions_remaining is not None:
+                    net_actions_remaining = max(0, net_actions_remaining - 1)
+                if _cycles_remaining is not None:
+                    _cycles_remaining = max(0, _cycles_remaining - 1)
+                results.append({
+                    "type": "boosted_action",
+                    "character": _ba_char,
+                    "program": _ba_canonical,
+                    "success": True,
+                    "cost_net_actions": 1,
+                    "cost_cycles": 1,
+                    "active_boost": _flag_key,
+                    "duration_field": _duration_field,
+                    "duration_value": _duration,
+                    "formatted": (
+                        f"Boosted {_ba_canonical} activated "
+                        f"(1 NA, 1 Cycle, {_flag_key} → True"
+                        + (f", {_duration_field}={_duration}"
+                           if _duration_field else "")
+                        + ")"
+                    ),
+                    "state_ops": [_ba_state_op, _cycle_op],
+                })
+
             elif action_type == "program_attack_vs_netrunner":
                 # Black ICE attacking the Netrunner — damage = brain damage (HP, no armor)
                 _ice_type_raw = action.get("ice_type")
@@ -4687,6 +4823,7 @@ RESOLVE_MECHANICS_TOOL = {
         "- deactivate_program: {type, character, program} — active → deactivated. Costs 1 NET Action.\n"
         "- reactivate_program: {type, character, program} — derezzed → active. Costs 2 NET Actions, ATOMIC: if fewer than 2 NA remain, fails soft with no actions consumed.\n"
         "- reinstall_program: {type, character, program} — destroyed → deactivated. Costs 1 Meat Action. Only valid if Backup Drive is installed (and saved this program from destruction).\n"
+        "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown.\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}\n"
@@ -4721,7 +4858,8 @@ RESOLVE_MECHANICS_TOOL = {
                                      "hustle", "find_item", "haggle", "facedown",
                                      "suppressive_fire",
                                      "activate_program", "deactivate_program",
-                                     "reactivate_program", "reinstall_program"],
+                                     "reactivate_program", "reinstall_program",
+                                     "boosted_action"],
                         },
                         "character": {"type": "string"},
                     },

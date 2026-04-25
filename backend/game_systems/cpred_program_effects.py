@@ -235,6 +235,78 @@ def _dna_lock_on_jack_in(deck_owner, jacker_name, hack_state, game_state):
     return False, 17, "DNA Lock — Electronics/Security Tech DV17 to bypass"
 
 
+# ---------------------------------------------------------------------------
+# Hook implementations (Step 6b: action-economy bespoke — Surge, Mask,
+#                       Spoof Signal, DeckKRASH; Overclock deferred)
+# ---------------------------------------------------------------------------
+
+def _surge_on_interface_check(ability, base_total, prog, hack_state):
+    """RAW: Surge is a Boosted Action (1 NA + 1 Cycle to activate). Once
+    active, the next Interface check gets +4. Single-shot — clears the
+    pending flag after firing."""
+    boosts = (hack_state or {}).get("active_boosts") or {}
+    if not boosts.get("surge_pending"):
+        return 0, None
+    # Clear in-place so subsequent checks don't double-fire. The proxy
+    # passed by the resolver shares the active_boosts dict reference with
+    # the live hack_state, so this mutation persists.
+    if isinstance(hack_state, dict) and isinstance(hack_state.get("active_boosts"), dict):
+        hack_state["active_boosts"].pop("surge_pending", None)
+    return 4, "Surge"
+
+
+def _mask_on_alert_increase(delta, source, hack_state):
+    """RAW: Mask is a Boosted Action that suppresses the next Alert increase
+    this turn (sets the delta to 0). Single-shot — clears after firing."""
+    boosts = (hack_state or {}).get("active_boosts") or {}
+    if not boosts.get("mask_pending"):
+        return delta, []
+    if isinstance(hack_state, dict) and isinstance(hack_state.get("active_boosts"), dict):
+        hack_state["active_boosts"].pop("mask_pending", None)
+    return 0, [{"op": "alert_suppressed", "by": "Mask",
+                "original_delta": delta, "source": source}]
+
+
+def _spoof_signal_on_turn_start(hack_state, game_state):
+    """RAW: Spoof Signal redirects Patrol ICE detection target for 2 rounds
+    after activation. Implementation is partial — the registry entry exists
+    so a future Patrol-detection routing layer can read
+    active_boosts.spoof_signal_rounds_remaining. The on_turn_start hook
+    decrements that counter so the effect expires correctly.
+
+    For Step 6b: the boosted_action handler sets
+    active_boosts.spoof_signal_rounds_remaining = 2 when activated; this
+    hook decrements it; on reaching 0 it's cleared."""
+    boosts = (hack_state or {}).get("active_boosts") or {}
+    rounds_left = boosts.get("spoof_signal_rounds_remaining")
+    if not rounds_left:
+        return []
+    new_rounds = max(0, int(rounds_left) - 1)
+    if isinstance(hack_state, dict) and isinstance(hack_state.get("active_boosts"), dict):
+        if new_rounds > 0:
+            hack_state["active_boosts"]["spoof_signal_rounds_remaining"] = new_rounds
+        else:
+            hack_state["active_boosts"].pop("spoof_signal_rounds_remaining", None)
+    return [{"op": "spoof_signal_tick", "rounds_remaining": new_rounds}]
+
+
+def _deckkrash_on_attack_hit(attack_result, prog, hack_state):
+    """RAW (PROGRAM_STATS): 'Unsafe jack out'. DeckKRASH is an Attacker
+    program that — on hit — forces the target Netrunner through an Unsafe
+    Jack Out cascade (all rezzed Black ICE effects fire on the way out).
+    Emits an initiate_unsafe_jack_out op the writeback layer consumes
+    (cpred_hack._apply_initiate_unsafe_jack_out). Auto-Deactivate is
+    resolver-driven; this hook only emits the kicker."""
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    return [{
+        "op": "initiate_unsafe_jack_out",
+        "cause": "deckkrash_attack",
+        "actor": "DeckKRASH",
+        "target": target,
+        "reason": f"DeckKRASH hit {target} — forced Unsafe Jack Out cascade",
+    }]
+
+
 def _booster_bonus_on_ability(target_ability, bonus, label):
     """Curry an on_interface_check hook that fires +bonus when the rolling
     Interface Ability matches `target_ability` (case-insensitive).
@@ -407,6 +479,44 @@ PROGRAM_EFFECTS["DNA Lock"] = {
     "is_hardware": True,
     "order": 10,
     "hooks": {"on_jack_in": _dna_lock_on_jack_in},
+}
+
+# Step 6b: action-economy bespoke programs.
+#   Surge / Mask / Spoof Signal — Boosted-Action programs activated via
+#       the boosted_action resolver action type (1 NA + 1 Cycle each, atomic).
+#       Hook fires once on the next matching event, clears the flag.
+#   DeckKRASH — Attacker program that, on hit, forces target Netrunner
+#       through an Unsafe Jack Out cascade. Wired via on_program_attack_hit.
+#   Overclock — DEFERRED. RAW gives extra NET Action(s) next turn; would
+#       need a deferred-action mechanism that mutates net_actions_per_turn
+#       transiently. Not in this batch.
+PROGRAM_EFFECTS["Surge"] = {
+    "category": "boosted_action",
+    "is_hardware": False,
+    "order": 60,  # after passive Boosters (50) so explicit user activation
+                  # appears after stable boosters in modifier label order
+    "hooks": {"on_interface_check": _surge_on_interface_check},
+}
+
+PROGRAM_EFFECTS["Mask"] = {
+    "category": "boosted_action",
+    "is_hardware": False,
+    "order": 60,
+    "hooks": {"on_alert_increase": _mask_on_alert_increase},
+}
+
+PROGRAM_EFFECTS["Spoof Signal"] = {
+    "category": "boosted_action",
+    "is_hardware": False,
+    "order": 60,
+    "hooks": {"on_turn_start": _spoof_signal_on_turn_start},
+}
+
+PROGRAM_EFFECTS["DeckKRASH"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _deckkrash_on_attack_hit},
 }
 
 

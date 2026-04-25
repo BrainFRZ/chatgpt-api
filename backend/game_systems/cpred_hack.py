@@ -470,7 +470,34 @@ def _apply_rez_damage_to_ice_status(state, op):
 def _apply_net_model_fields(state, hs, tool_input):
     """Apply model-reported NET fields, system map, revealed_nodes, available_actions."""
     if isinstance(hs, dict):
-        for field in ["alert_level", "cycles_remaining", "active_programs",
+        # Step 6b: alert_level changes route through on_alert_increase hooks
+        # so Mask can suppress detection, etc. Compute delta from current
+        # state and feed the registry; final delta becomes the actual change.
+        if "alert_level" in hs:
+            try:
+                _new_alert = int(hs["alert_level"])
+            except (TypeError, ValueError):
+                _new_alert = state.get("alert_level", 0)
+            _cur_alert = int(state.get("alert_level", 0))
+            _delta = _new_alert - _cur_alert
+            if _delta > 0:
+                from .cpred_program_effects import run_alert_increase_hooks
+                _final_delta, _alert_ops, _alert_trace = run_alert_increase_hooks(
+                    _delta, "model_report", state)
+                state["alert_level"] = _cur_alert + max(0, _final_delta)
+                if _alert_trace:
+                    state["_last_alert_trace"] = _alert_trace
+                # Process any state ops returned by alert hooks (Mask emits
+                # alert_suppressed annotation; future suppressors may emit
+                # other ops).
+                for _op in _alert_ops:
+                    if isinstance(_op, dict) and _op.get("op") == "alert_suppressed":
+                        # Annotation only — no state mutation; surfaced in
+                        # _last_alert_trace for narration.
+                        pass
+            else:
+                state["alert_level"] = _new_alert
+        for field in ["cycles_remaining", "active_programs",
                       "installed_hardware", "current_node", "nodes_visited",
                       "ice_status", "trace_progress", "tar_stacks",
                       "revealed_nodes"]:
@@ -563,6 +590,30 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
             boosts = state.setdefault("active_boosts", {})
             if isinstance(boosts, dict) and boost_key:
                 boosts.pop(boost_key, None)
+    # Step 6b: active_boost_set — boosted_action handler activates a flag
+    # (and optional duration counter for multi-turn boosts like Spoof Signal).
+    for op in resolver_state_ops:
+        if isinstance(op, dict) and op.get("op") == "active_boost_set":
+            boost_key = op.get("boost")
+            boosts = state.setdefault("active_boosts", {})
+            if isinstance(boosts, dict) and boost_key:
+                boosts[boost_key] = op.get("value", True)
+                df = op.get("duration_field")
+                dv = op.get("duration_value")
+                if df and dv:
+                    boosts[df] = dv
+    # Step 6b: cycle_consumed — debit cycles_remaining atomically.
+    for op in resolver_state_ops:
+        if isinstance(op, dict) and op.get("op") == "cycle_consumed":
+            try:
+                amount = int(op.get("amount", 1))
+            except (TypeError, ValueError):
+                amount = 1
+            cur = state.get("cycles_remaining", state.get("cycles_max", 0))
+            try:
+                state["cycles_remaining"] = max(0, int(cur) - amount)
+            except (TypeError, ValueError):
+                pass
 
 
 def _apply_brain_damage_hp(state, game_state, name_key, pipeline_state=None):
