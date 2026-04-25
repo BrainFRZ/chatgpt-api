@@ -3148,7 +3148,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     character_states: dict = None,
                     net_actions_remaining=None,
                     active_boosts=None,
-                    cycles_remaining=None) -> dict:
+                    cycles_remaining=None,
+                    slide_used_this_turn=False) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3229,6 +3230,12 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
 
     results = []
     all_state_ops = []
+    # Slide once-per-turn (RAW p.205): track local usage across this batch
+    # so a second Slide later in the same resolve_actions call fails
+    # validation even though the persisted hack_state.slide_used_this_turn
+    # flag isn't written back until apply_*_state consumes the slide_used
+    # state op below.
+    _slide_used_local = bool(slide_used_this_turn)
     effective_hp = {}
     if isinstance(combatant_hp, dict):
         for _k, _v in list(combatant_hp.items()):
@@ -4009,6 +4016,86 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         _hs_proxy,
                     )
                     _net_opp_mods = list(_opp_booster_labels)
+
+                # Slide enforcement (RAW p.205): once per turn; cannot Slide
+                # preemptively (target Black ICE must currently be hunting
+                # the Netrunner). Validation runs before the roll so the
+                # action doesn't burn a NET Action on a forbidden Slide.
+                # _slide_used_local is initialized below (just before the
+                # actions loop) and updated in-place when a Slide succeeds
+                # so a second Slide later in the same batch fail-softs too.
+                _is_slide = bool(action.get("net")) and \
+                    str(action.get("ability") or "").strip().lower() == "slide"
+                if _is_slide:
+                    if _slide_used_local:
+                        results.append({
+                            "type": "opposed_check",
+                            "character": action.get("character", ""),
+                            "success": False,
+                            "error": "slide_already_used",
+                            "reason": (
+                                "Slide already used this turn — RAW p.205 "
+                                "limits Slide to once per turn. Wait for "
+                                "the next turn or fight, Derez, or Jack Out."
+                            ),
+                            "formatted": "⚠ Slide blocked: already used this turn",
+                        })
+                        continue
+                    _slide_target_name = str(action.get("target") or "").strip()
+                    _slide_target_key = None
+                    for _key_candidate in (
+                        action.get("target_ice_key"),
+                        action.get("target_key"),
+                        action.get("ice_key"),
+                        action.get("ice_status_key"),
+                    ):
+                        _slide_target_key = _normalize_ice_key_candidate(
+                            _key_candidate, ice_status)
+                        if _slide_target_key:
+                            break
+                    _slide_runner = action.get("character", "")
+                    _hunting_match_key = None
+                    if isinstance(ice_status, dict) and _slide_runner:
+                        if _slide_target_key and isinstance(
+                                ice_status.get(_slide_target_key), dict):
+                            _h = ice_status[_slide_target_key].get("hunting", [])
+                            if isinstance(_h, list) and _slide_runner in _h:
+                                _hunting_match_key = _slide_target_key
+                        if not _hunting_match_key and _slide_target_name:
+                            _name_lc = _slide_target_name.lower()
+                            for _k, _v in ice_status.items():
+                                if not isinstance(_v, dict):
+                                    continue
+                                if _v.get("status") != "active":
+                                    continue
+                                if str(_v.get("name", "")).strip().lower() != _name_lc:
+                                    continue
+                                _h = _v.get("hunting", [])
+                                if isinstance(_h, list) and _slide_runner in _h:
+                                    _hunting_match_key = _k
+                                    break
+                    if not _hunting_match_key:
+                        results.append({
+                            "type": "opposed_check",
+                            "character": action.get("character", ""),
+                            "success": False,
+                            "error": "slide_preemptive",
+                            "reason": (
+                                f"Cannot Slide preemptively — no Black ICE "
+                                f"matching {_slide_target_name!r} is currently "
+                                f"hunting {_slide_runner}. Slide only escapes a "
+                                f"Black ICE that has already engaged you."
+                            ),
+                            "formatted": (
+                                f"⚠ Slide blocked: {_slide_target_name or 'target'} "
+                                f"is not hunting {_slide_runner}"
+                            ),
+                        })
+                        continue
+                    # Stash the resolved hunting key on the action so the
+                    # post-roll branch (below) can emit a hunt_clear op
+                    # with the right ICE instance bound.
+                    action["_resolved_hunt_key"] = _hunting_match_key
                 result = resolve_opposed_check(
                     attacker_stat=action.get("attacker_stat", 0),
                     defender_stat=action.get("defender_stat", 0),
@@ -4086,6 +4173,33 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         elif isinstance(_target_node_hint, str) and _target_node_hint:
                             _rez_op["target_node"] = _target_node_hint
                         all_state_ops.append(_rez_op)
+                # Slide success: clear the hunting bond on the target Black
+                # ICE and mark slide_used_this_turn so a second Slide this
+                # turn fail-softs in the validation branch above. Mutate
+                # the local snapshot too so a second Slide later in this
+                # same resolve_actions batch trips the once-per-turn check.
+                if _is_slide and result.get("success"):
+                    _hunt_key = action.get("_resolved_hunt_key")
+                    if _hunt_key:
+                        all_state_ops.append({
+                            "op": "hunt_clear",
+                            "ice_key": _hunt_key,
+                            "netrunner": actor_name,
+                            "reason": f"{actor_name} slid past hunting Black ICE",
+                        })
+                        # Mutate the in-batch ice_status snapshot so a
+                        # second Slide-against-the-same-ICE in this batch
+                        # fails the preemptive check (the hunt is gone).
+                        if isinstance(ice_status, dict) and isinstance(
+                                ice_status.get(_hunt_key), dict):
+                            _h_list = ice_status[_hunt_key].get("hunting", [])
+                            if isinstance(_h_list, list) and actor_name in _h_list:
+                                _h_list.remove(actor_name)
+                    all_state_ops.append({
+                        "op": "slide_used",
+                        "netrunner": actor_name,
+                    })
+                    _slide_used_local = True
                 _emit_luck_op_if_rolled(all_state_ops, result, actor_name,
                                         action.get("luck_spent", 0), "Luck spent on opposed check")
                 results.append(result)
@@ -4424,6 +4538,44 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 results.append(result)
                 if result.get("hit"):
                     _nr_name = action.get("target", "")
+                    # RAW p.205: a Black ICE attacking the Netrunner engages
+                    # the hunt — it pursues the Netrunner across nodes until
+                    # Derezzed, Slid past, or the Netrunner Jacks Out. Mark
+                    # this engagement on ice_status so backend Slide
+                    # validation has authoritative state to check against.
+                    _hunter_key = None
+                    for _key_candidate in (
+                        action.get("ice_key"),
+                        action.get("ice_status_key"),
+                        action.get("source_ice_key"),
+                    ):
+                        _hunter_key = _normalize_ice_key_candidate(
+                            _key_candidate, ice_status)
+                        if _hunter_key:
+                            break
+                    if not _hunter_key and isinstance(ice_status, dict) \
+                            and _ice_block:
+                        _name_lc = _ice_block["name"].lower()
+                        _matches = [
+                            _k for _k, _v in ice_status.items()
+                            if isinstance(_v, dict)
+                            and _v.get("status") == "active"
+                            and str(_v.get("name", "")).strip().lower() == _name_lc
+                        ]
+                        if len(_matches) == 1:
+                            _hunter_key = _matches[0]
+                    if _hunter_key and _nr_name:
+                        all_state_ops.append({
+                            "op": "hunt_start",
+                            "ice_key": _hunter_key,
+                            "netrunner": _nr_name,
+                            "reason": (
+                                f"Black ICE {_ice_block['name']} engaged "
+                                f"{_nr_name}"
+                                if _ice_block
+                                else f"Black ICE engaged {_nr_name}"
+                            ),
+                        })
                     # Brain damage (if damage_dice > 0). Step 3: route through
                     # on_brain_damage_inbound hooks so Defenders (Shield/Armor/
                     # Fortify) can mitigate before the brain_damage state op

@@ -85,6 +85,7 @@ def init_hack_state(
         "movement_locked_by": None,
         "movement_locked_by_key": None,
         "slide_penalty": 0,
+        "slide_used_this_turn": False,
         "net_action_penalty": 0,
         "active_debuffs": [],
         "destroyed_programs": [],
@@ -603,6 +604,11 @@ def _apply_rez_damage_to_ice_status(state, op):
     victim["rez_current"] = max(0, int(victim.get("rez_current", 0)) - damage)
     if victim["rez_current"] <= 0:
         victim["status"] = "derezzed"
+        # Derezzed Black ICE can't hunt — clear engagement list so any
+        # subsequent Slide validation against this ICE fails preemptively
+        # (correctly: there's nothing to escape from anymore).
+        if isinstance(victim.get("hunting"), list):
+            victim["hunting"] = []
 
 
 def _apply_net_model_fields(state, hs, tool_input):
@@ -638,7 +644,7 @@ def _apply_net_model_fields(state, hs, tool_input):
         for field in ["cycles_remaining", "active_programs",
                       "installed_hardware", "current_node", "nodes_visited",
                       "ice_status", "trace_progress", "tar_stacks",
-                      "revealed_nodes"]:
+                      "revealed_nodes", "slide_used_this_turn"]:
             if field in hs:
                 state[field] = hs[field]
         if hs.get("system_map") and not state.get("system_map"):
@@ -752,6 +758,35 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                 state["cycles_remaining"] = max(0, int(cur) - amount)
             except (TypeError, ValueError):
                 pass
+    # Slide / hunt enforcement (RAW p.205): hunt_start adds the Netrunner
+    # to a Black ICE's hunting list when the ICE engages; hunt_clear
+    # removes them on a successful Slide; slide_used flags one-Slide-
+    # per-turn enforcement (cleared at meatspace_due in apply_hack_state).
+    ice_status = state.setdefault("ice_status", {})
+    for op in resolver_state_ops:
+        if not isinstance(op, dict):
+            continue
+        op_t = op.get("op")
+        if op_t == "hunt_start":
+            ice_key = op.get("ice_key")
+            nr_name = op.get("netrunner")
+            if ice_key and nr_name and isinstance(ice_status, dict):
+                entry = ice_status.get(ice_key)
+                if isinstance(entry, dict):
+                    h = entry.setdefault("hunting", [])
+                    if isinstance(h, list) and nr_name not in h:
+                        h.append(nr_name)
+        elif op_t == "hunt_clear":
+            ice_key = op.get("ice_key")
+            nr_name = op.get("netrunner")
+            if ice_key and nr_name and isinstance(ice_status, dict):
+                entry = ice_status.get(ice_key)
+                if isinstance(entry, dict):
+                    h = entry.get("hunting", [])
+                    if isinstance(h, list) and nr_name in h:
+                        h.remove(nr_name)
+        elif op_t == "slide_used":
+            state["slide_used_this_turn"] = True
     # Step 6d: initiate_unsafe_jack_out — emitted by DeckKRASH's
     # on_program_attack_hit hook. Re-uses the same code path as the
     # model-supplied tool_input.initiate_unsafe_jack_out: pass through
@@ -1155,6 +1190,10 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
                         boosts["jack_out_lock_rounds_remaining"] = _glue_int - 1
                     else:
                         boosts.pop("jack_out_lock_rounds_remaining", None)
+            # Slide is once-per-turn (RAW p.205); reset at turn boundary so
+            # the Netrunner can Slide again next turn if a Black ICE is
+            # still on them.
+            hack_state["slide_used_this_turn"] = False
             hack_state["meatspace_due"] = True
         else:
             hack_state["net_actions_remaining"] = remaining

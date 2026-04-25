@@ -1818,8 +1818,8 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - Opposed check (Zap, no Program): Interface + d10 vs ICE stat + d10. Deals 1d6 REZ damage.
 - Program attack: Interface + Program ATK + d10 vs ICE DEF + d10. Damage per program listing.
 - Attack Programs Deactivate after use (1 use, then must Deactivate + Reactivate = 2 NET Actions).
-- Slide (flee): Interface + d10 vs ICE PER + d10. Escape to adjacent node; ICE stays where it was. Once per turn. Cannot Slide preemptively. Only way to escape hunting Black ICE without Derezzing it.
-- Black ICE hunts: triggered Black ICE pursues the Netrunner across nodes. Simply moving away does NOT escape — the ICE follows on its next action. Update ice_status to reflect its new node.
+- Slide (flee): Interface + d10 vs ICE PER + d10 (opposed_check, ability=Slide). Backend enforces RAW p.205: (1) once per turn — second Slide in the same turn fail-softs, (2) cannot Slide preemptively — target Black ICE must already be hunting the Netrunner (i.e., must already have engaged with an attack). On success, backend clears the hunting bond; ICE stays in its node, Netrunner moves to an adjacent node. In net_combat mode, send `slide_used_this_turn: false` in the reported hack_state when starting a fresh netrunner initiative slot so the next-turn Slide is allowed.
+- Black ICE hunts: when a Black ICE attacks the Netrunner (program_attack_vs_netrunner) and hits, the backend records the hunt on ice_status[key].hunting (list of Netrunner names being chased). The hunt persists across nodes — a Black ICE pursues the Netrunner until Derezzed, Slid past, or the Netrunner Jacks Out. Simply moving away (Enter Node) does NOT escape — the model is responsible for moving the ICE entry to the new node key on the Netrunner's next action.
 - Crits/Fumbles: same as meatspace (d10 explodes on 10, subtracts on 1).
 - Luck: spend before the roll on Interface checks (1:1).
 - Opposed check ties go to the Defender (ICE).
@@ -2024,7 +2024,7 @@ REPORT_NET_COMBAT_STATE_TOOL = {
                     "installed_hardware": {"type": "array", "description": "Cyberdeck Hardware (shares deck slots with programs). Auto-populated from deck_slots.", "items": {"type": "string"}},
                     "current_node": {"type": "string"},
                     "nodes_visited": {"type": "array", "items": {"type": "string"}},
-                    "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}}}},
+                    "ice_status": {"type": "object", "description": "Key = node ICE is currently in. Move Black ICE to new node key when it hunts. The optional `hunting` field is backend-managed (list of Netrunner names this Black ICE has engaged) — backend sets it via hunt_start ops and clears it via hunt_clear ops + ICE derez.", "additionalProperties": {"type": "object", "properties": {"name": {"type": "string"}, "behavior": {"type": "string", "enum": ["patrol", "tar", "black", "trace"]}, "rez_current": {"type": "integer"}, "rez_max": {"type": "integer"}, "status": {"type": "string", "enum": ["active", "bypassed", "disabled", "derezzed"]}, "hunting": {"type": "array", "items": {"type": "string"}, "description": "Backend-managed list of Netrunner names this Black ICE has engaged."}}}},
                     "trace_progress": {"type": ["integer", "null"]},
                     "tar_stacks": {"type": "integer", "minimum": 0},
                     "system_map": {"type": ["object", "null"]},

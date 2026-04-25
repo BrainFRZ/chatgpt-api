@@ -3043,6 +3043,7 @@ def run_mode_pipeline(
     installed_hardware=None,
     ice_status=None,
     net_actions_remaining=None,
+    slide_used_this_turn: bool = False,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -3229,6 +3230,7 @@ def run_mode_pipeline(
             edgerunner_states=_er_states,
             character_states=character_states,
             net_actions_remaining=net_actions_remaining,
+            slide_used_this_turn=slide_used_this_turn,
         ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results

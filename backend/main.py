@@ -5741,6 +5741,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     net_actions_remaining=(_safe_int(hack_state.get("net_actions_remaining"))
                                            if isinstance(hack_state, dict) and hack_state.get("net_actions_remaining") is not None
                                            else None),
+                    slide_used_this_turn=bool(hack_state.get("slide_used_this_turn", False))
+                                          if isinstance(hack_state, dict) else False,
                 )
 
                 mode_result = None
@@ -6014,6 +6016,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                            if isinstance(_net_combat, dict) and _net_combat.get("active")
                                               and _net_combat.get("net_actions_remaining") is not None
                                            else None),
+                    slide_used_this_turn=bool((_net_combat or {}).get("slide_used_this_turn", False))
+                                          if isinstance(_net_combat, dict) and _net_combat.get("active")
+                                          else False,
                 )
 
                 mode_result = None
@@ -6283,6 +6288,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     net_actions_remaining=(_safe_int(nc_state.get("net_actions_remaining"))
                                            if isinstance(nc_state, dict) and nc_state.get("net_actions_remaining") is not None
                                            else None),
+                    slide_used_this_turn=bool(nc_state.get("slide_used_this_turn", False))
+                                          if isinstance(nc_state, dict) else False,
                 )
 
                 mode_result = None
@@ -7440,6 +7447,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _rm_net_actions_remaining = None
                                 _rm_active_boosts = None
                                 _rm_cycles_remaining = None
+                                _rm_slide_used = False
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
@@ -7453,6 +7461,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_cycles_raw = _rm_active_state.get("cycles_remaining")
                                     if _rm_cycles_raw is not None:
                                         _rm_cycles_remaining = _safe_int(_rm_cycles_raw)
+                                    _rm_slide_used = bool(_rm_active_state.get("slide_used_this_turn", False))
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7493,6 +7502,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     net_actions_remaining=_rm_net_actions_remaining,
                                     active_boosts=_rm_active_boosts,
                                     cycles_remaining=_rm_cycles_remaining,
+                                    slide_used_this_turn=_rm_slide_used,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(
@@ -7501,6 +7511,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_result.get("state_ops", []),
                                 )
                                 _apply_tar_consumed_state_ops(_rm_tracking_ps or {}, _rm_result.get("state_ops", []))
+                                # Propagate Slide-used state across iterations so a
+                                # second resolve_mechanics call in the same turn sees
+                                # the prior Slide and fail-softs (RAW p.205 once-per-turn).
+                                if any(isinstance(_op, dict) and _op.get("op") == "slide_used"
+                                       for _op in _rm_result.get("state_ops", [])):
+                                    _rm_slide_used = True
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call

@@ -170,9 +170,10 @@ class TestResolveAlertDV(unittest.TestCase):
     @patch(MOCK, return_value=5)
     def test_alert_dv_not_on_opposed(self, _m):
         """Alert DV only affects skill_check, not opposed_check."""
+        # Zap (not Slide) so we don't trip the new Slide preemptive check.
         actions = [{"type": "opposed_check", "character": "V",
                      "attacker_stat": 6, "defender_stat": 4, "net": True,
-                     "ability": "Slide"}]
+                     "ability": "Zap"}]
         r = resolve_actions(actions, alert_level=5)
         # opposed_check doesn't have DV — no crash
         self.assertEqual(len(r["results"]), 1)

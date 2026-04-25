@@ -1910,5 +1910,271 @@ class TestStatDebuffCrossHackPersistence(unittest.TestCase):
         self.assertEqual(len(hs["active_debuffs"]), 1)
 
 
+class TestSlideEnforcement(unittest.TestCase):
+    """Backend-enforced Slide mechanics (RAW p.205).
+
+    Three rules pinned here:
+    1. Cannot Slide preemptively — target Black ICE must already be hunting.
+    2. Once per turn — second Slide in the same batch fail-softs.
+    3. Successful Slide clears the hunting bond on the target ICE.
+
+    Plus: Black ICE attack hits start the hunt; ICE derez clears it.
+    """
+
+    def _make_ice_status(self, hunting_netrunners=None):
+        return {
+            "n1": {
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "rez_max": 20, "status": "active",
+                "hunting": list(hunting_netrunners) if hunting_netrunners else [],
+            }
+        }
+
+    def test_preemptive_slide_blocked(self):
+        """Slide vs Black ICE that hasn't engaged yet → fail-soft, no roll spent."""
+        actions = [{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "target": "Hellhound",
+            "attacker_stat": 4, "attacker_skill": 0,
+            "defender_stat": 6, "defender_skill": 0,
+            "attacker_label": "Slide", "defender_label": "Hellhound PER",
+            "net": True, "ability": "Slide",
+        }]
+        result = resolve_actions(
+            actions,
+            ice_status=self._make_ice_status(hunting_netrunners=[]),
+        )
+        self.assertEqual(len(result["results"]), 1)
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "slide_preemptive")
+        # No state ops emitted (didn't reach the success branch)
+        self.assertEqual(result["state_ops"], [])
+
+    def test_slide_against_hunting_ice_allowed(self):
+        """Slide vs Black ICE actively hunting RedVelvet → roll proceeds."""
+        actions = [{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "target": "Hellhound",
+            "attacker_stat": 12, "attacker_skill": 0,  # high to favor success
+            "defender_stat": 0, "defender_skill": 0,
+            "attacker_label": "Slide", "defender_label": "Hellhound PER",
+            "net": True, "ability": "Slide",
+        }]
+        ice_status = self._make_ice_status(hunting_netrunners=["RedVelvet"])
+        result = resolve_actions(actions, ice_status=ice_status)
+        r = result["results"][0]
+        # Either success or failure — what matters is that validation passed
+        self.assertNotIn("error", r)
+
+    def test_slide_success_emits_hunt_clear_and_slide_used(self):
+        """On success, backend emits hunt_clear + slide_used state ops."""
+        import unittest.mock as mock
+        ice_status = self._make_ice_status(hunting_netrunners=["RedVelvet"])
+        actions = [{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "target": "Hellhound",
+            "attacker_stat": 4, "attacker_skill": 0,
+            "defender_stat": 0, "defender_skill": 0,
+            "attacker_label": "Slide", "defender_label": "Hellhound PER",
+            "net": True, "ability": "Slide",
+        }]
+        # Force success: attacker rolls 9, defender rolls 2 → 13 vs 2
+        with mock.patch("game_systems.cpred_mechanics.random.randint",
+                         side_effect=[9, 2]):
+            result = resolve_actions(actions, ice_status=ice_status)
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        ops = result["state_ops"]
+        self.assertTrue(any(o.get("op") == "hunt_clear" and o.get("ice_key") == "n1"
+                            and o.get("netrunner") == "RedVelvet" for o in ops))
+        self.assertTrue(any(o.get("op") == "slide_used"
+                            and o.get("netrunner") == "RedVelvet" for o in ops))
+
+    def test_slide_once_per_turn_within_batch(self):
+        """Two Slides in the same resolve_actions call → second fail-softs."""
+        import unittest.mock as mock
+        ice_status = self._make_ice_status(hunting_netrunners=["RedVelvet"])
+        actions = [
+            {
+                "type": "opposed_check",
+                "character": "RedVelvet",
+                "target": "Hellhound",
+                "attacker_stat": 4, "attacker_skill": 0,
+                "defender_stat": 0, "defender_skill": 0,
+                "attacker_label": "Slide", "defender_label": "Hellhound PER",
+                "net": True, "ability": "Slide",
+            },
+            {
+                "type": "opposed_check",
+                "character": "RedVelvet",
+                "target": "Hellhound",
+                "attacker_stat": 4, "attacker_skill": 0,
+                "defender_stat": 0, "defender_skill": 0,
+                "attacker_label": "Slide", "defender_label": "Hellhound PER",
+                "net": True, "ability": "Slide",
+            },
+        ]
+        with mock.patch("game_systems.cpred_mechanics.random.randint",
+                         side_effect=[9, 2, 9, 2]):
+            result = resolve_actions(actions, ice_status=ice_status)
+        # First Slide success (or attempt), second fail-softs with slide_already_used
+        self.assertEqual(len(result["results"]), 2)
+        r1, r2 = result["results"]
+        self.assertTrue(r1["success"])
+        self.assertFalse(r2["success"])
+        self.assertEqual(r2["error"], "slide_already_used")
+
+    def test_slide_used_param_blocks_first_attempt(self):
+        """If slide_used_this_turn=True is passed, even first Slide fail-softs."""
+        actions = [{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "target": "Hellhound",
+            "attacker_stat": 4, "attacker_skill": 0,
+            "defender_stat": 0, "defender_skill": 0,
+            "attacker_label": "Slide", "defender_label": "Hellhound PER",
+            "net": True, "ability": "Slide",
+        }]
+        result = resolve_actions(
+            actions,
+            ice_status=self._make_ice_status(hunting_netrunners=["RedVelvet"]),
+            slide_used_this_turn=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "slide_already_used")
+
+    def test_slide_against_wrong_ice_blocks(self):
+        """Slide vs an ICE not hunting this Netrunner → fail even if other ICE is hunting."""
+        ice_status = {
+            "n1": {  # Hunting RedVelvet
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "rez_max": 20, "status": "active",
+                "hunting": ["RedVelvet"],
+            },
+            "n2": {  # NOT hunting RedVelvet
+                "name": "Wisp", "behavior": "black", "ice_type": "wisp",
+                "rez_current": 15, "rez_max": 15, "status": "active",
+                "hunting": [],
+            },
+        }
+        actions = [{
+            "type": "opposed_check",
+            "character": "RedVelvet",
+            "target": "Wisp",  # Targeting the ICE that ISN'T hunting
+            "target_ice_key": "n2",
+            "attacker_stat": 4, "attacker_skill": 0,
+            "defender_stat": 0, "defender_skill": 0,
+            "attacker_label": "Slide", "defender_label": "Wisp PER",
+            "net": True, "ability": "Slide",
+        }]
+        result = resolve_actions(actions, ice_status=ice_status)
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "slide_preemptive")
+
+    def test_apply_hack_state_consumes_slide_used_op(self):
+        """slide_used state op flips hack_state.slide_used_this_turn."""
+        hs = _make_hack_state()
+        gs = _make_game_state()
+        ops = [{"op": "slide_used", "netrunner": "V"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertTrue(hs["slide_used_this_turn"])
+
+    def test_apply_hack_state_consumes_hunt_clear_op(self):
+        """hunt_clear state op removes Netrunner from ICE.hunting list."""
+        hs = _make_hack_state()
+        hs["ice_status"] = {
+            "n1": {"name": "Hellhound", "behavior": "black", "status": "active",
+                   "rez_current": 20, "rez_max": 20, "hunting": ["V", "Other"]},
+        }
+        gs = _make_game_state()
+        ops = [{"op": "hunt_clear", "ice_key": "n1", "netrunner": "V"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(hs["ice_status"]["n1"]["hunting"], ["Other"])
+
+    def test_apply_hack_state_consumes_hunt_start_op(self):
+        """hunt_start state op adds Netrunner to ICE.hunting list (deduped)."""
+        hs = _make_hack_state()
+        hs["ice_status"] = {
+            "n1": {"name": "Hellhound", "behavior": "black", "status": "active",
+                   "rez_current": 20, "rez_max": 20, "hunting": []},
+        }
+        gs = _make_game_state()
+        ops = [{"op": "hunt_start", "ice_key": "n1", "netrunner": "V"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(hs["ice_status"]["n1"]["hunting"], ["V"])
+        # Idempotent: re-applying doesn't duplicate
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(hs["ice_status"]["n1"]["hunting"], ["V"])
+
+    def test_meatspace_due_resets_slide_used(self):
+        """Turn boundary (meatspace_due) resets slide_used_this_turn to False."""
+        hs = _make_hack_state()
+        hs["slide_used_this_turn"] = True
+        hs["net_actions_remaining"] = 1
+        gs = _make_game_state()
+        # Use up the last NET action → triggers meatspace_due
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": 1}}, game_state=gs)
+        self.assertTrue(hs["meatspace_due"])
+        self.assertFalse(hs["slide_used_this_turn"])
+
+    def test_ice_derez_clears_hunting(self):
+        """Derezzing a Black ICE wipes its hunting list."""
+        hs = _make_hack_state()
+        hs["ice_status"] = {
+            "n1": {"name": "Hellhound", "behavior": "black", "status": "active",
+                   "rez_current": 5, "rez_max": 20, "hunting": ["V"]},
+        }
+        gs = _make_game_state()
+        # Apply enough rez damage to derez
+        ops = [{"op": "rez_damage", "target_key": "n1", "damage": 10}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(hs["ice_status"]["n1"]["status"], "derezzed")
+        self.assertEqual(hs["ice_status"]["n1"]["hunting"], [])
+
+    def test_init_hack_state_seeds_slide_used_false(self):
+        """Fresh hack starts with slide_used_this_turn=False."""
+        hs = init_hack_state(hacker_name="V", interface_rank=4)
+        self.assertFalse(hs["slide_used_this_turn"])
+
+    def test_black_ice_attack_emits_hunt_start(self):
+        """A successful Black ICE attack emits hunt_start tying the ICE to the Netrunner."""
+        import unittest.mock as mock
+        ice_status = {
+            "Lobby_Hellhound": {
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "rez_max": 20, "status": "active",
+                "hunting": [],
+            }
+        }
+        actions = [{
+            "type": "program_attack_vs_netrunner",
+            "character": "Hellhound",
+            "ice_type": "Hellhound",
+            "target": "RedVelvet",
+            "interface_rank": 4,
+            "target_def": 0,
+            "ice_status_key": "Lobby_Hellhound",
+        }]
+        # Force hit with a high attacker roll. Use return_value=4 so any
+        # number of internal rolls (opposed d10s, damage dice, hook rolls)
+        # all return safely without StopIteration. 4+6 vs 4+0 = 10 vs 4 → hit.
+        with mock.patch("game_systems.cpred_mechanics.random.randint",
+                         return_value=4):
+            result = resolve_actions(actions, ice_status=ice_status)
+        r = result["results"][0]
+        self.assertTrue(r.get("hit"))
+        ops = result["state_ops"]
+        hunt_ops = [o for o in ops if o.get("op") == "hunt_start"]
+        self.assertEqual(len(hunt_ops), 1)
+        self.assertEqual(hunt_ops[0]["ice_key"], "Lobby_Hellhound")
+        self.assertEqual(hunt_ops[0]["netrunner"], "RedVelvet")
+
+
 if __name__ == "__main__":
     unittest.main()
