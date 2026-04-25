@@ -140,6 +140,29 @@ def _fortify_on_turn_end(hack_state, game_state):
 
 
 # ---------------------------------------------------------------------------
+# Hook implementations (Step 4: Boosters — Worm, Eraser, See Ya, Speedy)
+# ---------------------------------------------------------------------------
+
+def _booster_bonus_on_ability(target_ability, bonus, label):
+    """Curry an on_interface_check hook that fires +bonus when the rolling
+    Interface Ability matches `target_ability` (case-insensitive).
+
+    Returns a function suitable for the on_interface_check hook signature:
+        (ability, base_total, prog, hack_state) → (bonus_int, label_or_None)
+    """
+    target_lc = target_ability.strip().lower()
+
+    def _hook(ability, base_total, prog, hack_state):
+        if not isinstance(ability, str):
+            return 0, None
+        if ability.strip().lower() == target_lc:
+            return bonus, label
+        return 0, None
+
+    return _hook
+
+
+# ---------------------------------------------------------------------------
 # Registry entries
 # ---------------------------------------------------------------------------
 PROGRAM_EFFECTS["Insulated Wiring"] = {
@@ -188,6 +211,45 @@ PROGRAM_EFFECTS["Fortify"] = {
         "on_brain_damage_inbound": _fortify_on_brain_damage_inbound,
         "on_turn_end": _fortify_on_turn_end,
     },
+}
+
+# Step 4: Booster programs. All order=50 (after Defenders' 10/20/30); they
+# fire on Interface Ability checks matching their target ability.
+#   Worm                +2 Backdoor    (PROGRAM_STATS effect: "+2 Backdoor")
+#   Eraser              +2 Cloak       (PROGRAM_STATS effect: "+2 Cloak")
+#   See Ya              +2 Pathfinder  (PROGRAM_STATS effect: "+2 Pathfinder")
+#   Speedy Gonzalvez    +2 Initiative  (CPRED p.205 — NET initiative bonus,
+#                                       PROGRAM_STATS effect: "+2 Speed")
+PROGRAM_EFFECTS["Worm"] = {
+    "category": "booster",
+    "is_hardware": False,
+    "order": 50,
+    "hooks": {"on_interface_check":
+              _booster_bonus_on_ability("Backdoor", 2, "Worm")},
+}
+
+PROGRAM_EFFECTS["Eraser"] = {
+    "category": "booster",
+    "is_hardware": False,
+    "order": 50,
+    "hooks": {"on_interface_check":
+              _booster_bonus_on_ability("Cloak", 2, "Eraser")},
+}
+
+PROGRAM_EFFECTS["See Ya"] = {
+    "category": "booster",
+    "is_hardware": False,
+    "order": 50,
+    "hooks": {"on_interface_check":
+              _booster_bonus_on_ability("Pathfinder", 2, "See Ya")},
+}
+
+PROGRAM_EFFECTS["Speedy Gonzalvez"] = {
+    "category": "booster",
+    "is_hardware": False,
+    "order": 50,
+    "hooks": {"on_interface_check":
+              _booster_bonus_on_ability("Initiative", 2, "Speedy")},
 }
 
 

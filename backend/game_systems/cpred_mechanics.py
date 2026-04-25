@@ -545,8 +545,13 @@ def resolve_check(
     luck_spent: int = 0,
     rel_bonus: int = 0,
     wb_boost: int = 0,
+    extra_modifiers=None,
 ) -> dict:
     """Resolve a skill check: d10 + STAT + Skill vs DV.
+
+    extra_modifiers: optional list of (label, value) tuples added to the
+    total and the formatted string before luck/relationship modifiers
+    (intended for backend-injected program effect bonuses like Worm +2).
 
     Returns dict with full breakdown and formatted string.
     """
@@ -558,6 +563,20 @@ def resolve_check(
 
     total += stat_value
     total += skill_value
+
+    if isinstance(extra_modifiers, list):
+        for em in extra_modifiers:
+            if not isinstance(em, tuple) or len(em) != 2:
+                continue
+            label, value = em
+            try:
+                value_int = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value_int == 0:
+                continue
+            total += value_int
+            modifiers.append((str(label or "?"), value_int))
 
     if seriously_wounded:
         total -= 2
@@ -1633,6 +1652,7 @@ def resolve_opposed_check(
     luck_spent: int = 0,
     rel_bonus: int = 0,
     wb_boost: int = 0,
+    extra_modifiers_attacker=None,
 ) -> dict:
     """Resolve an opposed check: both sides roll d10 + stat (+ skill).
 
@@ -1648,6 +1668,19 @@ def resolve_opposed_check(
     # --- Attacker total ---
     atk_total = atk_die["total"] + attacker_stat + attacker_skill
     atk_mods = []
+    if isinstance(extra_modifiers_attacker, list):
+        for em in extra_modifiers_attacker:
+            if not isinstance(em, tuple) or len(em) != 2:
+                continue
+            label, value = em
+            try:
+                value_int = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value_int == 0:
+                continue
+            atk_total += value_int
+            atk_mods.append((str(label or "?"), value_int))
     if seriously_wounded_attacker:
         atk_total -= 2
         atk_mods.append(("Wounded", -2))
@@ -3691,6 +3724,23 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     _wb_npc_data = relationships.get(_wb_boost_npc, {})
                     if isinstance(_wb_npc_data, dict) and _wb_npc_data.get("wb_boost"):
                         _wb_boost = 1
+                # Step 4: Booster bonuses on NET-context Interface checks.
+                # Hooks key on `ability` and only fire when the matching
+                # booster is rezzed.
+                _net_extra_mods = []
+                if action.get("net") and action.get("ability"):
+                    from .cpred_program_effects import run_interface_check_hooks
+                    _hs_proxy = {
+                        "active_programs": active_programs,
+                        "installed_hardware": installed_hardware,
+                        "active_boosts": _active_boosts,
+                    }
+                    _, _booster_labels = run_interface_check_hooks(
+                        action["ability"],
+                        action.get("stat_value", 0) + action.get("skill_value", 0),
+                        _hs_proxy,
+                    )
+                    _net_extra_mods = list(_booster_labels)
                 result = resolve_check(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -3699,12 +3749,15 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=rel_bonus,
                     wb_boost=_wb_boost,
+                    extra_modifiers=_net_extra_mods,
                 )
                 result["type"] = "skill_check"
                 result["character"] = actor_name
                 if action.get("net"):
                     result["net"] = True
                     result["ability"] = action.get("ability")
+                    if _net_extra_mods:
+                        result["booster_bonuses"] = _net_extra_mods
                 # Emit wb_boost_spend op to consume the boost
                 if _wb_boost:
                     all_state_ops.append({
@@ -3919,6 +3972,21 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     _opp_wb_data = relationships.get(_opp_wb_npc, {})
                     if isinstance(_opp_wb_data, dict) and _opp_wb_data.get("wb_boost"):
                         _opp_wb = 1
+                # Step 4: Booster bonuses on NET-context opposed checks (Zap/Slide).
+                _net_opp_mods = []
+                if action.get("net") and action.get("ability"):
+                    from .cpred_program_effects import run_interface_check_hooks
+                    _hs_proxy = {
+                        "active_programs": active_programs,
+                        "installed_hardware": installed_hardware,
+                        "active_boosts": _active_boosts,
+                    }
+                    _, _opp_booster_labels = run_interface_check_hooks(
+                        action["ability"],
+                        action.get("attacker_stat", 0) + action.get("attacker_skill", 0),
+                        _hs_proxy,
+                    )
+                    _net_opp_mods = list(_opp_booster_labels)
                 result = resolve_opposed_check(
                     attacker_stat=action.get("attacker_stat", 0),
                     defender_stat=action.get("defender_stat", 0),
@@ -3933,11 +4001,14 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=_opp_rel,
                     wb_boost=_opp_wb,
+                    extra_modifiers_attacker=_net_opp_mods,
                 )
                 result["character"] = actor_name
                 if action.get("net"):
                     result["net"] = True
                     result["ability"] = action.get("ability")
+                    if _net_opp_mods:
+                        result["booster_bonuses"] = _net_opp_mods
                 if _opp_wb:
                     all_state_ops.append({
                         "type": "relationship_op",

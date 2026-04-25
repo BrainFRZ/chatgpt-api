@@ -978,5 +978,222 @@ class TestStep3FortifyClearWriteback(unittest.TestCase):
         self.assertEqual(state["active_boosts"], {})
 
 
+class TestStep4BoosterEntries(unittest.TestCase):
+    """Step 4: Worm/Eraser/See Ya/Speedy Gonzalvez Booster programs.
+
+    Each fires +2 on a specific Interface Ability via on_interface_check.
+    Uses the production registry.
+    """
+
+    def _hs(self, programs):
+        return {
+            "active_programs": programs,
+            "installed_hardware": [],
+            "active_boosts": {},
+        }
+
+    def _active(self, name):
+        return {"name": name, "status": "active", "rez": 7, "category": "booster"}
+
+    # ----- Per-booster correctness -----
+
+    def test_worm_fires_on_backdoor(self):
+        hs = self._hs([self._active("Worm")])
+        bonus, labels = cpe.run_interface_check_hooks("Backdoor", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("Worm", 2)])
+
+    def test_eraser_fires_on_cloak(self):
+        hs = self._hs([self._active("Eraser")])
+        bonus, labels = cpe.run_interface_check_hooks("Cloak", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("Eraser", 2)])
+
+    def test_see_ya_fires_on_pathfinder(self):
+        hs = self._hs([self._active("See Ya")])
+        bonus, labels = cpe.run_interface_check_hooks("Pathfinder", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("See Ya", 2)])
+
+    def test_speedy_fires_on_initiative(self):
+        hs = self._hs([self._active("Speedy Gonzalvez")])
+        bonus, labels = cpe.run_interface_check_hooks("Initiative", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("Speedy", 2)])
+
+    # ----- Wrong-ability silence -----
+
+    def test_worm_silent_on_other_abilities(self):
+        hs = self._hs([self._active("Worm")])
+        for ability in ("Cloak", "Control", "Eye-Dee", "Pathfinder",
+                        "Slide", "Virus", "Zap", "Initiative"):
+            bonus, _ = cpe.run_interface_check_hooks(ability, 14, hs)
+            self.assertEqual(bonus, 0, f"Worm wrongly fired on {ability!r}")
+
+    def test_eraser_silent_on_backdoor(self):
+        hs = self._hs([self._active("Eraser")])
+        bonus, _ = cpe.run_interface_check_hooks("Backdoor", 14, hs)
+        self.assertEqual(bonus, 0)
+
+    # ----- Status filter -----
+
+    def test_booster_silent_when_derezzed(self):
+        progs = [{"name": "Worm", "status": "derezzed", "rez": 0, "category": "booster"}]
+        bonus, _ = cpe.run_interface_check_hooks("Backdoor", 14, self._hs(progs))
+        self.assertEqual(bonus, 0)
+
+    def test_booster_silent_when_deactivated(self):
+        progs = [{"name": "Worm", "status": "deactivated", "rez": 7, "category": "booster"}]
+        bonus, _ = cpe.run_interface_check_hooks("Backdoor", 14, self._hs(progs))
+        self.assertEqual(bonus, 0)
+
+    def test_booster_silent_when_destroyed(self):
+        progs = [{"name": "Worm", "status": "destroyed", "rez": 0, "category": "booster"}]
+        bonus, _ = cpe.run_interface_check_hooks("Backdoor", 14, self._hs(progs))
+        self.assertEqual(bonus, 0)
+
+    # ----- Stacking -----
+
+    def test_two_boosters_with_different_abilities_isolated(self):
+        """Worm + Eraser loaded; only the matching one fires per ability."""
+        hs = self._hs([self._active("Worm"), self._active("Eraser")])
+        # Backdoor: Worm fires
+        bonus, labels = cpe.run_interface_check_hooks("Backdoor", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("Worm", 2)])
+        # Cloak: Eraser fires
+        bonus, labels = cpe.run_interface_check_hooks("Cloak", 14, hs)
+        self.assertEqual(bonus, 2)
+        self.assertEqual(labels, [("Eraser", 2)])
+
+    # ----- Registry metadata sanity -----
+
+    def test_all_four_boosters_registered(self):
+        for name in ("Worm", "Eraser", "See Ya", "Speedy Gonzalvez"):
+            entry = cpe.PROGRAM_EFFECTS.get(name)
+            self.assertIsNotNone(entry, f"{name} not registered")
+            self.assertEqual(entry["category"], "booster")
+            self.assertFalse(entry["is_hardware"])
+            self.assertEqual(entry["order"], 50)
+            self.assertIn("on_interface_check", entry["hooks"])
+
+
+class TestStep4SkillCheckIntegration(unittest.TestCase):
+    """Step 4 integration: NET-context skill_check pulls booster bonuses
+    from active_programs and folds them into the formatted roll."""
+
+    def test_worm_fires_via_resolve_actions(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "active", "rez": 7, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=4):
+            result = resolve_actions(
+                [{"type": "skill_check", "character": "RedVelvet",
+                  "stat_value": 4, "skill_value": 0, "dv": 10,
+                  "net": True, "ability": "Backdoor"}],
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # d10=4 + Interface 4 + Worm 2 = 10 vs DV 10 → ✗ (ties favor defender)
+        self.assertEqual(r["total"], 10)
+        self.assertEqual(r["dv"], 10)
+        self.assertFalse(r["success"])
+        self.assertEqual(r["booster_bonuses"], [("Worm", 2)])
+        self.assertIn("+Worm 2", r["formatted"])
+
+    def test_no_booster_when_program_derezzed(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "derezzed", "rez": 0, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "skill_check", "character": "RedVelvet",
+                  "stat_value": 4, "skill_value": 0, "dv": 10,
+                  "net": True, "ability": "Backdoor"}],
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # d10=5 + Interface 4 = 9 (no Worm) vs DV 10 → ✗
+        self.assertEqual(r["total"], 9)
+        self.assertNotIn("booster_bonuses", r)
+        self.assertNotIn("Worm", r["formatted"])
+
+    def test_wrong_ability_no_bonus(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "active", "rez": 7, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "skill_check", "character": "RedVelvet",
+                  "stat_value": 4, "skill_value": 0, "dv": 10,
+                  "net": True, "ability": "Cloak"}],  # not Backdoor
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # d10=5 + Interface 4 = 9 (Worm doesn't fire on Cloak)
+        self.assertEqual(r["total"], 9)
+        self.assertNotIn("booster_bonuses", r)
+
+    def test_non_net_skill_check_unaffected(self):
+        """Meatspace skill checks ignore boosters even with same name."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "active", "rez": 7, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "skill_check", "character": "V",
+                  "stat_value": 6, "skill_value": 4, "dv": 13}],  # no net flag
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # 5 + 6 + 4 = 15 (no booster fires)
+        self.assertEqual(r["total"], 15)
+        self.assertNotIn("booster_bonuses", r)
+
+    def test_speedy_on_initiative_via_skill_check(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Speedy Gonzalvez", "status": "active", "rez": 7,
+                  "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=6):
+            result = resolve_actions(
+                [{"type": "skill_check", "character": "RedVelvet",
+                  "stat_value": 7, "skill_value": 0, "dv": 13,
+                  "net": True, "ability": "Initiative"}],
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # 6 + 7 + 2 (Speedy) = 15
+        self.assertEqual(r["total"], 15)
+        self.assertEqual(r["booster_bonuses"], [("Speedy", 2)])
+
+
+class TestStep4OpposedCheckIntegration(unittest.TestCase):
+    """NET opposed_check (Zap/Slide) also gets booster bonus on attacker side."""
+
+    def test_zap_with_no_matching_booster(self):
+        """Zap is its own enum value; no current Booster targets Zap."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "active", "rez": 7, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "opposed_check", "character": "RedVelvet",
+                  "attacker_stat": 6, "defender_stat": 4,
+                  "net": True, "ability": "Zap", "zap": True}],
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertNotIn("booster_bonuses", r)
+
+    def test_slide_does_not_fire_worm(self):
+        """Worm targets Backdoor only — Slide opposed check gets no Worm bonus."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Worm", "status": "active", "rez": 7, "category": "booster"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "opposed_check", "character": "RedVelvet",
+                  "attacker_stat": 6, "defender_stat": 4,
+                  "net": True, "ability": "Slide"}],
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertNotIn("booster_bonuses", r)
+
+
 if __name__ == "__main__":
     unittest.main()
