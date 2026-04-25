@@ -2268,8 +2268,16 @@ def resolve_ice_effect(ice_block, active_programs=None, installed_hardware=None,
             annotations.append("no_targets")
 
     elif effect == "body_fire":
-        if any("insulated wiring" in h for h in hw_list):
-            formatted_parts.append(f"{name} fire blocked by Insulated Wiring!")
+        # Step 2: Insulated Wiring block migrated to the registry. Hook
+        # may also emit replacement state ops in the future.
+        from .cpred_program_effects import run_ice_effect_inbound_hooks
+        _hs_proxy = {"active_programs": active_programs,
+                     "installed_hardware": installed_hardware}
+        _blocked, _hook_ops, _label, _ = run_ice_effect_inbound_hooks(
+            "body_fire", ice_block, _hs_proxy, None)
+        state_ops.extend(_hook_ops)
+        if _blocked:
+            formatted_parts.append(f"{name} fire blocked by {_label}!")
             annotations.append("blocked_by_hardware")
         else:
             state_ops.append({"op": "body_fire", "active": True,
@@ -2302,9 +2310,15 @@ def resolve_ice_effect(ice_block, active_programs=None, installed_hardware=None,
         formatted_parts.append(f"{name} steals 1 NET Action next turn!")
 
     elif effect == "forced_jack_out":
-        # Check KRASH Barrier
-        if any("krash barrier" in h for h in hw_list):
-            formatted_parts.append(f"{name} forced Jack Out blocked by KRASH Barrier!")
+        # Step 2: KRASH Barrier block migrated to the registry.
+        from .cpred_program_effects import run_ice_effect_inbound_hooks
+        _hs_proxy = {"active_programs": active_programs,
+                     "installed_hardware": installed_hardware}
+        _blocked, _hook_ops, _label, _ = run_ice_effect_inbound_hooks(
+            "forced_jack_out", ice_block, _hs_proxy, None)
+        state_ops.extend(_hook_ops)
+        if _blocked:
+            formatted_parts.append(f"{name} forced Jack Out blocked by {_label}!")
             annotations.append("blocked_by_hardware")
         else:
             # Cascade: resolve all rezzed Black ICE effects

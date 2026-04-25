@@ -493,5 +493,216 @@ class TestUnusedHookSkipped(_RegistryMixin, unittest.TestCase):
         self.assertEqual(labels, [])
 
 
+class TestStep2HardwareEntries(unittest.TestCase):
+    """Step 2: the 3 existing hardware effects are now registry-driven.
+
+    These tests use the production registry (no _RegistryMixin override)
+    so they verify the live entries.
+    """
+
+    def test_insulated_wiring_blocks_body_fire(self):
+        hs = {"installed_hardware": ["Insulated Wiring"], "active_programs": []}
+        blocked, ops, label, _ = cpe.run_ice_effect_inbound_hooks(
+            "body_fire", {"name": "Asp"}, hs, None)
+        self.assertTrue(blocked)
+        self.assertEqual(label, "Insulated Wiring")
+        self.assertEqual(ops, [])
+
+    def test_insulated_wiring_does_not_block_other_effects(self):
+        hs = {"installed_hardware": ["Insulated Wiring"], "active_programs": []}
+        for effect in ("forced_jack_out", "movement_lock", "stat_debuff",
+                       "slide_penalty", "net_action_penalty"):
+            blocked, _, _, _ = cpe.run_ice_effect_inbound_hooks(
+                effect, {"name": "X"}, hs, None)
+            self.assertFalse(blocked, f"Insulated Wiring wrongly blocked {effect!r}")
+
+    def test_krash_barrier_blocks_forced_jack_out(self):
+        hs = {"installed_hardware": ["KRASH Barrier"], "active_programs": []}
+        blocked, ops, label, _ = cpe.run_ice_effect_inbound_hooks(
+            "forced_jack_out", {"name": "Giant"}, hs, None)
+        self.assertTrue(blocked)
+        self.assertEqual(label, "KRASH Barrier")
+
+    def test_krash_barrier_does_not_block_body_fire(self):
+        hs = {"installed_hardware": ["KRASH Barrier"], "active_programs": []}
+        blocked, _, _, _ = cpe.run_ice_effect_inbound_hooks(
+            "body_fire", {"name": "Asp"}, hs, None)
+        self.assertFalse(blocked)
+
+    def test_no_hardware_no_block(self):
+        hs = {"installed_hardware": [], "active_programs": []}
+        for effect in ("body_fire", "forced_jack_out"):
+            blocked, _, _, _ = cpe.run_ice_effect_inbound_hooks(
+                effect, {"name": "X"}, hs, None)
+            self.assertFalse(blocked, f"Bare deck wrongly blocked {effect!r}")
+
+    def test_backup_drive_intercepts_destroyed_to_deactivated(self):
+        hs = {"installed_hardware": ["Backup Drive"], "active_programs": []}
+        new_status, ops, trace = cpe.run_program_status_change_hooks(
+            "Sword", "active", "destroyed", hs, {})
+        self.assertEqual(new_status, "deactivated")  # saved
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["before"], "destroyed")
+        self.assertEqual(trace[0]["after"], "deactivated")
+
+    def test_backup_drive_does_not_intercept_other_transitions(self):
+        hs = {"installed_hardware": ["Backup Drive"], "active_programs": []}
+        # active → derezzed: not destroyed, no intercept
+        new_status, _, _ = cpe.run_program_status_change_hooks(
+            "Shield", "active", "derezzed", hs, {})
+        self.assertEqual(new_status, "derezzed")
+        # active → deactivated: not destroyed
+        new_status, _, _ = cpe.run_program_status_change_hooks(
+            "Sword", "active", "deactivated", hs, {})
+        self.assertEqual(new_status, "deactivated")
+        # destroyed → destroyed (already destroyed, no double-save)
+        new_status, _, _ = cpe.run_program_status_change_hooks(
+            "Sword", "destroyed", "destroyed", hs, {})
+        self.assertEqual(new_status, "destroyed")
+
+    def test_no_backup_drive_destroyed_stays_destroyed(self):
+        hs = {"installed_hardware": [], "active_programs": []}
+        new_status, _, _ = cpe.run_program_status_change_hooks(
+            "Sword", "active", "destroyed", hs, {})
+        self.assertEqual(new_status, "destroyed")
+
+    def test_backup_drive_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Backup Drive")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["category"], "hardware")
+        self.assertTrue(entry["is_hardware"])
+        self.assertIn("on_program_status_change", entry["hooks"])
+
+    def test_insulated_wiring_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Insulated Wiring")
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry["is_hardware"])
+        self.assertIn("on_ice_effect_inbound", entry["hooks"])
+
+    def test_krash_barrier_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("KRASH Barrier")
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry["is_hardware"])
+        self.assertIn("on_ice_effect_inbound", entry["hooks"])
+
+
+class TestApplyProgramStatusChangeHelper(unittest.TestCase):
+    """apply_program_status_change is the single-source-of-truth status
+    transition helper. Routes through hooks, then maintains
+    active_programs / destroyed_programs / REZ invariants."""
+
+    def test_destroyed_with_backup_drive_saves_program(self):
+        from game_systems.cpred_hack import apply_program_status_change
+        state = {
+            "active_programs": [{"name": "Sword", "status": "active",
+                                 "rez": 0, "category": "attacker"}],
+            "installed_hardware": ["Backup Drive"],
+            "destroyed_programs": [],
+        }
+        final, _, _ = apply_program_status_change(state, "Sword", "active", "destroyed")
+        self.assertEqual(final, "deactivated")
+        # Saved: status flipped to deactivated
+        self.assertEqual(state["active_programs"][0]["status"], "deactivated")
+        # Not added to destroyed_programs (Backup Drive saved it before write)
+        self.assertEqual(state["destroyed_programs"], [])
+
+    def test_destroyed_without_backup_drive_persists(self):
+        from game_systems.cpred_hack import apply_program_status_change
+        state = {
+            "active_programs": [{"name": "Sword", "status": "active",
+                                 "rez": 0, "category": "attacker"}],
+            "installed_hardware": [],
+            "destroyed_programs": [],
+        }
+        final, _, _ = apply_program_status_change(state, "Sword", "active", "destroyed")
+        self.assertEqual(final, "destroyed")
+        self.assertEqual(state["active_programs"][0]["status"], "destroyed")
+        self.assertIn("Sword", state["destroyed_programs"])
+
+    def test_recovery_from_destroyed_clears_destroyed_programs(self):
+        from game_systems.cpred_hack import apply_program_status_change
+        state = {
+            "active_programs": [{"name": "Sword", "status": "destroyed",
+                                 "rez": 0, "category": "attacker"}],
+            "installed_hardware": [],
+            "destroyed_programs": ["Sword"],
+        }
+        # Reinstall: destroyed → deactivated
+        final, _, _ = apply_program_status_change(
+            state, "Sword", "destroyed", "deactivated")
+        self.assertEqual(final, "deactivated")
+        self.assertEqual(state["destroyed_programs"], [])  # cleared
+
+    def test_recovery_from_derezzed_restores_rez(self):
+        from game_systems.cpred_hack import apply_program_status_change
+        from game_systems.cpred_tables import PROGRAM_STATS
+        shield_rez = PROGRAM_STATS["Shield"]["rez"]
+        state = {
+            "active_programs": [{"name": "Shield", "status": "derezzed",
+                                 "rez": 0, "category": "defender"}],
+            "installed_hardware": [],
+        }
+        apply_program_status_change(state, "Shield", "derezzed", "active")
+        self.assertEqual(state["active_programs"][0]["rez"], shield_rez)
+
+
+class TestStep2EndToEndDestructionPath(unittest.TestCase):
+    """Verify: anti-program ICE destruction with Backup Drive saves the
+    program at the moment of destruction (not at writeback)."""
+
+    def test_program_rez_damage_to_zero_with_backup_drive_saves(self):
+        from game_systems.cpred_hack import _apply_single_ice_op
+        state = {
+            "active_programs": [{"name": "Sword", "status": "active",
+                                 "rez": 1, "category": "attacker"}],
+            "installed_hardware": ["Backup Drive"],
+            "destroyed_programs": [],
+        }
+        # Anti-program ICE deals 1 REZ damage → REZ to 0 → would be destroyed
+        op = {"op": "program_rez_damage", "program_name": "Sword",
+              "damage": 1, "destroyed": True}
+        _apply_single_ice_op(state, op, "program_rez_damage")
+        # Backup Drive intercepts destruction at status-change time
+        self.assertEqual(state["active_programs"][0]["status"], "deactivated")
+        self.assertEqual(state["destroyed_programs"], [])
+
+    def test_program_destroy_op_with_backup_drive_saves(self):
+        from game_systems.cpred_hack import _apply_single_ice_op
+        state = {
+            "active_programs": [{"name": "Sword", "status": "active",
+                                 "rez": 0, "category": "attacker"}],
+            "installed_hardware": ["Backup Drive"],
+            "destroyed_programs": [],
+        }
+        op = {"op": "program_destroy", "program_name": "Sword"}
+        _apply_single_ice_op(state, op, "program_destroy")
+        self.assertEqual(state["active_programs"][0]["status"], "deactivated")
+        self.assertEqual(state["destroyed_programs"], [])
+
+    def test_program_destroy_op_without_backup_drive_persists(self):
+        from game_systems.cpred_hack import _apply_single_ice_op
+        state = {
+            "active_programs": [{"name": "Sword", "status": "active",
+                                 "rez": 0, "category": "attacker"}],
+            "installed_hardware": [],
+            "destroyed_programs": [],
+        }
+        op = {"op": "program_destroy", "program_name": "Sword"}
+        _apply_single_ice_op(state, op, "program_destroy")
+        self.assertEqual(state["active_programs"][0]["status"], "destroyed")
+        self.assertIn("Sword", state["destroyed_programs"])
+
+    def test_program_derez_op_routes_through_helper(self):
+        from game_systems.cpred_hack import _apply_single_ice_op
+        state = {
+            "active_programs": [{"name": "Shield", "status": "active",
+                                 "rez": 7, "category": "defender"}],
+            "installed_hardware": [],
+        }
+        op = {"op": "program_derez", "program_name": "Shield"}
+        _apply_single_ice_op(state, op, "program_derez")
+        self.assertEqual(state["active_programs"][0]["status"], "derezzed")
+
+
 if __name__ == "__main__":
     unittest.main()

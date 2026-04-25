@@ -39,6 +39,8 @@ Hook signatures (return shape; malformed return → warning log + no-op):
                                 → (rewritten_new_status_str, list_of_state_ops)
     on_program_damage_dice_select (target_ice_block, prog, hack_state)
                                 → (damage_dice_int, modifier_label_or_None)
+    on_ice_effect_inbound       (effect_name, ice_block, hack_state, game_state)
+                                → (blocked_bool, replacement_ops_list, label_or_None)
 """
 import copy
 import logging
@@ -51,6 +53,63 @@ logger = logging.getLogger(__name__)
 # names matching PROGRAM_STATS / HARDWARE_STATS spelling.
 # ---------------------------------------------------------------------------
 PROGRAM_EFFECTS: dict[str, dict] = {}
+
+
+# ---------------------------------------------------------------------------
+# Hook implementations (Step 2: 3 hardware effects)
+# ---------------------------------------------------------------------------
+
+def _insulated_wiring_on_ice_effect(effect, ice_block, hack_state, game_state):
+    """Block body_fire effects (e.g. from Asp). RAW: Insulated Wiring
+    cyberdeck hardware prevents the Netrunner's clothes from catching fire."""
+    if effect == "body_fire":
+        return True, [], "Insulated Wiring"
+    return False, [], None
+
+
+def _krash_barrier_on_ice_effect(effect, ice_block, hack_state, game_state):
+    """Block forced_jack_out (e.g. from Giant). RAW: KRASH Barrier hardware
+    is immune to forced disconnection — brain damage still applies, but no
+    cascade and no disconnection."""
+    if effect == "forced_jack_out":
+        return True, [], "KRASH Barrier"
+    return False, [], None
+
+
+def _backup_drive_on_program_status_change(program_name, old_status, new_status,
+                                            hack_state, game_state):
+    """Intercept program destruction. RAW: Backup Drive hardware saves a
+    program from being permanently Destroyed by reducing it to Deactivated
+    instead. The save fires AT the moment of destruction (not at hack
+    writeback) so the program is recoverable mid-hack via reinstall_program."""
+    if new_status == "destroyed" and old_status != "destroyed":
+        return "deactivated", []
+    return new_status, []
+
+
+# ---------------------------------------------------------------------------
+# Registry entries
+# ---------------------------------------------------------------------------
+PROGRAM_EFFECTS["Insulated Wiring"] = {
+    "category": "hardware",
+    "is_hardware": True,
+    "order": 10,
+    "hooks": {"on_ice_effect_inbound": _insulated_wiring_on_ice_effect},
+}
+
+PROGRAM_EFFECTS["KRASH Barrier"] = {
+    "category": "hardware",
+    "is_hardware": True,
+    "order": 10,
+    "hooks": {"on_ice_effect_inbound": _krash_barrier_on_ice_effect},
+}
+
+PROGRAM_EFFECTS["Backup Drive"] = {
+    "category": "hardware",
+    "is_hardware": True,
+    "order": 10,
+    "hooks": {"on_program_status_change": _backup_drive_on_program_status_change},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +496,60 @@ def run_program_status_change_hooks(program_name, old_status, new_status,
         if isinstance(rewritten, str) and rewritten:
             current_new = rewritten
     return current_new, state_ops, trace
+
+
+def run_ice_effect_inbound_hooks(effect, ice_block, hack_state, game_state):
+    """Run on_ice_effect_inbound hooks (Insulated Wiring blocks body_fire,
+    KRASH Barrier blocks forced_jack_out, future Hardened Circuitry blocks EMP).
+
+    Args:
+        effect: The ICE effect type being applied (e.g. "body_fire",
+                "forced_jack_out", "movement_lock").
+        ice_block: The ICE stat block emitting the effect.
+        hack_state: The hack_state dict.
+        game_state: The game_state dict.
+
+    Returns: (blocked, replacement_ops, label, trace).
+        blocked = True if any hook returned blocked=True; first blocker wins
+                  the label.
+        replacement_ops = aggregated state ops from all hooks (e.g. an
+                  alternative annotation op a hook wants to emit instead).
+        label = first non-None blocker label (used for narration).
+        trace = [{prog, hook, blocked, label, state_ops}, ...].
+    """
+    hs = hack_state if isinstance(hack_state, dict) else {}
+    gs = game_state if isinstance(game_state, dict) else {}
+    progs = _snapshot_active_programs(hs.get("active_programs"))
+    hw = _snapshot_installed_hardware(hs.get("installed_hardware"))
+    entries = _matching_entries(progs, hw, "on_ice_effect_inbound")
+    blocked = False
+    label = None
+    state_ops = []
+    trace = []
+    for canonical, entry, prog in entries:
+        hook = entry["hooks"]["on_ice_effect_inbound"]
+        ret = _safe_call(
+            hook, (effect, ice_block, hs, gs),
+            f"{canonical}.on_ice_effect_inbound",
+        )
+        if not isinstance(ret, tuple) or len(ret) != 3:
+            if ret is not None:
+                logger.warning(
+                    "cpred_program_effects: %s.on_ice_effect_inbound returned %r; expected (blocked, ops, label).",
+                    canonical, ret,
+                )
+            continue
+        b, ops, lbl = ret
+        ops_copy = copy.deepcopy(ops) if isinstance(ops, list) else []
+        state_ops.extend(ops_copy)
+        if b and not blocked:
+            blocked = True
+            label = lbl or canonical
+        trace.append({
+            "prog": canonical, "hook": "on_ice_effect_inbound",
+            "blocked": bool(b), "label": lbl, "state_ops": ops_copy,
+        })
+    return blocked, state_ops, label, trace
 
 
 def run_program_damage_dice_select_hooks(target_ice_block, prog, hack_state):

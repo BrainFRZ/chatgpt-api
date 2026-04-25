@@ -276,30 +276,81 @@ def _has_unconscious_condition(character_name, game_state=None, pipeline_state=N
     return _has_condition(character_name, ("unconscious",), game_state=game_state, pipeline_state=pipeline_state)
 
 
+def apply_program_status_change(state, program_name, old_status, new_status,
+                                 game_state=None):
+    """Apply a program status transition through on_program_status_change hooks.
+
+    Hooks may rewrite new_status (e.g. Backup Drive: 'destroyed' →
+    'deactivated' to save the program from permanent loss). The chain runs
+    via the registry; final_new_status is then applied to active_programs
+    plus destroyed_programs / REZ invariants are maintained:
+      - status flips to final_new_status
+      - if final_new_status == 'destroyed' AND not already there: append to
+        destroyed_programs
+      - if recovering FROM destroyed (final != 'destroyed' but old was):
+        remove from destroyed_programs
+      - if recovering FROM derezzed/destroyed TO active/deactivated: restore
+        REZ from PROGRAM_STATS
+
+    Returns (final_new_status, hook_state_ops, trace).
+    """
+    from .cpred_program_effects import run_program_status_change_hooks
+    from .cpred_tables import PROGRAM_STATS
+
+    final_new, hook_ops, trace = run_program_status_change_hooks(
+        program_name, old_status, new_status, state, game_state)
+
+    # Apply to active_programs
+    programs = state.get("active_programs", [])
+    if isinstance(programs, list):
+        for p in programs:
+            if isinstance(p, dict) and p.get("name") == program_name:
+                p["status"] = final_new
+                # Restore REZ when recovering from a derezzed/destroyed state.
+                if old_status in ("derezzed", "destroyed") and final_new != old_status:
+                    needle = str(program_name).strip().lower().replace(" ", "")
+                    for canonical, block in PROGRAM_STATS.items():
+                        if canonical.lower().replace(" ", "") == needle:
+                            p["rez"] = block.get("rez", p.get("rez", 0))
+                            break
+                break
+
+    # Maintain destroyed_programs invariant
+    destroyed = state.setdefault("destroyed_programs", [])
+    if isinstance(destroyed, list):
+        if final_new == "destroyed":
+            if program_name and program_name not in destroyed:
+                destroyed.append(program_name)
+        else:
+            if program_name in destroyed:
+                destroyed.remove(program_name)
+
+    return final_new, hook_ops, trace
+
+
 def _apply_single_ice_op(state, op, op_type):
     """Apply a single ICE effect op. Raises on bad data — caller catches."""
     if op_type == "program_destroy":
         prog_name = op.get("program_name", "")
-        programs = state.get("active_programs", [])
-        if isinstance(programs, list):
-            for p in programs:
-                if isinstance(p, dict) and p.get("name") == prog_name:
-                    p["status"] = "destroyed"
-                    break
-        destroyed = state.setdefault("destroyed_programs", [])
-        if prog_name and prog_name not in destroyed:
-            destroyed.append(prog_name)
+        # Step 2: route through hooks so Backup Drive can intercept.
+        # Look up current status to record the transition origin.
+        old_status = "active"
+        for p in state.get("active_programs", []) or []:
+            if isinstance(p, dict) and p.get("name") == prog_name:
+                old_status = str(p.get("status", "active")).strip().lower() or "active"
+                break
+        apply_program_status_change(state, prog_name, old_status, "destroyed")
 
     elif op_type == "program_derez":
         # Derez is recoverable with 2 NET Actions, but it still uses the
         # documented recoverable status contract rather than a private marker.
         prog_name = op.get("program_name", "")
-        programs = state.get("active_programs", [])
-        if isinstance(programs, list):
-            for p in programs:
-                if isinstance(p, dict) and p.get("name") == prog_name:
-                    p["status"] = "derezzed"
-                    break
+        old_status = "active"
+        for p in state.get("active_programs", []) or []:
+            if isinstance(p, dict) and p.get("name") == prog_name:
+                old_status = str(p.get("status", "active")).strip().lower() or "active"
+                break
+        apply_program_status_change(state, prog_name, old_status, "derezzed")
 
     elif op_type == "body_fire":
         state["on_fire"] = True
@@ -336,10 +387,10 @@ def _apply_single_ice_op(state, op, op_type):
                 if isinstance(p, dict) and p.get("name") == prog_name:
                     p["rez"] = max(0, int(p.get("rez", 0)) - damage)
                     if p["rez"] <= 0 or op.get("destroyed"):
-                        p["status"] = "destroyed"
-                        destroyed = state.setdefault("destroyed_programs", [])
-                        if prog_name and prog_name not in destroyed:
-                            destroyed.append(prog_name)
+                        # Step 2: route through hooks so Backup Drive can
+                        # intercept anti-program-ICE destruction.
+                        old_status = str(p.get("status", "active")).strip().lower() or "active"
+                        apply_program_status_change(state, prog_name, old_status, "destroyed")
                     break
 
 
@@ -477,37 +528,17 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                         p["status"] = "deactivated"
                         break
         elif op.get("op") == "program_status_change":
-            # Step 0c: player-choice status transitions (activate /
-            # deactivate / reactivate / reinstall) emitted by the resolver.
+            # Step 0c emits this for player-choice transitions (activate /
+            # deactivate / reactivate / reinstall). Step 2 routes through the
+            # apply_program_status_change helper so on_program_status_change
+            # hooks (Backup Drive etc.) fire consistently with cascade-driven
+            # destruction paths.
             prog_name = op.get("program_name", "")
             new_status = op.get("new_status", "")
             old_status = op.get("old_status", "")
-            programs = state.get("active_programs", [])
-            if isinstance(programs, list) and new_status:
-                for p in programs:
-                    if isinstance(p, dict) and p.get("name") == prog_name:
-                        p["status"] = new_status
-                        # Restore REZ when recovering from derezzed/destroyed
-                        # (Hacking Rulebook §4: 2 NA Deactivate+Reactivate
-                        # brings a derezzed program back to working order;
-                        # Backup-Drive-saved reinstall likewise restores REZ).
-                        if old_status in ("derezzed", "destroyed"):
-                            from .cpred_tables import PROGRAM_STATS
-                            stats = None
-                            for canonical, block in PROGRAM_STATS.items():
-                                if canonical.lower().replace(" ", "") == \
-                                        str(prog_name).strip().lower().replace(" ", ""):
-                                    stats = block
-                                    break
-                            if stats is not None:
-                                p["rez"] = stats.get("rez", p.get("rez", 0))
-                        break
-                # Reinstall removes from destroyed_programs so it's no longer
-                # rendered as a permanent loss.
-                if new_status == "deactivated":
-                    destroyed_list = state.get("destroyed_programs", [])
-                    if isinstance(destroyed_list, list) and prog_name in destroyed_list:
-                        destroyed_list.remove(prog_name)
+            if prog_name and new_status:
+                apply_program_status_change(
+                    state, prog_name, old_status, new_status, game_state)
         elif op.get("op") == "rez_damage":
             try:
                 _apply_rez_damage_to_ice_status(state, op)
@@ -1186,7 +1217,15 @@ def _writeback_cycles(runner_name, cycles, pipeline_state):
 
 
 def _writeback_destroyed_programs(runner_name, state, pipeline_state):
-    """Remove destroyed programs from edgerunner persistent deck_slots (unless Backup Drive)."""
+    """Remove permanently-destroyed programs from edgerunner persistent deck_slots.
+
+    Step 2: the Backup Drive save now runs at status-change time via the
+    on_program_status_change registry hook (cpred_program_effects.Backup
+    Drive), so by the time we reach hack writeback, destroyed_programs
+    contains ONLY programs that were not saved. The legacy in-place Backup
+    Drive check here is therefore redundant — leaving it as a defensive
+    safety net would mask hook regressions, so we drop it.
+    """
     game_state = pipeline_state.get("game_state", {})
     destroyed = state.get("destroyed_programs", [])
     if not (isinstance(destroyed, list) and destroyed and runner_name and isinstance(game_state, dict)):
@@ -1194,14 +1233,6 @@ def _writeback_destroyed_programs(runner_name, state, pipeline_state):
     er = game_state.get("edgerunners", {}).get(runner_name, {})
     deck_slots = get_deck_slots(er)
     if not isinstance(deck_slots, list):
-        return
-    # Check for Backup Drive in deck_slots (hardware entries)
-    has_backup_drive = any(
-        isinstance(s, dict) and s.get("type") == "hardware"
-        and "backup drive" in s.get("name", "").lower()
-        for s in deck_slots
-    )
-    if has_backup_drive:
         return
     # Replace destroyed programs with null (preserving slot positions)
     er["deck_slots"] = [
