@@ -18,6 +18,7 @@ from .cpred_hack import (
     _apply_trace_auto_increment,
     _expire_active_debuffs,
     _stamp_debuff_expirations,
+    _sync_debuffs_to_edgerunner,
     _check_forced_disconnect,
     _get_alert_name,
     _mark_forced_disconnect,
@@ -48,6 +49,15 @@ def init_net_combat_state(
 ):
     """Return initial net_combat state for combined meatspace+NET mode."""
     net_actions = _net_actions_for_rank(interface_rank)
+    # Seed active_debuffs from edgerunner so RAW 1-hour effects (Liche /
+    # Scorpion / Nervescrub) survive entering combat after a prior hack.
+    seeded_debuffs = []
+    _gs = _kw.get("game_state")
+    if isinstance(_gs, dict) and netrunner_name:
+        _er = _gs.get("edgerunners", {}).get(netrunner_name, {})
+        _er_dbs = _er.get("active_debuffs") if isinstance(_er, dict) else None
+        if isinstance(_er_dbs, list):
+            seeded_debuffs = list(_er_dbs)
     return {
         "active": True,
         "netrunner": netrunner_name,
@@ -72,6 +82,7 @@ def init_net_combat_state(
         "brain_damage": 0,
         "system_map": None,
         "available_actions": [],
+        "active_debuffs": seeded_debuffs,
         # Completion flags
         "combat_complete": False,
         "net_complete": False,
@@ -209,6 +220,7 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     _apply_alert_ice_spawn(nc)
     _stamp_debuff_expirations(nc, pipeline_state)
     _expire_active_debuffs(nc, pipeline_state)
+    _sync_debuffs_to_edgerunner(nc, game_state, "netrunner")
 
     # --- Completion flags ---
     nc["combat_complete"] = tool_input.get("combat_complete", nc.get("combat_complete", False))

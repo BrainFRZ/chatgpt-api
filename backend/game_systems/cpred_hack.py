@@ -105,6 +105,14 @@ def init_hack_state(
                  "rez": p.get("rez_max", 0), "status": "deactivated"}
                 for p in _gs_progs if p.get("status") != "destroyed"
             ]
+        # Bootstrap active_debuffs from edgerunner so 1-hour Liche/Scorpion/
+        # Nervescrub effects survive hack boundaries (RAW: meatspace effect).
+        # Source-of-truth lives on the edgerunner; hack_state.active_debuffs
+        # is a working mirror that gets synced back at the end of each
+        # apply_hack_state call.
+        _gs_dbs = _gs_er.get("active_debuffs", [])
+        if isinstance(_gs_dbs, list) and _gs_dbs:
+            state["active_debuffs"] = list(_gs_dbs)
     if context:
         state["context"] = context
     return state
@@ -222,6 +230,29 @@ def _expire_active_debuffs(state, pipeline_state):
         if exp_dt > now:
             surviving.append(db)
     state["active_debuffs"] = surviving
+
+
+def _sync_debuffs_to_edgerunner(state, game_state, name_key="hacker_name"):
+    """Mirror state.active_debuffs back to game_state.edgerunners[name].active_debuffs.
+
+    The edgerunner copy is the persistent source of truth (survives across
+    hack/net_combat boundaries); state.active_debuffs is the live working
+    list that fresh ICE ops mutate. Called at the tail of apply_hack_state
+    and apply_net_combat_state so writes during the call propagate.
+    """
+    if not isinstance(game_state, dict):
+        return
+    name = state.get(name_key)
+    if not name:
+        return
+    edgerunners = game_state.get("edgerunners")
+    if not isinstance(edgerunners, dict):
+        return
+    er = edgerunners.get(name)
+    if not isinstance(er, dict):
+        return
+    debuffs = state.get("active_debuffs")
+    er["active_debuffs"] = list(debuffs) if isinstance(debuffs, list) else []
 
 
 def _apply_persistent_ice_effects(state, model_hs, game_state, name_key, tick_condition):
@@ -1156,6 +1187,7 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
     _apply_alert_ice_spawn(hack_state)
     _stamp_debuff_expirations(hack_state, pipeline_state)
     _expire_active_debuffs(hack_state, pipeline_state)
+    _sync_debuffs_to_edgerunner(hack_state, game_state, "hacker_name")
 
     # Model-signaled Unsafe Jack Out (ally unplugs / drags out of range / self-yanks).
     # Applied before flatline check so an ally rescuing an unconscious Netrunner

@@ -518,6 +518,7 @@ def _default_edgerunner():
         "stats": {},                   # {"INT": 7, "REF": 8, "DEX": 8, "TECH": 5, "COOL": 6, "WILL": 5, "LUCK": 7, "BODY": 6, "EMP": 6, "MOVE": 6}
         "skills": {},                  # {"Handgun": 6, "Evasion": 6, "Athletics": 4, "Stealth": 2, "Interface": 6, ...}
         "rep": 0,                      # Reputation rank (for facedowns)
+        "active_debuffs": [],          # NET stat debuffs (Liche/Scorpion/Nervescrub) — meatspace, persists across hack boundaries; entries carry expires_at_time/date stamped from HUD clock at apply time
     }
 
 

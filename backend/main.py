@@ -2851,6 +2851,7 @@ def _init_hack_from_trigger(gs, ht, character_states, pipeline_state=None):
         hacker_name=hacker_name,
         context=ht.get("context"),
         deck_slots=deck_slots,
+        game_state=pipeline_state.get("game_state", {}) if isinstance(pipeline_state, dict) else {},
     )
 
 
@@ -4419,6 +4420,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             interface_rank=_nr_iface,
             cycles_max=_nr_cycles,
             initiated_from=_net_combat.get("initiated_from", "combat"),
+            game_state=_ps_for_combat.get("game_state", {}),
         )
         # Carry over context from trigger for first-exchange injection
         if _net_combat.get("context"):

@@ -1774,5 +1774,141 @@ class TestStatDebuffExpiration(unittest.TestCase):
         self.assertEqual(nc["active_debuffs"], [])
 
 
+class TestStatDebuffCrossHackPersistence(unittest.TestCase):
+    """Verify Liche/Scorpion/Nervescrub debuffs persist across hack boundaries.
+
+    RAW: these are meatspace effects on the character, not on the hack state.
+    Source of truth lives on game_state.edgerunners[name].active_debuffs;
+    hack_state.active_debuffs is a working mirror seeded at init and synced
+    back at the end of every apply_hack_state / apply_net_combat_state call.
+    """
+
+    def _ps(self, hs=None, gs=None, hud_time="1430", hud_date="2026-04-25"):
+        gs = gs or _make_game_state()
+        return {
+            "hud_state": {"time": hud_time, "date": hud_date},
+            "game_state": gs,
+        }
+
+    def test_apply_syncs_to_edgerunner(self):
+        """After apply_hack_state, edgerunner.active_debuffs mirrors hack_state's."""
+        gs = _make_game_state()
+        hs = _make_hack_state(hacker_name="V")
+        ps = self._ps(gs=gs)
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        er_dbs = gs["edgerunners"]["V"]["active_debuffs"]
+        self.assertEqual(len(er_dbs), 1)
+        self.assertEqual(er_dbs[0]["source"], "Liche")
+        self.assertEqual(er_dbs[0]["expires_at_time"], "1530")
+
+    def test_init_hack_state_seeds_from_edgerunner(self):
+        """A fresh hack picks up a still-active Liche debuff from the edgerunner."""
+        gs = _make_game_state()
+        gs["edgerunners"]["V"]["active_debuffs"] = [
+            {"stats": ["INT"], "amount": 3, "source": "Liche", "duration": "1 hour",
+             "expires_at_time": "1530", "expires_at_date": "2026-04-25"}
+        ]
+        # Fresh init reads game_state.edgerunners.V.active_debuffs
+        hs = init_hack_state(hacker_name="V", interface_rank=4, game_state=gs)
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+        self.assertEqual(hs["active_debuffs"][0]["source"], "Liche")
+
+    def test_debuff_survives_hack_end_to_new_hack(self):
+        """Hack 1 applies Liche, hack ends, hack 2 starts — debuff is still there.
+
+        Pin the regression: previously, init_hack_state's active_debuffs: []
+        wiped the prior debuff because the source of truth was hack-scoped.
+        """
+        gs = _make_game_state()
+        # Hack 1: 14:00, take a 1-hour Liche hit
+        hs1 = init_hack_state(hacker_name="V", interface_rank=4, game_state=gs)
+        ps1 = self._ps(gs=gs, hud_time="1400")
+        ops = [{"op": "stat_debuff", "stats": ["INT", "REF", "DEX"], "amount": 4,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs1, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps1)
+        self.assertEqual(gs["edgerunners"]["V"]["active_debuffs"][0]["expires_at_time"], "1500")
+        # Hack 1 ends (model jacks out, hack_state is discarded)
+        # Hack 2 starts at 14:30 — fresh init, but edgerunner still holds the debuff
+        hs2 = init_hack_state(hacker_name="V", interface_rank=4, game_state=gs)
+        self.assertEqual(len(hs2["active_debuffs"]), 1)
+        # And the working mirror still shows it on the next apply
+        ps2 = self._ps(gs=gs, hud_time="1430")
+        apply_hack_state(hs2, {"hack_state": {}}, game_state=gs, pipeline_state=ps2)
+        self.assertEqual(len(hs2["active_debuffs"]), 1)
+        self.assertEqual(hs2["active_debuffs"][0]["source"], "Liche")
+
+    def test_debuff_expires_between_hacks_via_edgerunner(self):
+        """Hack 1 takes Liche at 14:00 (1h); hack 2 starts at 15:30 — debuff is gone."""
+        gs = _make_game_state()
+        hs1 = init_hack_state(hacker_name="V", interface_rank=4, game_state=gs)
+        ps1 = self._ps(gs=gs, hud_time="1400")
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs1, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps1)
+        # Time passes (model narrates an hour and a half) — HUD advances to 15:30.
+        # Hack 2 init seeds from edgerunner; first apply expires it.
+        hs2 = init_hack_state(hacker_name="V", interface_rank=4, game_state=gs)
+        ps2 = self._ps(gs=gs, hud_time="1530")
+        apply_hack_state(hs2, {"hack_state": {}}, game_state=gs, pipeline_state=ps2)
+        self.assertEqual(hs2["active_debuffs"], [])
+        self.assertEqual(gs["edgerunners"]["V"]["active_debuffs"], [])
+
+    def test_init_net_combat_state_seeds_from_edgerunner(self):
+        """A fresh net_combat (no prior hack) seeds active_debuffs from the edgerunner."""
+        from game_systems.cpred import init_net_combat_state
+        gs = _make_game_state()
+        gs["edgerunners"]["V"]["active_debuffs"] = [
+            {"stats": ["MOVE"], "amount": 4, "source": "Scorpion", "duration": "1 hour",
+             "expires_at_time": "1600", "expires_at_date": "2026-04-25"}
+        ]
+        nc = init_net_combat_state(netrunner_name="V", target="T",
+                                    interface_rank=4, game_state=gs)
+        self.assertEqual(len(nc["active_debuffs"]), 1)
+        self.assertEqual(nc["active_debuffs"][0]["source"], "Scorpion")
+
+    def test_net_combat_apply_syncs_to_edgerunner(self):
+        """After apply_net_combat_state, edgerunner.active_debuffs is updated."""
+        gs = _make_game_state()
+        nc = _make_nc_state(hacker_name="V")
+        # nc inherits netrunner=V from init_net_combat_from_hack
+        nc["netrunner"] = "V"
+        ps = {
+            "net_combat": nc,
+            "combat": None,
+            "character_states": {},
+            "game_state": gs,
+            "hud_state": {"time": "1430", "date": "2026-04-25"},
+        }
+        ops = [{"op": "stat_debuff", "stats": ["INT", "REF", "DEX"], "amount": 4,
+                "source": "Nervescrub", "duration": "1 hour"}]
+        tool = {"hack_state": {"net_actions_used": 0}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, resolver_state_ops=ops, game_state=gs)
+        er_dbs = gs["edgerunners"]["V"]["active_debuffs"]
+        self.assertEqual(len(er_dbs), 1)
+        self.assertEqual(er_dbs[0]["source"], "Nervescrub")
+        self.assertEqual(er_dbs[0]["expires_at_time"], "1530")
+
+    def test_no_hacker_name_no_sync(self):
+        """Hack with no hacker_name configured doesn't crash on sync."""
+        gs = _make_game_state()
+        hs = _make_hack_state(hacker_name="V")
+        hs["hacker_name"] = None  # unusual but tolerated
+        ps = self._ps(gs=gs)
+        ops = [{"op": "stat_debuff", "stats": ["INT"], "amount": 3,
+                "source": "Liche", "duration": "1 hour"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops,
+                         game_state=gs, pipeline_state=ps)
+        # Edgerunner V was untouched (no name = no sync target)
+        self.assertEqual(gs["edgerunners"]["V"].get("active_debuffs", []), [])
+        # But the debuff still landed in hack_state for HUD rendering this scene
+        self.assertEqual(len(hs["active_debuffs"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
