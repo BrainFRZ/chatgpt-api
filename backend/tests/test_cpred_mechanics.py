@@ -6841,5 +6841,236 @@ class TestNetAbilityEnum(unittest.TestCase):
         self.assertEqual(r.get("error"), "missing_or_invalid_ability")
 
 
+class TestProgramStatusChangeActions(unittest.TestCase):
+    """Step 0c: player-choice program status-change actions.
+
+    Four action types resolve transitions on active_programs and emit
+    program_status_change ops. Resolver validates the requested transition
+    and (for reactivate) NET Action availability atomically.
+
+    Status state machine:
+      active        — rezzed, ready
+      deactivated   — stored, recoverable in 1 NA (activate_program)
+      derezzed      — REZ to 0 mid-encounter, recoverable in 2 NA (reactivate)
+      destroyed     — permanent loss; reinstall_program restores if Backup Drive saved it
+    """
+
+    def _programs(self, *entries):
+        """Build active_programs list. Each entry is (name, status) or (name, status, rez)."""
+        out = []
+        for entry in entries:
+            name, status = entry[0], entry[1]
+            rez = entry[2] if len(entry) > 2 else 4
+            out.append({"name": name, "status": status, "rez": rez,
+                        "category": "attacker"})
+        return out
+
+    # ----- activate_program -----
+
+    def test_activate_program_happy_path(self):
+        """Deactivated → active. Emits program_status_change op, costs 1 NA."""
+        progs = self._programs(("Sword", "deactivated"))
+        result = resolve_actions(
+            [{"type": "activate_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertTrue(r["success"])
+        self.assertEqual(r["old_status"], "deactivated")
+        self.assertEqual(r["new_status"], "active")
+        self.assertEqual(r["cost_net_actions"], 1)
+        self.assertEqual(r["cost_meat_actions"], 0)
+        # state op emitted
+        ops = [op for op in result["state_ops"] if op.get("op") == "program_status_change"]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["program_name"], "Sword")
+        self.assertEqual(ops[0]["new_status"], "active")
+
+    def test_activate_program_fails_when_already_active(self):
+        progs = self._programs(("Sword", "active"))
+        result = resolve_actions(
+            [{"type": "activate_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "illegal_status_transition")
+        self.assertIn("already active", r["reason"].lower())
+        # No state op emitted
+        ops = [op for op in result["state_ops"] if op.get("op") == "program_status_change"]
+        self.assertEqual(len(ops), 0)
+
+    def test_activate_program_not_loaded(self):
+        progs = self._programs(("Armor", "deactivated"))
+        result = resolve_actions(
+            [{"type": "activate_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "program_not_loaded")
+        self.assertIn("Armor", r["reason"])  # lists what IS loaded
+
+    # ----- deactivate_program -----
+
+    def test_deactivate_program_happy_path(self):
+        progs = self._programs(("Worm", "active"))
+        result = resolve_actions(
+            [{"type": "deactivate_program", "character": "RedVelvet", "program": "Worm"}],
+            active_programs=progs,
+            net_actions_remaining=2,
+        )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["old_status"], "active")
+        self.assertEqual(r["new_status"], "deactivated")
+        self.assertEqual(r["cost_net_actions"], 1)
+
+    # ----- reactivate_program (2 NA atomic) -----
+
+    def test_reactivate_program_happy_path(self):
+        """Derezzed → active. 2 NA atomic."""
+        progs = self._programs(("Shield", "derezzed", 0))
+        result = resolve_actions(
+            [{"type": "reactivate_program", "character": "RedVelvet", "program": "Shield"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["old_status"], "derezzed")
+        self.assertEqual(r["new_status"], "active")
+        self.assertEqual(r["cost_net_actions"], 2)
+
+    def test_reactivate_program_fails_atomic_with_only_one_na(self):
+        """Only 1 NA remaining: reactivate fails soft, no NA spent."""
+        progs = self._programs(("Shield", "derezzed", 0))
+        result = resolve_actions(
+            [{"type": "reactivate_program", "character": "RedVelvet", "program": "Shield"}],
+            active_programs=progs,
+            net_actions_remaining=1,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "insufficient_net_actions")
+        # No state op
+        ops = [op for op in result["state_ops"] if op.get("op") == "program_status_change"]
+        self.assertEqual(len(ops), 0)
+
+    def test_reactivate_program_fails_if_not_derezzed(self):
+        progs = self._programs(("Shield", "active"))
+        result = resolve_actions(
+            [{"type": "reactivate_program", "character": "RedVelvet", "program": "Shield"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "illegal_status_transition")
+        self.assertIn("active", r["reason"].lower())
+
+    def test_reactivate_program_hint_when_deactivated(self):
+        """If user calls reactivate on a deactivated (not derezzed) program,
+        error hints to use activate_program instead."""
+        progs = self._programs(("Sword", "deactivated"))
+        result = resolve_actions(
+            [{"type": "reactivate_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "illegal_status_transition")
+        self.assertIn("activate_program", r["reason"])
+
+    # ----- reinstall_program (Backup Drive only) -----
+
+    def test_reinstall_program_happy_path(self):
+        progs = self._programs(("Sword", "destroyed"))
+        result = resolve_actions(
+            [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            installed_hardware=[{"name": "Backup Drive"}],
+        )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["old_status"], "destroyed")
+        self.assertEqual(r["new_status"], "deactivated")
+        self.assertEqual(r["cost_meat_actions"], 1)
+        self.assertEqual(r["cost_net_actions"], 0)
+
+    def test_reinstall_program_fails_without_backup_drive(self):
+        progs = self._programs(("Sword", "destroyed"))
+        result = resolve_actions(
+            [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            installed_hardware=[],
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "reinstall_requires_backup_drive")
+
+    def test_reinstall_program_fails_if_not_destroyed(self):
+        progs = self._programs(("Sword", "active"))
+        result = resolve_actions(
+            [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
+            active_programs=progs,
+            installed_hardware=[{"name": "Backup Drive"}],
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "illegal_status_transition")
+
+    # ----- atomic running NA debit across batch -----
+
+    def test_running_na_debit_blocks_overspend_in_same_batch(self):
+        """Two activates in one batch with 1 NA total: first succeeds, second fails."""
+        progs = self._programs(("Sword", "deactivated"), ("Worm", "deactivated"))
+        result = resolve_actions(
+            [
+                {"type": "activate_program", "character": "RedVelvet", "program": "Sword"},
+                {"type": "activate_program", "character": "RedVelvet", "program": "Worm"},
+            ],
+            active_programs=progs,
+            net_actions_remaining=1,
+        )
+        r0, r1 = result["results"]
+        self.assertNotIn("error", r0)  # First one succeeds (had 1 NA)
+        self.assertEqual(r1.get("error"), "insufficient_net_actions")  # Second is starved
+
+    # ----- case-insensitive program lookup -----
+
+    def test_program_lookup_is_case_insensitive(self):
+        progs = self._programs(("See Ya", "deactivated"))
+        result = resolve_actions(
+            [{"type": "activate_program", "character": "RedVelvet", "program": "see ya"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["program"], "See Ya")  # canonical name preserved
+
+    # ----- writeback integration -----
+
+    def test_writeback_applies_program_status_change_op(self):
+        """The program_status_change state op flips active_programs[i].status."""
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_programs": [{"name": "Sword", "status": "deactivated", "rez": 4}]}
+        ops = [{"op": "program_status_change", "program_name": "Sword",
+                "old_status": "deactivated", "new_status": "active"}]
+        _apply_resolver_net_ops(state, ops)
+        self.assertEqual(state["active_programs"][0]["status"], "active")
+
+    def test_writeback_reinstall_clears_destroyed_programs_list(self):
+        """Reinstalling a Backup-Drive-saved program removes it from destroyed_programs."""
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {
+            "active_programs": [{"name": "Sword", "status": "destroyed", "rez": 0}],
+            "destroyed_programs": ["Sword"],
+        }
+        ops = [{"op": "program_status_change", "program_name": "Sword",
+                "old_status": "destroyed", "new_status": "deactivated"}]
+        _apply_resolver_net_ops(state, ops)
+        self.assertEqual(state["active_programs"][0]["status"], "deactivated")
+        self.assertEqual(state["destroyed_programs"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

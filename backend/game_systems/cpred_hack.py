@@ -464,7 +464,7 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
     if bd_total > 0:
         state["brain_damage"] = state.get("brain_damage", 0) + bd_total
         state["_pending_bd_attacks"] = state.get("_pending_bd_attacks", 0) + bd_attacks
-    # program_deactivate + rez_damage
+    # program_deactivate + program_status_change + rez_damage
     for op in resolver_state_ops:
         if not isinstance(op, dict):
             continue
@@ -476,6 +476,23 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                     if isinstance(p, dict) and p.get("name") == prog_name:
                         p["status"] = "deactivated"
                         break
+        elif op.get("op") == "program_status_change":
+            # Step 0c: player-choice status transitions (activate /
+            # deactivate / reactivate / reinstall) emitted by the resolver.
+            prog_name = op.get("program_name", "")
+            new_status = op.get("new_status", "")
+            programs = state.get("active_programs", [])
+            if isinstance(programs, list) and new_status:
+                for p in programs:
+                    if isinstance(p, dict) and p.get("name") == prog_name:
+                        p["status"] = new_status
+                        break
+                # Reinstall removes from destroyed_programs so it's no longer
+                # rendered as a permanent loss.
+                if new_status == "deactivated":
+                    destroyed_list = state.get("destroyed_programs", [])
+                    if isinstance(destroyed_list, list) and prog_name in destroyed_list:
+                        destroyed_list.remove(prog_name)
         elif op.get("op") == "rez_damage":
             try:
                 _apply_rez_damage_to_ice_status(state, op)

@@ -2001,6 +2001,176 @@ def _hydrate_program_attack_from_state(action, ice_status):
             action["target_rez"] = rez_cur
 
 
+# ---------------------------------------------------------------------------
+# Program status-change action helpers (Step 0c)
+# ---------------------------------------------------------------------------
+# Status state machine:
+#   active        — rezzed, ready to use
+#   deactivated   — stored, recoverable in 1 NET Action (Activate)
+#   derezzed      — REZ hit 0 mid-encounter, recoverable in 2 NET Actions
+#                   (Reactivate = Deactivate + Activate, atomic)
+#   destroyed     — permanent loss; saved by Backup Drive if installed
+# Player-choice actions handled here:
+#   activate_program     deactivated → active     (1 NA)
+#   deactivate_program   active      → deactivated (1 NA)
+#   reactivate_program   derezzed    → active     (2 NA, atomic)
+#   reinstall_program    destroyed   → deactivated (1 Meat Action; only when
+#                                                   Backup Drive saved it)
+# Auto-emitted transitions (from attack resolvers / ICE ops):
+#   active → deactivated  (Attacker auto-Deactivate after firing — Step 5)
+#   active → derezzed     (program_rez_damage to 0, non-anti-program ICE)
+#   active → destroyed    (Asp/Poison Flatline / anti-program ICE to 0)
+
+_PROGRAM_STATUS_TRANSITIONS = {
+    # action_type → (required_old_status, new_status, na_cost, ma_cost, label)
+    "activate_program":   ("deactivated", "active",      1, 0, "Activate"),
+    "deactivate_program": ("active",      "deactivated", 1, 0, "Deactivate"),
+    "reactivate_program": ("derezzed",    "active",      2, 0, "Reactivate"),
+    "reinstall_program":  ("destroyed",   "deactivated", 0, 1, "Reinstall"),
+}
+
+
+def _find_program_in_active(program_name, active_programs):
+    """Case-insensitive lookup. Returns (entry, index) or (None, None)."""
+    if not isinstance(active_programs, list) or not program_name:
+        return None, None
+    needle = str(program_name).strip().lower()
+    for idx, p in enumerate(active_programs):
+        if isinstance(p, dict) and str(p.get("name", "")).strip().lower() == needle:
+            return p, idx
+    return None, None
+
+
+def _resolve_program_status_change(action, action_type, active_programs,
+                                   installed_hardware, net_actions_remaining):
+    """Resolve a program status-change action.
+
+    Returns (result_dict, state_ops_list). result_dict always has `formatted`
+    and (on success) `state_ops` reference; state_ops_list is the same list
+    flattened for the dispatcher to extend onto all_state_ops.
+    """
+    transition = _PROGRAM_STATUS_TRANSITIONS[action_type]
+    required_old, new_status, na_cost, ma_cost, label = transition
+
+    program_name = action.get("program") or action.get("program_name") or ""
+    character = action.get("character", "")
+
+    if not program_name:
+        return {
+            "type": action_type,
+            "character": character,
+            "error": "missing_program",
+            "reason": f"{label} requires a `program` field naming the program.",
+            "formatted": f"⚠ {label}: missing program name",
+        }, []
+
+    entry, _idx = _find_program_in_active(program_name, active_programs)
+
+    if entry is None:
+        loaded = []
+        if isinstance(active_programs, list):
+            loaded = [str(p.get("name", "")) for p in active_programs
+                      if isinstance(p, dict) and p.get("name")]
+        return {
+            "type": action_type,
+            "character": character,
+            "error": "program_not_loaded",
+            "reason": (
+                f"{label} {program_name!r}: program is not loaded on this "
+                f"deck. Currently loaded: {', '.join(loaded) if loaded else '(none)'}."
+            ),
+            "formatted": f"⚠ {label} {program_name}: not on deck",
+        }, []
+
+    current_status = str(entry.get("status", "")).strip().lower()
+    if current_status != required_old:
+        hint = ""
+        if action_type == "activate_program" and current_status == "active":
+            hint = " It is already active."
+        elif action_type == "deactivate_program" and current_status == "deactivated":
+            hint = " It is already deactivated."
+        elif action_type == "reactivate_program" and current_status == "active":
+            hint = " It is already active."
+        elif action_type == "reactivate_program" and current_status == "deactivated":
+            hint = " Use activate_program (1 NET Action) instead."
+        elif current_status == "destroyed" and action_type != "reinstall_program":
+            hint = " Program is destroyed — use reinstall_program if Backup Drive saved it."
+        return {
+            "type": action_type,
+            "character": character,
+            "error": "illegal_status_transition",
+            "reason": (
+                f"{label} {program_name}: requires status {required_old!r}, "
+                f"got {current_status!r}.{hint}"
+            ),
+            "formatted": f"⚠ {label} {program_name}: status is {current_status}",
+        }, []
+
+    if na_cost > 0 and net_actions_remaining is not None:
+        if net_actions_remaining < na_cost:
+            return {
+                "type": action_type,
+                "character": character,
+                "error": "insufficient_net_actions",
+                "reason": (
+                    f"{label} {program_name} requires {na_cost} NET Action(s); "
+                    f"only {net_actions_remaining} remaining. No actions consumed."
+                ),
+                "formatted": f"⚠ {label} {program_name}: needs {na_cost} NA, have {net_actions_remaining}",
+            }, []
+
+    if action_type == "reinstall_program":
+        hw_list = installed_hardware if isinstance(installed_hardware, list) else []
+        has_backup = any(
+            isinstance(h, dict) and str(h.get("name", "")).strip().lower() == "backup drive"
+            for h in hw_list
+        )
+        if not has_backup:
+            return {
+                "type": action_type,
+                "character": character,
+                "error": "reinstall_requires_backup_drive",
+                "reason": (
+                    f"Reinstall {program_name}: only programs saved by Backup Drive "
+                    f"can be reinstalled. No Backup Drive is installed on this deck."
+                ),
+                "formatted": f"⚠ Reinstall {program_name}: no Backup Drive",
+            }, []
+
+    state_op = {
+        "op": "program_status_change",
+        "program_name": entry.get("name", program_name),
+        "old_status": required_old,
+        "new_status": new_status,
+        "reason": f"{label} by {character}" if character else label,
+    }
+    cost_parts = []
+    if na_cost > 0:
+        cost_parts.append(f"{na_cost} NET Action{'s' if na_cost > 1 else ''}")
+    if ma_cost > 0:
+        cost_parts.append(f"{ma_cost} Meat Action")
+    cost_str = ", ".join(cost_parts) if cost_parts else "no cost"
+
+    formatted = (
+        f"{label} {entry.get('name', program_name)}: "
+        f"{required_old} → {new_status} ({cost_str})"
+    )
+
+    result = {
+        "type": action_type,
+        "character": character,
+        "program": entry.get("name", program_name),
+        "old_status": required_old,
+        "new_status": new_status,
+        "cost_net_actions": na_cost,
+        "cost_meat_actions": ma_cost,
+        "success": True,
+        "state_ops": [state_op],
+        "formatted": formatted,
+    }
+    return result, [state_op]
+
+
 def _normalize_ice_key_candidate(raw_key, ice_status):
     """Return a valid ICE status key or None."""
     if not raw_key or not isinstance(ice_status, dict):
@@ -2832,7 +3002,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     relationship_owner: str = "", relationship_actor_names=None,
                     relationship_present_names=None, relationship_context: dict = None,
                     edgerunner_states: dict = None,
-                    character_states: dict = None) -> dict:
+                    character_states: dict = None,
+                    net_actions_remaining=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3749,6 +3920,28 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     })
                 results.append(result)
 
+            elif action_type in _PROGRAM_STATUS_TRANSITIONS:
+                # Step 0c: player-choice status-change actions (activate /
+                # deactivate / reactivate / reinstall). The resolver validates
+                # the transition, deducts NA/MA atomically, and emits a
+                # `program_status_change` op consumed by _apply_resolver_net_ops.
+                _psc_result, _psc_ops = _resolve_program_status_change(
+                    action, action_type,
+                    active_programs, installed_hardware,
+                    net_actions_remaining,
+                )
+                results.append(_psc_result)
+                if _psc_ops:
+                    all_state_ops.extend(_psc_ops)
+                    # Atomically debit the running net_actions_remaining so
+                    # multiple status-change actions in the same batch see the
+                    # decremented value (prevents over-spending in one resolve_actions call).
+                    if net_actions_remaining is not None:
+                        net_actions_remaining = max(
+                            0,
+                            net_actions_remaining - _psc_result.get("cost_net_actions", 0),
+                        )
+
             elif action_type == "program_attack_vs_netrunner":
                 # Black ICE attacking the Netrunner — damage = brain damage (HP, no armor)
                 _ice_type_raw = action.get("ice_type")
@@ -4212,6 +4405,10 @@ RESOLVE_MECHANICS_TOOL = {
         "net?: true (set on NET-context contests), ability? (REQUIRED when net=true; one of: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} "
         "— for contested rolls (Stealth vs Concentration, Persuasion vs Concentration, etc.) and NET opposed checks (Zap/Slide with zap?: true, interface_rank?: N)\n"
         "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
+        "- activate_program: {type, character, program (program name)} — deactivated → active. Costs 1 NET Action. Fails if program not loaded, already active, or status mismatched.\n"
+        "- deactivate_program: {type, character, program} — active → deactivated. Costs 1 NET Action.\n"
+        "- reactivate_program: {type, character, program} — derezzed → active. Costs 2 NET Actions, ATOMIC: if fewer than 2 NA remain, fails soft with no actions consumed.\n"
+        "- reinstall_program: {type, character, program} — destroyed → deactivated. Costs 1 Meat Action. Only valid if Backup Drive is installed (and saved this program from destruction).\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}\n"
@@ -4244,7 +4441,9 @@ RESOLVE_MECHANICS_TOOL = {
                                      "driving_check", "ramming",
                                      "vehicle_weak_point", "spike_strip",
                                      "hustle", "find_item", "haggle", "facedown",
-                                     "suppressive_fire"],
+                                     "suppressive_fire",
+                                     "activate_program", "deactivate_program",
+                                     "reactivate_program", "reinstall_program"],
                         },
                         "character": {"type": "string"},
                     },

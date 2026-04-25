@@ -7425,12 +7425,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         _rm_active_state = _rm_hs
                                     elif isinstance(_rm_nc, dict) and _rm_nc.get("active"):
                                         _rm_active_state = _rm_nc
+                                _rm_net_actions_remaining = None
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
                                     _rm_active_progs = _rm_active_state.get("active_programs")
                                     _rm_hw = _rm_active_state.get("installed_hardware")
                                     _rm_ice = _rm_active_state.get("ice_status")
+                                    _rm_nar_raw = _rm_active_state.get("net_actions_remaining")
+                                    if _rm_nar_raw is not None:
+                                        _rm_net_actions_remaining = _safe_int(_rm_nar_raw)
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7468,6 +7472,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     relationship_context=_rm_relationship_context,
                                     edgerunner_states=_rm_gs.get("edgerunners") or {},
                                     character_states=(_rm_tracking_ps or {}).get("character_states"),
+                                    net_actions_remaining=_rm_net_actions_remaining,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(

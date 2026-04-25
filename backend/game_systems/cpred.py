@@ -1456,7 +1456,26 @@ The Hacking Rulebook document covers netrunning procedures: Quick Hack structure
 Call `resolve_mechanics` for EACH dice-based action (Interface checks, ICE combat) individually. Narrate AFTER receiving each result. Use skill_check action type for Interface checks (stat_value = Interface rank, skill_value = 0, dv = target DV, **`net`: true**, **`ability`** matching the Interface Ability rolled — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative). The `ability` tag is REQUIRED on every NET skill_check / opposed_check — backend uses it to fire program effect bonuses (e.g. Worm +2 on Backdoor) on the matching roll. After all actions are resolved and narrated, call `report_hack_state`.
 When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in report_hack_state.
 For anti-program ICE (Dragon/Killer/Sabertooth) attacking programs, use `ice_attack_vs_program`: {type, character (ICE name), ice_type, target_program, target_program_def, target_program_rez}.
-When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
+When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated (RAW). To reactivate it, call resolve_mechanics with `{type: "activate_program", character, program}` — costs 1 NET Action, no dice.
+
+### Program Status Transitions (resolve_mechanics action types)
+Programs have four statuses: `active` (rezzed, ready), `deactivated` (stored, recoverable in 1 NA), `derezzed` (REZ hit 0 mid-encounter, recoverable in 2 NA), `destroyed` (permanent loss; saved by Backup Drive if installed).
+
+Player-choice transitions are resolver actions — backend validates status, deducts NA atomically, and updates active_programs. Do NOT mutate `active_programs[i].status` manually for these transitions; emit the action and let the backend resolve it.
+
+| Action | Cost | Trigger |
+|---|---|---|
+| `activate_program` | 1 NA | Bring a stored program online: `deactivated → active` |
+| `deactivate_program` | 1 NA | Stand a program down: `active → deactivated` |
+| `reactivate_program` | 2 NA atomic | Recover a derezzed program: `derezzed → active`. If only 1 NA remains, the call fails soft with no NA spent. |
+| `reinstall_program` | 1 Meat Action | Restore a Backup-Drive-saved program from destroyed → deactivated. Only valid if the program is in `destroyed` status AND a Backup Drive is installed. |
+
+Auto-emitted by attack resolvers (do NOT emit manually):
+- Attacker programs auto-Deactivate after firing (active → deactivated) — included in the program_attack result.
+- REZ damage to 0 (non-anti-program ICE): active → derezzed.
+- Asp / Poison Flatline / anti-program ICE to 0: active → destroyed (or deactivated if Backup Drive saved it).
+
+Fail-soft semantics: if the named program isn't loaded, is already in the requested status, or current status doesn't match the required transition, the resolver returns an error result with a narrative reason — no NA spent, no state change.
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
