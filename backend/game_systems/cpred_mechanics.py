@@ -2347,11 +2347,16 @@ def resolve_ice_effect(ice_block, active_programs=None, installed_hardware=None,
 
 
 def _resolve_jack_out_cascade(ice_status, active_programs=None, installed_hardware=None,
-                               exclude_ice=None, exclude_ice_key=None, _depth=0):
+                               exclude_ice=None, exclude_ice_key=None, _depth=0,
+                               active_boosts=None):
     """Iterate rezzed Black ICE and resolve each effect for forced Jack Out cascade.
 
     Only processes ICE with status "active" AND behavior "black" (bypassed ICE never activated).
     Excludes the attacking Giant to prevent infinite recursion.
+
+    Step 3: each cascade brain-damage hit routes through Defender hooks
+    (Shield/Armor/Fortify) so the same mitigation applies whether damage
+    came from a single ICE attack or from a forced-jack-out cascade.
     """
     if _depth > 2:  # Safety: prevent deep recursion
         return {"state_ops": [], "formatted": "", "cascade_results": []}
@@ -2362,6 +2367,15 @@ def _resolve_jack_out_cascade(ice_status, active_programs=None, installed_hardwa
 
     if not isinstance(ice_status, dict):
         return {"state_ops": [], "formatted": "", "cascade_results": []}
+
+    # Build a hack_state-shaped proxy so the registry sees consistent state.
+    # active_programs may mutate via Shield's derez during the cascade — pass
+    # the live list reference so each subsequent ICE sees the post-derez state.
+    _hs_proxy = {
+        "active_programs": active_programs,
+        "installed_hardware": installed_hardware,
+        "active_boosts": active_boosts if isinstance(active_boosts, dict) else {},
+    }
 
     excluded_name_consumed = False
     # Iterate keys in sorted order so fallback exclusion-by-name is deterministic
@@ -2392,10 +2406,33 @@ def _resolve_jack_out_cascade(ice_status, active_programs=None, installed_hardwa
         bd_total = 0
         if dmg_dice > 0:
             bd_total = sum(_roll_d6() for _ in range(dmg_dice))
-            all_ops.append({"op": "brain_damage", "edgerunner": "",  # filled by caller
-                            "change": bd_total,
-                            "reason": f"Cascade: {ice_name} ({dmg_dice}d6)"})
-            formatted_parts.append(f"{ice_name} {dmg_dice}d6={bd_total} brain dmg")
+            # Step 3: route cascade brain damage through Defender hooks. Hook
+            # ops (Shield's program_derez) are appended; the brain_damage op
+            # uses the post-mitigation amount and is suppressed entirely if
+            # damage drops to 0.
+            from .cpred_program_effects import run_brain_damage_hooks
+            _final_dmg, _hook_ops, _trace = run_brain_damage_hooks(
+                bd_total, _hs_proxy, None,
+            )
+            all_ops.extend(_hook_ops)
+            # Mutate the proxy's active_programs in place so the next cascade
+            # ICE sees Shield as derezzed if it just consumed itself.
+            for _hop in _hook_ops:
+                if isinstance(_hop, dict) and _hop.get("op") == "program_derez":
+                    _derezzed = _hop.get("program_name")
+                    if _derezzed and isinstance(active_programs, list):
+                        for _p in active_programs:
+                            if isinstance(_p, dict) and _p.get("name") == _derezzed:
+                                _p["status"] = "derezzed"
+                                break
+            if _final_dmg > 0:
+                all_ops.append({"op": "brain_damage", "edgerunner": "",  # filled by caller
+                                "change": _final_dmg,
+                                "reason": f"Cascade: {ice_name} ({dmg_dice}d6)"})
+            formatted_parts.append(
+                f"{ice_name} {dmg_dice}d6={bd_total} brain dmg"
+                + (f" → {_final_dmg} after defenders" if _final_dmg != bd_total else "")
+            )
 
         # Resolve special effect (skip nested Giant to prevent infinite loop)
         if block.get("effect") != "forced_jack_out":
@@ -3061,7 +3098,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     relationship_present_names=None, relationship_context: dict = None,
                     edgerunner_states: dict = None,
                     character_states: dict = None,
-                    net_actions_remaining=None) -> dict:
+                    net_actions_remaining=None,
+                    active_boosts=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3120,6 +3158,10 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     _presence_chars = _relationship_context["present_names"] or set(_batch_chars)
     _relationship_actor_names = _relationship_context["actor_names"]
     _relationship_owner_name = _relationship_context["owner_name"]
+
+    # Local handle for active_boosts (used by brain damage hooks for Fortify
+    # expiry checks etc.). Coerce to dict so downstream get() calls are safe.
+    _active_boosts = active_boosts if isinstance(active_boosts, dict) else {}
 
     _romantic_partners_t2 = _romantic_partner_names(25)
     _romantic_partners_t3 = _romantic_partner_names(45)
@@ -4047,14 +4089,32 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 results.append(result)
                 if result.get("hit"):
                     _nr_name = action.get("target", "")
-                    # Brain damage (if damage_dice > 0)
+                    # Brain damage (if damage_dice > 0). Step 3: route through
+                    # on_brain_damage_inbound hooks so Defenders (Shield/Armor/
+                    # Fortify) can mitigate before the brain_damage state op
+                    # is emitted. Hook ops (e.g. Shield's program_derez) are
+                    # appended alongside the (possibly reduced) damage op.
                     if result.get("damage_total", 0) > 0:
-                        all_state_ops.append({
-                            "edgerunner": _nr_name,
-                            "op": "brain_damage",
-                            "change": result["damage_total"],
-                            "reason": f"Black ICE {_ice_block['name'] if _ice_block else action.get('program_name', 'ICE')} attack",
-                        })
+                        from .cpred_program_effects import run_brain_damage_hooks
+                        _hs_proxy = {
+                            "active_programs": active_programs,
+                            "installed_hardware": installed_hardware,
+                            "active_boosts": _active_boosts,
+                        }
+                        _final_dmg, _hook_ops, _trace = run_brain_damage_hooks(
+                            result["damage_total"], _hs_proxy, None,
+                        )
+                        if _trace:
+                            result["damage_resolution"] = _trace
+                            result["damage_after_defenders"] = _final_dmg
+                        all_state_ops.extend(_hook_ops)
+                        if _final_dmg > 0:
+                            all_state_ops.append({
+                                "edgerunner": _nr_name,
+                                "op": "brain_damage",
+                                "change": _final_dmg,
+                                "reason": f"Black ICE {_ice_block['name'] if _ice_block else action.get('program_name', 'ICE')} attack",
+                            })
                     # ICE special effect
                     if _ice_block:
                         _is_forced_jack_out = _ice_block.get("effect") == "forced_jack_out"

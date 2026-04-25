@@ -704,5 +704,279 @@ class TestStep2EndToEndDestructionPath(unittest.TestCase):
         self.assertEqual(state["active_programs"][0]["status"], "derezzed")
 
 
+class TestStep3DefenderEntries(unittest.TestCase):
+    """Step 3: Shield, Armor, Fortify Defender programs.
+
+    Uses the production registry. The order=10/20/30 layering is the key
+    correctness property — Shield consumes itself first, Armor's flat -4
+    runs second, Fortify's conditional -4 runs last.
+    """
+
+    def _hs(self, programs, hardware=None, active_boosts=None):
+        return {
+            "active_programs": programs,
+            "installed_hardware": hardware or [],
+            "active_boosts": active_boosts or {},
+        }
+
+    def _active(self, name):
+        return {"name": name, "status": "active", "rez": 7, "category": "defender"}
+
+    # ----- Shield in isolation -----
+
+    def test_shield_zeros_damage_and_emits_derez(self):
+        hs = self._hs([self._active("Shield")])
+        final, ops, trace = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 0)
+        derez_ops = [o for o in ops if o.get("op") == "program_derez"]
+        self.assertEqual(len(derez_ops), 1)
+        self.assertEqual(derez_ops[0]["program_name"], "Shield")
+        self.assertEqual(trace[0]["before"], 8)
+        self.assertEqual(trace[0]["after"], 0)
+
+    def test_shield_does_not_emit_derez_on_zero_input(self):
+        """Shield is consumed only when it actually blocks damage."""
+        hs = self._hs([self._active("Shield")])
+        final, ops, _ = cpe.run_brain_damage_hooks(0, hs, {})
+        self.assertEqual(final, 0)
+        self.assertEqual(ops, [])  # no derez
+
+    def test_shield_skipped_when_derezzed(self):
+        progs = [{"name": "Shield", "status": "derezzed", "rez": 0, "category": "defender"}]
+        final, ops, _ = cpe.run_brain_damage_hooks(8, self._hs(progs), {})
+        self.assertEqual(final, 8)  # passes through unmitigated
+        self.assertEqual(ops, [])
+
+    # ----- Armor in isolation -----
+
+    def test_armor_subtracts_four(self):
+        hs = self._hs([self._active("Armor")])
+        final, _, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 4)
+
+    def test_armor_floor_at_zero(self):
+        hs = self._hs([self._active("Armor")])
+        final, _, _ = cpe.run_brain_damage_hooks(2, hs, {})
+        self.assertEqual(final, 0)
+
+    def test_armor_persistent_no_derez(self):
+        """Armor doesn't consume itself — RAW: 'Reduces all incoming brain damage by 4.'"""
+        hs = self._hs([self._active("Armor")])
+        final1, ops1, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        final2, ops2, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final1, 4)
+        self.assertEqual(final2, 4)
+        self.assertEqual(ops1, [])
+        self.assertEqual(ops2, [])
+
+    # ----- Fortify in isolation -----
+
+    def test_fortify_pending_subtracts_four(self):
+        hs = self._hs([self._active("Fortify")],
+                      active_boosts={"fortify_pending": True})
+        final, _, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 4)
+
+    def test_fortify_inactive_does_nothing(self):
+        hs = self._hs([self._active("Fortify")],
+                      active_boosts={})  # not pending
+        final, _, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 8)
+
+    def test_fortify_on_turn_end_emits_clear_when_pending(self):
+        hs = self._hs([self._active("Fortify")],
+                      active_boosts={"fortify_pending": True})
+        ops, trace = cpe.run_turn_end_hooks(hs, {})
+        clear_ops = [o for o in ops if o.get("op") == "active_boost_clear"]
+        self.assertEqual(len(clear_ops), 1)
+        self.assertEqual(clear_ops[0]["boost"], "fortify_pending")
+
+    def test_fortify_on_turn_end_no_op_when_not_pending(self):
+        hs = self._hs([self._active("Fortify")], active_boosts={})
+        ops, _ = cpe.run_turn_end_hooks(hs, {})
+        self.assertEqual(ops, [])
+
+    # ----- Verification scenario from the plan -----
+
+    def test_full_defender_stack_blocks_eight_damage(self):
+        """Plan's verification: 8-damage hit on a Netrunner with
+        Shield+Armor+Fortify all rezzed → damage=0, Shield derezzed,
+        Armor and Fortify untouched."""
+        hs = self._hs([
+            self._active("Shield"),
+            self._active("Armor"),
+            self._active("Fortify"),
+        ], active_boosts={"fortify_pending": True})
+        final, ops, trace = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 0)
+        # Only Shield should have fired (early exit at 0 stops Armor/Fortify)
+        progs_in_trace = [t["prog"] for t in trace]
+        self.assertEqual(progs_in_trace, ["Shield"])
+        # Exactly one derez op for Shield
+        derez_ops = [o for o in ops if o.get("op") == "program_derez"]
+        self.assertEqual(len(derez_ops), 1)
+        self.assertEqual(derez_ops[0]["program_name"], "Shield")
+
+    def test_armor_plus_fortify_stack(self):
+        """Without Shield: Armor (-4) + Fortify (-4) reduces 10 → 2."""
+        hs = self._hs([
+            self._active("Armor"),
+            self._active("Fortify"),
+        ], active_boosts={"fortify_pending": True})
+        final, _, trace = cpe.run_brain_damage_hooks(10, hs, {})
+        self.assertEqual(final, 2)
+        self.assertEqual([t["prog"] for t in trace], ["Armor", "Fortify"])
+
+    def test_shield_derezzed_armor_still_runs(self):
+        """If Shield is already derezzed, Armor's -4 should still apply."""
+        progs = [
+            {"name": "Shield", "status": "derezzed", "rez": 0, "category": "defender"},
+            self._active("Armor"),
+        ]
+        hs = self._hs(progs)
+        final, ops, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final, 4)  # Armor reduced 8 → 4
+        # Shield was inactive, no derez op emitted from it
+        derez_ops = [o for o in ops if o.get("op") == "program_derez"]
+        self.assertEqual(derez_ops, [])
+
+    def test_multi_hit_sequence_shield_then_armor(self):
+        """First hit: Shield blocks all 8, derezzes itself.
+        Second hit: Armor reduces by 4 (Shield gone)."""
+        progs = [self._active("Shield"), self._active("Armor")]
+        hs = self._hs(progs)
+        # First hit
+        final1, ops1, _ = cpe.run_brain_damage_hooks(8, hs, {})
+        self.assertEqual(final1, 0)
+        # Simulate Shield derez — flip status (writeback would do this)
+        for p in progs:
+            if p["name"] == "Shield":
+                p["status"] = "derezzed"
+        # Second hit
+        final2, ops2, _ = cpe.run_brain_damage_hooks(6, hs, {})
+        self.assertEqual(final2, 2)  # Armor: 6 - 4
+
+    # ----- Registry metadata sanity -----
+
+    def test_shield_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Shield")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["category"], "defender")
+        self.assertFalse(entry["is_hardware"])
+        self.assertEqual(entry["order"], 10)
+
+    def test_armor_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Armor")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["order"], 20)
+
+    def test_fortify_registered_with_correct_metadata(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Fortify")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["order"], 30)
+        self.assertIn("on_brain_damage_inbound", entry["hooks"])
+        self.assertIn("on_turn_end", entry["hooks"])
+
+
+class TestStep3ProgramAttackVsNetrunnerIntegration(unittest.TestCase):
+    """Step 3 integration: program_attack_vs_netrunner now routes brain
+    damage through Defender hooks before emitting the brain_damage state op."""
+
+    def test_attack_with_shield_zeros_damage_and_appends_derez(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Shield", "status": "active", "rez": 7, "category": "defender"}]
+        ice_status = {"Lobby_Hellhound": {
+            "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+            "rez_current": 15, "status": "active",
+        }}
+        # All d10/d6 rolls = 5 → atk=5+ATK > def=5+DEF → hit, damage=1d6=5
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "program_attack_vs_netrunner",
+                  "character": "Hellhound", "ice_type": "Hellhound",
+                  "interface_rank": 4, "target_def": 4, "target": "V"}],
+                active_programs=progs,
+                ice_status=ice_status,
+            )
+        # No brain_damage op emitted (Shield zeroed it)
+        bd_ops = [op for op in result["state_ops"]
+                  if isinstance(op, dict) and op.get("op") == "brain_damage"]
+        self.assertEqual(bd_ops, [])
+        # Shield derez op emitted
+        derez_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "program_derez"
+                     and op.get("program_name") == "Shield"]
+        self.assertEqual(len(derez_ops), 1)
+        # Result decorated with damage_resolution trace
+        r = result["results"][0]
+        self.assertIn("damage_resolution", r)
+        self.assertEqual(r["damage_after_defenders"], 0)
+
+    def test_attack_with_armor_reduces_damage_by_four(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Armor", "status": "active", "rez": 7, "category": "defender"}]
+        ice_status = {"Lobby_Hellhound": {
+            "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+            "rez_current": 15, "status": "active",
+        }}
+        # All rolls = 5 → atk d10=5+6 vs def d10=5+4 → hit; damage 2d6=5+5=10
+        # Armor reduces 10 → 6
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "program_attack_vs_netrunner",
+                  "character": "Hellhound", "ice_type": "Hellhound",
+                  "interface_rank": 4, "target_def": 4, "target": "V"}],
+                active_programs=progs,
+                ice_status=ice_status,
+            )
+        bd_ops = [op for op in result["state_ops"]
+                  if isinstance(op, dict) and op.get("op") == "brain_damage"]
+        self.assertEqual(len(bd_ops), 1)
+        self.assertEqual(bd_ops[0]["change"], 6)  # 10 - 4
+
+    def test_attack_without_defenders_unchanged(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        ice_status = {"Lobby_Hellhound": {
+            "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+            "rez_current": 15, "status": "active",
+        }}
+        # All rolls = 5 → damage 2d6 = 10
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "program_attack_vs_netrunner",
+                  "character": "Hellhound", "ice_type": "Hellhound",
+                  "interface_rank": 4, "target_def": 4, "target": "V"}],
+                active_programs=[],
+                ice_status=ice_status,
+            )
+        bd_ops = [op for op in result["state_ops"]
+                  if isinstance(op, dict) and op.get("op") == "brain_damage"]
+        self.assertEqual(len(bd_ops), 1)
+        self.assertEqual(bd_ops[0]["change"], 10)  # unmitigated 2d6=5+5
+
+
+class TestStep3FortifyClearWriteback(unittest.TestCase):
+    """active_boost_clear op emitted by Fortify's on_turn_end is consumed by
+    _apply_resolver_net_ops."""
+
+    def test_clear_op_pops_boost_key(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_boosts": {"fortify_pending": True}}
+        _apply_resolver_net_ops(
+            state,
+            [{"op": "active_boost_clear", "boost": "fortify_pending"}],
+        )
+        self.assertEqual(state["active_boosts"], {})
+
+    def test_clear_op_unknown_key_is_safe_noop(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_boosts": {}}
+        _apply_resolver_net_ops(
+            state,
+            [{"op": "active_boost_clear", "boost": "nonexistent"}],
+        )
+        self.assertEqual(state["active_boosts"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

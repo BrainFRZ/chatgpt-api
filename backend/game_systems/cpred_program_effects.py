@@ -88,6 +88,58 @@ def _backup_drive_on_program_status_change(program_name, old_status, new_status,
 
 
 # ---------------------------------------------------------------------------
+# Hook implementations (Step 3: Defenders — Shield, Armor, Fortify)
+# ---------------------------------------------------------------------------
+
+def _shield_on_brain_damage_inbound(amount, prog, hack_state, game_state):
+    """RAW (Hacking Rulebook §4): Shield reduces incoming brain damage from
+    a single attack to 0. After preventing damage, the Shield is Derezzed.
+
+    One-shot per encounter. Only fires when there's actually damage to
+    block (amount > 0); otherwise no derez.
+    """
+    if amount <= 0:
+        return amount, []
+    derez_op = {
+        "op": "program_derez",
+        "program_name": "Shield",
+        "source": "self-consumed Shield",
+    }
+    return 0, [derez_op]
+
+
+def _armor_on_brain_damage_inbound(amount, prog, hack_state, game_state):
+    """RAW: Armor reduces all incoming brain damage by 4. Persistent — does
+    not derez on use."""
+    return max(0, amount - 4), []
+
+
+def _fortify_on_brain_damage_inbound(amount, prog, hack_state, game_state):
+    """RAW: Fortify is activated as a Boosted Action (1 NA + 1 Cycle) and
+    grants +4 brain damage reduction for the current turn (= a temporary
+    Armor). The Boosted-Action handler (Step 6b) sets
+    active_boosts.fortify_pending; on_turn_end clears it.
+
+    Until activated, Fortify provides no defense (the program is loaded but
+    inert). This matches RAW where the program must be actively boosted to
+    stack with passive Armor.
+    """
+    boosts = (hack_state or {}).get("active_boosts") or {}
+    if not boosts.get("fortify_pending"):
+        return amount, []
+    return max(0, amount - 4), []
+
+
+def _fortify_on_turn_end(hack_state, game_state):
+    """Clear the one-turn fortify_pending flag at the end of each turn."""
+    boosts = (hack_state or {}).get("active_boosts") or {}
+    if boosts.get("fortify_pending"):
+        return [{"op": "active_boost_clear", "boost": "fortify_pending",
+                 "reason": "Fortify duration expired"}]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Registry entries
 # ---------------------------------------------------------------------------
 PROGRAM_EFFECTS["Insulated Wiring"] = {
@@ -109,6 +161,33 @@ PROGRAM_EFFECTS["Backup Drive"] = {
     "is_hardware": True,
     "order": 10,
     "hooks": {"on_program_status_change": _backup_drive_on_program_status_change},
+}
+
+# Step 3: Defender programs. Order 10 → 20 → 30 ensures Shield (one-shot
+# absorber) consumes itself before Armor's flat -4 applies; Armor before
+# Fortify so a partially-derezzed defender stack still works correctly.
+PROGRAM_EFFECTS["Shield"] = {
+    "category": "defender",
+    "is_hardware": False,
+    "order": 10,
+    "hooks": {"on_brain_damage_inbound": _shield_on_brain_damage_inbound},
+}
+
+PROGRAM_EFFECTS["Armor"] = {
+    "category": "defender",
+    "is_hardware": False,
+    "order": 20,
+    "hooks": {"on_brain_damage_inbound": _armor_on_brain_damage_inbound},
+}
+
+PROGRAM_EFFECTS["Fortify"] = {
+    "category": "defender",
+    "is_hardware": False,
+    "order": 30,
+    "hooks": {
+        "on_brain_damage_inbound": _fortify_on_brain_damage_inbound,
+        "on_turn_end": _fortify_on_turn_end,
+    },
 }
 
 

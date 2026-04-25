@@ -88,6 +88,10 @@ def init_hack_state(
         "net_action_penalty": 0,
         "active_debuffs": [],
         "destroyed_programs": [],
+        # Boosted-action / Defender state. Step 3 uses fortify_pending; Step 6b
+        # adds surge_pending, mask_pending, etc. on_turn_end clears one-shot
+        # flags after they fire.
+        "active_boosts": {},
     }
     # Bootstrap active_programs from edgerunner persistent deck_slots
     if isinstance(_kw.get("game_state"), dict) and hacker_name:
@@ -551,6 +555,14 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
     # tar_consumed is resolver-authoritative
     if any(isinstance(op, dict) and op.get("op") == "tar_consumed" for op in resolver_state_ops):
         state["tar_stacks"] = 0
+    # active_boost_clear: clear one-shot Boosted-Action flags (Fortify, Surge,
+    # Mask). Emitted by on_turn_end hooks when a flag has expired.
+    for op in resolver_state_ops:
+        if isinstance(op, dict) and op.get("op") == "active_boost_clear":
+            boost_key = op.get("boost")
+            boosts = state.setdefault("active_boosts", {})
+            if isinstance(boosts, dict) and boost_key:
+                boosts.pop(boost_key, None)
 
 
 def _apply_brain_damage_hp(state, game_state, name_key, pipeline_state=None):
@@ -638,6 +650,7 @@ def _apply_disconnect_cascade(state, game_state, name_key, pipeline_state=None):
         cascade = _resolve_jack_out_cascade(
             ice_status, active_programs, installed_hardware,
             exclude_ice=None, exclude_ice_key=None, _depth=0,
+            active_boosts=state.get("active_boosts"),
         )
 
         cascade_ops = cascade.get("state_ops", [])
