@@ -24,6 +24,7 @@ from .cpred_tables import (
     AUTOFIRE_DV_TABLE,
     AIMED_SHOT_DV_PENALTY,
     ICE_STAT_BLOCKS,
+    PROGRAM_STATS,
     DRIVING_CHECK_DVS,
     RAMMING_DAMAGE_DICE,
     RAMMING_NOS_BONUS_DICE,
@@ -1903,6 +1904,83 @@ def _lookup_ice_type(ice_type_raw):
     return ICE_STAT_BLOCKS.get(key)
 
 
+def _lookup_program_stats(program_name):
+    """Normalize model string to PROGRAM_STATS entry. Returns block or None.
+
+    Case-insensitive name match; tolerates "see ya" / "seeya" / "See Ya" variants.
+    """
+    if not program_name:
+        return None
+    needle = str(program_name).strip().lower().replace(" ", "")
+    for canonical_name, block in PROGRAM_STATS.items():
+        if canonical_name.lower().replace(" ", "") == needle:
+            return block
+    return None
+
+
+def _resolve_ice_target_block(target, ice_status):
+    """Look up an ice_status entry by key or by name.
+
+    Accepts:
+      - Exact key match (e.g. "Server Farm_Dragon")
+      - Single name match (e.g. "Dragon" matches if exactly one ICE has name="Dragon")
+
+    Returns the ice_status entry dict or None.
+    """
+    if not target or not isinstance(ice_status, dict):
+        return None
+    if isinstance(ice_status.get(target), dict):
+        return ice_status[target]
+    target_lower = str(target).strip().lower()
+    matches = [
+        v for v in ice_status.values()
+        if isinstance(v, dict) and str(v.get("name", "")).strip().lower() == target_lower
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _hydrate_program_attack_from_state(action, ice_status):
+    """Auto-derive mechanical stats for a program_attack action from state.
+
+    Mutates `action` in place. Only fills fields the model didn't supply
+    (backward compat: explicit model values always win).
+
+    Derives:
+      - program_atk from PROGRAM_STATS lookup of program_name / program
+      - target_def from ICE_STAT_BLOCKS via ice_status[target].ice_type
+      - target_rez from ice_status[target].rez_current
+
+    Does NOT derive: interface_rank (lives on hack_state), program_damage_dice
+    (asymmetric for Sword/Banhammer — Step 5 handles via on_program_damage_dice_select).
+    """
+    program_name = action.get("program_name") or action.get("program") or ""
+    if program_name and "program_atk" not in action:
+        prog_stats = _lookup_program_stats(program_name)
+        if prog_stats is not None:
+            action["program_atk"] = prog_stats.get("atk", 0)
+
+    if "target_def" in action and "target_rez" in action:
+        return
+
+    target_block = _resolve_ice_target_block(action.get("target", ""), ice_status)
+    if target_block is None:
+        return
+
+    if "target_def" not in action:
+        ice_type = target_block.get("ice_type")
+        if ice_type:
+            ice_block = ICE_STAT_BLOCKS.get(str(ice_type).strip().lower())
+            if ice_block is not None:
+                action["target_def"] = ice_block.get("def", 0)
+
+    if "target_rez" not in action:
+        rez_cur = target_block.get("rez_current")
+        if rez_cur is not None:
+            action["target_rez"] = rez_cur
+
+
 def _normalize_ice_key_candidate(raw_key, ice_status):
     """Return a valid ICE status key or None."""
     if not raw_key or not isinstance(ice_status, dict):
@@ -3116,6 +3194,10 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     stat_name_key="stat", skill_name_key="skill",
                     wounded_key="seriously_wounded",
                 )
+            elif action_type == "program_attack":
+                # Intent-only: derive program_atk from PROGRAM_STATS, target DEF/REZ
+                # from ice_status. Model can still pass explicit values to override.
+                _hydrate_program_attack_from_state(action, ice_status)
             elif action_type == "opposed_check":
                 # Hydrate attacker
                 _hydrate_stats_from_state(
@@ -3598,19 +3680,20 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 results.append(result)
 
             elif action_type == "program_attack":
+                # Accept either "program_name" (legacy) or "program" (intent-only).
+                _prog_name = action.get("program_name") or action.get("program") or "Program"
                 result = resolve_program_attack(
                     interface_rank=action.get("interface_rank", 0),
                     program_atk=action.get("program_atk", 0),
                     target_def=action.get("target_def", 0),
                     program_damage_dice=action.get("program_damage_dice", 1),
                     target_rez=action.get("target_rez", 0),
-                    program_name=action.get("program_name", "Program"),
+                    program_name=_prog_name,
                     target_name=action.get("target", "ICE"),
                 )
                 result["character"] = action.get("character", "")
                 # Annotate result for model visibility (incremental mode)
-                _prog_name = action.get("program_name", "")
-                if _prog_name:
+                if _prog_name and _prog_name != "Program":
                     result["program_deactivated"] = _prog_name
                     result["deactivation_note"] = f"{_prog_name} deactivated after attack (RAW). Costs 1 NET Action to Reactivate."
                     all_state_ops.append({

@@ -6523,5 +6523,172 @@ class TestWbSceneScopedBoosts(unittest.TestCase):
         self.assertIn("Kessler (Excellent)", injection)
 
 
+class TestProgramAttackIntentOnly(unittest.TestCase):
+    """Step 0a: program_attack auto-derives mechanical stats from state.
+
+    The model can emit just `{type, character, program, target}` and the
+    resolver looks up program_atk in PROGRAM_STATS, target_def in
+    ICE_STAT_BLOCKS via ice_status, and target_rez from live ice_status.
+    Model can still pass explicit values to override (backward compat).
+    """
+
+    MOCK = "game_systems.cpred_mechanics.random.randint"
+
+    def _ice_status(self, name="Server Farm_Dragon", ice_type="dragon", rez_current=24):
+        return {
+            name: {
+                "name": "Dragon",
+                "behavior": "black",
+                "ice_type": ice_type,
+                "rez_current": rez_current,
+                "rez_max": 30,
+                "status": "active",
+            }
+        }
+
+    def test_auto_derives_program_atk_from_program_stats(self):
+        """Model passes only `program: 'Sword'`; backend looks up Sword.atk = 1."""
+        with patch(self.MOCK, side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 3,
+                }],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        self.assertEqual(r["type"], "program_attack")
+        # Sword has atk=1 in PROGRAM_STATS. Buyer roll = 8 + 4 (interface) + 1 (atk) = 13.
+        self.assertEqual(r["roll_result"]["attacker_total"], 8 + 4 + 1)
+
+    def test_auto_derives_target_def_from_ice_status(self):
+        """Model passes only `target: 'Server Farm_Dragon'`; backend looks up Dragon.def = 6."""
+        with patch(self.MOCK, side_effect=[7, 4, 4, 4, 4]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 3,
+                }],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        # Dragon has def=6. Defender roll = 4 + 6 = 10.
+        self.assertEqual(r["roll_result"]["defender_total"], 4 + 6)
+
+    def test_auto_derives_target_rez_from_live_ice_status(self):
+        """target_rez derived from current ice_status entry, not the table max.
+        With live rez=12, an 18-damage hit derezzes the Dragon."""
+        # rolls: attacker d10=8 (no explode), defender d10=3, three damage d6 = 6,6,6
+        with patch(self.MOCK, side_effect=[8, 3, 6, 6, 6]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 3,
+                }],
+                ice_status=self._ice_status(rez_current=12),  # half-derezzed Dragon
+            )
+        r = result["results"][0]
+        self.assertTrue(r["hit"])
+        self.assertEqual(r["damage_total"], 18)
+        self.assertTrue(r["derezzed"])
+        self.assertEqual(r["rez_remaining"], 0)
+
+    def test_resolves_target_by_bare_ice_name(self):
+        """target='Dragon' (bare name) resolves to the single matching ice_status entry."""
+        with patch(self.MOCK, side_effect=[7, 4, 4, 4, 4]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "target": "Dragon",  # bare name, not the key
+                    "program_damage_dice": 3,
+                }],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        # Defender total uses the matched ICE's def
+        self.assertEqual(r["roll_result"]["defender_total"], 4 + 6)
+
+    def test_explicit_model_values_override_state_derivation(self):
+        """Backward compat: if the model passes program_atk/target_def/target_rez
+        explicitly, the derivation does NOT overwrite them."""
+        with patch(self.MOCK, side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "program_atk": 5,    # override (Sword's real atk is 1)
+                    "target_def": 0,     # override (Dragon's real def is 6)
+                    "target_rez": 99,    # override (live rez is 24 by default)
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 3,
+                }],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        # Buyer = 8 + 4 + 5 (model-supplied), not + 1
+        self.assertEqual(r["roll_result"]["attacker_total"], 8 + 4 + 5)
+        # Defender = 3 + 0 (model-supplied), not + 6
+        self.assertEqual(r["roll_result"]["defender_total"], 3 + 0)
+        # rez_max in result reflects model-supplied 99
+        self.assertEqual(r["rez_remaining"], 99 - 15)  # 99 starting, 15 dmg
+
+    def test_unknown_program_falls_back_to_default(self):
+        """If the program isn't in PROGRAM_STATS, no auto-derive — uses model
+        value (or 0 default). No crash."""
+        with patch(self.MOCK, side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "ImaginaryProgram",
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 1,
+                }],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        self.assertEqual(r["type"], "program_attack")
+        # program_atk defaulted to 0 (no PROGRAM_STATS entry)
+        self.assertEqual(r["roll_result"]["attacker_total"], 8 + 4 + 0)
+
+    def test_no_ice_status_falls_back_to_model_or_zero(self):
+        """If ice_status is None / empty, derivation skipped; model values or 0 used."""
+        with patch(self.MOCK, side_effect=[8, 3, 5]):
+            result = resolve_actions(
+                [{
+                    "type": "program_attack",
+                    "character": "RedVelvet",
+                    "interface_rank": 4,
+                    "program": "Sword",
+                    "target": "Server Farm_Dragon",
+                    "program_damage_dice": 1,
+                }],
+                ice_status={},  # empty
+            )
+        r = result["results"][0]
+        # Sword.atk still derives (PROGRAM_STATS lookup doesn't need ice_status)
+        self.assertEqual(r["roll_result"]["attacker_total"], 8 + 4 + 1)
+        # target_def defaulted to 0 (no ice_status to derive from)
+        self.assertEqual(r["roll_result"]["defender_total"], 3 + 0)
+
+
 if __name__ == "__main__":
     unittest.main()
