@@ -84,6 +84,7 @@ def init_net_combat_state(
         "available_actions": [],
         "active_debuffs": seeded_debuffs,
         "slide_used_this_turn": False,
+        "_prev_combat_round": 1,
         # Completion flags
         "combat_complete": False,
         "net_complete": False,
@@ -185,6 +186,7 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "movement_locked_by_key": hack_state.get("movement_locked_by_key"),
         "slide_penalty": hack_state.get("slide_penalty", 0),
         "slide_used_this_turn": bool(hack_state.get("slide_used_this_turn", False)),
+        "_prev_combat_round": 1,
         "net_action_penalty": hack_state.get("net_action_penalty", 0),
         "active_debuffs": copy.deepcopy(hack_state.get("active_debuffs") if isinstance(hack_state.get("active_debuffs"), list) else []),
         "destroyed_programs": list(hack_state.get("destroyed_programs")) if isinstance(hack_state.get("destroyed_programs"), list) else [],
@@ -220,12 +222,24 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     _apply_persistent_ice_effects(nc, hs, game_state, "netrunner", _has_net_actions)
     _apply_trace_auto_increment(nc, _has_net_actions)
     _apply_alert_ice_spawn(nc)
-    # Slide once-per-turn (RAW p.205): in net_combat the cross-turn
-    # boundary is ambiguous (no analogue to hack mode's meatspace_due).
-    # The model can send `slide_used_this_turn: false` in the reported
-    # hack_state field to signal a fresh turn — _apply_net_model_fields
-    # routes that through. Within-call enforcement is still backend-driven
-    # via _slide_used_local in resolve_actions.
+    # Slide once-per-turn (RAW p.205): net_combat shares the meatspace
+    # initiative track with `combat`, so a fresh combat round IS a fresh
+    # turn for the netrunner. Reset slide_used_this_turn whenever the
+    # combat round number advances. The model is the source of truth for
+    # round increments via combat.round in pipeline_state.
+    _combat = pipeline_state.get("combat") if isinstance(pipeline_state, dict) else None
+    if isinstance(_combat, dict):
+        try:
+            _new_round = int(_combat.get("round", 1))
+        except (TypeError, ValueError):
+            _new_round = 1
+        try:
+            _prev_round = int(nc.get("_prev_combat_round", 1))
+        except (TypeError, ValueError):
+            _prev_round = 1
+        if _new_round > _prev_round:
+            nc["slide_used_this_turn"] = False
+        nc["_prev_combat_round"] = _new_round
     _stamp_debuff_expirations(nc, pipeline_state)
     _expire_active_debuffs(nc, pipeline_state)
     _sync_debuffs_to_edgerunner(nc, game_state, "netrunner")

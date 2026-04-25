@@ -2142,6 +2142,98 @@ class TestSlideEnforcement(unittest.TestCase):
         hs = init_hack_state(hacker_name="V", interface_rank=4)
         self.assertFalse(hs["slide_used_this_turn"])
 
+    def test_net_combat_round_increment_resets_slide_used(self):
+        """In net_combat, advancing combat.round resets slide_used_this_turn.
+
+        Net_combat shares meatspace combat initiative — a new combat round
+        IS a new turn for the netrunner, so the once-per-turn flag clears.
+        """
+        nc = _make_nc_state(hacker_name="V")
+        nc["netrunner"] = "V"
+        nc["slide_used_this_turn"] = True
+        nc["_prev_combat_round"] = 1
+        gs = _make_game_state()
+        ps = {
+            "net_combat": nc,
+            "combat": {"round": 2, "initiative_order": ["V"], "current_turn": "V"},
+            "character_states": {},
+            "game_state": gs,
+        }
+        tool = {"hack_state": {"net_actions_used": 0}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, game_state=gs)
+        self.assertFalse(nc["slide_used_this_turn"])
+        self.assertEqual(nc["_prev_combat_round"], 2)
+
+    def test_net_combat_same_round_keeps_slide_used(self):
+        """Same combat.round → slide_used_this_turn unchanged (still True)."""
+        nc = _make_nc_state(hacker_name="V")
+        nc["netrunner"] = "V"
+        nc["slide_used_this_turn"] = True
+        nc["_prev_combat_round"] = 2
+        gs = _make_game_state()
+        ps = {
+            "net_combat": nc,
+            "combat": {"round": 2, "initiative_order": ["V"], "current_turn": "V"},
+            "character_states": {},
+            "game_state": gs,
+        }
+        tool = {"hack_state": {"net_actions_used": 0}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, game_state=gs)
+        self.assertTrue(nc["slide_used_this_turn"])
+        self.assertEqual(nc["_prev_combat_round"], 2)
+
+    def test_net_combat_no_combat_dict_keeps_slide_used(self):
+        """Missing combat dict (rare) → no reset, no crash."""
+        nc = _make_nc_state(hacker_name="V")
+        nc["netrunner"] = "V"
+        nc["slide_used_this_turn"] = True
+        nc["_prev_combat_round"] = 1
+        gs = _make_game_state()
+        ps = {
+            "net_combat": nc,
+            "combat": None,
+            "character_states": {},
+            "game_state": gs,
+        }
+        tool = {"hack_state": {"net_actions_used": 0}, "combat_complete": False,
+                "net_complete": False}
+        apply_net_combat_state(ps, tool, game_state=gs)
+        self.assertTrue(nc["slide_used_this_turn"])
+
+    def test_net_combat_multi_round_progression(self):
+        """Slide once per round, persists within round, resets next round."""
+        nc = _make_nc_state(hacker_name="V")
+        nc["netrunner"] = "V"
+        nc["_prev_combat_round"] = 1
+        gs = _make_game_state()
+        # Round 1: a Slide just succeeded
+        ps_r1 = {
+            "net_combat": nc,
+            "combat": {"round": 1, "initiative_order": ["V"], "current_turn": "V"},
+            "character_states": {},
+            "game_state": gs,
+        }
+        tool_r1 = {"hack_state": {"net_actions_used": 1}, "combat_complete": False,
+                   "net_complete": False}
+        apply_net_combat_state(ps_r1, tool_r1, resolver_state_ops=[
+            {"op": "slide_used", "netrunner": "V"},
+        ], game_state=gs)
+        self.assertTrue(nc["slide_used_this_turn"])
+        # Same round, second exchange: still True
+        apply_net_combat_state(ps_r1, tool_r1, game_state=gs)
+        self.assertTrue(nc["slide_used_this_turn"])
+        # Round 2 starts: reset
+        ps_r2 = {
+            "net_combat": nc,
+            "combat": {"round": 2, "initiative_order": ["V"], "current_turn": "V"},
+            "character_states": {},
+            "game_state": gs,
+        }
+        apply_net_combat_state(ps_r2, tool_r1, game_state=gs)
+        self.assertFalse(nc["slide_used_this_turn"])
+
     def test_black_ice_attack_emits_hunt_start(self):
         """A successful Black ICE attack emits hunt_start tying the ICE to the Netrunner."""
         import unittest.mock as mock
