@@ -1945,7 +1945,9 @@ def _resolve_ice_target_block(target, ice_status):
       - Exact key match (e.g. "Server Farm_Dragon")
       - Single name match (e.g. "Dragon" matches if exactly one ICE has name="Dragon")
 
-    Returns the ice_status entry dict or None.
+    Returns the ice_status entry dict or None. (Ambiguous matches return None;
+    callers needing to distinguish ambiguous-vs-not-found use
+    _find_ice_target_matches.)
     """
     if not target or not isinstance(ice_status, dict):
         return None
@@ -1959,6 +1961,23 @@ def _resolve_ice_target_block(target, ice_status):
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _find_ice_target_matches(target, ice_status):
+    """Return list of (key, block) tuples for an ICE target name lookup.
+
+    Differentiates not-found (empty) from ambiguous (multiple) so callers
+    can fail-soft with a clear narrative reason.
+    """
+    if not target or not isinstance(ice_status, dict):
+        return []
+    if isinstance(ice_status.get(target), dict):
+        return [(target, ice_status[target])]
+    target_lower = str(target).strip().lower()
+    return [
+        (k, v) for k, v in ice_status.items()
+        if isinstance(v, dict) and str(v.get("name", "")).strip().lower() == target_lower
+    ]
 
 
 def _hydrate_program_attack_from_state(action, ice_status):
@@ -1984,7 +2003,17 @@ def _hydrate_program_attack_from_state(action, ice_status):
     if "target_def" in action and "target_rez" in action:
         return
 
-    target_block = _resolve_ice_target_block(action.get("target", ""), ice_status)
+    target_name = action.get("target", "")
+    matches = _find_ice_target_matches(target_name, ice_status)
+
+    # Ambiguous target — flag the action so the dispatcher can fail-soft
+    # with a clear narrative reason. Callers passing explicit target_def +
+    # target_rez bypass hydration entirely (early return above).
+    if target_name and len(matches) > 1:
+        action["_ice_target_ambiguous"] = [k for k, _ in matches]
+        return
+
+    target_block = matches[0][1] if len(matches) == 1 else None
     if target_block is None:
         return
 
@@ -2059,6 +2088,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
         return {
             "type": action_type,
             "character": character,
+            "success": False,
             "error": "missing_program",
             "reason": f"{label} requires a `program` field naming the program.",
             "formatted": f"⚠ {label}: missing program name",
@@ -2074,6 +2104,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
         return {
             "type": action_type,
             "character": character,
+            "success": False,
             "error": "program_not_loaded",
             "reason": (
                 f"{label} {program_name!r}: program is not loaded on this "
@@ -2098,6 +2129,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
         return {
             "type": action_type,
             "character": character,
+            "success": False,
             "error": "illegal_status_transition",
             "reason": (
                 f"{label} {program_name}: requires status {required_old!r}, "
@@ -2111,6 +2143,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
             return {
                 "type": action_type,
                 "character": character,
+                "success": False,
                 "error": "insufficient_net_actions",
                 "reason": (
                     f"{label} {program_name} requires {na_cost} NET Action(s); "
@@ -2129,6 +2162,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
             return {
                 "type": action_type,
                 "character": character,
+                "success": False,
                 "error": "reinstall_requires_backup_drive",
                 "reason": (
                     f"Reinstall {program_name}: only programs saved by Backup Drive "
@@ -2136,6 +2170,16 @@ def _resolve_program_status_change(action, action_type, active_programs,
                 ),
                 "formatted": f"⚠ Reinstall {program_name}: no Backup Drive",
             }, []
+
+    # Mutate the running snapshot in-place so subsequent actions in the same
+    # batch see the post-transition state. Mirrors the writeback that
+    # _apply_resolver_net_ops will eventually apply (status flip + REZ
+    # restoration when recovering from derezzed/destroyed).
+    entry["status"] = new_status
+    if required_old in ("derezzed", "destroyed"):
+        prog_stats = _lookup_program_stats(entry.get("name", program_name))
+        if prog_stats is not None:
+            entry["rez"] = prog_stats.get("rez", entry.get("rez", 0))
 
     state_op = {
         "op": "program_status_change",
@@ -3900,6 +3944,28 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             elif action_type == "program_attack":
                 # Accept either "program_name" (legacy) or "program" (intent-only).
                 _prog_name = action.get("program_name") or action.get("program") or "Program"
+                # Fail-soft on ambiguous target: hydrator flagged multiple ICE
+                # matches and the model didn't pass explicit target_def/rez to
+                # disambiguate. Returning a default-0 attack against the wrong
+                # instance would silently corrupt state.
+                _ambig = action.get("_ice_target_ambiguous")
+                if _ambig and ("target_def" not in action or "target_rez" not in action):
+                    results.append({
+                        "type": "program_attack",
+                        "character": action.get("character", ""),
+                        "success": False,
+                        "error": "target_ambiguous",
+                        "reason": (
+                            f"program_attack target {action.get('target', '')!r} "
+                            f"matches multiple ICE instances: "
+                            f"{', '.join(_ambig)}. Pass `target_key` (the "
+                            f"ice_status key) or explicit `target_def`/`target_rez` "
+                            f"to disambiguate."
+                        ),
+                        "candidates": list(_ambig),
+                        "formatted": f"⚠ program_attack {action.get('target', '')}: ambiguous ({len(_ambig)} matches)",
+                    })
+                    continue
                 result = resolve_program_attack(
                     interface_rank=action.get("interface_rank", 0),
                     program_atk=action.get("program_atk", 0),

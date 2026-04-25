@@ -7129,6 +7129,159 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(state["active_programs"][0]["status"], "active")
         self.assertEqual(state["active_programs"][0]["rez"], 2)  # unchanged
 
+    # ----- Step 0e: sequential composition + error semantics -----
+
+    def test_sequential_status_ops_compose_in_same_batch(self):
+        """activate + deactivate Sword in one batch — both succeed.
+
+        The resolver mutates active_programs in-place after emitting each
+        status-change op so subsequent actions see the post-transition state.
+        Without this, action 1 would see action 0's pre-transition status.
+        """
+        progs = self._programs(("Sword", "deactivated"))
+        result = resolve_actions(
+            [
+                {"type": "activate_program", "character": "V", "program": "Sword"},
+                {"type": "deactivate_program", "character": "V", "program": "Sword"},
+            ],
+            active_programs=progs,
+            net_actions_remaining=3,
+        )
+        r0, r1 = result["results"]
+        self.assertNotIn("error", r0)
+        self.assertNotIn("error", r1)
+        self.assertTrue(r0["success"])
+        self.assertTrue(r1["success"])
+        # Two state ops emitted, in order
+        ops = [op for op in result["state_ops"] if op.get("op") == "program_status_change"]
+        self.assertEqual(len(ops), 2)
+        self.assertEqual(ops[0]["new_status"], "active")
+        self.assertEqual(ops[1]["new_status"], "deactivated")
+
+    def test_sequential_reactivate_then_deactivate_restores_rez(self):
+        """Reactivate (derezzed → active) restores REZ in-place; subsequent
+        deactivate sees the restored REZ."""
+        progs = self._programs(("Shield", "derezzed", 0))
+        result = resolve_actions(
+            [
+                {"type": "reactivate_program", "character": "V", "program": "Shield"},
+                {"type": "deactivate_program", "character": "V", "program": "Shield"},
+            ],
+            active_programs=progs,
+            net_actions_remaining=4,
+        )
+        r0, r1 = result["results"]
+        self.assertNotIn("error", r0)
+        self.assertNotIn("error", r1)
+        # Running snapshot has Shield at full REZ + status=deactivated after both ops
+        self.assertEqual(progs[0]["status"], "deactivated")
+        self.assertGreater(progs[0]["rez"], 0)  # restored from PROGRAM_STATS
+
+    def test_error_results_include_success_false(self):
+        """All status-change error paths set `success: False` for callers
+        that branch on success rather than error."""
+        # missing_program
+        r1 = resolve_actions([{"type": "activate_program", "character": "V"}],
+                             active_programs=[])["results"][0]
+        self.assertEqual(r1["success"], False)
+        # program_not_loaded
+        r2 = resolve_actions([{"type": "activate_program", "character": "V",
+                               "program": "Ghost"}],
+                             active_programs=[{"name": "Sword", "status": "deactivated"}],
+                             )["results"][0]
+        self.assertEqual(r2["success"], False)
+        # illegal_status_transition
+        r3 = resolve_actions([{"type": "activate_program", "character": "V",
+                               "program": "Sword"}],
+                             active_programs=[{"name": "Sword", "status": "active"}],
+                             )["results"][0]
+        self.assertEqual(r3["success"], False)
+        # insufficient_net_actions
+        r4 = resolve_actions([{"type": "reactivate_program", "character": "V",
+                               "program": "Shield"}],
+                             active_programs=[{"name": "Shield", "status": "derezzed", "rez": 0}],
+                             net_actions_remaining=1,
+                             )["results"][0]
+        self.assertEqual(r4["success"], False)
+        # reinstall_requires_backup_drive
+        r5 = resolve_actions([{"type": "reinstall_program", "character": "V",
+                               "program": "Sword"}],
+                             active_programs=[{"name": "Sword", "status": "destroyed", "rez": 0}],
+                             installed_hardware=[],
+                             )["results"][0]
+        self.assertEqual(r5["success"], False)
+
+
+class TestProgramAttackAmbiguousTarget(unittest.TestCase):
+    """Step 0e: intent-only program_attack fail-soft on ambiguous ICE name."""
+
+    def _ice_status(self):
+        return {
+            "Lobby_Hellhound": {"name": "Hellhound", "behavior": "black",
+                                "ice_type": "hellhound", "rez_current": 15,
+                                "rez_max": 15, "status": "active"},
+            "Vault_Hellhound": {"name": "Hellhound", "behavior": "black",
+                                "ice_type": "hellhound", "rez_current": 12,
+                                "rez_max": 15, "status": "active"},
+        }
+
+    def test_ambiguous_target_returns_error_with_candidates(self):
+        result = resolve_actions(
+            [{"type": "program_attack", "character": "V", "interface_rank": 4,
+              "program": "Sword", "target": "Hellhound", "program_damage_dice": 3}],
+            ice_status=self._ice_status(),
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "target_ambiguous")
+        self.assertFalse(r["success"])
+        self.assertEqual(set(r["candidates"]), {"Lobby_Hellhound", "Vault_Hellhound"})
+        # No state ops emitted
+        self.assertEqual([op for op in result["state_ops"]
+                          if op.get("op") in ("rez_damage", "program_destroy")], [])
+
+    def test_explicit_key_disambiguates(self):
+        """Passing the full ice_status key resolves to a single match."""
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V", "interface_rank": 4,
+                  "program": "Sword", "target": "Lobby_Hellhound",
+                  "program_damage_dice": 3}],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        self.assertEqual(r["type"], "program_attack")
+
+    def test_explicit_target_def_and_rez_bypasses_ambiguity_check(self):
+        """Backward-compat: model passing explicit target_def + target_rez
+        skips hydration entirely, so ambiguity isn't flagged."""
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V", "interface_rank": 4,
+                  "program": "Sword", "target": "Hellhound",
+                  "target_def": 6, "target_rez": 15,
+                  "program_damage_dice": 3}],
+                ice_status=self._ice_status(),
+            )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+
+    def test_unique_match_proceeds_normally(self):
+        """Single match by name resolves cleanly — no ambiguity flag."""
+        ice_status = {"Lobby_Hellhound": self._ice_status()["Lobby_Hellhound"]}
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V", "interface_rank": 4,
+                  "program": "Sword", "target": "Hellhound",
+                  "program_damage_dice": 3}],
+                ice_status=ice_status,
+            )
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+
 
 if __name__ == "__main__":
     unittest.main()
