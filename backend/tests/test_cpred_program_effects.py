@@ -1514,5 +1514,168 @@ class TestStep5ProgramAttackIntegration(unittest.TestCase):
         self.assertEqual(legacy_ops, [])
 
 
+class TestStep6aPassiveBespokeEntries(unittest.TestCase):
+    """Step 6a: Flak (defender), Hardened Circuitry (hardware), DNA Lock
+    (hardware, not yet wired into runtime).
+    """
+
+    def _hs(self, programs=None, hardware=None):
+        return {
+            "active_programs": programs or [],
+            "installed_hardware": hardware or [],
+            "active_boosts": {},
+        }
+
+    # ----- Flak -----
+
+    def test_flak_zeros_non_black_ice_atk(self):
+        progs = [{"name": "Flak", "status": "active", "rez": 7, "category": "defender"}]
+        hs = self._hs(programs=progs)
+        # A non-Black ICE (e.g. Tar / Patrol class) attacks
+        ice_block = {"name": "TarPit", "class": "tar"}
+        final_atk, labels, trace = cpe.run_ice_attack_inbound_hooks(
+            ice_block, 6, hs, {})
+        self.assertEqual(final_atk, 0)
+        self.assertEqual(len(labels), 1)
+        self.assertIn("Flak", labels[0][0])
+
+    def test_flak_does_not_affect_black_ice(self):
+        progs = [{"name": "Flak", "status": "active", "rez": 7, "category": "defender"}]
+        hs = self._hs(programs=progs)
+        for cls in ("anti_personnel", "anti_program"):
+            ice_block = {"name": "X", "class": cls}
+            final_atk, labels, _ = cpe.run_ice_attack_inbound_hooks(
+                ice_block, 6, hs, {})
+            self.assertEqual(final_atk, 6, f"Flak wrongly modified Black ICE class={cls}")
+            self.assertEqual(labels, [])
+
+    def test_flak_silent_when_derezzed(self):
+        progs = [{"name": "Flak", "status": "derezzed", "rez": 0, "category": "defender"}]
+        hs = self._hs(programs=progs)
+        final_atk, _, _ = cpe.run_ice_attack_inbound_hooks(
+            {"name": "TarPit", "class": "tar"}, 6, hs, {})
+        self.assertEqual(final_atk, 6)
+
+    def test_flak_unknown_ice_class_treated_as_non_black(self):
+        """An ICE block with no/unknown class defaults to non-Black —
+        Flak fires (defensive default favors the Netrunner)."""
+        progs = [{"name": "Flak", "status": "active", "rez": 7, "category": "defender"}]
+        hs = self._hs(programs=progs)
+        final_atk, _, _ = cpe.run_ice_attack_inbound_hooks(
+            {"name": "Mystery"}, 6, hs, {})  # no class field
+        self.assertEqual(final_atk, 0)
+
+    # ----- Hardened Circuitry -----
+
+    def test_hardened_circuitry_blocks_emp(self):
+        hs = self._hs(hardware=["Hardened Circuitry"])
+        blocked, _, label, _ = cpe.run_ice_effect_inbound_hooks(
+            "emp", {"name": "EMPGremlin"}, hs, None)
+        self.assertTrue(blocked)
+        self.assertEqual(label, "Hardened Circuitry")
+
+    def test_hardened_circuitry_does_not_block_other_effects(self):
+        hs = self._hs(hardware=["Hardened Circuitry"])
+        for effect in ("body_fire", "forced_jack_out", "movement_lock",
+                       "stat_debuff", "slide_penalty"):
+            blocked, _, _, _ = cpe.run_ice_effect_inbound_hooks(
+                effect, {"name": "X"}, hs, None)
+            self.assertFalse(blocked, f"Hardened Circuitry wrongly blocked {effect!r}")
+
+    # ----- DNA Lock (signature only — not yet wired) -----
+
+    def test_dna_lock_hook_allows_owner(self):
+        from game_systems.cpred_program_effects import _dna_lock_on_jack_in
+        # Owner jacks in: allowed, no DV
+        allowed, dv, _ = _dna_lock_on_jack_in("V", "V", {}, {})
+        self.assertTrue(allowed)
+        self.assertIsNone(dv)
+
+    def test_dna_lock_hook_blocks_non_owner_with_dv17(self):
+        from game_systems.cpred_program_effects import _dna_lock_on_jack_in
+        allowed, dv, label = _dna_lock_on_jack_in("V", "BlackHat", {}, {})
+        self.assertFalse(allowed)
+        self.assertEqual(dv, 17)
+        self.assertIn("DNA Lock", label)
+
+    def test_dna_lock_case_insensitive_owner_match(self):
+        from game_systems.cpred_program_effects import _dna_lock_on_jack_in
+        allowed, dv, _ = _dna_lock_on_jack_in("V", "v", {}, {})
+        self.assertTrue(allowed)
+
+    # ----- Registry metadata sanity -----
+
+    def test_flak_registered(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Flak")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["category"], "defender")
+        self.assertFalse(entry["is_hardware"])
+        self.assertEqual(entry["order"], 25)
+        self.assertIn("on_ice_attack_inbound", entry["hooks"])
+
+    def test_hardened_circuitry_registered(self):
+        entry = cpe.PROGRAM_EFFECTS.get("Hardened Circuitry")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["category"], "hardware")
+        self.assertTrue(entry["is_hardware"])
+        self.assertIn("on_ice_effect_inbound", entry["hooks"])
+
+    def test_dna_lock_registered(self):
+        entry = cpe.PROGRAM_EFFECTS.get("DNA Lock")
+        self.assertIsNotNone(entry)
+        self.assertTrue(entry["is_hardware"])
+        self.assertIn("on_jack_in", entry["hooks"])
+
+
+class TestStep6aFlakIntegration(unittest.TestCase):
+    """End-to-end: program_attack_vs_netrunner with Flak rezzed nullifies
+    non-Black-ICE attacker ATK before the opposed roll."""
+
+    def test_flak_rezzed_zeros_non_black_ice_atk_in_attack(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Flak", "status": "active", "rez": 7, "category": "defender"}]
+        # Use a synthetic non-Black ICE via explicit ATK + def in action
+        # (no non-Black ICE in ICE_STAT_BLOCKS to look up). Pass ice_type
+        # not in the table — _lookup_ice_type returns None, _patk falls
+        # back to action.program_atk. But Flak's hook needs an ice_block
+        # to inspect; with None it treats as non-Black (defensive default).
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack_vs_netrunner",
+                  "character": "TarICE",
+                  "program_atk": 6, "program_damage_dice": 1,
+                  "target_def": 4, "target": "V"}],
+                active_programs=progs,
+                ice_status={},
+            )
+        r = result["results"][0]
+        # Flak should have applied — attacker ATK went 6 → 0
+        self.assertIn("atk_modifiers", r)
+        self.assertEqual(r["atk_modifiers"][0]["before"], 6)
+        self.assertEqual(r["atk_modifiers"][0]["after"], 0)
+
+    def test_flak_does_not_affect_black_ice_attack(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Flak", "status": "active", "rez": 7, "category": "defender"}]
+        # Hellhound is anti_personnel = Black ICE
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   return_value=5):
+            result = resolve_actions(
+                [{"type": "program_attack_vs_netrunner",
+                  "character": "Hellhound", "ice_type": "Hellhound",
+                  "interface_rank": 4, "target_def": 4, "target": "V"}],
+                active_programs=progs,
+                ice_status={"Lobby_Hellhound": {
+                    "name": "Hellhound", "behavior": "black",
+                    "ice_type": "hellhound", "rez_current": 15,
+                    "status": "active",
+                }},
+            )
+        r = result["results"][0]
+        # Flak shouldn't have fired — no atk_modifiers
+        self.assertNotIn("atk_modifiers", r)
+
+
 if __name__ == "__main__":
     unittest.main()

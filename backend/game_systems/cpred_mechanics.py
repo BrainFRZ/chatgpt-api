@@ -4194,6 +4194,19 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 # Override ATK and damage_dice from table if ICE type found
                 _patk = _ice_block["atk"] if _ice_block else action.get("program_atk", 0)
                 _pdmg = _ice_block["damage_dice"] if _ice_block else action.get("program_damage_dice", 1)
+                # Step 6a: Flak zeros non-Black-ICE attacker ATK before the
+                # opposed roll. on_ice_attack_inbound hooks may modify ATK.
+                from .cpred_program_effects import run_ice_attack_inbound_hooks
+                _atk_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": _active_boosts,
+                }
+                _modified_atk, _atk_labels, _atk_trace = run_ice_attack_inbound_hooks(
+                    _ice_block, _patk, _atk_hs_proxy, None,
+                )
+                if _modified_atk != _patk:
+                    _patk = _modified_atk
                 result = resolve_program_attack(
                     interface_rank=0,  # ICE ATK is from stat block; Netrunner interface is not an attacker bonus.
                     program_atk=_patk,
@@ -4209,6 +4222,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 result["type"] = "program_attack_vs_netrunner"
                 if _ice_block:
                     result["ice_type"] = _ice_block["name"]
+                if _atk_trace:
+                    result["atk_modifiers"] = _atk_trace
                 results.append(result)
                 if result.get("hit"):
                     _nr_name = action.get("target", "")

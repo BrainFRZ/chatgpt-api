@@ -41,6 +41,10 @@ Hook signatures (return shape; malformed return → warning log + no-op):
                                 → (damage_dice_int, modifier_label_or_None)
     on_ice_effect_inbound       (effect_name, ice_block, hack_state, game_state)
                                 → (blocked_bool, replacement_ops_list, label_or_None)
+    on_ice_attack_inbound       (attacker_ice_block, current_atk, hack_state, game_state)
+                                → (modified_atk_int, label_or_None)
+    on_jack_in (NOT WIRED YET)  (deck_owner, jacker_name, hack_state, game_state)
+                                → (allowed_bool, required_dv_int_or_None, label_or_None)
 """
 import copy
 import logging
@@ -191,6 +195,46 @@ def _banhammer_on_damage_dice_select(target_ice_block, prog, hack_state):
     return 3, "Banhammer vs non-Black"
 
 
+# ---------------------------------------------------------------------------
+# Hook implementations (Step 6a: passive bespoke — Flak, DNA Lock, Hardened Circuitry)
+# ---------------------------------------------------------------------------
+
+def _flak_on_ice_attack_inbound(attacker_ice_block, current_atk, prog, hack_state, game_state):
+    """RAW (PROGRAM_STATS): 'Enemy non-Black-ICE ATK → 0'. Flak is a Defender
+    program that nullifies attacks from non-Black ICE (Tar, Patrol, etc.) by
+    reducing the attacker's ATK to 0. Black ICE attacks are unaffected."""
+    if _is_black_ice_block(attacker_ice_block):
+        return current_atk, None
+    return 0, "Flak (non-Black ICE → 0 ATK)"
+
+
+def _hardened_circuitry_on_ice_effect(effect, ice_block, hack_state, game_state):
+    """RAW: Hardened Circuitry hardware makes the deck immune to EMP. No
+    current ICE in ICE_STAT_BLOCKS uses an 'emp' effect, but the hook is
+    here for any future EMP-emitting effect (e.g. homebrew or cyberware
+    EMP weapons that target the deck)."""
+    if effect == "emp":
+        return True, [], "Hardened Circuitry"
+    return False, [], None
+
+
+def _dna_lock_on_jack_in(deck_owner, jacker_name, hack_state, game_state):
+    """RAW (HARDWARE_STATS): 'DV17 Electronics/Security Tech to use deck'.
+    DNA Lock gates the deck so only the registered owner can jack in.
+    Anyone else must succeed at an Electronics/Security Tech vs DV17
+    check to bypass the lock.
+
+    NOTE: NOT YET WIRED. This hook signature is registered for future
+    integration with a jack_in resolver action. Currently no caller
+    invokes run_jack_in_hooks (no such driver exists yet) — this entry
+    is metadata-only for discoverability."""
+    if not deck_owner or not jacker_name:
+        return True, None, None
+    if str(deck_owner).strip().lower() == str(jacker_name).strip().lower():
+        return True, None, None
+    return False, 17, "DNA Lock — Electronics/Security Tech DV17 to bypass"
+
+
 def _booster_bonus_on_ability(target_ability, bonus, label):
     """Curry an on_interface_check hook that fires +bonus when the rolling
     Interface Ability matches `target_ability` (case-insensitive).
@@ -336,6 +380,33 @@ PROGRAM_EFFECTS["Vrizzbolt"] = {
     "is_hardware": False,
     "order": 100,
     "hooks": {"on_program_attack_hit": _vrizzbolt_on_attack_hit},
+}
+
+# Step 6a: passive bespoke effects.
+#   Flak — Defender program that zeros non-Black-ICE attacker ATK.
+#   Hardened Circuitry — hardware blocking 'emp' ICE effect (currently no
+#       ICE emits this; entry is preemptive for homebrew/future content).
+#   DNA Lock — hardware gating jack-in to the deck owner. NOT WIRED yet
+#       (no jack-in resolver action exists); registered for future use.
+PROGRAM_EFFECTS["Flak"] = {
+    "category": "defender",
+    "is_hardware": False,
+    "order": 25,  # between Armor (20) and Fortify (30) in the defender stack
+    "hooks": {"on_ice_attack_inbound": _flak_on_ice_attack_inbound},
+}
+
+PROGRAM_EFFECTS["Hardened Circuitry"] = {
+    "category": "hardware",
+    "is_hardware": True,
+    "order": 10,
+    "hooks": {"on_ice_effect_inbound": _hardened_circuitry_on_ice_effect},
+}
+
+PROGRAM_EFFECTS["DNA Lock"] = {
+    "category": "hardware",
+    "is_hardware": True,
+    "order": 10,
+    "hooks": {"on_jack_in": _dna_lock_on_jack_in},
 }
 
 
@@ -788,6 +859,64 @@ def run_ice_effect_inbound_hooks(effect, ice_block, hack_state, game_state):
             "blocked": bool(b), "label": lbl, "state_ops": ops_copy,
         })
     return blocked, state_ops, label, trace
+
+
+def run_ice_attack_inbound_hooks(attacker_ice_block, current_atk, hack_state, game_state):
+    """Run on_ice_attack_inbound hooks (Flak: zero out non-Black ICE ATK).
+
+    Hooks may modify the attacker's ATK before the opposed-roll resolution.
+    Chain in registry order; each hook receives the current (post-prior-hook)
+    ATK value.
+
+    Args:
+        attacker_ice_block: ICE stat block of the attacker (used by Flak to
+                            classify Black vs non-Black).
+        current_atk: Current ATK value (before any hook modification).
+        hack_state: hack_state dict (active_programs, installed_hardware).
+        game_state: game_state dict.
+
+    Returns: (final_atk, modifier_labels, trace) where modifier_labels is a
+    list of (label, before, after) tuples in execution order.
+    """
+    atk_int = _coerce_int(current_atk)
+    if atk_int is None:
+        return current_atk, [], []
+    hs = hack_state if isinstance(hack_state, dict) else {}
+    gs = game_state if isinstance(game_state, dict) else {}
+    progs = _snapshot_active_programs(hs.get("active_programs"))
+    hw = _snapshot_installed_hardware(hs.get("installed_hardware"))
+    entries = _matching_entries(progs, hw, "on_ice_attack_inbound")
+    state_ops_unused = []  # reserved if a future hook needs to emit
+    labels = []
+    trace = []
+    current = atk_int
+    for canonical, entry, prog in entries:
+        hook = entry["hooks"]["on_ice_attack_inbound"]
+        before = current
+        ret = _safe_call(
+            hook, (attacker_ice_block, current, prog, hs, gs),
+            f"{canonical}.on_ice_attack_inbound",
+        )
+        if not isinstance(ret, tuple) or len(ret) != 2:
+            if ret is not None:
+                logger.warning(
+                    "cpred_program_effects: %s.on_ice_attack_inbound returned %r; expected (atk, label).",
+                    canonical, ret,
+                )
+            continue
+        new_atk, label = ret
+        new_int = _coerce_int(new_atk)
+        if new_int is None:
+            continue
+        if new_int == current:
+            continue
+        labels.append((label or canonical, before, new_int))
+        trace.append({
+            "prog": canonical, "hook": "on_ice_attack_inbound",
+            "before": before, "after": new_int, "label": label,
+        })
+        current = new_int
+    return current, labels, trace
 
 
 def run_program_damage_dice_select_hooks(target_ice_block, prog, hack_state):
