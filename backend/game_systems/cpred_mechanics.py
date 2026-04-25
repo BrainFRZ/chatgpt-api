@@ -4093,23 +4093,75 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         "formatted": f"⚠ program_attack {action.get('target', '')}: ambiguous ({len(_ambig)} matches)",
                     })
                     continue
+                # Step 5: Sword/Banhammer scale damage_dice by target ICE class
+                # (Black vs non-Black). on_program_damage_dice_select returns
+                # (dice, label) — overrides the model-passed value when set.
+                _hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": _active_boosts,
+                }
+                _firing_prog_entry = None
+                if isinstance(active_programs, list):
+                    _prog_lc = str(_prog_name).strip().lower()
+                    for _p in active_programs:
+                        if isinstance(_p, dict) and \
+                                str(_p.get("name", "")).strip().lower() == _prog_lc:
+                            _firing_prog_entry = _p
+                            break
+                _target_block = _resolve_ice_target_block(
+                    action.get("target", ""), ice_status)
+                _ice_block_for_hook = None
+                if _target_block:
+                    _ice_type = _target_block.get("ice_type")
+                    if _ice_type:
+                        _ice_block_for_hook = ICE_STAT_BLOCKS.get(
+                            str(_ice_type).strip().lower())
+                _scaled_dice = action.get("program_damage_dice", 1)
+                _scaled_label = None
+                if _ice_block_for_hook is not None and _firing_prog_entry is not None:
+                    from .cpred_program_effects import run_program_damage_dice_select_hooks
+                    _hook_dice, _scaled_label = run_program_damage_dice_select_hooks(
+                        _ice_block_for_hook, _firing_prog_entry, _hs_proxy)
+                    if _hook_dice is not None:
+                        _scaled_dice = _hook_dice
                 result = resolve_program_attack(
                     interface_rank=action.get("interface_rank", 0),
                     program_atk=action.get("program_atk", 0),
                     target_def=action.get("target_def", 0),
-                    program_damage_dice=action.get("program_damage_dice", 1),
+                    program_damage_dice=_scaled_dice,
                     target_rez=action.get("target_rez", 0),
                     program_name=_prog_name,
                     target_name=action.get("target", "ICE"),
                 )
+                if _scaled_label:
+                    result["damage_dice_modifier"] = _scaled_label
                 result["character"] = action.get("character", "")
-                # Annotate result for model visibility (incremental mode)
+                # Step 5 (kickers): on hit, run on_program_attack_hit hooks
+                # for the firing program (Hellbolt body_fire, Vrizzbolt
+                # net_action_penalty, etc.). Filtered to firing program
+                # only — Hellbolt's deck-fire kicker doesn't trigger on a
+                # Sword attack, even when both are loaded.
+                if result.get("hit") and _prog_name and _prog_name != "Program":
+                    from .cpred_program_effects import run_program_attack_hit_hooks
+                    _hit_ops, _hit_trace = run_program_attack_hit_hooks(
+                        result, _hs_proxy, firing_program_name=_prog_name)
+                    all_state_ops.extend(_hit_ops)
+                    if _hit_trace:
+                        result["attack_hit_trace"] = _hit_trace
+                # Step 5 (auto-Deactivate): emit program_status_change op
+                # for the firing program — fires regardless of hit/miss per
+                # RAW. The op routes through apply_program_status_change at
+                # writeback so on_program_status_change observers can react.
                 if _prog_name and _prog_name != "Program":
                     result["program_deactivated"] = _prog_name
                     result["deactivation_note"] = f"{_prog_name} deactivated after attack (RAW). Costs 1 NET Action to Reactivate."
                     all_state_ops.append({
-                        "op": "program_deactivate",
+                        "op": "program_status_change",
                         "program_name": _prog_name,
+                        "old_status": "active",
+                        "new_status": "deactivated",
+                        "reason": f"{_prog_name} auto-Deactivated after firing (RAW)",
                     })
                 results.append(result)
 

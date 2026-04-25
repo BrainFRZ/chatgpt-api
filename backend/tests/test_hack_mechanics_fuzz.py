@@ -323,7 +323,13 @@ class TestResolveZapDamage(unittest.TestCase):
 # 4. resolve_actions: program_deactivate
 # ===========================================================================
 class TestResolveProgramDeactivate(unittest.TestCase):
-    """Program auto-deactivation after program_attack."""
+    """Program auto-deactivation after program_attack.
+
+    Step 5: the legacy `program_deactivate` op was replaced by the registry's
+    `program_status_change` op. Behavior is the same (auto-Deactivate fires
+    after every program_attack regardless of hit/miss per RAW), but the
+    op shape changed.
+    """
 
     @patch(MOCK, return_value=5)
     def test_deactivate_on_attack(self, _m):
@@ -335,9 +341,11 @@ class TestResolveProgramDeactivate(unittest.TestCase):
         result = r["results"][0]
         self.assertEqual(result["program_deactivated"], "Sword")
         self.assertIn("deactivation_note", result)
-        deact_ops = [op for op in r["state_ops"] if op.get("op") == "program_deactivate"]
-        self.assertEqual(len(deact_ops), 1)
-        self.assertEqual(deact_ops[0]["program_name"], "Sword")
+        psc_ops = [op for op in r["state_ops"]
+                   if op.get("op") == "program_status_change"
+                   and op.get("program_name") == "Sword"
+                   and op.get("new_status") == "deactivated"]
+        self.assertEqual(len(psc_ops), 1)
 
     @patch(MOCK, return_value=5)
     def test_no_deactivate_without_program_name(self, _m):
@@ -346,8 +354,9 @@ class TestResolveProgramDeactivate(unittest.TestCase):
                      "program_damage_dice": 3, "target_rez": 10,
                      "program_name": "", "target": "Hellhound"}]
         r = resolve_actions(actions)
-        deact_ops = [op for op in r["state_ops"] if op.get("op") == "program_deactivate"]
-        self.assertEqual(len(deact_ops), 0)
+        psc_ops = [op for op in r["state_ops"]
+                   if op.get("op") == "program_status_change"]
+        self.assertEqual(len(psc_ops), 0)
 
     @patch(MOCK, return_value=1)
     def test_deactivate_even_on_miss(self, _m):
@@ -358,6 +367,10 @@ class TestResolveProgramDeactivate(unittest.TestCase):
                      "program_name": "Sword", "target": "Hellhound"}]
         r = resolve_actions(actions)
         self.assertEqual(r["results"][0]["program_deactivated"], "Sword")
+        psc_ops = [op for op in r["state_ops"]
+                   if op.get("op") == "program_status_change"
+                   and op.get("program_name") == "Sword"]
+        self.assertEqual(len(psc_ops), 1)
 
 
 # ===========================================================================

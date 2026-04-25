@@ -1195,5 +1195,324 @@ class TestStep4OpposedCheckIntegration(unittest.TestCase):
         self.assertNotIn("booster_bonuses", r)
 
 
+class TestStep5AttackerEntries(unittest.TestCase):
+    """Step 5: Sword/Banhammer/Hellbolt/Vrizzbolt Attacker programs.
+
+    Attacker hooks fire only for the firing program (per RAW: Hellbolt's
+    fire kicker only triggers when Hellbolt itself attacks, not on every
+    attacker's hit).
+    """
+
+    def _hs(self, programs, hardware=None):
+        return {
+            "active_programs": programs,
+            "installed_hardware": hardware or [],
+            "active_boosts": {},
+        }
+
+    def _attacker(self, name):
+        return {"name": name, "status": "active", "rez": 0, "category": "attacker"}
+
+    # ----- Auto-Deactivate (resolver-driven, NOT in hooks) -----
+    # The auto-Deactivate fires hit-or-miss per RAW so it lives in the
+    # resolver, not in on_program_attack_hit. Hook here only emits
+    # per-attacker on-hit kickers.
+
+    def test_sword_has_no_attack_hit_hook(self):
+        """Sword's on-hit behavior is just 'plain damage' — no kicker hook."""
+        progs = [self._attacker("Sword")]
+        ops, trace = cpe.run_program_attack_hit_hooks(
+            {"hit": True, "target_name": "Dragon"},
+            self._hs(progs),
+            firing_program_name="Sword",
+        )
+        self.assertEqual(ops, [])
+        self.assertEqual(trace, [])
+
+    def test_banhammer_has_no_attack_hit_hook(self):
+        progs = [self._attacker("Banhammer")]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True}, self._hs(progs), firing_program_name="Banhammer")
+        self.assertEqual(ops, [])
+
+    def test_hooks_filter_to_firing_program_only(self):
+        """If Sword AND Hellbolt are both rezzed, only the FIRING program's
+        kicker fires (Hellbolt's deck-fire doesn't trigger when Sword fires)."""
+        progs = [self._attacker("Sword"), self._attacker("Hellbolt")]
+        ops, trace = cpe.run_program_attack_hit_hooks(
+            {"hit": True, "target_name": "Dragon"},
+            self._hs(progs),
+            firing_program_name="Sword",
+        )
+        # Sword has no kicker; Hellbolt's body_fire shouldn't fire either
+        body_fire_ops = [o for o in ops if o.get("op") == "body_fire"]
+        self.assertEqual(body_fire_ops, [])
+
+    # ----- Hellbolt kicker -----
+
+    def test_hellbolt_emits_body_fire(self):
+        progs = [self._attacker("Hellbolt")]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True, "target_name": "Vincent"},
+            self._hs(progs),
+            firing_program_name="Hellbolt",
+        )
+        body_fire_ops = [o for o in ops if o.get("op") == "body_fire"]
+        self.assertEqual(len(body_fire_ops), 1)
+        self.assertEqual(body_fire_ops[0]["target"], "Vincent")
+        self.assertEqual(body_fire_ops[0]["damage_per_turn"], 2)
+
+    # ----- Vrizzbolt kicker -----
+
+    def test_vrizzbolt_emits_net_action_penalty(self):
+        progs = [self._attacker("Vrizzbolt")]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True, "target_name": "BlackHat"},
+            self._hs(progs),
+            firing_program_name="Vrizzbolt",
+        )
+        nap_ops = [o for o in ops if o.get("op") == "net_action_penalty"]
+        self.assertEqual(len(nap_ops), 1)
+        self.assertEqual(nap_ops[0]["penalty"], 1)
+        self.assertEqual(nap_ops[0]["target"], "BlackHat")
+
+    # ----- Sword/Banhammer damage scaling -----
+
+    def test_sword_3d6_vs_black_ice(self):
+        progs = [self._attacker("Sword")]
+        firing_prog = progs[0]
+        # Hellhound is anti_personnel = Black ICE
+        ice_block = {"name": "Hellhound", "class": "anti_personnel"}
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            ice_block, firing_prog, self._hs(progs))
+        self.assertEqual(dice, 3)
+        self.assertEqual(label, "Sword vs Black")
+
+    def test_sword_2d6_vs_non_black_ice(self):
+        progs = [self._attacker("Sword")]
+        firing_prog = progs[0]
+        # File ICE / Patrol / etc. — not anti_personnel/anti_program
+        ice_block = {"name": "Patrol", "class": "patrol"}
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            ice_block, firing_prog, self._hs(progs))
+        self.assertEqual(dice, 2)
+        self.assertEqual(label, "Sword vs non-Black")
+
+    def test_sword_3d6_vs_anti_program_black_ice(self):
+        progs = [self._attacker("Sword")]
+        firing_prog = progs[0]
+        ice_block = {"name": "Dragon", "class": "anti_program"}
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            ice_block, firing_prog, self._hs(progs))
+        self.assertEqual(dice, 3)
+
+    def test_banhammer_2d6_vs_black(self):
+        progs = [self._attacker("Banhammer")]
+        firing_prog = progs[0]
+        ice_block = {"name": "Hellhound", "class": "anti_personnel"}
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            ice_block, firing_prog, self._hs(progs))
+        self.assertEqual(dice, 2)
+        self.assertEqual(label, "Banhammer vs Black")
+
+    def test_banhammer_3d6_vs_non_black(self):
+        progs = [self._attacker("Banhammer")]
+        firing_prog = progs[0]
+        ice_block = {"name": "Patrol", "class": "patrol"}
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            ice_block, firing_prog, self._hs(progs))
+        self.assertEqual(dice, 3)
+        self.assertEqual(label, "Banhammer vs non-Black")
+
+    # ----- Defenders / Boosters do not auto-Deactivate -----
+
+    def test_defender_does_not_auto_deactivate(self):
+        """Shield/Armor/Fortify aren't Attackers — never get auto-Deactivate
+        from on_program_attack_hit."""
+        progs = [{"name": "Shield", "status": "active", "rez": 7,
+                  "category": "defender"}]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True}, self._hs(progs), firing_program_name="Shield")
+        # No hook on Shield, so no ops at all
+        self.assertEqual(ops, [])
+
+    def test_booster_does_not_auto_deactivate(self):
+        progs = [{"name": "Worm", "status": "active", "rez": 7,
+                  "category": "booster"}]
+        ops, _ = cpe.run_program_attack_hit_hooks(
+            {"hit": True}, self._hs(progs), firing_program_name="Worm")
+        self.assertEqual(ops, [])
+
+    # ----- Status filter on damage dice select -----
+
+    def test_sword_dice_hook_skipped_when_derezzed(self):
+        progs = [{"name": "Sword", "status": "derezzed", "rez": 0,
+                  "category": "attacker"}]
+        firing_prog = progs[0]
+        dice, label = cpe.run_program_damage_dice_select_hooks(
+            {"class": "anti_personnel"}, firing_prog, self._hs(progs))
+        # Even though firing_prog matches by name, snapshot filters out
+        # derezzed programs — hook entry filtered out.
+        self.assertIsNone(dice)
+        self.assertIsNone(label)
+
+    # ----- Registry metadata sanity -----
+
+    def test_all_four_attackers_registered(self):
+        for name in ("Sword", "Banhammer", "Hellbolt", "Vrizzbolt"):
+            entry = cpe.PROGRAM_EFFECTS.get(name)
+            self.assertIsNotNone(entry, f"{name} not registered")
+            self.assertEqual(entry["category"], "attacker")
+            self.assertEqual(entry["order"], 100)
+
+    def test_sword_banhammer_have_damage_dice_hook(self):
+        for name in ("Sword", "Banhammer"):
+            entry = cpe.PROGRAM_EFFECTS[name]
+            self.assertIn("on_program_damage_dice_select", entry["hooks"])
+            # Sword/Banhammer have no on_program_attack_hit — auto-Deactivate
+            # is resolver-driven, no kicker beyond dice scaling.
+            self.assertNotIn("on_program_attack_hit", entry["hooks"])
+
+    def test_hellbolt_vrizzbolt_attack_hit_only(self):
+        """Hellbolt and Vrizzbolt have on_program_attack_hit (kickers) but
+        no damage dice scaling."""
+        for name in ("Hellbolt", "Vrizzbolt"):
+            entry = cpe.PROGRAM_EFFECTS[name]
+            self.assertIn("on_program_attack_hit", entry["hooks"])
+            self.assertNotIn("on_program_damage_dice_select", entry["hooks"])
+
+
+class TestStep5ProgramAttackIntegration(unittest.TestCase):
+    """End-to-end: program_attack via resolve_actions invokes both
+    on_program_damage_dice_select and on_program_attack_hit."""
+
+    def _ice_status(self, ice_type, rez_current=15):
+        return {"Server Farm_X": {
+            "name": ice_type.title(),
+            "behavior": "black",
+            "ice_type": ice_type,
+            "rez_current": rez_current,
+            "rez_max": 30,
+            "status": "active",
+        }}
+
+    def test_sword_attack_on_black_ice_uses_3d6(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Sword", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        # atk d10=8, def d10=3 (no fumble), three damage d6=5,5,5
+        # atk_total = 8+8+1 = 17 vs def_total = 3+6 = 9 → hit
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "interface_rank": 8, "program": "Sword",
+                  "target": "Dragon", "program_damage_dice": 99}],
+                # Note: model passed 99 dice — backend should override to 3
+                ice_status=self._ice_status("dragon"),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertTrue(r.get("hit"))
+        # Damage should be 3d6 (Sword vs Black) = 5+5+5 = 15
+        self.assertEqual(r["damage_total"], 15)
+        self.assertEqual(r.get("damage_dice_modifier"), "Sword vs Black")
+        # Auto-Deactivate op emitted
+        psc_ops = [op for op in result["state_ops"]
+                   if isinstance(op, dict) and op.get("op") == "program_status_change"
+                   and op.get("program_name") == "Sword"]
+        self.assertEqual(len(psc_ops), 1)
+        self.assertEqual(psc_ops[0]["new_status"], "deactivated")
+
+    def test_hellbolt_attack_emits_body_fire_op(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Hellbolt", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        # atk d10=8 (no explode), def d10=3 (no fumble), 2 damage d6=5,5
+        # atk_total=8+8+2=18 vs def_total=3+6=9 → hit
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "interface_rank": 8, "program": "Hellbolt",
+                  "target": "Dragon", "program_damage_dice": 2}],
+                ice_status=self._ice_status("dragon"),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertTrue(r.get("hit"))
+        body_fire_ops = [op for op in result["state_ops"]
+                         if isinstance(op, dict) and op.get("op") == "body_fire"
+                         and op.get("source") == "Hellbolt"]
+        self.assertEqual(len(body_fire_ops), 1)
+
+    def test_vrizzbolt_attack_emits_net_action_penalty(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Vrizzbolt", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        # atk d10=8, def d10=3, 1 damage d6=5
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "interface_rank": 8, "program": "Vrizzbolt",
+                  "target": "Dragon", "program_damage_dice": 1}],
+                ice_status=self._ice_status("dragon"),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertTrue(r.get("hit"))
+        nap_ops = [op for op in result["state_ops"]
+                   if isinstance(op, dict) and op.get("op") == "net_action_penalty"
+                   and op.get("source") == "Vrizzbolt"]
+        self.assertEqual(len(nap_ops), 1)
+
+    def test_attack_miss_still_fires_auto_deactivate_but_not_kickers(self):
+        """RAW: programs Deactivate after USE regardless of hit/miss.
+        Kickers (Hellbolt body_fire etc.) only fire on hit."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Hellbolt", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        # Force a miss: atk d10=1 (fumble: subtract another roll), def d10=10
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[1, 5, 10, 5, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "interface_rank": 0, "program": "Hellbolt",
+                  "target": "Dragon", "program_damage_dice": 2}],
+                ice_status=self._ice_status("dragon"),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        if not r.get("hit"):
+            # Miss → auto-Deactivate still fires (resolver, hit-or-miss)
+            psc_ops = [op for op in result["state_ops"]
+                       if isinstance(op, dict) and op.get("op") == "program_status_change"]
+            self.assertEqual(len(psc_ops), 1)
+            # But Hellbolt's body_fire kicker does NOT fire on miss
+            body_fire_ops = [op for op in result["state_ops"]
+                             if isinstance(op, dict) and op.get("op") == "body_fire"]
+            self.assertEqual(body_fire_ops, [])
+
+    def test_no_legacy_program_deactivate_op_emitted(self):
+        """Step 5 replaces the old `program_deactivate` op with the
+        registry's `program_status_change` op. Verify the legacy op is gone."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Sword", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "interface_rank": 8, "program": "Sword",
+                  "target": "Dragon", "program_damage_dice": 3}],
+                ice_status=self._ice_status("dragon"),
+                active_programs=progs,
+            )
+        legacy_ops = [op for op in result["state_ops"]
+                      if isinstance(op, dict) and op.get("op") == "program_deactivate"]
+        self.assertEqual(legacy_ops, [])
+
+
 if __name__ == "__main__":
     unittest.main()

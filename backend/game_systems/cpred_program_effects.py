@@ -143,6 +143,54 @@ def _fortify_on_turn_end(hack_state, game_state):
 # Hook implementations (Step 4: Boosters — Worm, Eraser, See Ya, Speedy)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Hook implementations (Step 5: Attacker kickers + auto-Deactivate)
+# ---------------------------------------------------------------------------
+
+def _is_black_ice_block(ice_block):
+    """RAW: Black ICE = anti_personnel + anti_program classes."""
+    if not isinstance(ice_block, dict):
+        return False
+    cls = str(ice_block.get("class", "")).strip().lower()
+    return cls in ("anti_personnel", "anti_program")
+
+
+def _hellbolt_on_attack_hit(attack_result, prog, hack_state):
+    """Hellbolt kicker: emit body_fire op so the target Netrunner's deck
+    catches fire (2 meat HP/turn until extinguished). PROGRAM_STATS effect:
+    "2d6 brain + deck fire". Brain damage is handled by the standard
+    program_attack damage roll; this hook only emits the deck-fire kicker.
+    Auto-Deactivate is resolver-driven (fires hit-or-miss per RAW)."""
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    return [{"op": "body_fire", "active": True, "damage_per_turn": 2,
+             "source": "Hellbolt", "target": target}]
+
+
+def _vrizzbolt_on_attack_hit(attack_result, prog, hack_state):
+    """Vrizzbolt kicker: emit net_action_penalty for the target's next
+    turn. PROGRAM_STATS effect: "1d6 brain; -1 NET Action". Brain damage
+    handled by the standard attack roll; this hook only emits the kicker.
+    Auto-Deactivate is resolver-driven (fires hit-or-miss per RAW)."""
+    target = attack_result.get("target_name") or attack_result.get("target", "")
+    return [{"op": "net_action_penalty", "penalty": 1, "source": "Vrizzbolt",
+             "target": target}]
+
+
+def _sword_on_damage_dice_select(target_ice_block, prog, hack_state):
+    """Sword: '3d6 REZ Black; 2d6 non-Black' (PROGRAM_STATS effect)."""
+    if _is_black_ice_block(target_ice_block):
+        return 3, "Sword vs Black"
+    return 2, "Sword vs non-Black"
+
+
+def _banhammer_on_damage_dice_select(target_ice_block, prog, hack_state):
+    """Banhammer: '3d6 REZ non-Black; 2d6 Black' (PROGRAM_STATS effect) —
+    inverse of Sword."""
+    if _is_black_ice_block(target_ice_block):
+        return 2, "Banhammer vs Black"
+    return 3, "Banhammer vs non-Black"
+
+
 def _booster_bonus_on_ability(target_ability, bonus, label):
     """Curry an on_interface_check hook that fires +bonus when the rolling
     Interface Ability matches `target_ability` (case-insensitive).
@@ -250,6 +298,44 @@ PROGRAM_EFFECTS["Speedy Gonzalvez"] = {
     "order": 50,
     "hooks": {"on_interface_check":
               _booster_bonus_on_ability("Initiative", 2, "Speedy")},
+}
+
+# Step 5: Attacker programs.
+#   Auto-Deactivate is resolver-driven (cpred_mechanics emits a
+#   program_status_change op for every program_attack regardless of hit/miss
+#   per RAW). Hooks here only emit per-attacker on-hit kicker effects.
+#   on_program_damage_dice_select (Sword/Banhammer) runs before the damage
+#   roll to pick 2d6 vs 3d6 based on target ICE class.
+PROGRAM_EFFECTS["Sword"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {
+        "on_program_damage_dice_select": _sword_on_damage_dice_select,
+    },
+}
+
+PROGRAM_EFFECTS["Banhammer"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {
+        "on_program_damage_dice_select": _banhammer_on_damage_dice_select,
+    },
+}
+
+PROGRAM_EFFECTS["Hellbolt"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _hellbolt_on_attack_hit},
+}
+
+PROGRAM_EFFECTS["Vrizzbolt"] = {
+    "category": "attacker",
+    "is_hardware": False,
+    "order": 100,
+    "hooks": {"on_program_attack_hit": _vrizzbolt_on_attack_hit},
 }
 
 
@@ -471,13 +557,20 @@ def run_brain_damage_hooks(amount, hack_state, game_state):
     return current, state_ops, trace
 
 
-def run_program_attack_hit_hooks(attack_result, hack_state):
+def run_program_attack_hit_hooks(attack_result, hack_state, firing_program_name=None):
     """Run on_program_attack_hit hooks (Attacker kickers + auto-Deactivate).
+
+    Filters to the firing program only (per RAW: Hellbolt's fire-on-hit
+    fires only when Hellbolt itself attacks, not when any active attacker
+    fires). Caller passes firing_program_name from the action.
 
     Args:
         attack_result: The resolved program_attack result dict (hit, damage,
                        target, etc.).
         hack_state: The hack_state dict.
+        firing_program_name: Name of the program that fired this attack.
+                             If None, falls back to firing all active
+                             attackers' hooks (legacy behavior).
 
     Returns: (state_ops, trace).
     """
@@ -485,6 +578,10 @@ def run_program_attack_hit_hooks(attack_result, hack_state):
     progs = _snapshot_active_programs(hs.get("active_programs"))
     hw = _snapshot_installed_hardware(hs.get("installed_hardware"))
     entries = _matching_entries(progs, hw, "on_program_attack_hit")
+    if firing_program_name:
+        firing_lc = str(firing_program_name).strip().lower()
+        entries = [(c, e, p) for c, e, p in entries
+                   if c.lower() == firing_lc]
     state_ops = []
     trace = []
     for canonical, entry, prog in entries:
