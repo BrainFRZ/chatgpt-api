@@ -6984,11 +6984,13 @@ class TestProgramStatusChangeActions(unittest.TestCase):
     # ----- reinstall_program (Backup Drive only) -----
 
     def test_reinstall_program_happy_path(self):
+        # installed_hardware is a list of strings in production
+        # (init_hack_state stores s.get("name")). Match that shape here.
         progs = self._programs(("Sword", "destroyed"))
         result = resolve_actions(
             [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
             active_programs=progs,
-            installed_hardware=[{"name": "Backup Drive"}],
+            installed_hardware=["Backup Drive"],
         )
         r = result["results"][0]
         self.assertNotIn("error", r)
@@ -6996,6 +6998,19 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(r["new_status"], "deactivated")
         self.assertEqual(r["cost_meat_actions"], 1)
         self.assertEqual(r["cost_net_actions"], 0)
+
+    def test_reinstall_program_substring_match_on_hw_name(self):
+        """Production string-list shape: Backup Drive detected via substring."""
+        progs = self._programs(("Sword", "destroyed"))
+        for hw in [["Backup Drive"], ["backup drive"], ["BACKUP DRIVE"],
+                   ["Range Extension", "Backup Drive"]]:
+            result = resolve_actions(
+                [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
+                active_programs=[dict(p) for p in progs],  # fresh copy each iter
+                installed_hardware=hw,
+            )
+            r = result["results"][0]
+            self.assertNotIn("error", r, f"hw={hw!r} unexpectedly rejected")
 
     def test_reinstall_program_fails_without_backup_drive(self):
         progs = self._programs(("Sword", "destroyed"))
@@ -7012,7 +7027,7 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         result = resolve_actions(
             [{"type": "reinstall_program", "character": "RedVelvet", "program": "Sword"}],
             active_programs=progs,
-            installed_hardware=[{"name": "Backup Drive"}],
+            installed_hardware=["Backup Drive"],
         )
         r = result["results"][0]
         self.assertEqual(r["error"], "illegal_status_transition")
@@ -7070,6 +7085,49 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         _apply_resolver_net_ops(state, ops)
         self.assertEqual(state["active_programs"][0]["status"], "deactivated")
         self.assertEqual(state["destroyed_programs"], [])
+
+    def test_writeback_reactivate_restores_rez_from_program_stats(self):
+        """Reactivating a derezzed program restores REZ from PROGRAM_STATS.
+
+        Per Hacking Rulebook §4: 2 NA Deactivate+Reactivate brings a derezzed
+        program back to working order. Status-only flip leaves the program
+        active-but-unusable at REZ 0 — so the writeback must also restore REZ.
+        """
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        from game_systems.cpred_tables import PROGRAM_STATS
+        # Sword's REZ from PROGRAM_STATS
+        sword_rez = PROGRAM_STATS["Sword"]["rez"]
+        state = {"active_programs": [{"name": "Sword", "status": "derezzed", "rez": 0}]}
+        ops = [{"op": "program_status_change", "program_name": "Sword",
+                "old_status": "derezzed", "new_status": "active"}]
+        _apply_resolver_net_ops(state, ops)
+        self.assertEqual(state["active_programs"][0]["status"], "active")
+        self.assertEqual(state["active_programs"][0]["rez"], sword_rez)
+
+    def test_writeback_reinstall_restores_rez_from_program_stats(self):
+        """Reinstalling a Backup-Drive-saved destroyed program restores REZ."""
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        from game_systems.cpred_tables import PROGRAM_STATS
+        shield_rez = PROGRAM_STATS["Shield"]["rez"]
+        state = {
+            "active_programs": [{"name": "Shield", "status": "destroyed", "rez": 0}],
+            "destroyed_programs": ["Shield"],
+        }
+        ops = [{"op": "program_status_change", "program_name": "Shield",
+                "old_status": "destroyed", "new_status": "deactivated"}]
+        _apply_resolver_net_ops(state, ops)
+        self.assertEqual(state["active_programs"][0]["status"], "deactivated")
+        self.assertEqual(state["active_programs"][0]["rez"], shield_rez)
+
+    def test_writeback_activate_does_not_alter_rez(self):
+        """deactivated → active should NOT restore REZ — REZ may be partial."""
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        state = {"active_programs": [{"name": "Sword", "status": "deactivated", "rez": 2}]}
+        ops = [{"op": "program_status_change", "program_name": "Sword",
+                "old_status": "deactivated", "new_status": "active"}]
+        _apply_resolver_net_ops(state, ops)
+        self.assertEqual(state["active_programs"][0]["status"], "active")
+        self.assertEqual(state["active_programs"][0]["rez"], 2)  # unchanged
 
 
 if __name__ == "__main__":

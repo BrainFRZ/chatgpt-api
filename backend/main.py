@@ -5736,6 +5736,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     active_programs=hack_state.get("active_programs") if isinstance(hack_state, dict) else None,
                     installed_hardware=hack_state.get("installed_hardware") if isinstance(hack_state, dict) else None,
                     ice_status=hack_state.get("ice_status") if isinstance(hack_state, dict) else None,
+                    net_actions_remaining=(_safe_int(hack_state.get("net_actions_remaining"))
+                                           if isinstance(hack_state, dict) and hack_state.get("net_actions_remaining") is not None
+                                           else None),
                 )
 
                 mode_result = None
@@ -6005,6 +6008,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     active_programs=(_net_combat or {}).get("active_programs") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
                     installed_hardware=(_net_combat or {}).get("installed_hardware") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
                     ice_status=(_net_combat or {}).get("ice_status") if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
+                    net_actions_remaining=(_safe_int((_net_combat or {}).get("net_actions_remaining"))
+                                           if isinstance(_net_combat, dict) and _net_combat.get("active")
+                                              and _net_combat.get("net_actions_remaining") is not None
+                                           else None),
                 )
 
                 mode_result = None
@@ -6271,6 +6278,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     active_programs=nc_state.get("active_programs") if isinstance(nc_state, dict) else None,
                     installed_hardware=nc_state.get("installed_hardware") if isinstance(nc_state, dict) else None,
                     ice_status=nc_state.get("ice_status") if isinstance(nc_state, dict) else None,
+                    net_actions_remaining=(_safe_int(nc_state.get("net_actions_remaining"))
+                                           if isinstance(nc_state, dict) and nc_state.get("net_actions_remaining") is not None
+                                           else None),
                 )
 
                 mode_result = None

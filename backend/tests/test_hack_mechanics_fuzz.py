@@ -79,7 +79,7 @@ class TestResolveTarPenalty(unittest.TestCase):
     @patch(MOCK, return_value=5)
     def test_tar_applied_to_net_skill_check(self, _m):
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, tar_stacks=2)
         # stat_value should be reduced by 4 (2*2)
         self.assertEqual(r["results"][0]["stat_value"], 4)  # 8-4
@@ -99,9 +99,9 @@ class TestResolveTarPenalty(unittest.TestCase):
         """TAR applies to first NET check only, not all."""
         actions = [
             {"type": "skill_check", "character": "V", "stat_value": 8,
-             "skill_value": 0, "dv": 13, "net": True},
+             "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"},
             {"type": "skill_check", "character": "V", "stat_value": 8,
-             "skill_value": 0, "dv": 13, "net": True},
+             "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"},
         ]
         r = resolve_actions(actions, tar_stacks=1)
         # First gets penalty
@@ -115,7 +115,8 @@ class TestResolveTarPenalty(unittest.TestCase):
     @patch(MOCK, return_value=5)
     def test_tar_applied_to_opposed_check(self, _m):
         actions = [{"type": "opposed_check", "character": "V",
-                     "attacker_stat": 6, "defender_stat": 4, "net": True}]
+                     "attacker_stat": 6, "defender_stat": 4, "net": True,
+                     "ability": "Slide"}]
         r = resolve_actions(actions, tar_stacks=1)
         # attacker_stat reduced by 2
         self.assertTrue(r["tar_consumed"])
@@ -123,7 +124,7 @@ class TestResolveTarPenalty(unittest.TestCase):
     @patch(MOCK, return_value=5)
     def test_tar_zero_stacks_no_effect(self, _m):
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, tar_stacks=0)
         self.assertEqual(r["results"][0]["stat_value"], 8)
         self.assertFalse(r["tar_consumed"])
@@ -148,21 +149,21 @@ class TestResolveAlertDV(unittest.TestCase):
     @patch(MOCK, return_value=5)
     def test_alert_dv_at_3(self, _m):
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, alert_level=3)
         self.assertEqual(r["results"][0]["dv"], 15)  # 13+2
 
     @patch(MOCK, return_value=5)
     def test_alert_dv_at_7(self, _m):
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, alert_level=7)
         self.assertEqual(r["results"][0]["dv"], 15)
 
     @patch(MOCK, return_value=5)
     def test_no_alert_dv_below_3(self, _m):
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, alert_level=2)
         self.assertEqual(r["results"][0]["dv"], 13)
 
@@ -170,7 +171,8 @@ class TestResolveAlertDV(unittest.TestCase):
     def test_alert_dv_not_on_opposed(self, _m):
         """Alert DV only affects skill_check, not opposed_check."""
         actions = [{"type": "opposed_check", "character": "V",
-                     "attacker_stat": 6, "defender_stat": 4, "net": True}]
+                     "attacker_stat": 6, "defender_stat": 4, "net": True,
+                     "ability": "Slide"}]
         r = resolve_actions(actions, alert_level=5)
         # opposed_check doesn't have DV — no crash
         self.assertEqual(len(r["results"]), 1)
@@ -187,7 +189,7 @@ class TestResolveAlertDV(unittest.TestCase):
     def test_tar_and_alert_combined(self, _m):
         """TAR + alert DV both apply to the same action."""
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, tar_stacks=1, alert_level=4)
         self.assertEqual(r["results"][0]["stat_value"], 6)  # 8 - 2
         self.assertEqual(r["results"][0]["dv"], 15)  # 13 + 2
@@ -205,7 +207,7 @@ class TestResolveZapDamage(unittest.TestCase):
         actions = [{"type": "opposed_check", "character": "V",
                      "attacker_stat": 10, "defender_stat": 4,
                      "zap": True, "interface_rank": 4, "target": "Hellhound",
-                     "net": True}]
+                     "net": True, "ability": "Zap"}]
         r = resolve_actions(actions)
         result = r["results"][0]
         if result["success"]:
@@ -1212,7 +1214,7 @@ class TestResolveApplyInjectIntegration(unittest.TestCase):
         hs = cpred_init_hack_state(tier="full_run")
         hs["tar_stacks"] = 1
         actions = [{"type": "skill_check", "character": "V", "stat_value": 8,
-                     "skill_value": 0, "dv": 13, "net": True}]
+                     "skill_value": 0, "dv": 13, "net": True, "ability": "Backdoor"}]
         r = resolve_actions(actions, tar_stacks=1)
         cpred_apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=r["state_ops"])
         self.assertEqual(hs["tar_stacks"], 0)

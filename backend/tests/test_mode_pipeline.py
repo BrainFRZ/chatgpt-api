@@ -20,6 +20,7 @@ def test_run_mode_pipeline_normalizes_non_int_tar_stacks(monkeypatch):
                 "skill_value": 0,
                 "dv": 13,
                 "net": True,
+                "ability": "Backdoor",
             }
         ]
     }

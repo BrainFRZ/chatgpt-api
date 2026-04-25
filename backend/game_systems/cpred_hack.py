@@ -481,11 +481,26 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
             # deactivate / reactivate / reinstall) emitted by the resolver.
             prog_name = op.get("program_name", "")
             new_status = op.get("new_status", "")
+            old_status = op.get("old_status", "")
             programs = state.get("active_programs", [])
             if isinstance(programs, list) and new_status:
                 for p in programs:
                     if isinstance(p, dict) and p.get("name") == prog_name:
                         p["status"] = new_status
+                        # Restore REZ when recovering from derezzed/destroyed
+                        # (Hacking Rulebook §4: 2 NA Deactivate+Reactivate
+                        # brings a derezzed program back to working order;
+                        # Backup-Drive-saved reinstall likewise restores REZ).
+                        if old_status in ("derezzed", "destroyed"):
+                            from .cpred_tables import PROGRAM_STATS
+                            stats = None
+                            for canonical, block in PROGRAM_STATS.items():
+                                if canonical.lower().replace(" ", "") == \
+                                        str(prog_name).strip().lower().replace(" ", ""):
+                                    stats = block
+                                    break
+                            if stats is not None:
+                                p["rez"] = stats.get("rez", p.get("rez", 0))
                         break
                 # Reinstall removes from destroyed_programs so it's no longer
                 # rendered as a permanent loss.

@@ -2121,10 +2121,10 @@ def _resolve_program_status_change(action, action_type, active_programs,
 
     if action_type == "reinstall_program":
         hw_list = installed_hardware if isinstance(installed_hardware, list) else []
-        has_backup = any(
-            isinstance(h, dict) and str(h.get("name", "")).strip().lower() == "backup drive"
-            for h in hw_list
-        )
+        # installed_hardware is a list of strings (just hardware names) per
+        # init_hack_state and the existing inline KRASH/Insulated checks at
+        # cpred_mechanics.py:2227, 2262. Substring match for robustness.
+        has_backup = any("backup drive" in str(h).lower() for h in hw_list)
         if not has_backup:
             return {
                 "type": action_type,

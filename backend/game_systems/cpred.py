@@ -772,9 +772,12 @@ Action types for resolve_mechanics (backend auto-resolves stat/skill values and 
 - autofire: {type, character, stat (e.g. "REF"), skill (e.g. "Autofire"), weapon_type (SMG/Assault Rifle), autofire_multiplier (3/4), target, target_sp, range_bracket (0-4), hit_location, is_ap?, luck_spent?}
 - death_save: {type, character, body_stat}
 - initiative: {type, character: "all", combatants: [{name}]} — Backend auto-resolves REF. For NPCs not in state, add "ref": <int>.
-- program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
+- program_attack: {type, character (Netrunner name), interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE. Intent-only emission also accepted: {type, character, program (Sword/Worm/etc.), target} — backend hydrates ATK/DEF/REZ from PROGRAM_STATS + ice_status.
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+- activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program} — player-choice program status transitions (1 NA / 1 NA / 2 NA atomic / 1 Meat Action). Fail-soft on illegal transitions. Do NOT mutate active_programs[i].status manually.
+
+For NET-context skill_check / opposed_check, set `"net": true` AND include an `ability` tag — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative. Required so program effect bonuses (e.g. Worm +2 on Backdoor) fire on the matching roll.
 - hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout, luck_spent?, on_success?, on_failure?} — Downtime income. Backend auto-resolves seriously_wounded.
 - facedown: {type, character, target, luck_spent?, on_success?, on_failure?} — Facedown (CRB p.195): COOL + Rep + d10 vs same. Backend auto-resolves initiator_cool/rep, opponent_cool/rep, and seriously_wounded from state. For NPCs not in state, add numeric overrides.
 - suppressive_fire: {type, character, targets: [{name}], luck_spent?, weapon_name?, on_success?, on_failure?} — Suppressive Fire (p.174). Backend auto-resolves attacker REF/Autofire and target WILL/Concentration/wounded. For NPCs not in state, add numeric overrides.
@@ -784,7 +787,7 @@ Active effects shown in injection — narrate them, do NOT manually track them. 
 
 When resolve_mechanics returns `program_deactivated` in the result, the program is now deactivated. Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
 For Zap attacks (opposed_check), add `"zap": true` and `"interface_rank": N` — the backend rolls 1d6 for REZ damage on hit, returns `zap_damage` in the result, and auto-applies REZ reduction to the target ICE.
-TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). NET skill_check / opposed_check additionally REQUIRE an `ability` tag (closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative).
 Alert DV penalty (+2 at alert 3+) is applied automatically by the backend to NET skill checks marked with `"net": true`. Do NOT add the +2 manually to the DV.
 Forced disconnect: the backend auto-terminates the hack/NET session ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187) — they keep acting with −4 to all actions, −6 MOVE (min 1), and a Death Save each turn. An Unconscious Netrunner (sleep ammo, KO from meatspace) is stuck jacked in as a sitting duck: they cannot take NET actions, so they cannot Jack Out themselves, and rezzed ICE / Demons keep acting on them. To rescue them, an ally must spend an Action to either unplug the body or drag it out of access-point range — either counts as an Unsafe Jack Out. Signal this by setting `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend will cascade all rezzed ICE effects onto the Netrunner and set hack_complete=true automatically. Same mechanism for a Netrunner voluntarily yanking their own plug mid-hack (cause="self_unplugged").
 
@@ -1461,7 +1464,7 @@ When resolve_mechanics returns `program_deactivated` in the result, the program 
 ### Program Status Transitions (resolve_mechanics action types)
 Programs have four statuses: `active` (rezzed, ready), `deactivated` (stored, recoverable in 1 NA), `derezzed` (REZ hit 0 mid-encounter, recoverable in 2 NA), `destroyed` (permanent loss; saved by Backup Drive if installed).
 
-Player-choice transitions are resolver actions — backend validates status, deducts NA atomically, and updates active_programs. Do NOT mutate `active_programs[i].status` manually for these transitions; emit the action and let the backend resolve it.
+Player-choice transitions are resolver actions — backend validates status atomically (no NA spent on failure) and updates active_programs. Do NOT mutate `active_programs[i].status` manually for these transitions; emit the action and let the backend resolve it. Each successful action returns `cost_net_actions` / `cost_meat_actions` in its result — include cost_net_actions in your `net_actions_used` count when reporting.
 
 | Action | Cost | Trigger |
 |---|---|---|
@@ -1477,7 +1480,7 @@ Auto-emitted by attack resolvers (do NOT emit manually):
 
 Fail-soft semantics: if the named program isn't loaded, is already in the requested status, or current status doesn't match the required transition, the resolver returns an error result with a narrative reason — no NA spent, no state change.
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
-TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). Reminder: NET skill_check / opposed_check also REQUIRE an `ability` tag — see Mechanics Resolution above.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
 Forced disconnect: the backend auto-terminates the hack ONLY on flatline (failed Death Save). **Neither 0 HP nor Unconscious auto-disconnect.** At 0 HP the Netrunner is Mortally Wounded but still conscious (RAW p.187), acting at −4 / −6 MOVE with a Death Save each turn. An Unconscious Netrunner is stuck jacked in as a sitting duck — cannot take NET actions or Jack Out themselves, while rezzed ICE / Demons keep acting on them. To rescue: an ally spends an Action to unplug or drag the body out of access-point range (= Unsafe Jack Out). Signal via `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend cascades all rezzed ICE effects onto the Netrunner and sets net_complete=true automatically. Same mechanism for self-unplug (cause="self_unplugged").
 
@@ -1827,10 +1830,12 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 ### Cross-Theater Interactions
 - **Netrunner's body is in meatspace**: can be shot, hit, caught in AoE. Track via character_updates. With Virtuality Goggles the Netrunner can still see and move in meatspace; without them the Netrunner is **Unconscious** in meatspace (no Move Action, no dodge).
 - **Brain damage**: When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in hack_state or character_updates.hp_delta. For anti-program ICE, use `ice_attack_vs_program`: {type, character, ice_type, target_program, target_program_def, target_program_rez}.
-- **Program deactivation**: When resolve_mechanics returns `program_deactivated`, the program is deactivated (RAW). Reactivating costs 1 NET Action (no dice — update status to 'active' in active_programs).
+- **Program deactivation**: When resolve_mechanics returns `program_deactivated`, the program is deactivated (RAW). Reactivate via resolve_mechanics with `{type: "activate_program", character, program}` — costs 1 NET Action. Do NOT mutate active_programs[i].status manually.
+- **Program status transitions**: Player-choice transitions are resolver actions: `activate_program` / `deactivate_program` / `reactivate_program` / `reinstall_program`. Backend validates transition + atomic NA. See HACK_CONTRACT for full table.
 - **Zap damage**: For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
-- **TAR penalty**: TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions).
+- **TAR penalty**: TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). NET skill_check / opposed_check additionally REQUIRE an `ability` tag.
 - **Alert DV penalty**: +2 to all NET skill check DVs at alert 3+ is auto-applied by the backend. Do NOT add +2 manually.
+- **NET ability tag**: Every NET-context skill_check / opposed_check (net=true) REQUIRES an `ability` field — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative.
 - **Forced disconnect**: Backend auto-sets net_complete=true on explicit forced jack-out/flatline conditions.
 - **NET affecting meatspace**: Unlocking doors, disabling cameras, controlling turrets — narrate in both sections. The physical effect happens on the Netrunner's initiative.
 - **Seriously Wounded**: applies to Interface checks too (−2 all actions includes NET).
@@ -2189,8 +2194,9 @@ DICE ACTION TYPES for the "actions" array:
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+- activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program (program name)} — player-choice program status transitions. Backend validates current status, fail-soft on illegal transition. Costs: activate / deactivate = 1 NA; reactivate (derezzed → active) = 2 NA atomic (fails with no NA spent if <2 remain); reinstall (destroyed → deactivated, only with Backup Drive) = 1 Meat Action. Include the cost in your `net_actions_used` count when reporting. Do NOT mutate active_programs[i].status manually.
 
-TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions).
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions). NET skill_check / opposed_check also REQUIRE an `ability` tag matching the Interface Ability being rolled.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually to the DV.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type in the action.
@@ -2253,10 +2259,11 @@ NET ACTION TYPES:
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
+- activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program (program name)} — player-choice program status transitions. Backend validates current status, fail-soft on illegal transition. Costs: activate / deactivate = 1 NA; reactivate (derezzed → active) = 2 NA atomic (fails with no NA spent if <2 remain); reinstall (destroyed → deactivated, only with Backup Drive) = 1 Meat Action. Include the cost in net_actions_used. Do NOT mutate active_programs[i].status manually.
 
 Black ICE Types: Anti-Personnel: Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program: Dragon, Killer, Sabertooth. Always include ice_type.
 
-TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions).
+TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions). NET skill_check / opposed_check also REQUIRE an `ability` tag matching the Interface Ability being rolled.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually.
 
 OUTPUT: JSON with these fields:

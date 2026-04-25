@@ -3042,6 +3042,7 @@ def run_mode_pipeline(
     active_programs=None,
     installed_hardware=None,
     ice_status=None,
+    net_actions_remaining=None,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -3137,6 +3138,7 @@ def run_mode_pipeline(
             relationship_context=_relationship_context,
             edgerunner_states=_er_states,
             character_states=character_states,
+            net_actions_remaining=net_actions_remaining,
         ) if ambush_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if ambush_result.get("tar_consumed"):
             _phase_tar = 0
@@ -3165,6 +3167,7 @@ def run_mode_pipeline(
             relationship_context=_relationship_context,
             edgerunner_states=_er_states,
             character_states=character_states,
+            net_actions_remaining=net_actions_remaining,
         ) if init_actions else {"results": [], "state_ops": [], "tar_consumed": False}
         if init_result.get("tar_consumed"):
             _phase_tar = 0
@@ -3225,6 +3228,7 @@ def run_mode_pipeline(
             relationship_context=_relationship_context,
             edgerunner_states=_er_states,
             character_states=character_states,
+            net_actions_remaining=net_actions_remaining,
         ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results

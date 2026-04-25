@@ -337,6 +337,7 @@ class TestModePipelineNormalizationFuzz:
                         "skill_value": 0,
                         "dv": 13,
                         "net": True,
+                        "ability": "Backdoor",
                     }]
                 },
                 usage={},
