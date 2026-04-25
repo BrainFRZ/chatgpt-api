@@ -4164,13 +4164,37 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 # net_action_penalty, etc.). Filtered to firing program
                 # only — Hellbolt's deck-fire kicker doesn't trigger on a
                 # Sword attack, even when both are loaded.
-                if result.get("hit") and _prog_name and _prog_name != "Program":
+                #
+                # Step 6d: gate on target-is-not-ICE. The PvP-designed
+                # Attacker programs (Hellbolt/Vrizzbolt/Nervescrub/Poison
+                # Flatline/Superglue/DeckKRASH) emit kicker ops scoped to
+                # a Netrunner target (body_fire on the deck, net_action
+                # _penalty on next turn, etc.). _apply_resolver_net_ops
+                # ignores op.target and writes to the firing Netrunner's
+                # state, so firing these at ICE self-applies the kicker.
+                # PvE program_attack always targets ICE (no PvP path
+                # exists yet) → skip kickers. The auto-Deactivate below
+                # is resolver-driven and unaffected.
+                _target_is_ice = bool(_target_block) or _ice_block_for_hook is not None
+                if (result.get("hit") and _prog_name
+                        and _prog_name != "Program" and not _target_is_ice):
                     from .cpred_program_effects import run_program_attack_hit_hooks
                     _hit_ops, _hit_trace = run_program_attack_hit_hooks(
                         result, _hs_proxy, firing_program_name=_prog_name)
                     all_state_ops.extend(_hit_ops)
                     if _hit_trace:
                         result["attack_hit_trace"] = _hit_trace
+                elif result.get("hit") and _target_is_ice:
+                    # Annotate the result so narration can mention the
+                    # PvP-only kicker was inert against an ICE target.
+                    if _prog_name in ("Hellbolt", "Vrizzbolt", "Nervescrub",
+                                      "Poison Flatline", "Superglue",
+                                      "DeckKRASH"):
+                        result["pvp_kicker_skipped"] = (
+                            f"{_prog_name}'s kicker effect requires a Netrunner "
+                            f"target; ICE targets receive only the standard "
+                            f"REZ damage."
+                        )
                 # Step 5 (auto-Deactivate): emit program_status_change op
                 # for the firing program — fires regardless of hit/miss per
                 # RAW. The op routes through apply_program_status_change at
@@ -4238,8 +4262,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         "formatted": f"⚠ Boosted Action {_ba_program}: unknown",
                     })
                     continue
-                # Validate program is loaded on deck (any status — Boosted
-                # Action activation implicitly turns the program on)
+                # Validate program is loaded on deck. Status check below.
                 _ba_entry, _ = _find_program_in_active(_ba_canonical, active_programs)
                 if _ba_entry is None:
                     _loaded = []
@@ -4256,6 +4279,29 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             f"deck. Currently loaded: {', '.join(_loaded) if _loaded else '(none)'}."
                         ),
                         "formatted": f"⚠ Boosted {_ba_canonical}: not on deck",
+                    })
+                    continue
+                # Step 6d: validate program status. Per RAW, destroyed and
+                # derezzed programs are unusable until reinstall_program /
+                # reactivate_program. Boosted Action implicitly activates
+                # a `deactivated` program (the Cycle+NA powers it on for
+                # the boost duration), but cannot use `derezzed` or
+                # `destroyed`.
+                _ba_status = str(_ba_entry.get("status", "")).strip().lower() or "active"
+                if _ba_status in ("derezzed", "destroyed"):
+                    _hint = (" Use reactivate_program (2 NA) first."
+                             if _ba_status == "derezzed"
+                             else " Use reinstall_program (1 Meat Action) if Backup Drive saved it.")
+                    results.append({
+                        "type": "boosted_action",
+                        "character": _ba_char,
+                        "success": False,
+                        "error": "program_unusable",
+                        "reason": (
+                            f"Boosted {_ba_canonical}: program is {_ba_status}, "
+                            f"unusable until recovered.{_hint}"
+                        ),
+                        "formatted": f"⚠ Boosted {_ba_canonical}: program is {_ba_status}",
                     })
                     continue
                 # Atomic resource validation: needs 1 NA + 1 Cycle
@@ -4302,6 +4348,17 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "source": f"Boosted {_ba_canonical}",
                 }
                 all_state_ops.extend([_ba_state_op, _cycle_op])
+                # Step 6d: mirror the active_boost_set op into the running
+                # _active_boosts dict so subsequent actions in the SAME
+                # batch see the flag. Without this, a [boosted_action(Surge),
+                # skill_check(Backdoor)] batch would resolve the Backdoor
+                # check WITHOUT Surge's +4 because the state op only
+                # persists at writeback. Mirrors Step 0e's same-batch
+                # composition fix for active_programs status changes.
+                if isinstance(_active_boosts, dict):
+                    _active_boosts[_flag_key] = True
+                    if _duration_field and _duration:
+                        _active_boosts[_duration_field] = _duration
                 # Debit the running NA / Cycles counters for in-batch atomicity.
                 if net_actions_remaining is not None:
                     net_actions_remaining = max(0, net_actions_remaining - 1)

@@ -1424,12 +1424,12 @@ class TestStep5ProgramAttackIntegration(unittest.TestCase):
         self.assertEqual(len(psc_ops), 1)
         self.assertEqual(psc_ops[0]["new_status"], "deactivated")
 
-    def test_hellbolt_attack_emits_body_fire_op(self):
+    def test_hellbolt_attack_against_ice_skips_kicker(self):
+        """Step 6d: PvP-only kickers (body_fire on target's deck) don't
+        fire when target is ICE. The auto-Deactivate still fires."""
         from game_systems.cpred_mechanics import resolve_actions
         progs = [{"name": "Hellbolt", "status": "active", "rez": 0,
                   "category": "attacker"}]
-        # atk d10=8 (no explode), def d10=3 (no fumble), 2 damage d6=5,5
-        # atk_total=8+8+2=18 vs def_total=3+6=9 → hit
         with patch("game_systems.cpred_mechanics.random.randint",
                    side_effect=[8, 3, 5, 5]):
             result = resolve_actions(
@@ -1441,16 +1441,26 @@ class TestStep5ProgramAttackIntegration(unittest.TestCase):
             )
         r = result["results"][0]
         self.assertTrue(r.get("hit"))
+        # NO body_fire op — kicker skipped
         body_fire_ops = [op for op in result["state_ops"]
-                         if isinstance(op, dict) and op.get("op") == "body_fire"
-                         and op.get("source") == "Hellbolt"]
-        self.assertEqual(len(body_fire_ops), 1)
+                         if isinstance(op, dict) and op.get("op") == "body_fire"]
+        self.assertEqual(body_fire_ops, [])
+        # Annotation surfaced for narration
+        self.assertIn("pvp_kicker_skipped", r)
+        self.assertIn("Hellbolt", r["pvp_kicker_skipped"])
+        # Auto-Deactivate still fires
+        psc_ops = [op for op in result["state_ops"]
+                   if isinstance(op, dict)
+                   and op.get("op") == "program_status_change"
+                   and op.get("program_name") == "Hellbolt"]
+        self.assertEqual(len(psc_ops), 1)
 
-    def test_vrizzbolt_attack_emits_net_action_penalty(self):
+    def test_vrizzbolt_attack_against_ice_skips_kicker(self):
+        """Step 6d: Vrizzbolt's net_action_penalty kicker doesn't self-fire
+        when used against ICE."""
         from game_systems.cpred_mechanics import resolve_actions
         progs = [{"name": "Vrizzbolt", "status": "active", "rez": 0,
                   "category": "attacker"}]
-        # atk d10=8, def d10=3, 1 damage d6=5
         with patch("game_systems.cpred_mechanics.random.randint",
                    side_effect=[8, 3, 5]):
             result = resolve_actions(
@@ -1463,9 +1473,10 @@ class TestStep5ProgramAttackIntegration(unittest.TestCase):
         r = result["results"][0]
         self.assertTrue(r.get("hit"))
         nap_ops = [op for op in result["state_ops"]
-                   if isinstance(op, dict) and op.get("op") == "net_action_penalty"
-                   and op.get("source") == "Vrizzbolt"]
-        self.assertEqual(len(nap_ops), 1)
+                   if isinstance(op, dict)
+                   and op.get("op") == "net_action_penalty"]
+        self.assertEqual(nap_ops, [])
+        self.assertIn("pvp_kicker_skipped", r)
 
     def test_attack_miss_still_fires_auto_deactivate_but_not_kickers(self):
         """RAW: programs Deactivate after USE regardless of hit/miss.
@@ -2327,6 +2338,311 @@ class TestStep6cWriteback(unittest.TestCase):
         r = result["results"][0]
         self.assertTrue(r["success"])
         self.assertEqual(r["active_boost"], "overclock_pending")
+
+
+class TestStep6dPvpKickerGate(unittest.TestCase):
+    """Step 6d P0 fix: PvP-designed Attacker programs (Hellbolt, Vrizzbolt,
+    Nervescrub, Poison Flatline, Superglue, DeckKRASH) emit kicker ops
+    scoped to a Netrunner target. _apply_resolver_net_ops applies ops to
+    the firing Netrunner's state regardless of op.target — so firing
+    these at ICE self-applies the kicker. The fix gates kicker hooks on
+    target-is-not-ICE."""
+
+    def _ice_status(self):
+        return {"Lobby_Dragon": {
+            "name": "Dragon", "behavior": "black", "ice_type": "dragon",
+            "rez_current": 30, "rez_max": 30, "status": "active",
+        }}
+
+    def _attacker_progs(self, name, extra=None):
+        out = [{"name": name, "status": "active", "rez": 0,
+                "category": "attacker"}]
+        if extra:
+            out.extend(extra)
+        return out
+
+    # ----- Each PvP program: kicker skipped on ICE target -----
+
+    def test_nervescrub_against_ice_no_self_debuff(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_programs"] = self._attacker_progs("Nervescrub")
+        hs["ice_status"] = self._ice_status()
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3]), \
+             patch("game_systems.cpred_program_effects.random.randint",
+                   return_value=4):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V",
+                  "interface_rank": 8, "program": "Nervescrub",
+                  "target": "Dragon", "program_damage_dice": 0}],
+                ice_status=hs["ice_status"],
+                active_programs=hs["active_programs"],
+            )
+        _apply_resolver_net_ops(hs, result["state_ops"])
+        self.assertEqual(hs.get("active_debuffs", []), [])
+        self.assertIn("pvp_kicker_skipped", result["results"][0])
+
+    def test_poison_flatline_against_ice_no_self_destroy(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_programs"] = self._attacker_progs("Poison Flatline", extra=[
+            {"name": "Worm", "status": "active", "rez": 7, "category": "booster"},
+        ])
+        hs["ice_status"] = self._ice_status()
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V",
+                  "interface_rank": 8, "program": "Poison Flatline",
+                  "target": "Dragon", "program_damage_dice": 0}],
+                ice_status=hs["ice_status"],
+                active_programs=hs["active_programs"],
+            )
+        _apply_resolver_net_ops(hs, result["state_ops"])
+        # Worm survives — kicker didn't fire
+        worm = next(p for p in hs["active_programs"] if p["name"] == "Worm")
+        self.assertEqual(worm["status"], "active")
+        self.assertEqual(hs.get("destroyed_programs", []), [])
+
+    def test_superglue_against_ice_no_self_lock(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state, _check_jack_out_allowed
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_programs"] = self._attacker_progs("Superglue")
+        hs["ice_status"] = self._ice_status()
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3]), \
+             patch("game_systems.cpred_program_effects.random.randint",
+                   return_value=4):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V",
+                  "interface_rank": 8, "program": "Superglue",
+                  "target": "Dragon", "program_damage_dice": 0}],
+                ice_status=hs["ice_status"],
+                active_programs=hs["active_programs"],
+            )
+        _apply_resolver_net_ops(hs, result["state_ops"])
+        self.assertIsNone(hs.get("movement_locked_by"))
+        self.assertEqual(hs.get("active_boosts", {}).get(
+            "jack_out_lock_rounds_remaining", 0), 0)
+        allowed, _ = _check_jack_out_allowed(hs, cause="self_unplugged")
+        self.assertTrue(allowed)
+
+    def test_deckkrash_against_ice_no_self_jack_out(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_programs"] = self._attacker_progs("DeckKRASH")
+        hs["ice_status"] = self._ice_status()
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V",
+                  "interface_rank": 8, "program": "DeckKRASH",
+                  "target": "Dragon", "program_damage_dice": 0}],
+                ice_status=hs["ice_status"],
+                active_programs=hs["active_programs"],
+            )
+        _apply_resolver_net_ops(hs, result["state_ops"])
+        self.assertTrue(hs.get("active"))  # not forced disconnected
+        self.assertFalse(hs.get("_cascade_applied"))
+
+    def test_sword_against_ice_normal_behavior(self):
+        """Regression check: Sword/Banhammer (non-PvP attackers) still
+        fire normally against ICE. Damage scaling + auto-Deactivate
+        unchanged."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Sword", "status": "active", "rez": 0,
+                  "category": "attacker"}]
+        with patch("game_systems.cpred_mechanics.random.randint",
+                   side_effect=[8, 3, 5, 5, 5]):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "V",
+                  "interface_rank": 8, "program": "Sword",
+                  "target": "Dragon", "program_damage_dice": 99}],
+                ice_status=self._ice_status(),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["hit"])
+        self.assertEqual(r["damage_total"], 15)  # 3d6 vs Black
+        # No PvP-skip annotation (Sword has no kicker to skip)
+        self.assertNotIn("pvp_kicker_skipped", r)
+        # Auto-Deactivate still fires
+        psc_ops = [op for op in result["state_ops"]
+                   if isinstance(op, dict)
+                   and op.get("op") == "program_status_change"
+                   and op.get("program_name") == "Sword"]
+        self.assertEqual(len(psc_ops), 1)
+
+
+class TestStep6dInitiateUnsafeJackOutOpHandler(unittest.TestCase):
+    """Step 6d P1 fix: resolver-emitted initiate_unsafe_jack_out op now
+    routes through _apply_initiate_unsafe_jack_out (same gate + cascade)."""
+
+    def test_initiate_unsafe_jack_out_op_triggers_cascade(self):
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state
+        hs = init_hack_state(tier="full_run")
+        hs["active"] = True
+        hs["ice_status"] = {"Lobby_Hellhound": {
+            "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+            "rez_current": 15, "status": "active",
+        }}
+        ops = [{
+            "op": "initiate_unsafe_jack_out",
+            "cause": "deckkrash_attack",
+            "actor": "DeckKRASH",
+            "target": "V",
+            "reason": "DeckKRASH cascade",
+        }]
+        _apply_resolver_net_ops(hs, ops)
+        self.assertTrue(hs.get("_cascade_applied"))
+        self.assertTrue(hs.get("_forced_disconnect"))
+
+    def test_initiate_unsafe_jack_out_op_blocked_by_glue(self):
+        """Self-cause unsafe jack-out is gated by Superglue — same as the
+        model-supplied tool_input path."""
+        from game_systems.cpred_hack import _apply_resolver_net_ops, init_hack_state
+        hs = init_hack_state(tier="full_run")
+        hs["active"] = True
+        hs["active_boosts"] = {"jack_out_lock_rounds_remaining": 3}
+        ops = [{
+            "op": "initiate_unsafe_jack_out",
+            "cause": "self_unplugged",
+            "actor": "self",
+            "reason": "yanking",
+        }]
+        _apply_resolver_net_ops(hs, ops)
+        self.assertTrue(hs.get("active"))  # not disconnected
+        self.assertIsNotNone(hs.get("_jack_out_rejected"))
+
+
+class TestStep6dBoostedActionSameBatchComposition(unittest.TestCase):
+    """Step 6d P1 fix: Boosted Surge → check in the same batch now sees
+    the surge_pending flag because the boosted_action handler mutates
+    _active_boosts in-place (mirrors Step 0e composition fix)."""
+
+    def test_boosted_surge_then_backdoor_in_same_batch(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        active_boosts = {}
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=4):
+            result = resolve_actions(
+                [
+                    {"type": "boosted_action", "character": "V", "program": "Surge"},
+                    {"type": "skill_check", "character": "V", "stat_value": 4,
+                     "skill_value": 0, "dv": 13,
+                     "net": True, "ability": "Backdoor"},
+                ],
+                active_programs=progs,
+                net_actions_remaining=3,
+                cycles_remaining=2,
+                active_boosts=active_boosts,
+            )
+        r1 = result["results"][1]
+        # d10(4) + Interface(4) + Surge(4) = 12
+        self.assertEqual(r1["total"], 12)
+        self.assertEqual(r1.get("booster_bonuses"), [("Surge", 4)])
+        # surge_pending was cleared by the hook firing
+        self.assertNotIn("surge_pending", active_boosts)
+
+    def test_boosted_mask_then_alert_increase_in_same_batch_via_writeback(self):
+        """Mask suppression composition is exercised at writeback time
+        (alert_level changes route through _apply_net_model_fields). This
+        test verifies the in-batch mutation propagates to the writeback
+        path correctly."""
+        from game_systems.cpred_mechanics import resolve_actions
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        progs = [{"name": "Mask", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_programs"] = progs
+        hs["alert_level"] = 0
+        # Activate Mask via boosted_action — emits active_boost_set op
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "V", "program": "Mask"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=3,
+            active_boosts=hs["active_boosts"],
+        )
+        # Apply the resolver state ops to flush active_boost_set
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=result["state_ops"])
+        self.assertTrue(hs["active_boosts"].get("mask_pending"))
+        # Now model reports alert level going to 2 — Mask should suppress
+        apply_hack_state(hs, {"hack_state": {"alert_level": 2}})
+        self.assertEqual(hs["alert_level"], 0)
+        self.assertNotIn("mask_pending", hs["active_boosts"])
+
+
+class TestStep6dBoostedActionStatusValidation(unittest.TestCase):
+    """Step 6d P1 fix: Boosted Action rejects destroyed/derezzed programs
+    (RAW: programs in those states are unusable until recovered)."""
+
+    def test_boosted_action_rejects_destroyed_program(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "destroyed", "rez": 0,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "V", "program": "Surge"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "program_unusable")
+        self.assertIn("destroyed", r["reason"].lower())
+        self.assertIn("reinstall_program", r["reason"])
+        # No NA/Cycle consumed (atomic fail)
+        self.assertEqual(
+            [op for op in result["state_ops"]
+             if op.get("op") in ("active_boost_set", "cycle_consumed")], [])
+
+    def test_boosted_action_rejects_derezzed_program(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "derezzed", "rez": 0,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "V", "program": "Surge"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["error"], "program_unusable")
+        self.assertIn("derezzed", r["reason"].lower())
+        self.assertIn("reactivate_program", r["reason"])
+
+    def test_boosted_action_accepts_active_program(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "V", "program": "Surge"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=3,
+        )
+        self.assertTrue(result["results"][0]["success"])
+
+    def test_boosted_action_accepts_deactivated_program(self):
+        """RAW: a deactivated program is just stored — Boosted Action
+        activation implicitly powers it on."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "deactivated", "rez": 7,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "V", "program": "Surge"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=3,
+        )
+        self.assertTrue(result["results"][0]["success"])
 
 
 if __name__ == "__main__":

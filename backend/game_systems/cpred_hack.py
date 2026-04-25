@@ -614,6 +614,25 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                 state["cycles_remaining"] = max(0, int(cur) - amount)
             except (TypeError, ValueError):
                 pass
+    # Step 6d: initiate_unsafe_jack_out — emitted by DeckKRASH's
+    # on_program_attack_hit hook. Re-uses the same code path as the
+    # model-supplied tool_input.initiate_unsafe_jack_out: pass through
+    # the gate (ally/connection_severed bypass; self_unplugged blocked
+    # by Superglue) and cascade if allowed. The resolver-emitted op is
+    # synthesized into the tool_input shape that
+    # _apply_initiate_unsafe_jack_out expects.
+    for op in resolver_state_ops:
+        if isinstance(op, dict) and op.get("op") == "initiate_unsafe_jack_out":
+            synthesized = {"initiate_unsafe_jack_out": {
+                "cause": op.get("cause", "other"),
+                "actor": op.get("actor", ""),
+                "reason": op.get("reason", ""),
+            }}
+            try:
+                _apply_initiate_unsafe_jack_out(
+                    state, synthesized, game_state, "hacker_name")
+            except (TypeError, ValueError, OverflowError, KeyError):
+                pass
     # Step 6c: jack_out_lock — Superglue and similar effects set a
     # rounds_remaining countdown on active_boosts. The
     # _check_jack_out_allowed gate reads it; on_turn_end (or equivalent
