@@ -1585,7 +1585,9 @@ When alert_level crosses a threshold boundary, apply the new effects immediately
 ### Trace & Convergence
 **Trace ICE** runs a countdown that locates the Netrunner's body. **Convergence** is the alert-7 NET-defense state. They are *separate tracks* — Trace can complete at low alert; Convergence (Black ICE spawn at the Netrunner's node) can fire from loud actions without any Trace running.
 
-**Trace mechanic (RAW p.205-211, backend-driven):** When any Trace ICE is active and not derezzed/disabled:
+**Trace mechanic (RAW p.205-211, backend-driven):** A Trace ICE only ticks once it has *engaged* the Netrunner — i.e., the Netrunner has reached its node. Backend handles engagement automatically: each apply call walks `ice_status` and adds the Netrunner to the matching Trace's `engaged_by` list when `current_node` matches the Trace's node key. First engagement initializes `trace_progress` to 0. Engagement persists across node moves (the Trace locked on; moving away doesn't reset). Lockdown-spawned Trace ICE is pre-engaged at spawn (system-wide alarm representation). Pre-placed Trace ICE that the Netrunner hasn't reached yet sits idle — never ticks until reached.
+
+While at least one engaged Trace is running:
 - `trace_progress` increments by 1 at the end of each full turn (with the meatspace round tick).
 - Trace completes when `trace_progress` ≥ **(6 − SR)** (minimum 1 round).
 - On completion, **backend rolls dispatch automatically**: 1d10 + SR vs DV 7. Result stored in `_last_trace_dispatch_roll` (for narration).

@@ -2531,5 +2531,143 @@ class TestTraceMeatspaceDispatch(unittest.TestCase):
         self.assertEqual(hs["trace_progress"], 0)
 
 
+class TestTraceEngagementGating(unittest.TestCase):
+    """Per RAW p.205-211, a Trace doesn't tick until the Netrunner has
+    reached its node and engaged it. Backend auto-engages via current_node
+    match; pre-placed Traces in unvisited nodes stay idle.
+    """
+
+    def test_pre_placed_trace_in_other_node_does_not_tick(self):
+        """A Trace in 'Server' node does NOT tick while Netrunner is at Gateway."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["current_node"] = "Gateway"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "active",
+            }
+        }
+        # No engaged_by yet, no trace_progress initialized
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        # Should not engage, should not initialize trace_progress
+        self.assertEqual(hs["ice_status"]["Server_Trace"].get("engaged_by", []), [])
+        self.assertIsNone(hs.get("trace_progress"))
+
+    def test_entering_trace_node_engages_and_starts_ticking(self):
+        """Walking into a Trace's node engages it; counter starts at 0 then ticks."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["current_node"] = "Gateway"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "active",
+            }
+        }
+        # Tick once at Gateway — no engagement, no progress
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertIsNone(hs.get("trace_progress"))
+        # Move to Server
+        hs["current_node"] = "Server"
+        # Tick — engagement fires, trace_progress initializes to 0, then ticks to 1
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["ice_status"]["Server_Trace"]["engaged_by"], ["V"])
+        self.assertEqual(hs["trace_progress"], 1)
+
+    def test_engagement_persists_across_node_moves(self):
+        """Once a Trace has locked on, moving away does NOT reset it."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["current_node"] = "Server"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "active",
+            }
+        }
+        _apply_trace_auto_increment(hs, tick_condition=True)  # engage + tick
+        self.assertEqual(hs["trace_progress"], 1)
+        # Move to a different node; Trace is still engaged
+        hs["current_node"] = "Vault"
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["trace_progress"], 2)  # kept ticking
+
+    def test_engagement_idempotent_on_re_entry(self):
+        """Re-entering an already-engaged Trace's node does not duplicate engaged_by."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["current_node"] = "Server"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "active",
+            }
+        }
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["ice_status"]["Server_Trace"]["engaged_by"], ["V"])
+
+    def test_bypassed_trace_does_not_engage(self):
+        """A Bypassed Trace (status != active) doesn't engage even at its node."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["current_node"] = "Server"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "bypassed",
+            }
+        }
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["ice_status"]["Server_Trace"].get("engaged_by", []), [])
+        self.assertIsNone(hs.get("trace_progress"))
+
+    def test_lockdown_spawn_pre_engages(self):
+        """Lockdown auto-spawn at Gateway pre-engages the Netrunner so the
+        Trace ticks immediately regardless of where the Netrunner is."""
+        from game_systems.cpred_hack import _apply_alert_ice_spawn, _apply_trace_auto_increment
+        hs = _make_hack_state(hacker_name="V")
+        hs["sr"] = 3
+        hs["alert_level"] = 5
+        hs["_prev_alert_level"] = 4
+        hs["current_node"] = "DeepNode"  # nowhere near Gateway
+        _apply_alert_ice_spawn(hs)
+        # Trace spawned at Gateway but should be pre-engaged with V
+        self.assertIn("Gateway_Trace", hs["ice_status"])
+        self.assertEqual(hs["ice_status"]["Gateway_Trace"]["engaged_by"], ["V"])
+        self.assertEqual(hs["trace_progress"], 0)
+        # Tick — should advance even though Netrunner is elsewhere
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["trace_progress"], 1)
+
+    def test_engagement_via_apply_hack_state_node_change(self):
+        """End-to-end through apply_hack_state: model reports new current_node,
+        backend engages Trace in that node, ticks at meatspace_due."""
+        hs = _make_hack_state(hacker_name="V", interface_rank=4)
+        hs["sr"] = 3
+        hs["current_node"] = "Gateway"
+        hs["ice_status"] = {
+            "Server_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": 6, "rez_max": 6, "status": "active",
+            }
+        }
+        gs = _make_game_state()
+        # Model reports moving to Server + uses all NA → meatspace_due
+        apply_hack_state(hs, {"hack_state": {
+            "current_node": "Server",
+            "net_actions_used": 3,
+        }}, game_state=gs)
+        self.assertEqual(hs["ice_status"]["Server_Trace"]["engaged_by"], ["V"])
+        self.assertEqual(hs["trace_progress"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

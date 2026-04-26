@@ -613,12 +613,14 @@ class TestApplyTraceAutoIncrement(unittest.TestCase):
     """Trace ticks once per completed turn (meatspace_due)."""
 
     def test_trace_ticks_on_meatspace_due(self):
-        hs = cpred_init_hack_state(tier="full_run")
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
         hs["trace_progress"] = 0
         hs["sr"] = 3
+        # Use Gateway_Trace key so engagement helper auto-engages with V
+        # (default current_node is "Gateway").
         hs["ice_status"] = {
-            "GW_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
-                          "rez_current": 6, "rez_max": 6},
+            "Gateway_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
+                               "rez_current": 6, "rez_max": 6},
         }
         # Simulate turn completion: net_actions_used = all remaining
         hs["net_actions_remaining"] = 1
@@ -665,13 +667,15 @@ class TestApplyTraceAutoIncrement(unittest.TestCase):
         """Trace completing rolls dispatch (does NOT force Convergence — those
         are decoupled tracks per the corrected RAW interpretation)."""
         from unittest.mock import patch
-        hs = cpred_init_hack_state(tier="full_run")
+        hs = cpred_init_hack_state(tier="full_run", hacker_name="V")
         hs["sr"] = 3
         hs["trace_progress"] = 2  # max is 6-3=3, so one more tick → 3 >= 3
         hs["alert_level"] = 5
+        # Use Gateway_Trace so the engagement helper auto-engages V at default
+        # current_node="Gateway".
         hs["ice_status"] = {
-            "GW_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
-                          "rez_current": 6, "rez_max": 6},
+            "Gateway_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
+                               "rez_current": 6, "rez_max": 6},
         }
         hs["net_actions_remaining"] = 1
         # Force dispatch pass (d10=10) and a fixed ETA (d6=4) → ETA=4+2=6.
@@ -1044,9 +1048,11 @@ class TestNetCombatTraceGating(unittest.TestCase):
     def test_trace_ticks_with_hack_state(self):
         nc = cpred_init_net_combat_state(netrunner_name="V", target="T", sr=3)
         nc["trace_progress"] = 0
+        nc["current_node"] = "Gateway"
+        # Use Gateway_Trace key so engagement helper auto-engages V at current_node.
         nc["ice_status"] = {
-            "GW_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
-                          "rez_current": 6, "rez_max": 6},
+            "Gateway_Trace": {"name": "Trace", "behavior": "trace", "status": "active",
+                               "rez_current": 6, "rez_max": 6},
         }
         ps = _minimal_pipeline_state(nc)
         tool_input = {"hack_state": {"alert_level": 2, "net_actions_used": 2}}

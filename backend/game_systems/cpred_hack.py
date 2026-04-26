@@ -1076,6 +1076,48 @@ def _check_forced_disconnect(state, game_state, name_key, pipeline_state=None):
         pass
 
 
+def _engage_traces_in_current_node(state):
+    """Auto-engage any active Trace ICE in the Netrunner's current node.
+
+    Per RAW p.205-211 a Trace doesn't begin tracking until the Netrunner
+    has actually reached its node — the ICE has to *see* the body first.
+    This helper enforces that backend-side: each call, walk ice_status
+    and add the Netrunner to `engaged_by` for any active Trace whose key
+    matches current_node (exact or "<node>_<suffix>" prefix). On first
+    engagement, trace_progress is initialized to 0 if still None.
+
+    Idempotent — re-engagement of an already-engaged Trace is a no-op.
+    Engagement persists across node moves: once the Trace has locked on,
+    it keeps tracking even if the Netrunner moves elsewhere.
+    """
+    current_node = state.get("current_node")
+    if not current_node or not isinstance(current_node, str):
+        return
+    runner = state.get("hacker_name") or state.get("netrunner")
+    if not runner:
+        return
+    ice_status = state.get("ice_status", {})
+    if not isinstance(ice_status, dict):
+        return
+    engaged_any = False
+    for key, entry in ice_status.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") != "active":
+            continue
+        if "trace" not in str(entry.get("behavior", "")).lower():
+            continue
+        if not (key == current_node or
+                (isinstance(key, str) and key.startswith(f"{current_node}_"))):
+            continue
+        engaged = entry.setdefault("engaged_by", [])
+        if isinstance(engaged, list) and runner not in engaged:
+            engaged.append(runner)
+        engaged_any = True
+    if engaged_any and state.get("trace_progress") is None:
+        state["trace_progress"] = 0
+
+
 def _apply_trace_auto_increment(state, tick_condition):
     """Tick trace progress and meatspace-security ETA each completed NET turn.
 
@@ -1088,23 +1130,36 @@ def _apply_trace_auto_increment(state, tick_condition):
     Trace completion does NOT directly raise alert to Convergence — that's
     a separate alert-driven track. Trace and Convergence can both be
     active, both dormant, or one without the other.
+
+    Engagement gating: a Trace only ticks once the Netrunner has reached
+    its node (engaged_by non-empty). Auto-engagement runs every call;
+    Lockdown-spawned Traces are pre-engaged at spawn since they represent
+    "the alarmed system reaches for any tool to find you, regardless of
+    your current node."
     """
     try:
+        # Auto-engage Traces in the current node before deciding whether
+        # to tick. Runs every call; idempotent.
+        _engage_traces_in_current_node(state)
+
         if not tick_condition:
             return
         ice_status = state.get("ice_status", {})
         if not isinstance(ice_status, dict):
             return
-        has_active_trace = any(
+        # Only engaged Traces tick (RAW: Trace must have detected the body).
+        has_engaged_trace = any(
             isinstance(v, dict) and v.get("status") == "active"
             and isinstance(v.get("behavior", ""), str)
             and "trace" in v.get("behavior", "").lower()
+            and isinstance(v.get("engaged_by"), list)
+            and len(v.get("engaged_by", [])) > 0
             for v in ice_status.values()
         )
         sr = int(state.get("sr", 3))
 
-        # Tick trace progress while Trace is active.
-        if has_active_trace and state.get("trace_progress") is not None:
+        # Tick trace progress while at least one engaged Trace is running.
+        if has_engaged_trace and state.get("trace_progress") is not None:
             state["trace_progress"] = int(state.get("trace_progress", 0)) + 1
             trace_max = max(1, 6 - sr)
             # On Trace completion: roll dispatch (once per encounter).
@@ -1171,9 +1226,16 @@ def _apply_alert_ice_spawn(state):
             )
             if not has_trace:
                 sr = int(state.get("sr", 3))
+                # Pre-engage with the Netrunner — the Lockdown spawn
+                # represents the alarmed system reaching for any tool to
+                # find them, so the Trace locks on regardless of where
+                # the Netrunner currently is (no "must be at Gateway").
+                runner = state.get("hacker_name") or state.get("netrunner")
                 ice_status["Gateway_Trace"] = {
                     "name": "Trace ICE", "behavior": "trace",
-                    "rez_current": sr * 2, "rez_max": sr * 2, "status": "active"
+                    "rez_current": sr * 2, "rez_max": sr * 2,
+                    "status": "active",
+                    "engaged_by": [runner] if runner else [],
                 }
                 state["ice_status"] = ice_status
                 state["trace_progress"] = 0
