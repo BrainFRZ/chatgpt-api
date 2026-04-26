@@ -6927,10 +6927,114 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(r["new_status"], "deactivated")
         self.assertEqual(r["cost_net_actions"], 1)
 
-    # ----- reactivate_program (2 NA atomic) -----
+    # ----- program_attack accepts deactivated firing program (RAW Errata p.3) -----
+
+    def test_program_attack_from_deactivated_succeeds(self):
+        """Per RAW Errata p.3: firing a Deactivated Attacker auto-activates
+        as part of the 1-NA attack. Sword Deactivated → Crash → ends Deactivated."""
+        progs = self._programs(("Sword", "deactivated"))
+        actions = [{"type": "program_attack", "character": "RedVelvet",
+                    "program": "Sword", "target": "Hellhound",
+                    "interface_rank": 4, "program_atk": 1, "target_def": 2,
+                    "program_damage_dice": 3, "target_rez": 20}]
+        result = resolve_actions(actions, active_programs=progs,
+                                 net_actions_remaining=4)
+        r = result["results"][0]
+        # Should not have program_not_firable error
+        self.assertNotIn("error", r)
+        # Auto-deactivate op emitted with old_status = deactivated (real prior)
+        ops = [op for op in result["state_ops"]
+               if op.get("op") == "program_status_change"
+               and op.get("program_name") == "Sword"]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["old_status"], "deactivated")
+        self.assertEqual(ops[0]["new_status"], "deactivated")
+        # Note explains the RAW Errata p.3 mechanic
+        self.assertIn("Errata p.3", r.get("deactivation_note", ""))
+
+    def test_program_attack_from_active_succeeds_normal(self):
+        """Standard case: Active → fire → Deactivated."""
+        progs = self._programs(("Sword", "active"))
+        actions = [{"type": "program_attack", "character": "RedVelvet",
+                    "program": "Sword", "target": "Hellhound",
+                    "interface_rank": 4, "program_atk": 1, "target_def": 2,
+                    "program_damage_dice": 3, "target_rez": 20}]
+        result = resolve_actions(actions, active_programs=progs,
+                                 net_actions_remaining=4)
+        r = result["results"][0]
+        self.assertNotIn("error", r)
+        ops = [op for op in result["state_ops"]
+               if op.get("op") == "program_status_change"
+               and op.get("program_name") == "Sword"]
+        self.assertEqual(ops[0]["old_status"], "active")
+        self.assertEqual(ops[0]["new_status"], "deactivated")
+
+    def test_program_attack_from_derezzed_fails_soft(self):
+        """Cannot fire a Derezzed program — must Deactivate (1 NA) first."""
+        progs = self._programs(("Sword", "derezzed", 0))
+        actions = [{"type": "program_attack", "character": "RedVelvet",
+                    "program": "Sword", "target": "Hellhound",
+                    "interface_rank": 4, "program_atk": 1, "target_def": 2,
+                    "program_damage_dice": 3, "target_rez": 20}]
+        result = resolve_actions(actions, active_programs=progs,
+                                 net_actions_remaining=4)
+        r = result["results"][0]
+        self.assertEqual(r["error"], "program_not_firable")
+        self.assertIn("derezzed", r["reason"].lower())
+        # No auto-deactivate emitted (program never fired)
+        ops = [op for op in result["state_ops"]
+               if op.get("op") == "program_status_change"
+               and op.get("program_name") == "Sword"]
+        self.assertEqual(ops, [])
+
+    def test_program_attack_from_destroyed_fails_soft(self):
+        """Cannot fire a destroyed program — points to reinstall_program."""
+        progs = self._programs(("Sword", "destroyed", 0))
+        actions = [{"type": "program_attack", "character": "RedVelvet",
+                    "program": "Sword", "target": "Hellhound",
+                    "interface_rank": 4, "program_atk": 1, "target_def": 2,
+                    "program_damage_dice": 3, "target_rez": 20}]
+        result = resolve_actions(actions, active_programs=progs,
+                                 net_actions_remaining=4)
+        r = result["results"][0]
+        self.assertEqual(r["error"], "program_not_firable")
+        self.assertIn("destroyed", r["reason"].lower())
+        self.assertIn("reinstall", r["reason"].lower())
+
+    def test_raw_errata_p3_full_recovery_sequence(self):
+        """Derezzed → Deactivated (1 NA via reactivate/deactivate) →
+        Fire (1 NA via program_attack, auto-activates) = 2 NA total.
+
+        This pins the actual RAW flow per Errata p.3."""
+        progs = self._programs(("Sword", "derezzed", 0))
+        actions = [
+            {"type": "reactivate_program", "character": "RedVelvet",
+             "program": "Sword"},  # Derezzed → Deactivated, 1 NA
+            {"type": "program_attack", "character": "RedVelvet",
+             "program": "Sword", "target": "Hellhound",
+             "interface_rank": 4, "program_atk": 1, "target_def": 2,
+             "program_damage_dice": 3, "target_rez": 20},  # auto-activates + fires, 1 NA
+        ]
+        result = resolve_actions(actions, active_programs=progs,
+                                 net_actions_remaining=4)
+        r0, r1 = result["results"]
+        self.assertNotIn("error", r0)
+        self.assertNotIn("error", r1)
+        # Total NA spent: 1 (deactivate from derezzed) + 1 (attack) = 2
+        self.assertEqual(r0.get("cost_net_actions"), 1)
+        # Final state of Sword in running snapshot: deactivated again (auto-deactivate after fire)
+        self.assertEqual(progs[0]["status"], "deactivated")
+
+    # ----- reactivate_program (RAW p.201-202 + Errata p.3 alias) -----
+    # Per RAW Errata p.3, restoring a Derezzed program is "Deactivate +
+    # Activate" = 2 NA total (each step is its own NET Action, not an
+    # atomic 2-NA operation). reactivate_program is preserved as a legacy
+    # alias for the first half (Derezzed → Deactivated, 1 NA); the second
+    # half is then activate_program OR program_attack (which auto-activates
+    # from Deactivated for free per Errata p.3).
 
     def test_reactivate_program_happy_path(self):
-        """Derezzed → active. 2 NA atomic."""
+        """Derezzed → deactivated. 1 NA (RAW Errata p.3 alias for Deactivate)."""
         progs = self._programs(("Shield", "derezzed", 0))
         result = resolve_actions(
             [{"type": "reactivate_program", "character": "RedVelvet", "program": "Shield"}],
@@ -6940,11 +7044,11 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         r = result["results"][0]
         self.assertNotIn("error", r)
         self.assertEqual(r["old_status"], "derezzed")
-        self.assertEqual(r["new_status"], "active")
-        self.assertEqual(r["cost_net_actions"], 2)
+        self.assertEqual(r["new_status"], "deactivated")
+        self.assertEqual(r["cost_net_actions"], 1)
 
-    def test_reactivate_program_fails_atomic_with_only_one_na(self):
-        """Only 1 NA remaining: reactivate fails soft, no NA spent."""
+    def test_reactivate_program_succeeds_with_one_na(self):
+        """Only 1 NA remaining: reactivate (1 NA) succeeds per Errata p.3."""
         progs = self._programs(("Shield", "derezzed", 0))
         result = resolve_actions(
             [{"type": "reactivate_program", "character": "RedVelvet", "program": "Shield"}],
@@ -6952,10 +7056,8 @@ class TestProgramStatusChangeActions(unittest.TestCase):
             net_actions_remaining=1,
         )
         r = result["results"][0]
-        self.assertEqual(r["error"], "insufficient_net_actions")
-        # No state op
-        ops = [op for op in result["state_ops"] if op.get("op") == "program_status_change"]
-        self.assertEqual(len(ops), 0)
+        self.assertNotIn("error", r)
+        self.assertEqual(r["new_status"], "deactivated")
 
     def test_reactivate_program_fails_if_not_derezzed(self):
         progs = self._programs(("Shield", "active"))
@@ -7158,14 +7260,14 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(ops[0]["new_status"], "active")
         self.assertEqual(ops[1]["new_status"], "deactivated")
 
-    def test_sequential_reactivate_then_deactivate_restores_rez(self):
-        """Reactivate (derezzed → active) restores REZ in-place; subsequent
-        deactivate sees the restored REZ."""
+    def test_sequential_reactivate_then_activate_restores_rez(self):
+        """Per RAW Errata p.3: Derezzed → Deactivated (reactivate, 1 NA) →
+        Active (activate, 1 NA) = 2 NA total, REZ restored along the way."""
         progs = self._programs(("Shield", "derezzed", 0))
         result = resolve_actions(
             [
                 {"type": "reactivate_program", "character": "V", "program": "Shield"},
-                {"type": "deactivate_program", "character": "V", "program": "Shield"},
+                {"type": "activate_program", "character": "V", "program": "Shield"},
             ],
             active_programs=progs,
             net_actions_remaining=4,
@@ -7173,8 +7275,8 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         r0, r1 = result["results"]
         self.assertNotIn("error", r0)
         self.assertNotIn("error", r1)
-        # Running snapshot has Shield at full REZ + status=deactivated after both ops
-        self.assertEqual(progs[0]["status"], "deactivated")
+        # Running snapshot has Shield at full REZ + status=active after both ops
+        self.assertEqual(progs[0]["status"], "active")
         self.assertGreater(progs[0]["rez"], 0)  # restored from PROGRAM_STATS
 
     def test_error_results_include_success_false(self):
@@ -7196,11 +7298,11 @@ class TestProgramStatusChangeActions(unittest.TestCase):
                              active_programs=[{"name": "Sword", "status": "active"}],
                              )["results"][0]
         self.assertEqual(r3["success"], False)
-        # insufficient_net_actions
-        r4 = resolve_actions([{"type": "reactivate_program", "character": "V",
+        # insufficient_net_actions (any 1-NA action with 0 NA remaining)
+        r4 = resolve_actions([{"type": "activate_program", "character": "V",
                                "program": "Shield"}],
-                             active_programs=[{"name": "Shield", "status": "derezzed", "rez": 0}],
-                             net_actions_remaining=1,
+                             active_programs=[{"name": "Shield", "status": "deactivated", "rez": 7}],
+                             net_actions_remaining=0,
                              )["results"][0]
         self.assertEqual(r4["success"], False)
         # reinstall_requires_backup_drive

@@ -2068,27 +2068,43 @@ def _hydrate_program_attack_from_state(action, ice_status):
 # ---------------------------------------------------------------------------
 # Status state machine:
 #   active        — rezzed, ready to use
-#   deactivated   — stored, recoverable in 1 NET Action (Activate)
-#   derezzed      — REZ hit 0 mid-encounter, recoverable in 2 NET Actions
-#                   (Reactivate = Deactivate + Activate, atomic)
+#   deactivated   — stored. To fire: 1 NA via program_attack (auto-activates
+#                   as part of the attack per CPRED Errata p.3) OR spend a
+#                   standalone 1-NA activate_program to leave it active.
+#   derezzed      — REZ hit 0 mid-encounter. RAW p.201-202 + Errata p.3:
+#                   recovery is "Deactivate + Activate" = 2 NA, where each
+#                   step is its own NET Action. The Deactivate step here is
+#                   the special-case derezzed→deactivated transition.
 #   destroyed     — permanent loss; saved by Backup Drive if installed
 # Player-choice actions handled here:
-#   activate_program     deactivated → active     (1 NA)
-#   deactivate_program   active      → deactivated (1 NA)
-#   reactivate_program   derezzed    → active     (2 NA, atomic)
+#   activate_program     deactivated → active     (1 NA, optional —
+#                                                   program_attack auto-activates)
+#   deactivate_program   active|derezzed → deactivated (1 NA — clears Derez
+#                                                   without firing the program)
 #   reinstall_program    destroyed   → deactivated (1 Meat Action; only when
 #                                                   Backup Drive saved it)
 # Auto-emitted transitions (from attack resolvers / ICE ops):
-#   active → deactivated  (Attacker auto-Deactivate after firing — Step 5)
+#   active|deactivated → deactivated (Attacker auto-Deactivate after firing
+#                                     — Step 5; "deactivated" → fire path
+#                                     auto-activates implicitly during the
+#                                     attack and ends back at deactivated)
 #   active → derezzed     (program_rez_damage to 0, non-anti-program ICE)
 #   active → destroyed    (Asp/Poison Flatline / anti-program ICE to 0)
+#
+# NOTE: reactivate_program (atomic Derezzed → Active for 2 NA) was the
+# pre-Errata-p.3 model. RAW now splits this into deactivate_program
+# (Derezzed → Deactivated, 1 NA) plus a subsequent program_attack or
+# activate_program (Deactivated → ... , 1 NA) for 2 NA total. The action
+# is retained as an alias for backward compatibility but routes through
+# the new split semantics.
 
 _PROGRAM_STATUS_TRANSITIONS = {
     # action_type → (required_old_status, new_status, na_cost, ma_cost, label)
-    "activate_program":   ("deactivated", "active",      1, 0, "Activate"),
-    "deactivate_program": ("active",      "deactivated", 1, 0, "Deactivate"),
-    "reactivate_program": ("derezzed",    "active",      2, 0, "Reactivate"),
-    "reinstall_program":  ("destroyed",   "deactivated", 0, 1, "Reinstall"),
+    # Note: required_old_status can be a tuple of acceptable statuses.
+    "activate_program":   ("deactivated",                    "active",      1, 0, "Activate"),
+    "deactivate_program": (("active", "derezzed"),           "deactivated", 1, 0, "Deactivate"),
+    "reactivate_program": ("derezzed",                       "deactivated", 1, 0, "Reactivate (legacy alias for Deactivate from derezzed)"),
+    "reinstall_program":  ("destroyed",                      "deactivated", 0, 1, "Reinstall"),
 }
 
 
@@ -2162,16 +2178,21 @@ def _resolve_program_status_change(action, action_type, active_programs,
         }, []
 
     current_status = str(entry.get("status", "")).strip().lower()
-    if current_status != required_old:
+    # required_old can be a single string or tuple of acceptable statuses
+    accepted_old = (required_old,) if isinstance(required_old, str) else tuple(required_old)
+    if current_status not in accepted_old:
         hint = ""
         if action_type == "activate_program" and current_status == "active":
             hint = " It is already active."
+        elif action_type == "activate_program" and current_status == "derezzed":
+            hint = " Derezzed: spend deactivate_program first (Derezzed → Deactivated, 1 NA), then activate or program_attack."
         elif action_type == "deactivate_program" and current_status == "deactivated":
             hint = " It is already deactivated."
         elif action_type == "reactivate_program" and current_status == "active":
             hint = " It is already active."
         elif action_type == "reactivate_program" and current_status == "deactivated":
-            hint = " Use activate_program (1 NET Action) instead."
+            hint = (" Use activate_program (1 NA) for Deactivated → Active, "
+                    "or program_attack (1 NA) which auto-activates and fires.")
         elif current_status == "destroyed" and action_type != "reinstall_program":
             hint = " Program is destroyed — use reinstall_program if Backup Drive saved it."
         return {
@@ -2180,8 +2201,8 @@ def _resolve_program_status_change(action, action_type, active_programs,
             "success": False,
             "error": "illegal_status_transition",
             "reason": (
-                f"{label} {program_name}: requires status {required_old!r}, "
-                f"got {current_status!r}.{hint}"
+                f"{label} {program_name}: requires status "
+                f"{'/'.join(accepted_old)!r}, got {current_status!r}.{hint}"
             ),
             "formatted": f"⚠ {label} {program_name}: status is {current_status}",
         }, []
@@ -2224,7 +2245,11 @@ def _resolve_program_status_change(action, action_type, active_programs,
     # _apply_resolver_net_ops will eventually apply (status flip + REZ
     # restoration when recovering from derezzed/destroyed).
     entry["status"] = new_status
-    if required_old in ("derezzed", "destroyed"):
+    # current_status was the program's actual prior status (matched against
+    # accepted_old). Use it for state ops + result fields so callers see the
+    # real transition rather than the (possibly tuple) requirement spec.
+    actual_old = current_status
+    if actual_old in ("derezzed", "destroyed"):
         prog_stats = _lookup_program_stats(entry.get("name", program_name))
         if prog_stats is not None:
             entry["rez"] = prog_stats.get("rez", entry.get("rez", 0))
@@ -2232,7 +2257,7 @@ def _resolve_program_status_change(action, action_type, active_programs,
     state_op = {
         "op": "program_status_change",
         "program_name": entry.get("name", program_name),
-        "old_status": required_old,
+        "old_status": actual_old,
         "new_status": new_status,
         "reason": f"{label} by {character}" if character else label,
     }
@@ -2245,14 +2270,14 @@ def _resolve_program_status_change(action, action_type, active_programs,
 
     formatted = (
         f"{label} {entry.get('name', program_name)}: "
-        f"{required_old} → {new_status} ({cost_str})"
+        f"{actual_old} → {new_status} ({cost_str})"
     )
 
     result = {
         "type": action_type,
         "character": character,
         "program": entry.get("name", program_name),
-        "old_status": required_old,
+        "old_status": actual_old,
         "new_status": new_status,
         "cost_net_actions": na_cost,
         "cost_meat_actions": ma_cost,
@@ -4245,6 +4270,35 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                                 str(_p.get("name", "")).strip().lower() == _prog_lc:
                             _firing_prog_entry = _p
                             break
+                # RAW p.201-202 + Errata p.3: program_attack accepts a program
+                # in 'active' OR 'deactivated' status — firing implicitly
+                # Activates a Deactivated program at no extra NA cost (the
+                # 1 NA covers Activate+Attack as one operation). Derezzed
+                # and destroyed are still hard-fails.
+                if _firing_prog_entry is not None and _prog_name and _prog_name != "Program":
+                    _firing_status = str(_firing_prog_entry.get("status", "")).strip().lower() or "active"
+                    if _firing_status not in ("active", "deactivated"):
+                        _hint = ""
+                        if _firing_status == "derezzed":
+                            _hint = (" Spend deactivate_program (Derezzed → "
+                                     "Deactivated, 1 NA) first; the next "
+                                     "program_attack auto-activates and fires.")
+                        elif _firing_status == "destroyed":
+                            _hint = (" Program is destroyed — use "
+                                     "reinstall_program if Backup Drive saved it.")
+                        results.append({
+                            "type": "program_attack",
+                            "character": action.get("character", ""),
+                            "success": False,
+                            "error": "program_not_firable",
+                            "reason": (
+                                f"program_attack {_prog_name}: status is "
+                                f"{_firing_status!r}; can only fire from "
+                                f"'active' or 'deactivated'.{_hint}"
+                            ),
+                            "formatted": f"⚠ program_attack {_prog_name}: status is {_firing_status}",
+                        })
+                        continue
                 _target_block = _resolve_ice_target_block(
                     action.get("target", ""), ice_status)
                 _ice_block_for_hook = None
@@ -4313,13 +4367,33 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 # for the firing program — fires regardless of hit/miss per
                 # RAW. The op routes through apply_program_status_change at
                 # writeback so on_program_status_change observers can react.
+                # Per Errata p.3 the program may have started in 'active' OR
+                # 'deactivated' (firing auto-activates a deactivated program
+                # within the same 1-NA action); end state is always
+                # 'deactivated'. Pass actual prior status so hooks see the
+                # real transition.
                 if _prog_name and _prog_name != "Program":
+                    _prior_status = "active"
+                    if _firing_prog_entry is not None:
+                        _prior_status = (
+                            str(_firing_prog_entry.get("status", "")).strip().lower()
+                            or "active"
+                        )
                     result["program_deactivated"] = _prog_name
-                    result["deactivation_note"] = f"{_prog_name} deactivated after attack (RAW). Costs 1 NET Action to Reactivate."
+                    if _prior_status == "deactivated":
+                        result["deactivation_note"] = (
+                            f"{_prog_name} fired from Deactivated (auto-activated for the attack per Errata p.3); ends Deactivated again. "
+                            f"Next attack: 1 NET Action."
+                        )
+                    else:
+                        result["deactivation_note"] = (
+                            f"{_prog_name} deactivated after attack (RAW). "
+                            f"Next attack: 1 NET Action (auto-activates from Deactivated per Errata p.3)."
+                        )
                     all_state_ops.append({
                         "op": "program_status_change",
                         "program_name": _prog_name,
-                        "old_status": "active",
+                        "old_status": _prior_status,
                         "new_status": "deactivated",
                         "reason": f"{_prog_name} auto-Deactivated after firing (RAW)",
                     })
@@ -4403,7 +4477,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 # `destroyed`.
                 _ba_status = str(_ba_entry.get("status", "")).strip().lower() or "active"
                 if _ba_status in ("derezzed", "destroyed"):
-                    _hint = (" Use reactivate_program (2 NA) first."
+                    _hint = (" Use deactivate_program (Derezzed → Deactivated, 1 NA) then activate_program (1 NA), or fire it directly with program_attack (auto-activates) per RAW Errata p.3."
                              if _ba_status == "derezzed"
                              else " Use reinstall_program (1 Meat Action) if Backup Drive saved it.")
                     results.append({
@@ -5031,10 +5105,10 @@ RESOLVE_MECHANICS_TOOL = {
         "check_context? (social/persuasion/combat/perception), "
         "net?: true (set on NET-context contests), ability? (REQUIRED when net=true; one of: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} "
         "— for contested rolls (Stealth vs Concentration, Persuasion vs Concentration, etc.) and NET opposed checks (Zap/Slide with zap?: true, interface_rank?: N)\n"
-        "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}\n"
-        "- activate_program: {type, character, program (program name)} — deactivated → active. Costs 1 NET Action. Fails if program not loaded, already active, or status mismatched.\n"
-        "- deactivate_program: {type, character, program} — active → deactivated. Costs 1 NET Action.\n"
-        "- reactivate_program: {type, character, program} — derezzed → active. Costs 2 NET Actions, ATOMIC: if fewer than 2 NA remain, fails soft with no actions consumed.\n"
+        "- program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name?, target (ICE name)}. Costs 1 NET Action. Per RAW Errata p.3 the firing program may be in `active` OR `deactivated` status — Deactivated firing auto-activates as part of the 1-NA attack (Activate+Attack is one operation, NOT two). After firing, the Attacker auto-Deactivates regardless of starting state. Fails soft (program_not_firable) if the program is `derezzed` or `destroyed`.\n"
+        "- activate_program: {type, character, program (program name)} — deactivated → active. Costs 1 NET Action. OPTIONAL when used right before program_attack (the attack auto-activates for free). Use it to keep a program ready without firing.\n"
+        "- deactivate_program: {type, character, program} — active|derezzed → deactivated. Costs 1 NET Action. Per RAW Errata p.3, the Derezzed → Deactivated transition is also routed here (the first half of '2 NA to recover from Derez').\n"
+        "- reactivate_program: {type, character, program} — LEGACY ALIAS for `deactivate_program` from the derezzed state. derezzed → deactivated. Costs 1 NET Action. Per RAW Errata p.3, recovering a Derezzed program is `deactivate_program` (1 NA, → Deactivated) followed by either `activate_program` (1 NA, → Active) OR `program_attack` (1 NA, auto-activates and fires) — for 2 NA total to fully recover. The legacy 'atomic 2-NA Reactivate' was a pre-Errata-p.3 model and no longer matches RAW.\n"
         "- reinstall_program: {type, character, program} — destroyed → deactivated. Costs 1 Meat Action. Only valid if Backup Drive is installed (and saved this program from destruction).\n"
         "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal/Overclock)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending / overclock_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown; Overclock grants +1 NET Action on the next turn (consumed at turn-boundary reset).\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"

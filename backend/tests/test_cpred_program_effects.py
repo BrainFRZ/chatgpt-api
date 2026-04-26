@@ -2616,7 +2616,8 @@ class TestStep6dBoostedActionStatusValidation(unittest.TestCase):
         r = result["results"][0]
         self.assertEqual(r["error"], "program_unusable")
         self.assertIn("derezzed", r["reason"].lower())
-        self.assertIn("reactivate_program", r["reason"])
+        # Hint points to RAW Errata p.3 recovery path (deactivate + activate / attack)
+        self.assertIn("deactivate_program", r["reason"])
 
     def test_boosted_action_accepts_active_program(self):
         from game_systems.cpred_mechanics import resolve_actions
