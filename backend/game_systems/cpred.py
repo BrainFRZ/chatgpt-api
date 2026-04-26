@@ -795,6 +795,16 @@ Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
 - PC death should not be possible outside designated Death Risk points — use fail-forward
 
+### RAW Violation Handling — DO NOT advance the world on player-side errors
+The `resolve_mechanics` result includes a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If `player_errors` is non-empty, the player asked for something illegal per RAW.** The backend rejected those actions with NO state change — no resources consumed, no time elapsed, no NPC reaction. Treat it like the player typed an invalid command at a real GM's table:
+1. **Do NOT call `report_state`.** The world has not progressed.
+2. **Do NOT narrate the failure as if it happened in-fiction.** The action never resolved at all.
+3. **Route to "output" (Schema B, `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain what went wrong, then prompt for retry. Tone: GM stepping out of character for a brief rule clarification, friendly and concise.
+
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`.
+
+Distinguish from in-fiction failures: `success: false` with NO `error` field is a normal dice failure (missed attack, failed check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the OOC retry path.
+
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
@@ -1479,6 +1489,20 @@ Auto-emitted by attack resolvers (do NOT emit manually):
 - Asp / Poison Flatline / anti-program ICE to 0: active → destroyed (or deactivated if Backup Drive saved it).
 
 Fail-soft semantics: if the named program isn't loaded, is already in the requested status, or current status doesn't match the required transition, the resolver returns an error result with a narrative reason — no NA spent, no state change.
+
+### RAW Violation Handling — DO NOT advance the world on player-side errors
+The resolver returns a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If `player_errors` is non-empty, the player asked for something illegal per RAW.** The backend rejected those actions with NO state change — no NA consumed, no Cycles spent, no time elapsed, no NPC reaction. This is a player-side OOC mistake, not an in-fiction failure.
+
+Treat these EXACTLY like the player typed an invalid command at a real GM's table:
+1. **Do NOT call `report_hack_state`.** The world has not progressed. Calling it would tick Trace, advance NPCs, and burn time the player didn't actually spend.
+2. **Do NOT narrate the failure as if it happened in-fiction** (e.g. don't write "Sword sputters and refuses to fire" — Sword *can't* fire because it's Derezzed; the action never resolved at all).
+3. **Route to OUTPUT (Schema B / `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain what went wrong, then prompt the player to clarify or retry. Tone: GM dropping out of character for a brief rule clarification, friendly and concise.
+4. The player gets a free retry with full NET Actions / Cycles / time intact.
+
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`.
+
+Distinguish from in-fiction failures: a `success: false` result with NO `error` field is a normal dice failure (a missed attack, a failed Backdoor check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the OOC retry path.
+
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). Reminder: NET skill_check / opposed_check also REQUIRE an `ability` tag — see Mechanics Resolution above.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks marked `"net": true`. Do NOT add +2 manually.
@@ -1843,6 +1867,9 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **Unconscious** (sleep ammo, KO in meatspace): does NOT auto-disconnect. Netrunner is stuck jacked in — cannot take NET actions or Jack Out themselves. Rezzed ICE / Demons continue to act on them. To rescue, an ally spends an Action to unplug the deck or drag the body out of access-point range — this is an Unsafe Jack Out. Emit `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend cascades all rezzed ICE effects onto the Netrunner and sets net_complete=true automatically.
 - **Flatlined** (failed Death Save): immediate backend-auto forced disconnect + cascade. Set net_complete=true.
 
+### RAW Violation Handling — DO NOT advance the world on player-side errors
+The resolver returns a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If non-empty, the player asked for something illegal per RAW** — backend rejected with NO state change (no NA/Cycles consumed, no time elapsed, no NPC reaction). Player-side OOC mistake, not in-fiction failure. Do NOT call `report_net_combat_state`, do NOT narrate the failure as fiction. Route the response as a brief OOC clarification (paraphrase the `reason` field) and prompt for retry. Player gets a free re-do with full resources intact. Error codes surfaced: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`. A `success: false` result with NO `error` field is a normal dice failure — narrate in fiction and advance the world.
+
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
 - **hack_state**: NET state (alert_level, cycles_remaining, active_programs, current_node, nodes_visited, revealed_nodes, ice_status, trace_progress, tar_stacks, system_map). revealed_nodes is a superset of nodes_visited — add nodes discovered via Pathfinder, Eye-Dee, or any other means. Never remove entries. brain_damage is backend-managed — do not set it.
@@ -2194,12 +2221,14 @@ DICE ACTION TYPES for the "actions" array:
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
-- activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program (program name)} — player-choice program status transitions. Backend validates current status, fail-soft on illegal transition. Costs: activate / deactivate = 1 NA; reactivate (derezzed → active) = 2 NA atomic (fails with no NA spent if <2 remain); reinstall (destroyed → deactivated, only with Backup Drive) = 1 Meat Action. Include the cost in your `net_actions_used` count when reporting. Do NOT mutate active_programs[i].status manually.
+- activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program (program name)} — player-choice program status transitions. Costs (RAW p.201-202 + Errata p.3): activate=1 NA (deactivated → active, OPTIONAL before program_attack since the attack auto-activates for free); deactivate=1 NA (active|derezzed → deactivated; also covers the first half of recovering a Derezzed program); reactivate=1 NA (legacy alias for deactivate from derezzed); reinstall=1 Meat Action (destroyed → deactivated, requires Backup Drive). program_attack accepts a Deactivated firing program and auto-activates it within the 1-NA attack. Backend validates and fail-softs on illegal transitions. Include cost in `net_actions_used` when reporting. Do NOT mutate active_programs[i].status manually.
 
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions). NET skill_check / opposed_check also REQUIRE an `ability` tag matching the Interface Ability being rolled.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually to the DV.
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type in the action.
+
+PLAYER-SIDE RAW VIOLATIONS: If you propose actions that violate RAW (Slide preemptive, fire a Derezzed program, insufficient NA, etc.), the resolver returns those entries in a top-level `player_errors` list. When `player_errors` is non-empty: output `hack_state_updates` with `net_actions_used: 0` (no time/resources spent — the actions never resolved); the narrator will route to OOC and explain the issue. Do NOT pretend the actions resolved in fiction. Set `meatspace_round: false`.
 
 OUTPUT: JSON with these fields:
 - actions: array of mechanical actions to resolve
@@ -2234,6 +2263,8 @@ RULES:
 - Include 🎲 roll breakdown lines for every resolved action
 - If meatspace_round is true, narrate the meatspace crew's round ABOVE NET content, separated by ---
 - End each exchange presenting available options to the player
+
+PLAYER-SIDE RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The player asked for an illegal action. Backend rejected it; nothing happened in fiction. Skip the normal narrative. Output a brief OOC clarification — "(OOC: ...)" prefix or italics — paraphrasing the `reason` field, then prompt the player to retry. Examples: "(OOC: Slide only escapes a Black ICE that's already engaged you — none of the active ICE are hunting you yet. What would you like to do instead?)", "(OOC: Sword is currently Derezzed. To get it back online: 1 NA to Reactivate (Derezzed → Deactivated), then 1 NA to fire it (auto-activates per RAW Errata p.3). Or you can spend 1 NA on activate_program to leave it Active without firing.)" Do NOT roll dice, do NOT narrate fiction, do NOT advance time.
 
 ROLL FORMAT:
 🎲 [Description]: {formatted string from result}
@@ -2307,6 +2338,8 @@ RULES:
 - 2-5 sentences per section
 - Name combatants. Chrome reflects neon. Data streams as light.
 - End each exchange setting up the next combatant's situation
+
+PLAYER-SIDE RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The player asked for an illegal action. Backend rejected it; nothing happened in fiction. Skip the normal narrative — output a brief OOC clarification ("(OOC: ...)" prefix or italics) paraphrasing the `reason` field, then prompt for retry. Do NOT roll dice, do NOT narrate fiction, do NOT advance time. Other (legal) actions in the same batch may still narrate normally if they resolved.
 
 If both combat_complete and net_complete, write a wrap-up paragraph."""
 

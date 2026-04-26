@@ -2268,5 +2268,114 @@ class TestSlideEnforcement(unittest.TestCase):
         self.assertEqual(hunt_ops[0]["netrunner"], "RedVelvet")
 
 
+class TestPlayerErrorsSummary(unittest.TestCase):
+    """Verify resolve_actions surfaces player-side RAW violations as a
+    top-level `player_errors` list so the narrator can route to OOC retry
+    without scanning every action result.
+
+    The narrator contract treats non-empty player_errors as: do NOT advance
+    the world (skip report_*_state), drop OOC, paraphrase the reason field,
+    prompt for retry.
+    """
+
+    def test_clean_batch_has_empty_player_errors(self):
+        """All-valid actions → player_errors=[]."""
+        ice_status = {"n1": {"name": "Hellhound", "behavior": "black",
+                              "ice_type": "hellhound", "rez_current": 20,
+                              "rez_max": 20, "status": "active",
+                              "hunting": ["V"]}}
+        result = resolve_actions([{
+            "type": "opposed_check", "character": "V", "target": "Hellhound",
+            "attacker_stat": 4, "defender_stat": 0,
+            "attacker_label": "Slide", "defender_label": "PER",
+            "net": True, "ability": "Slide",
+        }], ice_status=ice_status)
+        self.assertEqual(result["player_errors"], [])
+
+    def test_slide_preemptive_surfaces_in_player_errors(self):
+        """slide_preemptive error appears in player_errors with action_index + reason."""
+        ice_status = {"n1": {"name": "Hellhound", "behavior": "black",
+                              "ice_type": "hellhound", "rez_current": 20,
+                              "rez_max": 20, "status": "active", "hunting": []}}
+        result = resolve_actions([{
+            "type": "opposed_check", "character": "V", "target": "Hellhound",
+            "attacker_stat": 4, "defender_stat": 0,
+            "attacker_label": "Slide", "defender_label": "PER",
+            "net": True, "ability": "Slide",
+        }], ice_status=ice_status)
+        self.assertEqual(len(result["player_errors"]), 1)
+        pe = result["player_errors"][0]
+        self.assertEqual(pe["action_index"], 0)
+        self.assertEqual(pe["error"], "slide_preemptive")
+        self.assertEqual(pe["action_type"], "opposed_check")
+        self.assertIn("hunting", pe["reason"].lower())
+
+    def test_program_not_firable_surfaces_in_player_errors(self):
+        """program_not_firable (Derezzed Sword) appears in player_errors."""
+        progs = [{"name": "Sword", "status": "derezzed", "rez": 0,
+                  "category": "attacker"}]
+        result = resolve_actions([{
+            "type": "program_attack", "character": "V",
+            "program": "Sword", "target": "Hellhound",
+            "interface_rank": 4, "program_atk": 1, "target_def": 2,
+            "program_damage_dice": 3, "target_rez": 20,
+        }], active_programs=progs, net_actions_remaining=4)
+        self.assertEqual(len(result["player_errors"]), 1)
+        self.assertEqual(result["player_errors"][0]["error"], "program_not_firable")
+
+    def test_dice_failure_does_not_appear_in_player_errors(self):
+        """A normal missed roll (success: false, no error code) is NOT a
+        player error — the world should advance normally."""
+        ice_status = {"n1": {"name": "Hellhound", "behavior": "black",
+                              "ice_type": "hellhound", "rez_current": 20,
+                              "rez_max": 20, "status": "active",
+                              "hunting": ["V"]}}
+        # Stack the deck against the player so they fail the Slide
+        result = resolve_actions([{
+            "type": "opposed_check", "character": "V", "target": "Hellhound",
+            "attacker_stat": 1, "defender_stat": 99,
+            "attacker_label": "Slide", "defender_label": "PER",
+            "net": True, "ability": "Slide",
+        }], ice_status=ice_status)
+        # Even if the roll fails, no error code → not in player_errors
+        self.assertEqual(result["player_errors"], [])
+
+    def test_mixed_batch_only_errors_in_player_errors(self):
+        """A batch with one valid + one invalid action — only the invalid
+        one shows up in player_errors with the right action_index."""
+        ice_status = {"n1": {"name": "Hellhound", "behavior": "black",
+                              "ice_type": "hellhound", "rez_current": 20,
+                              "rez_max": 20, "status": "active",
+                              "hunting": ["V"]}}
+        progs = [{"name": "Sword", "status": "derezzed", "rez": 0,
+                  "category": "attacker"}]
+        result = resolve_actions([
+            # Valid: Slide vs hunting Hellhound
+            {"type": "opposed_check", "character": "V", "target": "Hellhound",
+             "attacker_stat": 4, "defender_stat": 0,
+             "attacker_label": "Slide", "defender_label": "PER",
+             "net": True, "ability": "Slide"},
+            # Invalid: fire Derezzed Sword
+            {"type": "program_attack", "character": "V",
+             "program": "Sword", "target": "Hellhound",
+             "interface_rank": 4, "program_atk": 1, "target_def": 2,
+             "program_damage_dice": 3, "target_rez": 20},
+        ], ice_status=ice_status, active_programs=progs,
+           net_actions_remaining=4)
+        self.assertEqual(len(result["player_errors"]), 1)
+        self.assertEqual(result["player_errors"][0]["action_index"], 1)
+        self.assertEqual(result["player_errors"][0]["error"], "program_not_firable")
+
+    def test_insufficient_net_actions_surfaces_in_player_errors(self):
+        """insufficient_net_actions (boosted action with no NA) surfaces."""
+        result = resolve_actions([{
+            "type": "activate_program", "character": "V",
+            "program": "Shield",
+        }], active_programs=[{"name": "Shield", "status": "deactivated", "rez": 7}],
+           net_actions_remaining=0)
+        self.assertEqual(len(result["player_errors"]), 1)
+        self.assertEqual(result["player_errors"][0]["error"], "insufficient_net_actions")
+
+
 if __name__ == "__main__":
     unittest.main()

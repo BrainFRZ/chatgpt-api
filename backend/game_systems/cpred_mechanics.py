@@ -5073,7 +5073,37 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
             logger.warning(f"resolve_actions: error resolving {action_type}: {e}")
             results.append({"type": action_type, "error": str(e), "character": _char})
 
-    return {"results": results, "state_ops": all_state_ops, "tar_consumed": _tar_consumed}
+    # Surface player-side RAW violations as a top-level summary field so the
+    # narration agent can detect them with a single check rather than scanning
+    # every result. These are the error codes that mean "player asked for an
+    # illegal action, no resources spent, no state changed" — the model must
+    # NOT advance the world (skip report_*_state, route to OOC clarification
+    # with the action's reason, prompt for retry).
+    _PLAYER_ERROR_CODES = {
+        "slide_preemptive", "slide_already_used",
+        "program_not_firable", "program_not_loaded",
+        "illegal_status_transition", "insufficient_net_actions",
+        "program_unusable", "target_ambiguous",
+        "missing_program", "reinstall_requires_backup_drive",
+    }
+    player_errors = []
+    for _idx, _r in enumerate(results):
+        if not isinstance(_r, dict):
+            continue
+        _err = _r.get("error")
+        if _err in _PLAYER_ERROR_CODES:
+            player_errors.append({
+                "action_index": _idx,
+                "action_type": _r.get("type", ""),
+                "error": _err,
+                "reason": _r.get("reason", ""),
+            })
+    return {
+        "results": results,
+        "state_ops": all_state_ops,
+        "tar_consumed": _tar_consumed,
+        "player_errors": player_errors,
+    }
 
 
 # ---------------------------------------------------------------------------
