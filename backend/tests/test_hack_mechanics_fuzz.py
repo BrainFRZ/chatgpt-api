@@ -662,7 +662,9 @@ class TestApplyTraceAutoIncrement(unittest.TestCase):
         self.assertIsNone(hs["trace_progress"])
 
     def test_trace_completion_forces_convergence(self):
-        """Trace completing sets alert to 7 (Convergence)."""
+        """Trace completing rolls dispatch (does NOT force Convergence — those
+        are decoupled tracks per the corrected RAW interpretation)."""
+        from unittest.mock import patch
         hs = cpred_init_hack_state(tier="full_run")
         hs["sr"] = 3
         hs["trace_progress"] = 2  # max is 6-3=3, so one more tick → 3 >= 3
@@ -672,9 +674,17 @@ class TestApplyTraceAutoIncrement(unittest.TestCase):
                           "rez_current": 6, "rez_max": 6},
         }
         hs["net_actions_remaining"] = 1
-        cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 1}})
+        # Force dispatch pass (d10=10) and a fixed ETA (d6=4) → ETA=4+2=6.
+        with patch("game_systems.cpred_hack.random.randint",
+                   side_effect=[10, 4]):
+            cpred_apply_hack_state(hs, {"hack_state": {"net_actions_used": 1}})
         self.assertEqual(hs["trace_progress"], 3)
-        self.assertEqual(hs["alert_level"], 7)
+        # Alert is unchanged — Trace and Convergence are decoupled.
+        self.assertEqual(hs["alert_level"], 5)
+        # Dispatch attempted, passed, ETA decremented by one same-call.
+        self.assertTrue(hs["meatspace_security_dispatch_attempted"])
+        self.assertTrue(hs["meatspace_security_dispatched"])
+        self.assertEqual(hs["meatspace_security_eta"], 5)  # 6 - 1 in-call
 
     def test_trace_garbage_values_no_crash(self):
         """Garbage in trace-related fields doesn't crash."""

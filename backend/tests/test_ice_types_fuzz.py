@@ -2377,5 +2377,159 @@ class TestPlayerErrorsSummary(unittest.TestCase):
         self.assertEqual(result["player_errors"][0]["error"], "insufficient_net_actions")
 
 
+class TestTraceMeatspaceDispatch(unittest.TestCase):
+    """RAW p.205-211: Trace finds the body, rolls dispatch, ETA ticks down,
+    backend auto-emits _initiate_combat on arrival.
+    """
+
+    def _hs_with_active_trace(self, sr=3):
+        hs = _make_hack_state()
+        hs["sr"] = sr
+        hs["trace_progress"] = 0
+        hs["ice_status"] = {
+            "Gateway_Trace": {
+                "name": "Trace ICE", "behavior": "trace",
+                "rez_current": sr * 2, "rez_max": sr * 2,
+                "status": "active",
+            }
+        }
+        return hs
+
+    def test_trace_completion_rolls_dispatch_pass(self):
+        """Trace completes, dispatch roll passes → ETA set, dispatched flag true."""
+        import unittest.mock as mock
+        hs = self._hs_with_active_trace(sr=3)
+        gs = _make_game_state()
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        # SR 3 → trace_max = 3. Tick three times.
+        # Force dispatch pass with high d10 roll, then a fixed ETA.
+        with mock.patch("game_systems.cpred_hack.random.randint",
+                         side_effect=[10, 4]):  # dispatch d10=10, eta d6=4
+            for _ in range(3):
+                _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertTrue(hs["meatspace_security_dispatch_attempted"])
+        self.assertTrue(hs["meatspace_security_dispatched"])
+        # ETA = 1d6 + max(0, 5 - sr) = 4 + 2 = 6. Then ticked once on the
+        # same call (the ETA decrement runs in-line). So 6 - 1 = 5.
+        self.assertEqual(hs["meatspace_security_eta"], 5)
+
+    def test_trace_completion_rolls_dispatch_fail(self):
+        """Trace completes, dispatch roll fails → no ETA, no auto-combat."""
+        import unittest.mock as mock
+        hs = self._hs_with_active_trace(sr=1)
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        # SR 1 → trace_max = 5. Force d10=1 (1+1=2 vs DV 7 → fail).
+        with mock.patch("game_systems.cpred_hack.random.randint",
+                         return_value=1):
+            for _ in range(5):
+                _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertTrue(hs["meatspace_security_dispatch_attempted"])
+        self.assertFalse(hs["meatspace_security_dispatched"])
+        self.assertIsNone(hs["meatspace_security_eta"])
+        self.assertNotIn("_initiate_combat", hs)
+
+    def test_eta_decrements_per_round(self):
+        """Once dispatched, ETA decrements by 1 per meatspace_due tick."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        hs["meatspace_security_dispatch_attempted"] = True
+        hs["meatspace_security_dispatched"] = True
+        hs["meatspace_security_eta"] = 4
+        hs["trace_progress"] = 99  # already complete; no re-dispatch
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["meatspace_security_eta"], 3)
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["meatspace_security_eta"], 2)
+
+    def test_eta_zero_emits_initiate_combat(self):
+        """When ETA hits 0, _initiate_combat is auto-emitted with the right trigger."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        hs["meatspace_security_dispatch_attempted"] = True
+        hs["meatspace_security_dispatched"] = True
+        hs["meatspace_security_eta"] = 1
+        hs["trace_progress"] = 99
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["meatspace_security_eta"], 0)
+        self.assertIn("_initiate_combat", hs)
+        ic = hs["_initiate_combat"]
+        self.assertEqual(ic["trigger"], "trace_meatspace_arrival")
+        self.assertEqual(ic["sr"], 3)
+        self.assertEqual(ic["enemies"], [])
+        self.assertIn("Meatspace security", ic["reason"])
+
+    def test_dispatch_only_fires_once(self):
+        """Re-completing Trace doesn't re-roll dispatch (flag prevents it)."""
+        import unittest.mock as mock
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        # First completion: dispatch fails
+        with mock.patch("game_systems.cpred_hack.random.randint",
+                         return_value=1):
+            for _ in range(3):
+                _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertFalse(hs["meatspace_security_dispatched"])
+        # Reset trace_progress, tick again. Dispatch already attempted →
+        # no re-roll, no dispatch.
+        hs["trace_progress"] = 0
+        with mock.patch("game_systems.cpred_hack.random.randint",
+                         return_value=10):  # would pass if rolled
+            for _ in range(3):
+                _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertFalse(hs["meatspace_security_dispatched"])
+        self.assertIsNone(hs["meatspace_security_eta"])
+
+    def test_eta_continues_after_trace_derezzed(self):
+        """Strike team is en route; derezzing the Trace ICE doesn't recall them."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        hs["meatspace_security_dispatched"] = True
+        hs["meatspace_security_dispatch_attempted"] = True
+        hs["meatspace_security_eta"] = 3
+        # Derez the Trace
+        hs["ice_status"]["Gateway_Trace"]["status"] = "derezzed"
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        self.assertEqual(hs["meatspace_security_eta"], 2)
+
+    def test_eta_zero_does_not_overwrite_existing_initiate_combat(self):
+        """If model already set initiate_combat (separate ambush narrative),
+        backend doesn't clobber it on ETA=0."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        hs["meatspace_security_dispatch_attempted"] = True
+        hs["meatspace_security_dispatched"] = True
+        hs["meatspace_security_eta"] = 1
+        hs["trace_progress"] = 99
+        hs["_initiate_combat"] = {"reason": "Patrol spotted the body",
+                                   "trigger": "narrative_ambush",
+                                   "enemies": ["Patrol"]}
+        _apply_trace_auto_increment(hs, tick_condition=True)
+        # Original trigger preserved
+        self.assertEqual(hs["_initiate_combat"]["trigger"], "narrative_ambush")
+        self.assertEqual(hs["_initiate_combat"]["enemies"], ["Patrol"])
+
+    def test_trace_completion_does_not_raise_alert(self):
+        """Per RAW (per the corrected mechanic): Trace completion is a
+        meatspace dispatch trigger, not a Convergence (alert 7) trigger.
+        Alert stays at whatever it was."""
+        import unittest.mock as mock
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        hs["alert_level"] = 4  # Active Search, well below Convergence
+        with mock.patch("game_systems.cpred_hack.random.randint",
+                         return_value=10):
+            for _ in range(3):
+                _apply_trace_auto_increment(hs, tick_condition=True)
+        # Trace done, security dispatched, but alert_level NOT bumped
+        self.assertEqual(hs["alert_level"], 4)
+
+    def test_no_tick_condition_no_progress(self):
+        """Trace tick is gated on meatspace_due — mid-turn calls don't tick."""
+        from game_systems.cpred_hack import _apply_trace_auto_increment
+        hs = self._hs_with_active_trace(sr=3)
+        _apply_trace_auto_increment(hs, tick_condition=False)
+        self.assertEqual(hs["trace_progress"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1578,25 +1578,36 @@ Alert only rises from events INSIDE the architecture. These are the triggers —
 | 1–2 | Elevated | System suspicious. No mechanical change yet. |
 | 3–4 | Active Search | **ALL Interface check DVs +2.** Patrol ICE detection rolls get +2 bonus. |
 | 5–6 | Lockdown | DV +2 persists. **Moving between nodes requires an Interface check (DV = system Base DV from SR table).** If no Trace ICE is active anywhere, spawn a new Trace ICE at the Gateway (active, REZ = SR × 2). |
-| 7+ | Convergence | **Spawn Black ICE** at the Netrunner's current node (type scales with SR — auto-spawned by backend). Set `initiate_combat` with reason "Convergence" and facility-appropriate security NPCs. The hack is in endgame — Jack Out or finish the objective NOW. |
+| 7+ | Convergence | **Spawn Black ICE** at the Netrunner's current node (type scales with SR — auto-spawned by backend). The hack is in endgame — Jack Out or finish the objective NOW. **NOT a meatspace dispatch trigger** — meatspace security only arrives through the Trace mechanic (see below); Convergence is a NET-side escalation. |
 
 When alert_level crosses a threshold boundary, apply the new effects immediately — do NOT wait until the next exchange. Stack with existing effects (e.g., DV +2 at Active Search persists through Lockdown and Convergence).
 
 ### Trace & Convergence
-**Trace ICE** runs a countdown. When any Trace ICE is active and not derezzed/disabled:
-- Increment `trace_progress` by **1 at the end of each full turn** (after all NET actions are resolved, same time as meatspace round).
+**Trace ICE** runs a countdown that locates the Netrunner's body. **Convergence** is the alert-7 NET-defense state. They are *separate tracks* — Trace can complete at low alert; Convergence (Black ICE spawn at the Netrunner's node) can fire from loud actions without any Trace running.
+
+**Trace mechanic (RAW p.205-211, backend-driven):** When any Trace ICE is active and not derezzed/disabled:
+- `trace_progress` increments by 1 at the end of each full turn (with the meatspace round tick).
 - Trace completes when `trace_progress` ≥ **(6 − SR)** (minimum 1 round).
+- On completion, **backend rolls dispatch automatically**: 1d10 + SR vs DV 7. Result stored in `_last_trace_dispatch_roll` (for narration).
+- **Pass** → `meatspace_security_dispatched = true`, `meatspace_security_eta` rolled = `1d6 + max(0, 5 − SR)`. SR 1 → 5–10 rounds, SR 5 → 1–6 rounds.
+- **Fail** → no strike team. Corp logged the location but didn't dispatch; consequences are post-run (followups, retaliation), not in-scene. `meatspace_security_dispatched` stays false.
+- The dispatch roll fires **once per encounter** (`meatspace_security_dispatch_attempted` flag). If the Netrunner derezzes the Trace before completion, no dispatch. If a new Trace spawns later, the prior `trace_progress` resumes.
 
-**On Trace completion:**
-1. The Netrunner's physical body location is **burned** — the system's owners know exactly where the meat is.
-2. If `alert_level` < 7, **set alert_level to 7** (Convergence triggers immediately with all its effects).
-3. Narrate the consequence: security teams are en route to the Netrunner's physical location, comms chatter, alarms. Set `initiate_combat` with reason "Trace complete — physical location compromised" and dispatched enemies.
-4. The Netrunner can keep running but the clock is now a meat-clock — the crew must protect the body or extract.
+**ETA countdown:** Each turn after dispatch, backend decrements `meatspace_security_eta` by 1. When it hits 0, backend **auto-emits `_initiate_combat`** with `trigger: "trace_meatspace_arrival"` — you (the model) populate the `enemies` list with facility-appropriate security NPCs (corp ESU team, MaxTac for severe SR, building rentacops, whatever fits the scene). Do NOT set `initiate_combat` manually for Trace dispatch — the backend owns this.
 
-Derezzing or disabling Trace ICE **freezes** trace_progress (does not reset it). If new Trace ICE spawns later (e.g., from Lockdown), it resumes from the frozen count.
+**Narrate the dispatch sequence:**
+1. Trace completes → describe the moment the corp pinpoints the body. Comms chatter, alarms, "we have a fix on the netrunner."
+2. ETA ticks → describe approaching response: sirens distant, AVs vectoring in, footsteps in the building.
+3. ETA = 0 + `_initiate_combat` set → strike team kicks the door, combat starts. The hack continues in `net_combat` mode (the Netrunner is still jacked in).
+
+**Trace completion does NOT raise alert to Convergence.** They're decoupled tracks. Alert reaches 7 (Convergence Black ICE spawn) through loud NET actions, not through Trace.
 
 ### Combat Breakout
-If meatspace combat breaks out during the hack — Convergence dispatches physical security, Trace burns the location, the body is discovered, ambush, alarm — set `initiate_combat` with the reason and enemy names. Do NOT set `hack_complete` — the hack continues in combined NET+combat mode. Do NOT resolve the combat; end the exchange after setting the trigger.
+Two paths to net_combat from a hack:
+1. **Trace-driven (backend auto-emits)**: Trace ICE completes → dispatch roll → ETA ticks → on ETA=0 the backend sets `_initiate_combat` for you with `trigger: "trace_meatspace_arrival"`. Your job is to populate the `enemies` list (facility-appropriate security NPCs) when you see this trigger. See §Trace & Convergence.
+2. **Model-narrated**: meatspace ambush, body discovered by patrols, ally yells the netrunner's location, etc. — narrative reason unrelated to Trace. Set `initiate_combat` yourself with `reason` and `enemies`.
+
+In both cases: do NOT set `hack_complete` — the hack continues in `net_combat` mode. Do NOT resolve the combat in this exchange; end after setting/seeing the trigger.
 
 ### Completing the Hack
 Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:

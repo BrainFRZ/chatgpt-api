@@ -71,6 +71,14 @@ def init_hack_state(
         "nodes_visited": ["Gateway"],
         "ice_status": {},
         "trace_progress": None,
+        # Trace → physical-security dispatch (RAW p.205-211). When a Trace ICE
+        # completes, the corp learns the Netrunner's body location and rolls
+        # whether to dispatch a strike team. If yes, an SR-scaled ETA ticks
+        # down each round; on arrival, backend auto-emits _initiate_combat
+        # so the encounter transitions to net_combat (meat + NET concurrent).
+        "meatspace_security_dispatch_attempted": False,
+        "meatspace_security_dispatched": False,
+        "meatspace_security_eta": None,
         "tar_stacks": 0,
         "brain_damage": 0,
         "narrative_summary": None,
@@ -1069,7 +1077,18 @@ def _check_forced_disconnect(state, game_state, name_key, pipeline_state=None):
 
 
 def _apply_trace_auto_increment(state, tick_condition):
-    """Tick trace progress once per completed NET turn if active Trace ICE exists."""
+    """Tick trace progress and meatspace-security ETA each completed NET turn.
+
+    Trace mechanic (RAW p.205-211): when a Trace ICE completes its countdown,
+    the corp pinpoints the Netrunner's body. Backend rolls whether a strike
+    team is dispatched (1d10 + SR vs DV 7). If yes, an SR-scaled ETA ticks
+    down each round; on arrival, _initiate_combat is auto-emitted so the
+    encounter transitions to net_combat (meatspace + NET concurrent).
+
+    Trace completion does NOT directly raise alert to Convergence — that's
+    a separate alert-driven track. Trace and Convergence can both be
+    active, both dormant, or one without the other.
+    """
     try:
         if not tick_condition:
             return
@@ -1082,12 +1101,53 @@ def _apply_trace_auto_increment(state, tick_condition):
             and "trace" in v.get("behavior", "").lower()
             for v in ice_status.values()
         )
+        sr = int(state.get("sr", 3))
+
+        # Tick trace progress while Trace is active.
         if has_active_trace and state.get("trace_progress") is not None:
             state["trace_progress"] = int(state.get("trace_progress", 0)) + 1
-            sr = int(state.get("sr", 3))
             trace_max = max(1, 6 - sr)
-            if state["trace_progress"] >= trace_max:
-                state["alert_level"] = max(int(state.get("alert_level", 0)), 7)
+            # On Trace completion: roll dispatch (once per encounter).
+            if (state["trace_progress"] >= trace_max
+                    and not state.get("meatspace_security_dispatch_attempted")):
+                state["meatspace_security_dispatch_attempted"] = True
+                # Dispatch check: 1d10 + SR vs DV 7. SR 1 has ~30% chance
+                # ((1d10 ≥ 6) → 50% × …); SR 5 has ~90% ((1d10 ≥ 2)).
+                roll = random.randint(1, 10)
+                state["_last_trace_dispatch_roll"] = {
+                    "roll": roll, "sr_bonus": sr, "total": roll + sr,
+                    "dv": 7, "passed": (roll + sr) >= 7,
+                }
+                if (roll + sr) >= 7:
+                    state["meatspace_security_dispatched"] = True
+                    # ETA: 1d6 + max(0, 5 - sr). SR 1 → 5-10 rounds (slow
+                    # response, distant); SR 5 → 1-6 rounds (corp ready).
+                    eta = random.randint(1, 6) + max(0, 5 - sr)
+                    state["meatspace_security_eta"] = eta
+
+        # Tick meatspace security ETA (independent of has_active_trace —
+        # once dispatched, the strike team is already en route even if
+        # the Netrunner derezzes the Trace ICE afterward).
+        eta = state.get("meatspace_security_eta")
+        if isinstance(eta, int) and eta > 0:
+            state["meatspace_security_eta"] = eta - 1
+            if state["meatspace_security_eta"] <= 0:
+                state["meatspace_security_eta"] = 0
+                # Strike team arrives — auto-emit combat breakout if the
+                # model didn't already set one this exchange (e.g., from
+                # an unrelated narrative ambush).
+                if not state.get("_initiate_combat"):
+                    state["_initiate_combat"] = {
+                        "reason": (
+                            "Meatspace security strike team arrived. Corp "
+                            "dispatched a response unit after Trace "
+                            "completed; Netrunner's body is now under "
+                            "physical attack."
+                        ),
+                        "trigger": "trace_meatspace_arrival",
+                        "sr": sr,
+                        "enemies": [],  # model populates from facility context
+                    }
     except (TypeError, ValueError, OverflowError):
         pass
 
