@@ -5743,6 +5743,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                            else None),
                     slide_used_this_turn=bool(hack_state.get("slide_used_this_turn", False))
                                           if isinstance(hack_state, dict) else False,
+                    system_map=hack_state.get("system_map") if isinstance(hack_state, dict) else None,
+                    current_node=hack_state.get("current_node") if isinstance(hack_state, dict) else None,
                 )
 
                 mode_result = None
@@ -6019,6 +6021,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     slide_used_this_turn=bool((_net_combat or {}).get("slide_used_this_turn", False))
                                           if isinstance(_net_combat, dict) and _net_combat.get("active")
                                           else False,
+                    system_map=(_net_combat or {}).get("system_map")
+                               if isinstance(_net_combat, dict) and _net_combat.get("active")
+                               else None,
+                    current_node=(_net_combat or {}).get("current_node")
+                                 if isinstance(_net_combat, dict) and _net_combat.get("active")
+                                 else None,
                 )
 
                 mode_result = None
@@ -6290,6 +6298,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                            else None),
                     slide_used_this_turn=bool(nc_state.get("slide_used_this_turn", False))
                                           if isinstance(nc_state, dict) else False,
+                    system_map=nc_state.get("system_map") if isinstance(nc_state, dict) else None,
+                    current_node=nc_state.get("current_node") if isinstance(nc_state, dict) else None,
                 )
 
                 mode_result = None
@@ -7448,6 +7458,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _rm_active_boosts = None
                                 _rm_cycles_remaining = None
                                 _rm_slide_used = False
+                                _rm_system_map = None
+                                _rm_current_node = None
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
@@ -7462,6 +7474,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     if _rm_cycles_raw is not None:
                                         _rm_cycles_remaining = _safe_int(_rm_cycles_raw)
                                     _rm_slide_used = bool(_rm_active_state.get("slide_used_this_turn", False))
+                                    _rm_system_map = _rm_active_state.get("system_map")
+                                    _rm_current_node = _rm_active_state.get("current_node")
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7503,6 +7517,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     active_boosts=_rm_active_boosts,
                                     cycles_remaining=_rm_cycles_remaining,
                                     slide_used_this_turn=_rm_slide_used,
+                                    system_map=_rm_system_map,
+                                    current_node=_rm_current_node,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(
@@ -7517,6 +7533,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 if any(isinstance(_op, dict) and _op.get("op") == "slide_used"
                                        for _op in _rm_result.get("state_ops", [])):
                                     _rm_slide_used = True
+                                # Propagate node moves across iterations so a chained
+                                # move + entered-node action in the next iteration
+                                # validates against the new position. Last node_change
+                                # in the iteration's ops is authoritative.
+                                for _op in _rm_result.get("state_ops", []):
+                                    if (isinstance(_op, dict) and _op.get("op") == "node_change"
+                                            and isinstance(_op.get("to_node"), str)):
+                                        _rm_current_node = _op["to_node"]
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call

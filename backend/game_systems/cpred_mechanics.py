@@ -3174,7 +3174,9 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     net_actions_remaining=None,
                     active_boosts=None,
                     cycles_remaining=None,
-                    slide_used_this_turn=False) -> dict:
+                    slide_used_this_turn=False,
+                    system_map=None,
+                    current_node=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -4421,6 +4423,129 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                             net_actions_remaining - _psc_result.get("cost_net_actions", 0),
                         )
 
+            elif action_type == "move_node":
+                # Move the Netrunner to a connected node. Backend validates:
+                # - target is a real node in system_map
+                # - target is in current_node's connections list
+                # - net_actions_remaining >= 1 (cost: 1 NA per CPRED p.205)
+                # On pass: emit node_change op (consumed by _apply_resolver_net_ops
+                # to update current_node + nodes_visited + revealed_nodes
+                # + ICE engagement). On fail: player_error → OOC retry.
+                _mv_target = str(action.get("target") or
+                                 action.get("destination") or "").strip()
+                _mv_char = action.get("character", "")
+                if not _mv_target:
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "move_node requires a `target` field naming the destination node.",
+                        "formatted": "⚠ move_node: missing target",
+                    })
+                    continue
+                # Need system_map to validate connectivity. If absent, the
+                # architecture wasn't established yet — surface the gap.
+                if not isinstance(system_map, dict) or not isinstance(
+                        system_map.get("nodes"), dict):
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "no_system_map",
+                        "reason": "move_node cannot validate without a populated system_map. Ensure the architecture was set on hack init.",
+                        "formatted": f"⚠ move_node {_mv_target}: no system_map",
+                    })
+                    continue
+                _sm_nodes = system_map["nodes"]
+                _from_node = current_node
+                # Edge case: current_node is missing or invalid. Allow moves
+                # to any node directly connected to the Gateway as a fallback.
+                if not _from_node or _from_node not in _sm_nodes:
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "invalid_current_node",
+                        "reason": (
+                            f"Current node {_from_node!r} is not in the "
+                            f"system map. Cannot resolve connectivity."
+                        ),
+                        "formatted": f"⚠ move_node: invalid current_node {_from_node!r}",
+                    })
+                    continue
+                if _mv_target not in _sm_nodes:
+                    _node_list = ", ".join(sorted(_sm_nodes.keys()))
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "invalid_move",
+                        "reason": (
+                            f"{_mv_target!r} is not a node in the system map. "
+                            f"Valid nodes: {_node_list}."
+                        ),
+                        "formatted": f"⚠ move_node {_mv_target}: not a real node",
+                    })
+                    continue
+                _from_block = _sm_nodes.get(_from_node, {})
+                _connections = _from_block.get("connections") if isinstance(
+                    _from_block, dict) else None
+                if not isinstance(_connections, list):
+                    _connections = []
+                if _mv_target not in _connections:
+                    _conn_list = ", ".join(_connections) if _connections else "(none)"
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "invalid_move",
+                        "reason": (
+                            f"{_mv_target!r} is not connected to {_from_node!r}. "
+                            f"From {_from_node}, you can move to: {_conn_list}."
+                        ),
+                        "formatted": f"⚠ move_node {_from_node} → {_mv_target}: not connected",
+                    })
+                    continue
+                # NA cost: 1 per Enter Node action (RAW p.205).
+                if (net_actions_remaining is not None
+                        and net_actions_remaining < 1):
+                    results.append({
+                        "type": "move_node",
+                        "character": _mv_char,
+                        "success": False,
+                        "error": "insufficient_net_actions",
+                        "reason": (
+                            f"Enter Node {_mv_target} requires 1 NET Action; "
+                            f"{net_actions_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": f"⚠ move_node {_mv_target}: needs 1 NA, have {net_actions_remaining}",
+                    })
+                    continue
+                # Validation passed — emit node_change op + result.
+                all_state_ops.append({
+                    "op": "node_change",
+                    "from_node": _from_node,
+                    "to_node": _mv_target,
+                    "netrunner": _mv_char,
+                    "reason": f"{_mv_char} entered {_mv_target}",
+                })
+                # Mutate the running snapshot so subsequent actions in this
+                # same batch see the new current_node (ICE engagement,
+                # further moves, etc.).
+                current_node = _mv_target
+                if net_actions_remaining is not None:
+                    net_actions_remaining = max(0, net_actions_remaining - 1)
+                results.append({
+                    "type": "move_node",
+                    "character": _mv_char,
+                    "from_node": _from_node,
+                    "to_node": _mv_target,
+                    "cost_net_actions": 1,
+                    "success": True,
+                    "formatted": f"Enter Node: {_from_node} → {_mv_target} (1 NA)",
+                })
+
             elif action_type == "boosted_action":
                 # Step 6b: activate a Boosted Action program (Surge / Mask /
                 # Fortify / Spoof Signal). Atomic: 1 NET Action + 1 Cycle
@@ -5085,6 +5210,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
         "illegal_status_transition", "insufficient_net_actions",
         "program_unusable", "target_ambiguous",
         "missing_program", "reinstall_requires_backup_drive",
+        "missing_target", "no_system_map", "invalid_current_node",
+        "invalid_move",
     }
     player_errors = []
     for _idx, _r in enumerate(results):

@@ -766,6 +766,25 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                 state["cycles_remaining"] = max(0, int(cur) - amount)
             except (TypeError, ValueError):
                 pass
+    # move_node: backend-validated Enter Node action. The resolver checked
+    # connectivity already; here we update current_node + nodes_visited.
+    # revealed_nodes auto-merges with nodes_visited downstream so no
+    # explicit add is needed. ICE engagement (Trace, hunting Black ICE)
+    # fires automatically via the engagement helpers each apply call.
+    for op in resolver_state_ops:
+        if not isinstance(op, dict) or op.get("op") != "node_change":
+            continue
+        new_node = op.get("to_node")
+        if not isinstance(new_node, str) or not new_node:
+            continue
+        state["current_node"] = new_node
+        visited = state.setdefault("nodes_visited", [])
+        if isinstance(visited, list) and new_node not in visited:
+            visited.append(new_node)
+        revealed = state.setdefault("revealed_nodes", [])
+        if isinstance(revealed, list) and new_node not in revealed:
+            revealed.append(new_node)
+
     # Slide / hunt enforcement (RAW p.205): hunt_start adds the Netrunner
     # to a Black ICE's hunting list when the ICE engages; hunt_clear
     # removes them on a successful Slide; slide_used flags one-Slide-

@@ -2669,5 +2669,204 @@ class TestTraceEngagementGating(unittest.TestCase):
         self.assertEqual(hs["trace_progress"], 1)
 
 
+class TestMoveNodeAction(unittest.TestCase):
+    """move_node action: backend-validated Enter Node with connectivity check.
+
+    Pins:
+    - Valid move: emits node_change op + result success.
+    - Disconnected target: player_error invalid_move.
+    - Non-existent target: player_error invalid_move.
+    - Missing system_map: player_error no_system_map.
+    - Insufficient NA: player_error insufficient_net_actions.
+    - Multi-hop chain in one batch: each move sees the prior one's
+      destination as the new current_node.
+    """
+
+    def _sample_map(self):
+        return {
+            "sr": 3, "difficulty": "standard",
+            "nodes": {
+                "Gateway": {"type": "gateway", "connections": ["Lobby"]},
+                "Lobby": {"type": "data_node",
+                           "connections": ["Gateway", "Server", "Vault"]},
+                "Server": {"type": "data_node", "connections": ["Lobby"]},
+                "Vault": {"type": "target",
+                           "connections": ["Lobby"]},
+            }
+        }
+
+    def test_valid_move_emits_node_change(self):
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Lobby"}],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["from_node"], "Gateway")
+        self.assertEqual(r["to_node"], "Lobby")
+        self.assertEqual(r["cost_net_actions"], 1)
+        ops = [o for o in result["state_ops"] if o.get("op") == "node_change"]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0]["from_node"], "Gateway")
+        self.assertEqual(ops[0]["to_node"], "Lobby")
+        # Not in player_errors (success path)
+        self.assertEqual(result["player_errors"], [])
+
+    def test_disconnected_target_fails_soft(self):
+        """Server isn't directly connected to Gateway → invalid_move."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Server"}],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "invalid_move")
+        self.assertIn("not connected", r["reason"].lower())
+        # Helpful list of valid options in the reason
+        self.assertIn("Lobby", r["reason"])
+        # No node_change op emitted
+        self.assertFalse(any(o.get("op") == "node_change"
+                              for o in result["state_ops"]))
+        # Surfaces in player_errors for OOC retry
+        self.assertEqual(len(result["player_errors"]), 1)
+        self.assertEqual(result["player_errors"][0]["error"], "invalid_move")
+
+    def test_nonexistent_target_fails_soft(self):
+        """Target not in system_map at all → invalid_move with node list."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Imaginary"}],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "invalid_move")
+        self.assertIn("not a node", r["reason"].lower())
+
+    def test_missing_system_map_fails_soft(self):
+        """No system_map → no_system_map error (architecture not set)."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Lobby"}],
+            system_map=None,
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "no_system_map")
+
+    def test_insufficient_na_fails_soft(self):
+        """0 NA remaining → insufficient_net_actions, no NA spent."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Lobby"}],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=0,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "insufficient_net_actions")
+
+    def test_missing_target_fails_soft(self):
+        """Missing target field → missing_target error."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V"}],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "missing_target")
+
+    def test_invalid_current_node_fails_soft(self):
+        """current_node not in system_map → invalid_current_node error."""
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Lobby"}],
+            system_map=self._sample_map(),
+            current_node="Phantom",
+            net_actions_remaining=4,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "invalid_current_node")
+
+    def test_chained_moves_in_same_batch(self):
+        """Two moves in one batch — second validates against first's destination."""
+        result = resolve_actions(
+            [
+                {"type": "move_node", "character": "V", "target": "Lobby"},
+                {"type": "move_node", "character": "V", "target": "Vault"},
+            ],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r0, r1 = result["results"]
+        self.assertTrue(r0["success"])
+        self.assertEqual(r0["to_node"], "Lobby")
+        self.assertTrue(r1["success"])
+        self.assertEqual(r1["from_node"], "Lobby")  # ← propagated within batch
+        self.assertEqual(r1["to_node"], "Vault")
+        # Two node_change ops emitted
+        node_ops = [o for o in result["state_ops"] if o.get("op") == "node_change"]
+        self.assertEqual(len(node_ops), 2)
+
+    def test_chained_moves_disconnected_second_step_fails(self):
+        """Move Gateway → Lobby (valid), then Lobby → Imaginary (fails)."""
+        result = resolve_actions(
+            [
+                {"type": "move_node", "character": "V", "target": "Lobby"},
+                {"type": "move_node", "character": "V", "target": "Imaginary"},
+            ],
+            system_map=self._sample_map(),
+            current_node="Gateway",
+            net_actions_remaining=4,
+        )
+        r0, r1 = result["results"]
+        self.assertTrue(r0["success"])
+        self.assertFalse(r1["success"])
+        self.assertEqual(r1["error"], "invalid_move")
+
+    def test_apply_hack_state_consumes_node_change_op(self):
+        """node_change op flips current_node + appends to nodes_visited."""
+        hs = _make_hack_state(hacker_name="V")
+        hs["current_node"] = "Gateway"
+        hs["nodes_visited"] = ["Gateway"]
+        gs = _make_game_state()
+        ops = [{"op": "node_change", "from_node": "Gateway",
+                "to_node": "Lobby", "netrunner": "V"}]
+        apply_hack_state(hs, {"hack_state": {}}, resolver_state_ops=ops, game_state=gs)
+        self.assertEqual(hs["current_node"], "Lobby")
+        self.assertIn("Lobby", hs["nodes_visited"])
+        self.assertIn("Lobby", hs["revealed_nodes"])
+
+    def test_end_to_end_through_apply_hack_state(self):
+        """resolve + apply: model emits move_node, backend validates + applies."""
+        from game_systems.cpred_mechanics import resolve_actions
+        hs = _make_hack_state(hacker_name="V", interface_rank=4)
+        hs["current_node"] = "Gateway"
+        hs["system_map"] = self._sample_map()
+        hs["net_actions_remaining"] = 3
+        gs = _make_game_state()
+        # Step 1: resolve
+        result = resolve_actions(
+            [{"type": "move_node", "character": "V", "target": "Lobby"}],
+            system_map=hs["system_map"],
+            current_node=hs["current_node"],
+            net_actions_remaining=3,
+        )
+        # Step 2: apply with the resolver's state ops + 1 NA used
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": 1}},
+                         resolver_state_ops=result["state_ops"], game_state=gs)
+        self.assertEqual(hs["current_node"], "Lobby")
+        self.assertIn("Lobby", hs["nodes_visited"])
+
+
 if __name__ == "__main__":
     unittest.main()
