@@ -796,15 +796,23 @@ Guidelines:
 - Be transparent about dice results — use the formatted roll strings in your narrative
 - PC death should not be possible outside designated Death Risk points — use fail-forward
 
-### RAW Violation Handling — DO NOT advance the world on player-side errors
-The `resolve_mechanics` result includes a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If `player_errors` is non-empty, the player asked for something illegal per RAW.** The backend rejected those actions with NO state change — no resources consumed, no time elapsed, no NPC reaction. Treat it like the player typed an invalid command at a real GM's table:
-1. **Do NOT call `report_state`.** The world has not progressed.
-2. **Do NOT narrate the failure as if it happened in-fiction.** The action never resolved at all.
-3. **Route to "output" (Schema B, `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain what went wrong, then prompt for retry. Tone: GM stepping out of character for a brief rule clarification, friendly and concise.
+### RAW Violation Handling — backend rejected an action; triage who erred
+The `resolve_mechanics` result includes a top-level `player_errors` list: `[{action_index, action_type, error, reason}, ...]`. When non-empty, the backend rejected an action with NO state change — no resources consumed, no time elapsed, no NPC reaction. **The backend cannot tell whether you (the model) hallucinated the action or whether the player genuinely asked for something illegal.** You have to triage by comparing the failing action to the user's prompt:
 
-Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`.
+**Case 1: You hallucinated.** The action you emitted doesn't match what the user actually asked for (you picked a wrong target name, fabricated a program they didn't mention, misread their intent).
+→ **Retry internally**: call `resolve_mechanics` again with the correct action. Do NOT surface this to the user — they shouldn't see your mistake. Only emit `report_state` once you have a clean batch.
 
-Distinguish from in-fiction failures: `success: false` with NO `error` field is a normal dice failure (missed attack, failed check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the OOC retry path.
+**Case 2: User genuinely asked for the illegal thing.** Their prompt clearly named the action, and it's legitimately invalid (Slide preemptively, fire a Derezzed program, move to a disconnected node, boost with no Cycles).
+→ **Route to OUTPUT (Schema B, `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain the rule. Prompt for retry. Tone: GM stepping out of character briefly. Do NOT call `report_state` — the world has not progressed.
+
+**Case 3: Ambiguous.** You can't tell whether your interpretation matches their intent.
+→ **Route to OUTPUT and ask.** Better to clarify than guess wrong.
+
+Either way: do NOT narrate the failure as if it happened in-fiction. The action never resolved.
+
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`.
+
+Distinguish from in-fiction failures: `success: false` with NO `error` field is a normal dice failure (missed attack, failed check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the triage path above.
 
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
@@ -1491,18 +1499,23 @@ Auto-emitted by attack resolvers (do NOT emit manually):
 
 Fail-soft semantics: if the named program isn't loaded, is already in the requested status, or current status doesn't match the required transition, the resolver returns an error result with a narrative reason — no NA spent, no state change.
 
-### RAW Violation Handling — DO NOT advance the world on player-side errors
-The resolver returns a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If `player_errors` is non-empty, the player asked for something illegal per RAW.** The backend rejected those actions with NO state change — no NA consumed, no Cycles spent, no time elapsed, no NPC reaction. This is a player-side OOC mistake, not an in-fiction failure.
+### RAW Violation Handling — backend rejected an action; triage who erred
+The resolver returns a top-level `player_errors` list: `[{action_index, action_type, error, reason}, ...]`. When non-empty, the backend rejected an action with NO state change — no NA consumed, no Cycles spent, no time elapsed, no NPC reaction. **The backend cannot tell whether you (the model) hallucinated the action or whether the player genuinely asked for something illegal.** You have to triage by comparing the failing action to the user's prompt:
 
-Treat these EXACTLY like the player typed an invalid command at a real GM's table:
-1. **Do NOT call `report_hack_state`.** The world has not progressed. Calling it would tick Trace, advance NPCs, and burn time the player didn't actually spend.
-2. **Do NOT narrate the failure as if it happened in-fiction** (e.g. don't write "Sword sputters and refuses to fire" — Sword *can't* fire because it's Derezzed; the action never resolved at all).
-3. **Route to OUTPUT (Schema B / `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain what went wrong, then prompt the player to clarify or retry. Tone: GM dropping out of character for a brief rule clarification, friendly and concise.
-4. The player gets a free retry with full NET Actions / Cycles / time intact.
+**Case 1: You hallucinated.** The action you emitted doesn't match what the user actually asked for (you picked a wrong target name, fabricated a program they didn't mention, misread their movement intent, invented a Crash they didn't request).
+→ **Retry internally**: call `resolve_mechanics` again with the correct action. Do NOT surface this to the user — they shouldn't see your mistake. Only emit `report_hack_state` once you have a clean batch. The within-turn `resolve_mechanics` loop is built for this — accumulated state ops persist across iterations.
 
-Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`.
+**Case 2: User genuinely asked for the illegal thing.** Their prompt clearly named the action and it's legitimately invalid (Slide preemptively, fire a Derezzed program, move to a disconnected node, boost with no Cycles, target a node they haven't discovered).
+→ **Route to OUTPUT (Schema B / `is_ooc: true`).** Use the `reason` field verbatim or paraphrased to explain the rule. Prompt for retry. Tone: GM stepping out of character for a brief rule clarification. Do NOT call `report_hack_state` — the world has not progressed.
 
-Distinguish from in-fiction failures: a `success: false` result with NO `error` field is a normal dice failure (a missed attack, a failed Backdoor check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the OOC retry path.
+**Case 3: Ambiguous.** You can't tell whether your interpretation matches their intent (their prompt was vague, multiple valid readings).
+→ **Route to OUTPUT and ask.** Better to clarify than guess wrong.
+
+Either way: do NOT narrate the failure as if it happened in-fiction. The action never resolved.
+
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`.
+
+Distinguish from in-fiction failures: a `success: false` result with NO `error` field is a normal dice failure (a missed attack, a failed Backdoor check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the triage path above.
 
 For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). Reminder: NET skill_check / opposed_check also REQUIRE an `ability` tag — see Mechanics Resolution above.
@@ -1881,8 +1894,14 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **Unconscious** (sleep ammo, KO in meatspace): does NOT auto-disconnect. Netrunner is stuck jacked in — cannot take NET actions or Jack Out themselves. Rezzed ICE / Demons continue to act on them. To rescue, an ally spends an Action to unplug the deck or drag the body out of access-point range — this is an Unsafe Jack Out. Emit `initiate_unsafe_jack_out: {cause, actor, reason}` in your report; the backend cascades all rezzed ICE effects onto the Netrunner and sets net_complete=true automatically.
 - **Flatlined** (failed Death Save): immediate backend-auto forced disconnect + cascade. Set net_complete=true.
 
-### RAW Violation Handling — DO NOT advance the world on player-side errors
-The resolver returns a top-level `player_errors` list summarizing player-side RAW violations: `[{action_index, action_type, error, reason}, ...]`. **If non-empty, the player asked for something illegal per RAW** — backend rejected with NO state change (no NA/Cycles consumed, no time elapsed, no NPC reaction). Player-side OOC mistake, not in-fiction failure. Do NOT call `report_net_combat_state`, do NOT narrate the failure as fiction. Route the response as a brief OOC clarification (paraphrase the `reason` field) and prompt for retry. Player gets a free re-do with full resources intact. Error codes surfaced: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`. A `success: false` result with NO `error` field is a normal dice failure — narrate in fiction and advance the world.
+### RAW Violation Handling — backend rejected an action; triage who erred
+The resolver returns a top-level `player_errors` list: `[{action_index, action_type, error, reason}, ...]`. When non-empty, the backend rejected an action with NO state change. **The backend cannot tell whether you (the model) hallucinated the action or whether the player genuinely asked for something illegal.** Triage by comparing the failing action to the user's prompt:
+
+- **You hallucinated** (action doesn't match what user said) → call `resolve_mechanics` again with the correct action. Internal retry. Do not surface to the user. Only emit `report_net_combat_state` after a clean batch.
+- **User genuinely asked for the illegal thing** → route the response as a brief OOC clarification ("(OOC: ...)" prefix or italics), paraphrase the `reason` field, prompt for retry. Do NOT call `report_net_combat_state`.
+- **Ambiguous** → route to OOC and ask.
+
+Either way: never narrate the failure as fiction. Error codes surfaced: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`. A `success: false` result with NO `error` field is a normal dice failure — narrate in fiction and advance the world.
 
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
@@ -2243,7 +2262,12 @@ Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill ch
 
 Black ICE Types: Anti-Personnel (program_attack_vs_netrunner): Asp, Giant, Hellhound, Kraken, Liche, Raven, Scorpion, Skunk, Wisp. Anti-Program (ice_attack_vs_program): Dragon, Killer, Sabertooth. Always include ice_type in the action.
 
-PLAYER-SIDE RAW VIOLATIONS: If you propose actions that violate RAW (Slide preemptive, fire a Derezzed program, insufficient NA, etc.), the resolver returns those entries in a top-level `player_errors` list. When `player_errors` is non-empty: output `hack_state_updates` with `net_actions_used: 0` (no time/resources spent — the actions never resolved); the narrator will route to OOC and explain the issue. Do NOT pretend the actions resolved in fiction. Set `meatspace_round: false`.
+RAW VIOLATIONS — TRIAGE BEFORE GIVING UP: If you propose actions that violate RAW, the resolver returns those entries in a top-level `player_errors` list. **Backend can't tell whether you hallucinated or the user actually asked for the illegal thing.** You must triage by re-reading the user's prompt:
+- **You hallucinated** (your action doesn't match user's stated intent — wrong target, wrong program, wrong move): call `resolve_mechanics` again with the corrected action. Internal retry. Do NOT route to narrator with player_errors set; the user shouldn't see your mistake.
+- **User genuinely asked for the illegal thing** (their prompt clearly named the action, it's just illegal): output `hack_state_updates` with `net_actions_used: 0` (no time/resources spent), `meatspace_round: false`, and add `scene_notes` flagging the OOC clarification needed. Narrator routes to OOC.
+- **Ambiguous**: same as case 2 — escalate to narrator OOC for clarification.
+
+Never `meatspace_round: true` and never narrate the rejected action as fiction.
 
 OUTPUT: JSON with these fields:
 - actions: array of mechanical actions to resolve
@@ -2279,7 +2303,7 @@ RULES:
 - If meatspace_round is true, narrate the meatspace crew's round ABOVE NET content, separated by ---
 - End each exchange presenting available options to the player
 
-PLAYER-SIDE RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The player asked for an illegal action. Backend rejected it; nothing happened in fiction. Skip the normal narrative. Output a brief OOC clarification — "(OOC: ...)" prefix or italics — paraphrasing the `reason` field, then prompt the player to retry. Examples: "(OOC: Slide only escapes a Black ICE that's already engaged you — none of the active ICE are hunting you yet. What would you like to do instead?)", "(OOC: Sword is currently Derezzed. To get it back online: 1 NA to Reactivate (Derezzed → Deactivated), then 1 NA to fire it (auto-activates per RAW Errata p.3). Or you can spend 1 NA on activate_program to leave it Active without firing.)" Do NOT roll dice, do NOT narrate fiction, do NOT advance time.
+RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The Planner already triaged — if it routed `player_errors` to you with `meatspace_round: false` + scene_notes flagging OOC, that means the user genuinely asked for an illegal action (Planner was unable to interpret it as something legal). Skip the normal narrative. Output a brief OOC clarification — "(OOC: ...)" prefix or italics — paraphrasing the `reason` field, then prompt the player to retry. Examples: "(OOC: Slide only escapes a Black ICE that's already engaged you — none of the active ICE are hunting you yet. What would you like to do instead?)", "(OOC: Sword is currently Derezzed. To get it back online: 1 NA to Reactivate (Derezzed → Deactivated), then 1 NA to fire it (auto-activates per RAW Errata p.3). Or you can spend 1 NA on activate_program to leave it Active without firing.)" Do NOT roll dice, do NOT narrate fiction, do NOT advance time.
 
 ROLL FORMAT:
 🎲 [Description]: {formatted string from result}
@@ -2355,7 +2379,7 @@ RULES:
 - Name combatants. Chrome reflects neon. Data streams as light.
 - End each exchange setting up the next combatant's situation
 
-PLAYER-SIDE RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The player asked for an illegal action. Backend rejected it; nothing happened in fiction. Skip the normal narrative — output a brief OOC clarification ("(OOC: ...)" prefix or italics) paraphrasing the `reason` field, then prompt for retry. Do NOT roll dice, do NOT narrate fiction, do NOT advance time. Other (legal) actions in the same batch may still narrate normally if they resolved.
+RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The Planner already triaged — if you're seeing `player_errors` with `meatspace_round: false` + scene_notes flagging OOC, that means the user genuinely asked for an illegal action. Skip the normal narrative — output a brief OOC clarification ("(OOC: ...)" prefix or italics) paraphrasing the `reason` field, then prompt for retry. Do NOT roll dice, do NOT narrate fiction, do NOT advance time. Other (legal) actions in the same batch may still narrate normally if they resolved.
 
 If both combat_complete and net_complete, write a wrap-up paragraph."""
 
