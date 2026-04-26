@@ -4176,6 +4176,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     model_switched = request.model and request.model != old_model
     if model_switched:
         data["model"] = request.model
+        # User explicitly picked a model — drop any stashed mode-auto-switch
+        # original so it doesn't restore over their choice on mode end.
+        data.pop("_auto_switched_from", None)
         token_field = "total_claude_tokens" if model_id.startswith("claude") else "total_gpt_tokens"
 
         for msg in data["messages"]:
@@ -4346,6 +4349,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if gs and gs.get("apply_hack_writeback"):
                 gs["apply_hack_writeback"](hack_state, data.get("pipeline_state", {}))
             data["hack_state"] = None
+            # Restore user's original model choice now that hack mode ended
+            # (covers chat-reload-after-mode-end before next message).
+            if data.get("_auto_switched_from"):
+                _restored = data.pop("_auto_switched_from")
+                data["model"] = _restored
+                model_id = _restored
+                provider = ProviderRegistry.get(model_id)
+                api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+                logger.info(f"Hack ended: restored model to {_restored} for {username}")
             logger.info(f"Hack: cleared completed hack_state for {username}")
 
     # Auto-switch Claude to GPT for hack mode (preserves Anthropic prompt cache)
@@ -4356,10 +4368,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
+            logger.warning(
+                f"Hack-mode auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
             model_id = _original_model
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             _original_model = None
+        else:
+            logger.info(
+                f"Hack-mode auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            # Persist so chat reload + dropdown reflect the actually-running
+            # model. Stash the user's original choice so we can restore it
+            # on mode end (handles the "reload chat after mode ended but
+            # before next message" edge case).
+            data["model"] = model_id
+            data["_auto_switched_from"] = _original_model
 
     if use_hack_mode:
         # Flag the user message as a hack exchange
@@ -4396,6 +4423,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             gs["apply_net_combat_writeback"](_net_combat, _ps_for_combat)
         _ps_for_combat["net_combat"] = None
         _ps_for_combat.pop("_hack_start_message_id", None)
+        # Restore user's original model on mode end (chat-reload edge case).
+        if data.get("_auto_switched_from"):
+            _restored = data.pop("_auto_switched_from")
+            data["model"] = _restored
+            model_id = _restored
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            logger.info(f"Net combat ended: restored model to {_restored} for {username}")
         logger.info(f"Net combat: cleared completed net_combat for {username}")
 
     # First-exchange initialization: expand trigger fields into full state
@@ -4439,10 +4474,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
+            logger.warning(
+                f"Net-combat auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
             model_id = _original_model
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             _original_model = None
+        else:
+            logger.info(
+                f"Net-combat auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            data["model"] = model_id
 
     if use_net_combat_mode:
         user_msg_data["net_combat_mode"] = True
@@ -4459,10 +4504,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
+            logger.warning(
+                f"Combat auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
             model_id = _original_model
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             _original_model = None
+        else:
+            logger.info(
+                f"Combat auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            data["model"] = model_id
 
     if use_combat_mode:
         # Flag the user message as a combat exchange
@@ -4482,10 +4537,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
+            logger.warning(
+                f"Ship-combat auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
             model_id = _original_model
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             _original_model = None
+        else:
+            logger.info(
+                f"Ship-combat auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            data["model"] = model_id
 
     if use_ship_combat_mode:
         user_msg_data["ship_combat_mode"] = True
@@ -4503,10 +4568,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
+            logger.warning(
+                f"Sex-mode auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
             model_id = _original_model
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             _original_model = None
+        else:
+            logger.info(
+                f"Sex-mode auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            data["model"] = model_id
 
     if use_sex_mode:
         user_msg_data["sex_mode"] = True
