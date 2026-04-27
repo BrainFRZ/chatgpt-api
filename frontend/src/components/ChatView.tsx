@@ -5,6 +5,38 @@ import rehypeKatex from 'rehype-katex';
 import { styles } from '../styles';
 import { ChatMessage, ModelInfo, convertMathDelimiters, formatTimestamp } from '../types';
 
+/** Format the in-fiction time/date/location HUD line saved on each
+ * assistant message.  Reads from msg.pipeline_state_after.hud_state —
+ * the deterministic backend-tracked snapshot at the moment that
+ * message was generated.  Returns null if there's nothing usable to
+ * display (older messages, mode-only messages without a HUD update).
+ *
+ * Format: "2045-06-12 · 21:43 · Delphi's Apartment, Watson"
+ *   - HHMM (4-digit) → HH:MM for readability
+ *   - YYYY-MM-DD passed through (already readable)
+ *   - Location passed through
+ *   - Middle dots as separators, dim color, monospace font
+ */
+function getMessageHudLine(msg: any): string | null {
+  if (!msg || msg.role !== 'assistant') return null;
+  const psa = msg.pipeline_state_after;
+  if (!psa || typeof psa !== 'object') return null;
+  const hud = psa.hud_state;
+  if (!hud || typeof hud !== 'object') return null;
+  const date = typeof hud.date === 'string' ? hud.date.trim() : '';
+  const rawTime = typeof hud.time === 'string' ? hud.time.trim() : '';
+  const location = typeof hud.location === 'string' ? hud.location.trim() : '';
+  // HHMM → HH:MM (e.g. "2143" → "21:43"); leave as-is if already colonized.
+  let time = rawTime;
+  if (rawTime && /^\d{3,4}$/.test(rawTime)) {
+    const padded = rawTime.padStart(4, '0');
+    time = padded.slice(0, 2) + ':' + padded.slice(2);
+  }
+  const parts = [date, time, location].filter(p => !!p);
+  if (parts.length === 0) return null;
+  return parts.join(' · ');
+}
+
 interface ChatViewProps {
   isMobile: boolean;
   currentChat: string;
@@ -496,6 +528,29 @@ export default function ChatView({
                       })()}
                     </>
                   )}
+                  {/* In-fiction HUD timestamp — frozen snapshot from when
+                       this assistant message was generated.  Backend-tracked
+                       (pipeline_state_after.hud_state), not model-narrated.
+                       Lets you scroll back through the chat and see when
+                       each scene happened in fiction time. */}
+                  {(() => {
+                    const hudLine = getMessageHudLine(msg);
+                    if (!hudLine) return null;
+                    return (
+                      <div style={{
+                        fontFamily: '"Courier New", monospace',
+                        fontSize: '11px',
+                        color: '#7a7aa0',
+                        marginBottom: '6px',
+                        marginTop: '2px',
+                        letterSpacing: '0.4px',
+                        opacity: 0.75,
+                        userSelect: 'text',
+                      }}>
+                        {hudLine}
+                      </div>
+                    );
+                  })()}
                   <div style={styles.messageContent} className="messageContent">
                     <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
                   </div>
