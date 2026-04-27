@@ -2846,8 +2846,21 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
     return tool_input, retry_usage
 
 
-def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None, game_state=None, pipeline_state=None):
-    """Call game-system apply_hack_state with only supported kwargs."""
+def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None,
+                              game_state=None, pipeline_state=None,
+                              username=None, project=None):
+    """Call game-system apply_hack_state with only supported kwargs.
+
+    Stuffs `_username` / `_project` into `tool_input` so the plot-doc
+    encounter loader (cpred_plot_encounters.load_plot_encounters) can
+    resolve the project's uploads dir without changing the apply_fn
+    signature across game systems.
+    """
+    if isinstance(tool_input, dict):
+        if username and "_username" not in tool_input:
+            tool_input["_username"] = username
+        if project and "_project" not in tool_input:
+            tool_input["_project"] = project
     kwargs = {}
     try:
         sig = inspect.signature(apply_fn)
@@ -6052,6 +6065,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     resolver_state_ops=mode_result.state_ops,
                     game_state=hack_ps.get("game_state"),
                     pipeline_state=hack_ps,
+                    username=username,
+                    project=request.project or "",
                 )
                 # virus_op state ops live at pipeline_state level, not hack_state —
                 # apply_hack_state ignores them. Route them through here.
@@ -6856,6 +6871,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             hack_json,
                             game_state=hack_ps.get("game_state"),
                             pipeline_state=hack_ps,
+                            username=username,
+                            project=request.project or "",
                         )
                         data["hack_state"] = hack_state
                         yield f"event: hack_state_update\ndata: {json.dumps(hack_state)}\n\n"
@@ -8008,6 +8025,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     resolver_state_ops=accumulated_rm_state_ops,
                                     game_state=_hack_gs,
                                     pipeline_state=_hack_ps,
+                                    username=username,
+                                    project=request.project or "",
                                 )
                                 data["hack_state"] = hack_state
                                 hack_tool_input = tool_input
@@ -8045,6 +8064,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             resolver_state_ops=accumulated_rm_state_ops,
                                             game_state=_hack_gs,
                                             pipeline_state=_hack_ps,
+                                            username=username,
+                                            project=request.project or "",
                                         )
                                         data["hack_state"] = hack_state
                                         hack_tool_input = retry_result

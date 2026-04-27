@@ -1,6 +1,7 @@
 """CPRED hack mode — standalone NET encounters (Quick Hacks and Full Runs)."""
 
 import logging
+import os
 import random
 
 from .cpred_mechanics import _resolve_jack_out_cascade
@@ -726,6 +727,56 @@ def _generate_architecture_if_missing(state, tool_input):
         sm.get("target_system") if isinstance(sm, dict) else None
     )
     hint = (sm.get("structure_hint") if isinstance(sm, dict) else None)
+    # Plot-doc encounter override.  If the user has a `Plot Encounters.yaml`
+    # in their project uploads with a matching `target_system` (or alias),
+    # use that pre-baked Architecture instead of the RNG generator.  This
+    # is the "plot-doc-driven encounters" path: the designer's intent wins
+    # over random generation, and the model can't accidentally drop nodes
+    # or mis-tier ICE because the engine reads structured data directly.
+    username = tool_input.get("_username") if isinstance(tool_input, dict) else None
+    project = tool_input.get("_project") if isinstance(tool_input, dict) else None
+    if target_system and username and project:
+        try:
+            from .cpred_plot_encounters import (
+                load_plot_encounters, find_encounter_for, materialize_encounter,
+            )
+            # Resolve uploads dir.  Mirrors main.py:get_project_dir
+            # (`<DATA_DIR>/<username>/projects/<project>`) without importing
+            # main (which fails on Windows test envs via fcntl).  The
+            # CHATGPT_DATA_DIR env var lets tests redirect to a tempdir;
+            # production falls through to main.py's hardcoded path.
+            data_dir = os.environ.get(
+                "CHATGPT_DATA_DIR", "/home/chatgpt/data/users"
+            )
+            uploads_dir = os.path.join(
+                data_dir, username, "projects", project, "uploads"
+            )
+            encounters = load_plot_encounters(uploads_dir)
+            match = find_encounter_for(target_system, encounters)
+            if match:
+                materialized = materialize_encounter(match)
+                state["system_map"] = materialized["system_map"]
+                new_ice = materialized.get("ice_status") or {}
+                if new_ice:
+                    existing = state.get("ice_status")
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    for k, v in new_ice.items():
+                        existing.setdefault(k, v)
+                    state["ice_status"] = existing
+                logger.info(
+                    "Hack apply: using plot-encounter override %r for "
+                    "target_system %r (%d nodes, %d ICE)",
+                    match.get("id"), target_system,
+                    len(materialized["system_map"].get("nodes", {})),
+                    len(new_ice),
+                )
+                return
+        except Exception as e:  # noqa: BLE001 — never break hack init
+            logger.warning(
+                "Hack apply: plot-encounter lookup failed for %r: %s",
+                target_system, e,
+            )
     # Stable seed for re-applies of the same hack across server restarts.
     # Python's built-in hash() is randomized per-process via PYTHONHASHSEED,
     # so the same string would produce different ints on each restart and

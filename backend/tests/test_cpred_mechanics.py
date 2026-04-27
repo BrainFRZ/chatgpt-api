@@ -9610,5 +9610,157 @@ class TestBackdoorEntryApply(unittest.TestCase):
         self.assertNotIn("backdoor_grace", state)
 
 
+class TestPlotEncounterOverride(unittest.TestCase):
+    """Plot-doc-driven encounter override beats the RNG generator when a
+    matching `Plot Encounters.yaml` entry exists in the project's uploads.
+    """
+
+    def test_load_and_match_by_target_system(self):
+        from game_systems.cpred_plot_encounters import (
+            find_encounter_for, materialize_encounter,
+        )
+        encounters = [{
+            "id": "helix_quick_hack",
+            "target_system": "Helix BioSolutions — Watson Branch",
+            "aliases": ["Helix Watson", "STILLWATER"],
+            "sr": 2,
+            "tier": "quick_hack",
+            "nodes": {
+                "Gateway": {"type": "gateway", "connections": ["Service Port"]},
+                "Service Port": {"type": "password", "dv": 13,
+                                 "connections": ["Gateway", "Watchdog"]},
+                "Watchdog": {"type": "data_node", "dv": 8,
+                             "connections": ["Service Port", "STILLWATER Archive"]},
+                "STILLWATER Archive": {"type": "target", "dv": 15,
+                                       "connections": ["Watchdog"]},
+            },
+            "ice": [
+                {"key": "Watchdog_Skunk", "species": "skunk", "node": "Watchdog"},
+            ],
+        }]
+        # Direct title match
+        m = find_encounter_for("Helix BioSolutions — Watson Branch", encounters)
+        self.assertIsNotNone(m)
+        # Alias substring match
+        self.assertIsNotNone(find_encounter_for("STILLWATER Archive", encounters))
+        # Fuzzy planner output (substring contains alias)
+        self.assertIsNotNone(find_encounter_for(
+            "Helix Watson Branch internal archive", encounters))
+        # Non-match
+        self.assertIsNone(find_encounter_for("Arasaka HR", encounters))
+
+    def test_materialize_canonical_ice_shape(self):
+        from game_systems.cpred_plot_encounters import materialize_encounter
+        result = materialize_encounter({
+            "id": "test", "target_system": "T", "sr": 2, "tier": "quick_hack",
+            "nodes": {"Watchdog": {"type": "data_node", "dv": 8, "connections": []}},
+            "ice": [{"key": "Watchdog_Skunk", "species": "skunk", "node": "Watchdog"}],
+        })
+        skunk = result["ice_status"]["Watchdog_Skunk"]
+        # Canonical fields the engine reads.
+        self.assertEqual(skunk["behavior"], "black")
+        self.assertEqual(skunk["entity_type"], "black_ice")
+        self.assertEqual(skunk["ice_type"], "skunk")
+        self.assertEqual(skunk["rez_current"], 10)
+        self.assertEqual(skunk["rez_max"], 10)
+        self.assertEqual(skunk["per"], 2)
+        self.assertEqual(skunk["status"], "active")
+        self.assertEqual(skunk["node"], "Watchdog")
+
+    def test_materialize_honors_effect_desc_override(self):
+        from game_systems.cpred_plot_encounters import materialize_encounter
+        result = materialize_encounter({
+            "id": "t", "target_system": "T", "sr": 2, "tier": "quick_hack",
+            "nodes": {},
+            "ice": [{"species": "skunk", "node": "X",
+                     "effect_desc": "Plot homerule effect."}],
+        })
+        ice = list(result["ice_status"].values())[0]
+        self.assertEqual(ice["effect_desc"], "Plot homerule effect.")
+
+    def test_materialize_drops_unknown_species(self):
+        from game_systems.cpred_plot_encounters import materialize_encounter
+        result = materialize_encounter({
+            "id": "t", "target_system": "T", "sr": 2, "tier": "quick_hack",
+            "nodes": {},
+            "ice": [{"species": "fakebeast", "node": "X"}],
+        })
+        self.assertEqual(result["ice_status"], {})
+
+    def test_apply_uses_plot_encounter_when_target_matches(self):
+        """End-to-end: tool_input carries _username/_project, encounter file
+        on disk, apply_hack_state honors the override and skips RNG."""
+        import tempfile, os, yaml as _yaml  # noqa: E401
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "users")
+            uploads = os.path.join(data_dir, "tester", "projects", "MyProj", "uploads")
+            os.makedirs(uploads)
+            with open(os.path.join(uploads, "Plot Encounters.yaml"), "w") as f:
+                _yaml.dump({"encounters": [{
+                    "id": "plot_arch",
+                    "target_system": "Arasaka HR",
+                    "sr": 3, "tier": "full_run",
+                    "nodes": {
+                        "Gateway": {"type": "gateway", "connections": ["Vault"]},
+                        "Vault": {"type": "target", "dv": 12,
+                                  "connections": ["Gateway"]},
+                    },
+                    "ice": [{"key": "Vault_Liche", "species": "liche",
+                             "node": "Vault"}],
+                }]}, f)
+            old_env = os.environ.get("CHATGPT_DATA_DIR")
+            os.environ["CHATGPT_DATA_DIR"] = data_dir
+            try:
+                state = init_hack_state(tier="full_run", sr=3,
+                                         hacker_name="V",
+                                         target_system="Arasaka HR")
+                apply_hack_state(state, tool_input={
+                    "_username": "tester", "_project": "MyProj",
+                })
+            finally:
+                if old_env is None:
+                    del os.environ["CHATGPT_DATA_DIR"]
+                else:
+                    os.environ["CHATGPT_DATA_DIR"] = old_env
+            # Plot encounter wins — Vault node, Liche ICE — NOT the generator.
+            self.assertIn("Vault", state["system_map"]["nodes"])
+            self.assertEqual(state["ice_status"]["Vault_Liche"]["ice_type"],
+                              "liche")
+            # Generator's auto-Convergence should NOT be present.
+            self.assertNotIn("Objective_Convergence", state["ice_status"])
+
+    def test_apply_falls_through_to_generator_when_no_match(self):
+        import tempfile, os, yaml as _yaml  # noqa: E401
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, "users")
+            uploads = os.path.join(data_dir, "tester", "projects", "MyProj", "uploads")
+            os.makedirs(uploads)
+            with open(os.path.join(uploads, "Plot Encounters.yaml"), "w") as f:
+                _yaml.dump({"encounters": [{
+                    "id": "other", "target_system": "Different Server",
+                    "sr": 2, "tier": "quick_hack",
+                    "nodes": {"Gateway": {"type": "gateway", "connections": []}},
+                    "ice": [],
+                }]}, f)
+            old_env = os.environ.get("CHATGPT_DATA_DIR")
+            os.environ["CHATGPT_DATA_DIR"] = data_dir
+            try:
+                state = init_hack_state(tier="full_run", sr=3, hacker_name="V",
+                                         target_system="Arasaka HR")
+                apply_hack_state(state, tool_input={
+                    "_username": "tester", "_project": "MyProj",
+                })
+            finally:
+                if old_env is None:
+                    del os.environ["CHATGPT_DATA_DIR"]
+                else:
+                    os.environ["CHATGPT_DATA_DIR"] = old_env
+            # No match → generator ran; SR3 standard produces multi-node + Convergence.
+            self.assertIn("Gateway", state["system_map"]["nodes"])
+            self.assertGreaterEqual(len(state["system_map"]["nodes"]), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
