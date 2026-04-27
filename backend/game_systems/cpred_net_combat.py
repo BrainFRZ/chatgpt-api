@@ -14,6 +14,7 @@ from .cpred_hack import (
     _apply_initiate_unsafe_jack_out,
     _apply_net_model_fields,
     _apply_persistent_ice_effects,
+    _restore_active_programs_if_lost,
     _apply_resolver_net_ops,
     _apply_trace_auto_increment,
     _expire_active_debuffs,
@@ -223,6 +224,9 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
     hs = tool_input.get("hack_state", {})
 
     _apply_net_model_fields(nc, hs, tool_input)
+    # Defense: re-bootstrap active_programs if planner cleared them while
+    # programs are loaded in deck_slots.
+    _restore_active_programs_if_lost(nc, game_state)
     _apply_resolver_net_ops(nc, resolver_state_ops, game_state)
     _apply_brain_damage_hp(nc, game_state, "netrunner", pipeline_state)
 

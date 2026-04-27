@@ -730,6 +730,61 @@ def _autofill_missing_node_dvs(state):
             node["dv"] = canonical_dv
 
 
+def _restore_active_programs_if_lost(state, game_state):
+    """Re-bootstrap active_programs from deck_slots if the list ended up empty
+    while the Netrunner has program-type entries loaded.
+
+    Bug class this prevents: the planner sometimes emits hack_state_updates
+    with `active_programs: []` (or omits programs while keeping other fields),
+    and `_apply_net_model_fields` overwrites the bootstrapped list with empty.
+    Subsequent program actions then fail with `program_not_loaded` because
+    nothing's in active_programs.
+
+    Defensive trigger: empty `active_programs` + at least one program-type
+    deck slot for this Netrunner. Re-bootstrap with status="deactivated"
+    (RAW: programs start deactivated; planner activates as needed). Logs a
+    warning so the issue is visible.
+    """
+    if not isinstance(state, dict):
+        return
+    progs = state.get("active_programs")
+    if isinstance(progs, list) and progs:
+        return  # populated, leave alone
+    if not state.get("active"):
+        return  # not in a hack
+    hacker_name = state.get("hacker_name") or state.get("netrunner")
+    if not hacker_name or not isinstance(game_state, dict):
+        return
+    er = game_state.get("edgerunners", {}).get(hacker_name, {})
+    slots = get_deck_slots(er) if isinstance(er, dict) else []
+    if not isinstance(slots, list):
+        return
+    bootstrapped = []
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        if s.get("type", "program") != "program":
+            continue
+        if s.get("_continuation_of"):
+            continue
+        if not s.get("name"):
+            continue
+        bootstrapped.append({
+            "name": s.get("name"),
+            "category": str(s.get("category", "attacker")).lower(),
+            "rez": _safe_int(s.get("rez_max") or 0),
+            "status": "deactivated",
+        })
+    if bootstrapped:
+        state["active_programs"] = bootstrapped
+        logger.warning(
+            "Hack apply: active_programs was empty for %s mid-hack; "
+            "re-bootstrapped %d programs from deck_slots (status=deactivated). "
+            "Likely cause: planner emitted active_programs=[] in hack_state_updates.",
+            hacker_name, len(bootstrapped),
+        )
+
+
 def _apply_net_model_fields(state, hs, tool_input):
     """Apply model-reported NET fields, system map, revealed_nodes, available_actions."""
     if isinstance(hs, dict):
@@ -1470,6 +1525,11 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
         hs = {}
 
     _apply_net_model_fields(hack_state, hs, tool_input)
+    # Defense: if model emission cleared active_programs but the Netrunner
+    # has loaded programs in deck_slots, re-bootstrap. Prevents the bug class
+    # where planner emits active_programs=[] and subsequent actions fail with
+    # program_not_loaded.
+    _restore_active_programs_if_lost(hack_state, game_state)
 
     # NET action counter — decrement remaining, flag meatspace when turn complete
     net_actions_used = hs.get("net_actions_used")
