@@ -376,34 +376,48 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
               const toRevealed = revealedSet.has(to);
 
               if (bothRevealed) {
-                // Both revealed — full solid edge
+                // Both revealed — full solid edge.  No filter: feGaussianBlur
+                // on a vertical line has a degenerate (zero-width) bounding
+                // box that some renderers clip, hiding the line entirely.
+                // Bumping strokeWidth + opacity gives the same readability.
                 return (
                   <line
                     key={`${from}-${to}`}
                     x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
                     stroke="#00ff41"
-                    strokeWidth={1.5}
-                    opacity={0.7}
-                    filter="url(#edgeGlow)"
+                    strokeWidth={2}
+                    opacity={0.85}
+                    strokeLinecap="round"
                   />
                 );
               } else if (fromRevealed || toRevealed) {
-                // One end revealed — draw stub from revealed end, dissolving
+                // One end revealed — draw stub from the revealed node's
+                // EDGE (not center) so the stub doesn't run through the
+                // node's label below it.  The label sits at
+                // y = center + NODE_RADIUS + 14, so starting the stub at
+                // y = center + NODE_RADIUS + 18 keeps it below the label.
                 const revealed = fromRevealed ? p1 : p2;
                 const hidden = fromRevealed ? p2 : p1;
-                // Stub goes ~35% of the way
-                const stubX = revealed.x + (hidden.x - revealed.x) * 0.35;
-                const stubY = revealed.y + (hidden.y - revealed.y) * 0.35;
+                const dx = hidden.x - revealed.x;
+                const dy = hidden.y - revealed.y;
+                const dist = Math.hypot(dx, dy) || 1;
+                // Push start 38px from center (past NODE_RADIUS + label band)
+                const startOffset = 38;
+                const startX = revealed.x + (dx / dist) * startOffset;
+                const startY = revealed.y + (dy / dist) * startOffset;
+                // Stub extends another ~28% of remaining distance.
+                const stubX = startX + dx * 0.28;
+                const stubY = startY + dy * 0.28;
                 return (
                   <g key={`${from}-${to}`}>
                     <line
-                      x1={revealed.x} y1={revealed.y} x2={stubX} y2={stubY}
+                      x1={startX} y1={startY} x2={stubX} y2={stubY}
                       stroke="#00ff41"
                       strokeWidth={1}
-                      opacity={0.25}
+                      opacity={0.35}
                       strokeDasharray="4 3"
                     />
-                    <DissolveParticles x1={revealed.x} y1={revealed.y} x2={stubX} y2={stubY} />
+                    <DissolveParticles x1={startX} y1={startY} x2={stubX} y2={stubY} />
                   </g>
                 );
               }
