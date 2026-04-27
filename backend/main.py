@@ -1223,19 +1223,48 @@ def _consume_plot_prefix(msg: dict) -> bool:
 
 
 def _build_plot_injection(username: str, project: str) -> str:
-    """Load plot/project docs for one-shot injection via /plot command.
+    """Load plot docs only for one-shot injection via /plot command.
 
-    Wraps the existing `load_project_files` blob in clear START/END markers
-    so the model treats it as ephemeral context (the prefix is stripped from
-    the saved user message; the docs are NOT in mode_messages history).
+    Filters to filenames starting with "plot" (case-insensitive) — typically
+    `Plot - Session N.md` style files. Excludes rulebooks, character sheets,
+    enemy templates, and other staged project docs that aren't plot/lore.
+
+    Honors the staging cache: unstaged plot docs (e.g., a future-session
+    plot file the player wants to keep spoiler-free) are skipped, so users
+    can control spoiler exposure via the file manager.
     """
     if not username or not project:
         return ""
     try:
-        blob = load_project_files(username, project)
+        uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
+        if not os.path.exists(uploads_dir):
+            return ""
+        tokens_cache = load_file_tokens_cache(username, project)
+        plot_files = []
+        for filename in os.listdir(uploads_dir):
+            if os.path.splitext(filename)[1].lower() not in ALLOWED_FILE_EXTENSIONS:
+                continue
+            if not filename.lower().startswith("plot"):
+                continue
+            if not tokens_cache.get(filename, {}).get("staged", True):
+                continue
+            plot_files.append(filename)
+        if not plot_files:
+            return ""
+        chunks = []
+        for filename in sorted(plot_files):
+            filepath = os.path.join(uploads_dir, filename)
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    chunks.append(
+                        f"\n\n{'='*60}\nFILE: {filename}\n{'='*60}\n\n" + f.read()
+                    )
+            except (OSError, UnicodeDecodeError):
+                continue
+        if not chunks:
+            return ""
+        blob = "".join(chunks)
     except Exception:
-        return ""
-    if not blob or not blob.strip():
         return ""
     return (
         "[PLOT DOCS — one-shot injection via /plot, NOT persisted in history]\n"
