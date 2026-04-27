@@ -31,6 +31,58 @@ def _net_actions_for_rank(interface_rank):
     return 2 if interface_rank <= 3 else 3 if interface_rank <= 6 else 4 if interface_rank <= 9 else 5
 
 
+# ---------------------------------------------------------------------------
+# Going Quiet stealth: Watcher enumeration
+# ---------------------------------------------------------------------------
+
+def enumerate_watchers(state):
+    """Return a list of Watcher entries from hack_state.ice_status.
+
+    Per Going Quiet DLC, a "Watcher" is any entity in the Architecture with
+    an Interface Rank — Demons, enemy Netrunners, etc. We tag them in
+    ice_status via `entity_type` ∈ {"demon", "watcher_netrunner"}.
+
+    For migration safety: entries WITHOUT explicit entity_type are inferred
+    from `behavior` — only entries with `behavior == "demon"` count as
+    Watchers in legacy data. Patrol/Black/Trace ICE are NOT Watchers.
+
+    Each returned entry is an annotated dict with the original ice_status
+    values plus a stable `_watcher_key` and `_watcher_index`.
+    """
+    if not isinstance(state, dict):
+        return []
+    ice_status = state.get("ice_status")
+    if not isinstance(ice_status, dict):
+        return []
+    watchers = []
+    for key, entry in ice_status.items():
+        if not isinstance(entry, dict):
+            continue
+        # Status filter: only active Watchers participate in stealth contests.
+        # A destroyed/bypassed Demon (or downed enemy Netrunner) doesn't get
+        # to detect anything. Default missing status to "active" for migration
+        # safety (legacy entries usually omit status when alive).
+        status = str(entry.get("status", "active")).strip().lower() or "active"
+        if status != "active":
+            continue
+        et = str(entry.get("entity_type") or "").strip().lower()
+        if not et:
+            # Migration fallback: infer from behavior. Only "demon" gets
+            # promoted to Watcher in legacy data — Patrol/Black/Trace stay
+            # as ICE.
+            beh = str(entry.get("behavior") or "").strip().lower()
+            if beh == "demon":
+                et = "demon"
+            else:
+                continue
+        if et not in ("demon", "watcher_netrunner"):
+            continue
+        annotated = dict(entry)
+        annotated["_watcher_key"] = key
+        watchers.append(annotated)
+    return watchers
+
+
 def init_hack_state(
     tier="full_run",
     target_system="Unknown",
@@ -97,6 +149,11 @@ def init_hack_state(
         "net_action_penalty": 0,
         "active_debuffs": [],
         "destroyed_programs": [],
+        # Going Quiet stealth state (planner-driven; engine never auto-cascades)
+        "stealth_active": False,
+        "stealth_broken_round": None,
+        "quiet_jack_in_used": False,
+        "net_round": 1,
         # Boosted-action / Defender state. Step 3 uses fortify_pending; Step 6b
         # adds surge_pending, mask_pending, etc. on_turn_end clears one-shot
         # flags after they fire.
@@ -657,6 +714,12 @@ def _apply_net_model_fields(state, hs, tool_input):
                 state[field] = hs[field]
         if hs.get("system_map") and not state.get("system_map"):
             state["system_map"] = hs["system_map"]
+    # Going Quiet stealth state defaults — legacy hack_state without these
+    # fields loads cleanly; never auto-derive stealth_active=True for legacy.
+    state.setdefault("stealth_active", False)
+    state.setdefault("stealth_broken_round", None)
+    state.setdefault("quiet_jack_in_used", False)
+    state.setdefault("net_round", 1)
     # revealed_nodes validation + auto-merge
     if not isinstance(state.get("revealed_nodes"), list):
         visited_fallback = state.get("nodes_visited", [])
@@ -814,6 +877,54 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                         h.remove(nr_name)
         elif op_t == "slide_used":
             state["slide_used_this_turn"] = True
+        # Going Quiet stealth ops (planner-emitted, never engine-cascaded)
+        elif op_t == "stealth_set_active":
+            # Set by quiet_jack_in success.
+            state["stealth_active"] = True
+            state["quiet_jack_in_used"] = True
+            # No NA grant / offset — RAW Quiet Jack-In already cost 1 NA at
+            # action resolution time.
+        elif op_t == "quiet_jack_in_used":
+            # Set even on Quiet Jack-In failure (NA still spent, can't retry
+            # without Jack Out + Jack In).
+            state["quiet_jack_in_used"] = True
+        elif op_t == "break_stealth":
+            # RAW: stealth_active=False, all Watchers globally aware. NO alert
+            # bump (engine implements only RAW-specified effects).
+            state["stealth_active"] = False
+            try:
+                state["stealth_broken_round"] = int(state.get("net_round", 1) or 1)
+            except (TypeError, ValueError):
+                state["stealth_broken_round"] = 1
+            if isinstance(ice_status, dict):
+                for _entry in ice_status.values():
+                    if not isinstance(_entry, dict):
+                        continue
+                    et = str(_entry.get("entity_type") or "").strip().lower()
+                    if not et:
+                        # Migration fallback: only Demons get awareness flag in
+                        # legacy data (Patrol/Black/Trace ICE aren't Watchers).
+                        if str(_entry.get("behavior") or "").strip().lower() != "demon":
+                            continue
+                    elif et not in ("demon", "watcher_netrunner"):
+                        continue
+                    _entry["stealth_aware"] = True
+        elif op_t == "watcher_search_used":
+            # Mark a Watcher's last_search_round to enforce once-per-turn.
+            ice_key = op.get("ice_key")
+            if ice_key and isinstance(ice_status, dict):
+                entry = ice_status.get(ice_key)
+                if isinstance(entry, dict):
+                    try:
+                        entry["last_search_round"] = int(state.get("net_round", 1) or 1)
+                    except (TypeError, ValueError):
+                        entry["last_search_round"] = 1
+        elif op_t == "ice_initiative_entry":
+            # Annotation-only op for Step 0 Speed Check (and Step C failed
+            # stealth contest). The actual Initiative tracking lives in the
+            # combat sub-state; for hack-mode standalone, this is a marker
+            # the planner can read in narration.
+            pass
     # Step 6d: initiate_unsafe_jack_out — emitted by DeckKRASH's
     # on_program_attack_hit hook. Re-uses the same code path as the
     # model-supplied tool_input.initiate_unsafe_jack_out: pass through
@@ -1252,6 +1363,7 @@ def _apply_alert_ice_spawn(state):
                 runner = state.get("hacker_name") or state.get("netrunner")
                 ice_status["Gateway_Trace"] = {
                     "name": "Trace ICE", "behavior": "trace",
+                    "entity_type": "trace",
                     "rez_current": sr * 2, "rez_max": sr * 2,
                     "status": "active",
                     "engaged_by": [runner] if runner else [],
@@ -1268,6 +1380,7 @@ def _apply_alert_ice_spawn(state):
             ice_block = ICE_STAT_BLOCKS.get(ice_key, ICE_STAT_BLOCKS["kraken"])
             ice_status[spawn_key] = {
                 "name": ice_block["name"], "behavior": "black", "ice_type": ice_key,
+                "entity_type": "black_ice",
                 "rez_current": ice_block["rez"],
                 "rez_max": ice_block["rez"], "status": "active"
             }
@@ -1335,6 +1448,9 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
             # the Netrunner can Slide again next turn if a Black ICE is
             # still on them.
             hack_state["slide_used_this_turn"] = False
+            # Going Quiet: tick the round counter so per-Watcher
+            # `last_search_round` enforcement works across turns.
+            hack_state["net_round"] = int(hack_state.get("net_round", 1) or 1) + 1
             hack_state["meatspace_due"] = True
         else:
             hack_state["net_actions_remaining"] = remaining
@@ -1570,7 +1686,69 @@ def build_hack_injection(hack_state, pipeline_state=None):
     parts.append("\n".join(lines))
     parts.extend(_render_system_map(hack_state, "report_hack_state"))
 
+    # Going Quiet stealth status block.
+    stealth_lines = _render_stealth_status(hack_state)
+    if stealth_lines:
+        parts.append("\n".join(stealth_lines))
+
+    # Virus ledger: persistent across sessions, injected when non-empty so the
+    # planning agent can reference active viruses when emitting activate_virus
+    # actions or when narrating heightened security from prior plants.
+    if isinstance(pipeline_state, dict):
+        from pipeline import build_virus_ledger_injection
+        _v = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+        if _v:
+            parts.append(_v)
+
     return "\n\n".join(parts)
+
+
+def _render_stealth_status(state):
+    """Render [STEALTH STATUS] block for hack/net_combat injections.
+
+    Returns a list of lines. Empty list if neither stealthed nor broken-this-run.
+    """
+    if not isinstance(state, dict):
+        return []
+    stealth_active = bool(state.get("stealth_active"))
+    broken_round = state.get("stealth_broken_round")
+    if not stealth_active and broken_round is None:
+        return []
+    lines = ["[STEALTH STATUS]"]
+    if stealth_active:
+        lines.append(f"Stealth: ACTIVE (round {state.get('net_round', 1)})")
+        # List Watchers + their last_search_round so the GM/world planner
+        # knows which Watchers can still search this turn.
+        watchers = enumerate_watchers(state)
+        if watchers:
+            lines.append("Watchers:")
+            for w in watchers:
+                last = w.get("last_search_round")
+                etype = str(w.get("entity_type") or "").strip() or (
+                    "demon" if str(w.get("behavior", "")).lower() == "demon" else "?"
+                )
+                searched = (
+                    f"searched round {last}" if last is not None
+                    else "search not yet used this run"
+                )
+                lines.append(
+                    f"  - {w.get('name', '?')} ({etype}, Int {w.get('interface_rank', '?')}, "
+                    f"Pathfinder +{w.get('pathfinder_skill', 0)}, {searched})"
+                )
+        # Highlight active Cloak booster (Eraser) for planner awareness.
+        active_progs = state.get("active_programs") or []
+        for p in active_progs:
+            if isinstance(p, dict) and str(p.get("name", "")).lower() == "eraser" \
+                    and str(p.get("status", "")).lower() == "active":
+                lines.append("Active Cloak booster: Eraser (+2 to Cloak checks)")
+                break
+    else:
+        lines.append(
+            f"Stealth: BROKEN this run (round {broken_round}) — re-establish requires "
+            f"Jack Out + Quiet Jack-In fresh"
+        )
+    lines.append("[/STEALTH STATUS]")
+    return lines
 
 
 def _resolve_netrunner_name(character_states, preferred_name=None, game_state=None):

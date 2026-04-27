@@ -135,6 +135,7 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
   },
   "combat": "<null OR combat object>",
   "callback_ops": [...],
+  "virus_ops": [...],
   "npc_memory_ops": [...],
   "plot_ops": [],
   "ip_ops": [],
@@ -161,6 +162,7 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions, IP awards, or IP spendi
   "time_passed": "0 minutes",
   "content": "<your conversational OOC response>",
   "callback_ops": [],
+  "virus_ops": [],
   "npc_memory_ops": [],
   "ip_ops": [],
   "scene_state": {<maintain current scene state unchanged>}
@@ -377,6 +379,17 @@ CALLBACK LEDGER:
 - Use for Fixer promises, corp intel, gang debts, personal vendettas
 - Most turns have 0-1 callback_ops. Don't force ops — only act when a genuine promise, hook, or foreshadowing moment emerges.
 
+VIRUS LEDGER:
+- `virus_ops` tracks viruses planted by Netrunners in NET Architectures. Persistent across sessions — this is your continuity anchor for high-risk-high-reward plant operations.
+- Actions:
+  - `plant`: emit when the player passes a Virus Interface Ability check AND chooses to LEAVE something behind in the system (a backdoor, time-bomb worm, surveillance daemon, etc.). Do NOT emit `plant` for inline corruption (e.g. "Virus to corrupt this one file mid-hack") — that's a tactical use, not a strategic plant. Required fields: `target` (the Architecture/Corp — keep stable for queryability), `planter` (edgerunner name), `narrative` (what the virus IS and how/when it triggers — GM-design payload, not a fixed enum).
+  - `activate`/`discover`/`purge`: status transitions with optional `log` entry. Activate = the virus fires (player- or narrative-triggered). Discover = the target found it. Purge = it's been removed.
+  - `log`: append a consequence entry without changing status (e.g. "Skim now totals 12,000eb — Corp suspicion rising").
+  - `update`: corrections to `target`/`planter`/`narrative` only.
+- Effects are NARRATIVE — the engine does not auto-resolve virus payloads. You describe what happens when one fires, when one is discovered, etc.
+- Restraint: plant ops should be RARE — once or twice per gig at most. Most Virus checks are tactical. Plants are a deliberate strategic choice the player announces.
+- When a hack begins against a target with active or recently-archived viruses (visible in `[VIRUS LEDGER]`), reference them organically in scene-setting if narratively appropriate (heightened security, residual access, suspicious Netrunner activity).
+
 NPC MEMORIES:
 - Same semantics (add/drop via npc_memory_ops)
 - Track NPC grudges, debts, loyalties, and knowledge
@@ -513,6 +526,7 @@ You maintain persistent state across turns. This is your long-term memory — wh
 ### Injected State (read these carefully each turn):
 - **[PIPELINE STATE]**: Pacing data (episode, beat, response count)
 - **[CALLBACK LEDGER]**: Open plot threads, Fixer contacts, gig promises with IDs
+- **[VIRUS LEDGER]**: Viruses planted by Netrunners in NET Architectures, with target, planter, narrative payload, status (dormant/activated/discovered/purged), and consequence log. Persistent across sessions — your continuity anchor for high-risk plant operations.
 - **[NPC MEMORIES: <name>]**: Key moments per NPC, scoped to NPCs in the current scene
 - **[SCENE STATE]**: Current location, NPCs present, PCs present, tensions, atmosphere, details
 - **[CHARACTER STATES]**: Mechanical state per character (HP, Humanity, conditions)
@@ -539,6 +553,7 @@ After your narrative, you MUST call the `report_state` tool every turn. Required
 
 Optional arrays:
 - **callback_ops**: Add/resolve Fixer deals, gig intel, debts. Include `resolutions` on add: up to 3 trigger conditions (200 char limit each) that would close this callback. Each turn, check `[resolves if: ...]` on open callbacks and resolve any whose conditions have been met.
+- **virus_ops**: Track viruses planted in NET Architectures. Actions: `plant` (target + planter + narrative payload — only when the runner LEAVES something behind, not for inline corruption), `activate`/`discover`/`purge` (status transitions with optional `log`), `log` (consequence note without status change), `update` (corrections to target/planter/narrative). Effects are NARRATIVE — the engine does not auto-resolve payloads. Plant ops should be rare — once or twice per gig at most. Reference active viruses in `[VIRUS LEDGER]` when narratively relevant (heightened Corp security, follow-up gigs against the same target, residual access, etc.).
 - **npc_memory_ops**: Record significant NPC moments
 - **plot_ops**: Fire when a plot-doc trigger condition is met. See **Plot Triggers (plot_ops)** section at the end of this contract for authoring formats, pre-registration, severities, and the required shape of the `decision` field (must be a self-contained narrative sentence — this is the user's save-state read-out).
 - **Restraint**: Most turns should have **0** callback_ops and **0** npc_memory_ops. Add a callback only when a genuine promise, hook, or foreshadowing moment emerges — not every turn. Add a memory only when something would genuinely change how an NPC thinks about the party. Tier caps are a safety net, not a target. If you are adding ops every turn, you are adding too many.
@@ -777,6 +792,13 @@ Action types for resolve_mechanics (backend auto-resolves stat/skill values and 
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
 - activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program} — player-choice program status transitions. Costs (RAW p.201-202 + Errata p.3): activate=1 NA (deactivated → active; OPTIONAL before program_attack since the attack auto-activates for free); deactivate=1 NA (active|derezzed → deactivated, also covers the first half of recovering a Derezzed program); reactivate=1 NA (legacy alias for deactivate from derezzed); reinstall=1 Meat Action (destroyed → deactivated, requires Backup Drive). program_attack itself accepts a Deactivated firing program and implicitly activates it within the 1-NA attack. Fail-soft on illegal transitions. Do NOT mutate active_programs[i].status manually.
 - move_node: {type, character, target (destination node name)} — Enter Node action. Costs 1 NA. Backend validates: target must be a real node in `system_map.nodes` AND must be in `system_map.nodes[current_node].connections`. On success, backend updates `current_node`, appends to `nodes_visited` + `revealed_nodes`, and triggers ICE engagement (Trace lock-on, Black ICE hunt continuation) automatically. On failure (invalid_move / no_system_map / insufficient_net_actions / etc.), action surfaces in `player_errors` for OOC retry. **Use this instead of mutating `current_node` directly in report_hack_state** — direct mutation bypasses the connectivity check.
+- activate_virus: {type, character, virus_id?: int, target?: str, log?: str} — Player-initiated trigger of a previously-planted virus. Lookup by `virus_id` (preferred) or `target` (fallback string match). No NA cost — remote trigger. Resolver validates the virus exists in `pipeline_state.virus_ledger.active` and is not purged; on success emits a virus_op {action: "activate"} that flows into the next report_state's virus_ops list, transitioning the virus to `activated` status. The narrative consequences are yours to describe. Errors: `no_viruses_planted` / `virus_not_found` / `virus_purged` (all surface in `player_errors` for OOC retry).
+- speed_check_vs_black_ice: {type, character, target, interface_rank?} — Standard non-stealth Black ICE encounter (CPRED Core p.205). Backend rolls Interface + 1d10 vs Black ICE PER + 1d10. Pass: avoid effect. Fail: take effect. Both: ICE enters Initiative (emits `ice_initiative_entry` op). Use this on encounter when the Netrunner is NOT stealthed.
+- patrol_detection: {type, character (Netrunner being detected), target (Patrol ICE), interface_rank?} — Patrol ICE detection roll. GM/world-emitted. Backend rolls Patrol PER (+2 if alert ≥ 3) + 1d10 vs Netrunner Interface (with Cloak hooks) + 1d10. Detected: planner separately emits +1 alert per RAW.
+- quiet_jack_in: {type, character, interface_rank?} — Going Quiet: establish stealth on jack-in. **Costs 1 NA.** Contested vs every Watcher; pass beats ALL. Cloak boosters apply automatically. Errors: `stealth_already_active` / `quiet_jack_in_unavailable` / `cannot_quiet_jack_in_after_break` / `insufficient_net_actions`.
+- stealth_contest: {type, character, vs ("black_ice"|"watcher"), target, trigger?, interface_rank?} — Going Quiet contest. Replaces Speed Check while stealthed. 0 NA. Pass vs Black ICE: bypassed silently (no Initiative). Fail vs Black ICE: effect + ICE to top of Initiative + break_stealth. Pass vs Watcher: undetected. Fail vs Watcher: break_stealth. Errors: `not_in_stealth` / `wrong_entity_type` / `ice_not_found` / `target_ambiguous`.
+- watcher_search: {type, target, netrunner, netrunner_interface_rank?} — Going Quiet: GM/world-emitted Watcher Pathfinder search. Once per turn per Watcher. On Watcher win: break_stealth. Errors: `not_in_stealth` / `watcher_search_already_used_this_turn` / `wrong_entity_type`.
+- break_stealth: {type, character, reason} — Going Quiet: planner-emitted explicit stealth break. 0 NA. REQUIRED before any program_attack / opposed_check(zap=true) against ICE/Watcher while `stealth_active=True` (engine fail-softs the attack with `must_break_stealth_first` otherwise). Effects: stealth_active=False, all Watchers stealth_aware=True. NO alert bump (RAW silence).
 
 For NET-context skill_check / opposed_check, set `"net": true` AND include an `ability` tag — closed enum: Backdoor / Cloak / Control / Eye-Dee / Pathfinder / Slide / Virus / Zap / Initiative. Required so program effect bonuses (e.g. Worm +2 on Backdoor) fire on the matching roll.
 - hustle: {type, character, role (e.g. "Fixer"/"Solo"), role_ability_rank, dv, payout, luck_spent?, on_success?, on_failure?} — Downtime income. Backend auto-resolves seriously_wounded.
@@ -810,7 +832,7 @@ The `resolve_mechanics` result includes a top-level `player_errors` list: `[{act
 
 Either way: do NOT narrate the failure as if it happened in-fiction. The action never resolved.
 
-Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`.
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`, `not_in_stealth`, `quiet_jack_in_unavailable`, `cannot_quiet_jack_in_after_break`, `stealth_already_active`, `watcher_search_already_used_this_turn`, `must_break_stealth_first`, `wrong_entity_type`, `ice_not_found`, `no_viruses_planted`, `virus_not_found`, `virus_purged`.
 
 Distinguish from in-fiction failures: `success: false` with NO `error` field is a normal dice failure (missed attack, failed check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the triage path above.
 
@@ -926,6 +948,24 @@ STATE_REPORT_TOOL = {
                             "maxItems": 3,
                             "description": "Up to 3 non-exhaustive trigger conditions that would close this callback (200 char limit each)"
                         }
+                    }
+                }
+            },
+            "virus_ops": {
+                "type": "array",
+                "description": "Planted-virus state ops. Persistent across sessions. plant: add a new virus from a successful Virus Interface Ability check that the runner uses to LEAVE something behind (not for inline corruption). activate/discover/purge: status transitions. log: append a consequence entry without status change. update: correct fields on an active virus.",
+                "items": {
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {"type": "string", "enum": ["plant", "activate", "discover", "purge", "log", "update"]},
+                        "id": {"type": "integer", "description": "Required for activate/discover/purge/log/update; ignored for plant"},
+                        "target": {"type": "string", "description": "Architecture/Corp/system the virus sits in (plant). Used for queryability — keep stable."},
+                        "planter": {"type": "string", "description": "Edgerunner name who planted it (plant)"},
+                        "narrative": {"type": "string", "description": "What the virus IS / does — narrative payload (plant). 800 char limit."},
+                        "log": {"type": "string", "description": "Optional consequence note attached to a status transition (activate/discover/purge). 400 char limit."},
+                        "entry": {"type": "string", "description": "Log-only entry text (log). 400 char limit."},
+                        "fields": {"type": "object", "description": "Updateable fields (update): target, planter, narrative."}
                     }
                 }
             },
@@ -1499,6 +1539,78 @@ Auto-emitted by attack resolvers (do NOT emit manually):
 
 Fail-soft semantics: if the named program isn't loaded, is already in the requested status, or current status doesn't match the required transition, the resolver returns an error result with a narrative reason — no NA spent, no state change.
 
+### Stealth Netrunning (Going Quiet DLC)
+
+Going Quiet adds an optional stealth path: enter the Architecture quietly, slip past Watchers and Black ICE on contested checks instead of Speed Checks, exfiltrate without raising the alert. The engine is a strict resolver — every state change traces to a planner-emitted action; there are NO engine auto-cascades.
+
+**Entities:**
+- **Watchers** = `entity_type ∈ {demon, watcher_netrunner}` in `ice_status`. Trace ICE, Black ICE, Patrol ICE, and Tar are NOT Watchers.
+- Watcher fields on the ice_status entry: `interface_rank`, `pathfinder_skill` (default 0), `last_search_round` (per-turn enforcement).
+
+**Adding Watchers to the architecture:** When you place a Demon or enemy Netrunner in `ice_status` (during architecture generation or mid-run encounters), set the entry shape explicitly:
+```json
+{
+  "name": "Imp",                 // entity name (also used as part of stable key)
+  "entity_type": "demon",        // REQUIRED — "demon" or "watcher_netrunner"
+  "interface_rank": 3,           // REQUIRED for stealth contests; defaults to 0 if missing (auto-fail)
+  "pathfinder_skill": 0,         // optional Pathfinder bonus (default 0)
+  "status": "active",            // standard ice_status field
+  "behavior": "demon"            // optional; if entity_type is set it's authoritative
+}
+```
+Without `entity_type` set, the `enumerate_watchers` helper falls back to `behavior=="demon"` for legacy compatibility — which means `behavior=="netrunner"` enemy Netrunners would NOT be enumerated as Watchers without the `entity_type` field. Always set `entity_type` explicitly on Watcher entries.
+
+**ICE entries (NOT Watchers):** Black ICE / Trace / Patrol / Tar entries don't need `interface_rank` or `pathfinder_skill`. Use `entity_type: "black_ice"` / `"trace"` if you want explicit typing; otherwise the legacy `behavior` field is recognized.
+
+**Action types (all planner-emitted, no auto-emission):**
+
+- **`quiet_jack_in`** {type, character, interface_rank?}: establishes stealth on jack-in. **Costs 1 NA** (RAW: "spend an additional NET Action when you Jack In" — that's the price of the stealthy entrance, no offset). Resolves contested Interface + 1d10 vs every Watcher's Interface + Pathfinder + 1d10. Pass requires beating ALL Watchers. Cloak booster bonuses (Eraser +2) fire automatically. Once per encounter (re-Jack-In requires Jack Out first). NA is consumed even on failure.
+  - **TIMING:** RAW gates this to Jack-In itself. You MUST emit `quiet_jack_in` as the first NET Action in the first batch after the encounter starts, before any other NET Action. If the player's first turn passes without a Quiet Jack-In, they are committed to a loud run — there is no "going stealth mid-hack." The engine doesn't currently enforce this strictly (validation only checks `quiet_jack_in_used=False`), so this is a planner contract responsibility.
+
+- **`stealth_contest`** {type, character, vs, target, trigger, interface_rank?}: universal contest replacing Speed Check while stealthed.
+  - `vs="black_ice"`: Interface + Cloak + 1d10 vs Black ICE PER + 1d10. Pass: ICE bypassed silently (NO Initiative entry, NO effect). Fail: ICE effect triggers, ICE jumps to TOP of Initiative, stealth breaks.
+  - `vs="watcher"`: Interface + Cloak + 1d10 vs Watcher Interface + Pathfinder + 1d10. Pass: undetected. Fail: stealth breaks (no Initiative effect — Watchers don't enter Initiative).
+  - `trigger`: "encounter" | "watcher_search" | "forced" — narrative tag.
+  - 0 NA (encounter & forced); watcher_search variant is the Watcher's NA, not the Netrunner's.
+
+- **`watcher_search`** {type, target, netrunner, netrunner_interface_rank?}: Watcher's active Pathfinder search — **planner-emitted by the GM/world model when a Watcher's AI chooses to search**. Engine does NOT auto-fire searches at turn boundaries. Once per turn per Watcher (`last_search_round` enforcement). Roll: Watcher Interface + Pathfinder + 1d10 vs Netrunner Interface + Cloak + 1d10. On Watcher win: stealth breaks.
+
+- **`break_stealth`** {type, character, reason}: planner-emitted explicit break. 0 NA. Idempotent if already broken. Required before any attack against ICE/Watcher while stealthed (see attack guard below). Effects (RAW-only): clears stealth_active, sets stealth_broken_round, marks all Watchers `stealth_aware=True`. **No alert bump** — RAW silence means no engine effect.
+
+**Stealth-aware attack guard:** While `stealth_active=True`, the engine fail-softs `program_attack` and `opposed_check (zap=true)` against any ICE or Watcher target with error `must_break_stealth_first` (NA NOT consumed). To attack, emit `break_stealth` first in the same batch, then the attack action. The engine resolves them in order.
+
+**When stealth breaks:**
+- All Watchers become globally aware (`stealth_aware=True` on their ice_status entry).
+- Black ICE reverts to standard RAW encounter behavior — handled by `speed_check_vs_black_ice`. No automatic convergence.
+- **No alert bump on the break itself.** Each subsequent action with its own RAW alert trigger (failed Backdoor, derezzing ICE, Patrol detecting on subsequent moves, lingering, Brute Force) fires that trigger normally.
+- Reestablishment: must Jack Out + Quiet Jack-In fresh. The `cannot_quiet_jack_in_after_break` fail-soft enforces this within an encounter.
+
+**Narrating `stealth_aware=True` Watchers:** Once a Watcher's `stealth_aware` flag is set, that Watcher knows the Netrunner is in the Architecture. Narrate them as actively hostile and engaging — they no longer need to roll passive contests or active searches to find the runner; the engine never auto-fires those, and the planner should NOT emit `watcher_search` against a `stealth_aware` Watcher (it'd pass for free and add nothing). Instead, narrate the Watcher's pursuit/attack directly: a Demon weaving toward the runner's node, an enemy Netrunner firing programs back, a Patrol ICE escalating its detection. The flag is a state hint, not a separate combat sub-mechanic.
+
+**While stealthed:**
+- Successful stealth contests do NOT bump alert (replaces Patrol detection and Black ICE Speed Check).
+- Lingering 3+ rounds STILL bumps alert (system audit, RAW-independent of agent detection).
+- Brute Force on a password node: planner emits both `break_stealth` and the Brute Force action (Brute Force is noisy by definition).
+- Taking a Control Node: planner emits `break_stealth` adjacent to the Control Node action.
+
+**New player_errors codes (all fail-soft, no NA consumed):**
+- `not_in_stealth` — stealth_contest emitted while stealth_active=False
+- `quiet_jack_in_unavailable` — Quiet Jack-In already attempted this encounter
+- `cannot_quiet_jack_in_after_break` — must Jack Out first
+- `stealth_already_active` — duplicate quiet_jack_in
+- `watcher_search_already_used_this_turn` — Watcher already searched this round
+- `must_break_stealth_first` — stealthed attack against ICE/Watcher without preceding break_stealth
+- `wrong_entity_type` — stealth_contest vs/target mismatch (e.g., vs="watcher" on a Black ICE target)
+
+### Planted Viruses (virus_ops via report_hack_state / events)
+When the player passes a Virus Interface Ability check AND chooses to LEAVE something behind in this Architecture (a backdoor for later access, a time-bomb worm, a surveillance daemon, a payroll skimmer), emit a `virus_ops` plant entry alongside your normal report. Required fields: `target` (the Architecture or Corp — keep stable for queryability across sessions), `planter` (edgerunner name), `narrative` (what the virus IS, how/when it triggers, what it costs the target — GM-design payload).
+
+Do NOT emit `plant` for inline corruption (a Virus check used to corrupt one file mid-hack, brick a single node, etc.) — that's a tactical use, not a strategic plant. Plants are rare, deliberate, player-announced.
+
+Effects of planted viruses are NARRATIVE — the engine does not auto-resolve payloads. When you (or future-you on a later session) see active viruses in `[VIRUS LEDGER]`, reference them organically: heightened Corp security on follow-up gigs against the same target, residual access points the runner can lean on, suspicious Corp Netrunner activity, etc.
+
+The player can also call `activate_virus` via resolve_mechanics to manually trigger a previously-planted virus by id or target — see the action types reference.
+
 ### RAW Violation Handling — backend rejected an action; triage who erred
 The resolver returns a top-level `player_errors` list: `[{action_index, action_type, error, reason}, ...]`. When non-empty, the backend rejected an action with NO state change — no NA consumed, no Cycles spent, no time elapsed, no NPC reaction. **The backend cannot tell whether you (the model) hallucinated the action or whether the player genuinely asked for something illegal.** You have to triage by comparing the failing action to the user's prompt:
 
@@ -1513,7 +1625,7 @@ The resolver returns a top-level `player_errors` list: `[{action_index, action_t
 
 Either way: do NOT narrate the failure as if it happened in-fiction. The action never resolved.
 
-Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`.
+Error codes the backend surfaces in `player_errors`: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`, `not_in_stealth`, `quiet_jack_in_unavailable`, `cannot_quiet_jack_in_after_break`, `stealth_already_active`, `watcher_search_already_used_this_turn`, `must_break_stealth_first`, `wrong_entity_type`, `ice_not_found`, `no_viruses_planted`, `virus_not_found`, `virus_purged`.
 
 Distinguish from in-fiction failures: a `success: false` result with NO `error` field is a normal dice failure (a missed attack, a failed Backdoor check) — narrate it in fiction and advance the world as usual. Only entries that appear in `player_errors` trigger the triage path above.
 
@@ -1883,6 +1995,7 @@ If initiated_from is "hack", the NET encounter was already in progress when comb
 - **Brain damage**: When Black ICE attacks the Netrunner, call resolve_mechanics with action type `program_attack_vs_netrunner`: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table. Brain damage and special effects are resolved by the backend — do NOT set brain_damage in hack_state or character_updates.hp_delta. For anti-program ICE, use `ice_attack_vs_program`: {type, character, ice_type, target_program, target_program_def, target_program_rez}.
 - **Program deactivation**: When resolve_mechanics returns `program_deactivated`, the program is deactivated (RAW). Per RAW Errata p.3 the next `program_attack` auto-activates a Deactivated program for free (1 NA covers Activate+Attack as one operation) — do NOT emit a separate activate_program before the attack unless you want to leave the program Active without firing. Do NOT mutate active_programs[i].status manually.
 - **Program status transitions**: Player-choice transitions are resolver actions: `activate_program` / `deactivate_program` / `reactivate_program` / `reinstall_program`. Backend validates transition + atomic NA. See HACK_CONTRACT for full table.
+- **Stealth Netrunning (Going Quiet DLC)**: see HACK_CONTRACT § "Stealth Netrunning (Going Quiet DLC)" for the full ruleset. Action types: `quiet_jack_in` (1 NA), `stealth_contest` (vs="black_ice"|"watcher"), `watcher_search` (Watcher's 1 NA, GM-emitted), `break_stealth` (planner-emitted, REQUIRED before any attack against ICE/Watcher while stealthed). Engine is a strict resolver — NO auto-cascades. Watchers are entries in `ice_status` with `entity_type ∈ {demon, watcher_netrunner}` (Trace/Black/Patrol ICE are NOT Watchers). Backend Speed Check via `speed_check_vs_black_ice`; Patrol Detection via `patrol_detection`.
 - **Zap damage**: For Zap attacks, use opposed_check with `"zap": true` and `"interface_rank": N`. Backend rolls 1d6 REZ damage on hit and auto-applies to ice_status.
 - **TAR penalty**: TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with `"net": true` (do NOT mark ICE actions). NET skill_check / opposed_check additionally REQUIRE an `ability` tag.
 - **Alert DV penalty**: +2 to all NET skill check DVs at alert 3+ is auto-applied by the backend. Do NOT add +2 manually.
@@ -1901,7 +2014,7 @@ The resolver returns a top-level `player_errors` list: `[{action_index, action_t
 - **User genuinely asked for the illegal thing** → route the response as a brief OOC clarification ("(OOC: ...)" prefix or italics), paraphrase the `reason` field, prompt for retry. Do NOT call `report_net_combat_state`.
 - **Ambiguous** → route to OOC and ask.
 
-Either way: never narrate the failure as fiction. Error codes surfaced: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`. A `success: false` result with NO `error` field is a normal dice failure — narrate in fiction and advance the world.
+Either way: never narrate the failure as fiction. Error codes surfaced: `slide_preemptive`, `slide_already_used`, `program_not_firable`, `program_not_loaded`, `illegal_status_transition`, `insufficient_net_actions`, `program_unusable`, `target_ambiguous`, `missing_program`, `reinstall_requires_backup_drive`, `missing_target`, `no_system_map`, `invalid_current_node`, `invalid_move`, `not_in_stealth`, `quiet_jack_in_unavailable`, `cannot_quiet_jack_in_after_break`, `stealth_already_active`, `watcher_search_already_used_this_turn`, `must_break_stealth_first`, `wrong_entity_type`, `ice_not_found`, `no_viruses_planted`, `virus_not_found`, `virus_purged`. A `success: false` result with NO `error` field is a normal dice failure — narrate in fiction and advance the world.
 
 ### State Tracking
 - **character_updates**: meatspace changes (hp_delta, armor_delta, luck_delta, ammo, critical injuries, conditions). Same as standalone combat.
@@ -2256,6 +2369,13 @@ DICE ACTION TYPES for the "actions" array:
 - ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. "Dragon"), target_program, target_program_def, target_program_rez} — Anti-program ICE attacking a program.
 - activate_program / deactivate_program / reactivate_program / reinstall_program: {type, character, program (program name)} — player-choice program status transitions. Costs (RAW p.201-202 + Errata p.3): activate=1 NA (deactivated → active, OPTIONAL before program_attack since the attack auto-activates for free); deactivate=1 NA (active|derezzed → deactivated; also covers the first half of recovering a Derezzed program); reactivate=1 NA (legacy alias for deactivate from derezzed); reinstall=1 Meat Action (destroyed → deactivated, requires Backup Drive). program_attack accepts a Deactivated firing program and auto-activates it within the 1-NA attack. Backend validates and fail-softs on illegal transitions. Include cost in `net_actions_used` when reporting. Do NOT mutate active_programs[i].status manually.
 - move_node: {type, character, target (destination node name)} — Enter Node action. Costs 1 NA. Backend validates connectivity against `system_map.nodes[current_node].connections`. On success: emits node_change op which the apply step consumes (updates current_node, nodes_visited, revealed_nodes, fires ICE engagement). On failure: surfaces in `player_errors` for OOC retry. **Always use move_node — do NOT mutate current_node directly in hack_state_updates.**
+- activate_virus: {type, character, virus_id?: int, target?: str, log?: str} — Player-initiated remote trigger of a previously-planted virus from `[VIRUS LEDGER]`. 0 NA cost. Looks up by id (preferred) or target string. Resolver emits a virus_op flowing into virus_ops on the next report; the model narrates the consequences.
+- speed_check_vs_black_ice: {type, character, target, interface_rank?} — Backend Speed Check on non-stealth Black ICE encounter. Pass: avoid effect (ICE still enters Initiative). Fail: take effect.
+- patrol_detection: {type, character (Netrunner), target (Patrol ICE), interface_rank?} — GM-emitted Patrol detection roll. Cloak hooks apply. On detection: planner emits +1 alert separately.
+- quiet_jack_in: {type, character, interface_rank?} — Going Quiet stealth establishment. 1 NA. Pass requires beating every Watcher.
+- stealth_contest: {type, character, vs, target, interface_rank?} — Stealth contest replacing Speed Check. vs="black_ice" or vs="watcher". On Black ICE pass: silent bypass. On Black ICE fail: effect + top-of-Initiative + break. On Watcher pass: undetected. On Watcher fail: break.
+- watcher_search: {type, target, netrunner, netrunner_interface_rank?} — Watcher's 1-NA Pathfinder search. Once per turn per Watcher. On Watcher win: break_stealth.
+- break_stealth: {type, character, reason} — Planner-emitted explicit stealth break. Required before any attack against ICE/Watcher while stealthed.
 
 TAR penalty (-2 per stack) is applied automatically by the backend to the Netrunner's next NET check. Mark the Netrunner's NET actions with "net": true (do NOT mark ICE actions). NET skill_check / opposed_check also REQUIRE an `ability` tag matching the Interface Ability being rolled.
 Alert DV penalty (+2 at alert 3+) is auto-applied by the backend to NET skill checks. Do NOT add +2 manually to the DV.
@@ -2287,6 +2407,11 @@ HACK_PLANNING_SCHEMA = {
         "hack_complete": {"type": "boolean"},
         "narrative_summary": {"type": "string"},
         "meatspace_round": {"type": "boolean"},
+        "virus_ops": {
+            "type": "array",
+            "description": "Planted-virus state ops. Persistent across sessions. Emit `plant` only when the runner deliberately leaves something behind in this Architecture (not for inline corruption). See HACK_CONTRACT 'Planted Viruses' section for full action shapes.",
+            "items": {"type": "object"}
+        },
     }
 }
 
@@ -2363,6 +2488,11 @@ NET_COMBAT_PLANNING_SCHEMA = {
         "net_complete": {"type": "boolean"},
         "scene_notes": {"type": "string"},
         "narrative_summary": {"type": "string"},
+        "virus_ops": {
+            "type": "array",
+            "description": "Planted-virus state ops. Persistent across sessions. See NET_COMBAT_CONTRACT 'Planted Viruses' section for action shapes.",
+            "items": {"type": "object"}
+        },
     }
 }
 

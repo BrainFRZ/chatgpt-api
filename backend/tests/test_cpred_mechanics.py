@@ -7314,6 +7314,1459 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(r5["success"], False)
 
 
+class TestActivateVirus(unittest.TestCase):
+    """Player-initiated trigger of a previously-planted virus.
+
+    Resolver looks up the virus in pipeline_state.virus_ledger.active by id
+    or target. Emits a virus_op state op for the events apply path. Fail-soft
+    on missing virus, missing ledger, or already-purged virus.
+    """
+
+    def _ledger(self, *entries):
+        """Build virus_ledger. Each entry: (id, target, status[, narrative])."""
+        active = []
+        for entry in entries:
+            vid, target, status = entry[0], entry[1], entry[2]
+            narrative = entry[3] if len(entry) > 3 else "test virus"
+            active.append({
+                "id": vid, "target": target, "planter": "RedVelvet",
+                "narrative": narrative, "planted_date": "2046-03-01",
+                "planted_turn": 10, "status": status, "log": []
+            })
+        return {"next_id": len(active) + 1, "active": active, "archived": []}
+
+    def test_activate_by_id_success(self):
+        ledger = self._ledger((4, "MegaCorp HQ", "dormant", "Skim worm"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet",
+              "virus_id": 4, "log": "Triggered remotely"}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["virus_id"], 4)
+        self.assertEqual(r["target"], "MegaCorp HQ")
+        # Emits a virus_op state op flagged for the events apply layer
+        v_ops = [op for op in result["state_ops"]
+                 if isinstance(op, dict) and op.get("op") == "virus_op"]
+        self.assertEqual(len(v_ops), 1)
+        self.assertEqual(v_ops[0]["virus_op"]["action"], "activate")
+        self.assertEqual(v_ops[0]["virus_op"]["id"], 4)
+        self.assertEqual(v_ops[0]["virus_op"]["log"], "Triggered remotely")
+
+    def test_activate_by_target_success(self):
+        ledger = self._ledger((7, "Arasaka R&D NET", "dormant"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet",
+              "target": "Arasaka R&D NET"}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["virus_id"], 7)
+        v_ops = [op for op in result["state_ops"]
+                 if isinstance(op, dict) and op.get("op") == "virus_op"]
+        self.assertEqual(len(v_ops), 1)
+        # log omitted when not provided
+        self.assertNotIn("log", v_ops[0]["virus_op"])
+
+    def test_activate_target_match_is_case_insensitive(self):
+        ledger = self._ledger((1, "MegaCorp Heywood HQ", "dormant"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet",
+              "target": "megacorp heywood hq"}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["virus_id"], 1)
+
+    def test_activate_no_viruses_planted(self):
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 4}],
+            virus_ledger={"next_id": 1, "active": [], "archived": []},
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "no_viruses_planted")
+
+    def test_activate_no_ledger_param_treated_as_empty(self):
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 4}],
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "no_viruses_planted")
+
+    def test_activate_virus_not_found(self):
+        ledger = self._ledger((4, "MegaCorp HQ", "dormant"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 99}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "virus_not_found")
+        # Reason lists what's available
+        self.assertIn("MegaCorp HQ", r["reason"])
+
+    def test_activate_purged_virus_fails(self):
+        ledger = self._ledger((4, "MegaCorp HQ", "purged"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 4}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "virus_purged")
+
+    def test_activate_already_activated_virus_re_activates(self):
+        """Re-triggering an already-activated virus is allowed (the player can fire it again)."""
+        ledger = self._ledger((4, "MegaCorp HQ", "activated"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 4,
+              "log": "Triggered second wave"}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+
+    def test_activate_id_takes_precedence_over_target(self):
+        """When both id and target are passed, id wins."""
+        ledger = self._ledger(
+            (1, "MegaCorp HQ", "dormant"),
+            (2, "Arasaka", "dormant"),
+        )
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet",
+              "virus_id": 2, "target": "MegaCorp HQ"}],
+            virus_ledger=ledger,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        # id=2 → Arasaka, not MegaCorp HQ
+        self.assertEqual(r["target"], "Arasaka")
+
+    def test_activate_no_na_cost(self):
+        """activate_virus is a remote trigger — costs 0 NA."""
+        ledger = self._ledger((1, "X", "dormant"))
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 1}],
+            virus_ledger=ledger,
+            net_actions_remaining=0,  # 0 NA available — should still succeed
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+
+    def test_activate_log_truncated_at_400(self):
+        ledger = self._ledger((1, "X", "dormant"))
+        long_log = "z" * 1000
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet",
+              "virus_id": 1, "log": long_log}],
+            virus_ledger=ledger,
+        )
+        v_op = [op for op in result["state_ops"]
+                if isinstance(op, dict) and op.get("op") == "virus_op"][0]
+        self.assertEqual(len(v_op["virus_op"]["log"]), 400)
+
+
+class TestStealthStatePlumbing(unittest.TestCase):
+    """Step A: stealth state fields exist with safe defaults; legacy hack_state
+    without them loads cleanly via apply_hack_state.
+    """
+
+    def test_init_hack_state_has_stealth_fields(self):
+        from game_systems.cpred_hack import init_hack_state
+        state = init_hack_state(target_system="Test", sr=3)
+        self.assertEqual(state["stealth_active"], False)
+        self.assertEqual(state["stealth_broken_round"], None)
+        self.assertEqual(state["quiet_jack_in_used"], False)
+        self.assertEqual(state["net_round"], 1)
+
+    def test_legacy_hack_state_migrates_with_defaults(self):
+        from game_systems.cpred_hack import apply_hack_state
+        legacy = {
+            "active": True, "target_system": "MegaCorp", "sr": 3,
+            "interface_rank": 4, "net_actions_per_turn": 3,
+            "alert_level": 0, "cycles_remaining": 3, "cycles_max": 3,
+            "active_programs": [], "installed_hardware": [],
+            "current_node": "Gateway", "nodes_visited": ["Gateway"],
+            "ice_status": {}, "tar_stacks": 0, "brain_damage": 0,
+            "net_actions_remaining": 3, "meatspace_due": False,
+            # No stealth fields! Legacy state.
+        }
+        apply_hack_state(legacy, {})
+        self.assertEqual(legacy["stealth_active"], False)
+        self.assertEqual(legacy["stealth_broken_round"], None)
+        self.assertEqual(legacy["quiet_jack_in_used"], False)
+        self.assertEqual(legacy["net_round"], 1)
+
+    def test_init_net_combat_has_stealth_fields(self):
+        from game_systems.cpred_net_combat import init_net_combat_state
+        nc = init_net_combat_state(netrunner_name="RedVelvet", target="Test")
+        self.assertEqual(nc["stealth_active"], False)
+        self.assertEqual(nc["net_round"], 1)
+
+    def test_init_net_combat_from_hack_carries_stealth(self):
+        from game_systems.cpred_net_combat import init_net_combat_from_hack
+        hack = {
+            "hacker_name": "RedVelvet", "interface_rank": 4,
+            "stealth_active": True, "stealth_broken_round": None,
+            "quiet_jack_in_used": True, "net_round": 5,
+            "alert_level": 0, "cycles_remaining": 3, "cycles_max": 3,
+        }
+        nc = init_net_combat_from_hack(hack)
+        self.assertEqual(nc["stealth_active"], True)
+        self.assertEqual(nc["quiet_jack_in_used"], True)
+        self.assertEqual(nc["net_round"], 5)
+
+    def test_meatspace_due_ticks_net_round(self):
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        state = init_hack_state(target_system="Test", sr=3, interface_rank=4)
+        state["net_actions_per_turn"] = 3
+        state["net_actions_remaining"] = 3
+        # Apply enough net_actions_used to trigger meatspace_due
+        # (net_actions_used lives inside the hack_state sub-key per apply_hack_state contract)
+        apply_hack_state(state, {"hack_state": {"net_actions_used": 3}})
+        self.assertEqual(state["net_round"], 2)
+        self.assertTrue(state["meatspace_due"])
+
+
+class TestQuietJackIn(unittest.TestCase):
+    """Step B: Quiet Jack-In establishes stealth via contested check vs all
+    Watchers. Costs 1 NA. RAW: pass requires beating ALL Watchers.
+    """
+
+    def _watchers_ice_status(self, *watchers):
+        """Build ice_status with given Watcher entries.
+        Each entry: (key, name, entity_type, interface_rank, pathfinder_skill).
+        """
+        out = {}
+        for entry in watchers:
+            key, name, et, iface, pf = entry
+            out[key] = {
+                "name": name, "entity_type": et,
+                "interface_rank": iface, "pathfinder_skill": pf,
+                "behavior": et if et != "watcher_netrunner" else "netrunner",
+                "status": "active",
+            }
+        return out
+
+    def test_quiet_jack_in_pass_against_all_watchers(self):
+        ice_status = self._watchers_ice_status(
+            ("Floor1_Imp", "Imp", "demon", 3, 0),
+        )
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status=ice_status,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # Interface 4 + 8 = 12 vs Imp Int 3 + 8 = 11 → RedVelvet wins
+        self.assertTrue(r["passed_all"])
+        self.assertEqual(r["cost_net_actions"], 1)
+        self.assertTrue(r["stealth_active"])
+        # Both ops emitted
+        ops = result["state_ops"]
+        self.assertTrue(any(op.get("op") == "quiet_jack_in_used" for op in ops))
+        self.assertTrue(any(op.get("op") == "stealth_set_active" for op in ops))
+
+    def test_quiet_jack_in_fail_when_any_watcher_beats(self):
+        ice_status = self._watchers_ice_status(
+            ("Floor1_Imp", "Imp", "demon", 3, 0),
+            ("Floor3_Asura", "Asura", "demon", 8, 2),
+        )
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status=ice_status,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # vs Imp: 4+5=9 vs 3+5=8 → pass
+        # vs Asura: 4+5=9 vs 8+2+5=15 → fail
+        # → fail overall
+        self.assertFalse(r["passed_all"])
+        self.assertFalse(r["stealth_active"])
+        ops = result["state_ops"]
+        self.assertTrue(any(op.get("op") == "quiet_jack_in_used" for op in ops))
+        self.assertFalse(any(op.get("op") == "stealth_set_active" for op in ops))
+
+    def test_quiet_jack_in_no_watchers_auto_pass(self):
+        """Empty Architecture → no contests to beat → auto-pass."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status={},
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["passed_all"])
+        self.assertTrue(r["stealth_active"])
+
+    def test_quiet_jack_in_costs_1_na(self):
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status={},
+                net_actions_remaining=2,
+            )
+        r = result["results"][0]
+        self.assertEqual(r["cost_net_actions"], 1)
+        self.assertTrue(r["passed_all"])
+
+    def test_quiet_jack_in_insufficient_na_fail_soft(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=0,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "insufficient_net_actions")
+
+    def test_quiet_jack_in_already_used(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            quiet_jack_in_used=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "quiet_jack_in_unavailable")
+
+    def test_quiet_jack_in_already_active(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            stealth_active=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "stealth_already_active")
+
+    def test_quiet_jack_in_after_break_blocked(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            stealth_broken_round=2,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "cannot_quiet_jack_in_after_break")
+
+    def test_quiet_jack_in_eraser_bonus_applies(self):
+        """Eraser +2 Cloak fires on Quiet Jack-In contest."""
+        ice_status = self._watchers_ice_status(
+            ("Floor1_Imp", "Imp", "demon", 3, 0),
+        )
+        progs = [{"name": "Eraser", "category": "booster", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status=ice_status,
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # Interface 4 + Eraser 2 + 5 = 11 vs Imp Int 3 + 5 = 8 → pass with margin
+        self.assertTrue(r["passed_all"])
+        self.assertTrue(any("Eraser" in str(b) for b in r.get("booster_bonuses", [])))
+
+    def test_quiet_jack_in_excludes_trace_from_watchers(self):
+        """Trace ICE is NOT a Watcher — Quiet Jack-In ignores Trace entries."""
+        ice_status = {
+            "Gateway_Trace": {
+                "name": "Trace", "entity_type": "trace", "behavior": "trace",
+                "interface_rank": 6, "pathfinder_skill": 0, "status": "active",
+            }
+        }
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=2):
+            # Low roll — would lose to Trace if Trace were a Watcher
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status=ice_status,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["passed_all"])
+        self.assertEqual(len(r["watcher_contests"]), 0)
+
+
+class TestBreakStealth(unittest.TestCase):
+    """Step B: break_stealth op clears stealth, marks Watchers aware. NO alert
+    bump. Idempotent if already broken.
+    """
+
+    def test_break_stealth_clears_active_and_marks_watchers(self):
+        ice_status = {
+            "Floor1_Imp": {
+                "name": "Imp", "entity_type": "demon",
+                "interface_rank": 3, "status": "active",
+            },
+            "Floor2_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "status": "active",
+            },
+        }
+        result = resolve_actions(
+            [{"type": "break_stealth", "character": "RedVelvet",
+              "reason": "took Control Node"}],
+            ice_status=ice_status,
+            stealth_active=True,
+            net_round=3,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        ops = [op for op in result["state_ops"]
+               if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(ops), 1)
+
+    def test_break_stealth_no_op_when_not_active(self):
+        result = resolve_actions(
+            [{"type": "break_stealth", "character": "RedVelvet",
+              "reason": "test"}],
+            ice_status={},
+            stealth_active=False,
+        )
+        r = result["results"][0]
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("no_op", False))
+        ops = [op for op in result["state_ops"]
+               if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(ops), 0)
+
+    def test_break_stealth_does_not_emit_alert_bump(self):
+        """RAW silence: stealth break itself does NOT bump alert."""
+        result = resolve_actions(
+            [{"type": "break_stealth", "character": "RedVelvet"}],
+            ice_status={},
+            stealth_active=True,
+        )
+        # No alert ops should be emitted by break_stealth.
+        alert_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict)
+                     and "alert" in str(op.get("op", "")).lower()]
+        self.assertEqual(len(alert_ops), 0)
+
+
+class TestEnumerateWatchers(unittest.TestCase):
+    """Helper: enumerate_watchers returns ONLY demons + watcher_netrunners."""
+
+    def test_excludes_black_ice_trace_patrol(self):
+        from game_systems.cpred_hack import enumerate_watchers
+        state = {
+            "ice_status": {
+                "F1_Hellhound": {"name": "Hellhound", "entity_type": "black_ice"},
+                "Gateway_Trace": {"name": "Trace", "entity_type": "trace"},
+                "F2_Patrol": {"name": "Patrol", "behavior": "patrol"},
+                "F3_Imp": {"name": "Imp", "entity_type": "demon", "interface_rank": 3},
+                "F4_Corp": {"name": "Corp Runner", "entity_type": "watcher_netrunner",
+                            "interface_rank": 4},
+            }
+        }
+        watchers = enumerate_watchers(state)
+        names = sorted(w.get("name") for w in watchers)
+        self.assertEqual(names, ["Corp Runner", "Imp"])
+
+    def test_legacy_demon_via_behavior_fallback(self):
+        from game_systems.cpred_hack import enumerate_watchers
+        state = {
+            "ice_status": {
+                "F1_Imp": {"name": "Imp", "behavior": "demon", "interface_rank": 3},
+                "F2_Trace": {"name": "Trace", "behavior": "trace"},
+            }
+        }
+        watchers = enumerate_watchers(state)
+        self.assertEqual(len(watchers), 1)
+        self.assertEqual(watchers[0]["name"], "Imp")
+
+    def test_empty_state(self):
+        from game_systems.cpred_hack import enumerate_watchers
+        self.assertEqual(enumerate_watchers({}), [])
+        self.assertEqual(enumerate_watchers({"ice_status": {}}), [])
+        self.assertEqual(enumerate_watchers(None), [])
+
+    def test_destroyed_watcher_excluded(self):
+        """Status filter: destroyed/bypassed Watchers don't get rolled against."""
+        from game_systems.cpred_hack import enumerate_watchers
+        state = {
+            "ice_status": {
+                "F1_Imp": {"name": "Imp", "entity_type": "demon",
+                           "interface_rank": 3, "status": "destroyed"},
+                "F2_Asura": {"name": "Asura", "entity_type": "demon",
+                             "interface_rank": 8, "status": "bypassed"},
+                "F3_Live": {"name": "Live Demon", "entity_type": "demon",
+                            "interface_rank": 4, "status": "active"},
+            }
+        }
+        watchers = enumerate_watchers(state)
+        names = sorted(w.get("name") for w in watchers)
+        self.assertEqual(names, ["Live Demon"])
+
+    def test_missing_status_treated_as_active(self):
+        """Migration safety: legacy entries without status field default to active."""
+        from game_systems.cpred_hack import enumerate_watchers
+        state = {
+            "ice_status": {
+                "F1_Imp": {"name": "Imp", "entity_type": "demon",
+                           "interface_rank": 3},  # no status field
+            }
+        }
+        watchers = enumerate_watchers(state)
+        self.assertEqual(len(watchers), 1)
+
+
+class TestAutoSpawnedICEEntityType(unittest.TestCase):
+    """P2 fix: auto-spawned Trace and Convergence ICE set entity_type explicitly."""
+
+    def test_trace_spawn_sets_entity_type(self):
+        from game_systems.cpred_hack import _apply_alert_ice_spawn
+        state = {
+            "alert_level": 5,
+            "_prev_alert_level": 4,
+            "sr": 3,
+            "ice_status": {},
+            "current_node": "Gateway",
+            "hacker_name": "RedVelvet",
+        }
+        _apply_alert_ice_spawn(state)
+        trace = state["ice_status"].get("Gateway_Trace")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.get("entity_type"), "trace")
+
+    def test_convergence_spawn_sets_entity_type(self):
+        from game_systems.cpred_hack import _apply_alert_ice_spawn
+        state = {
+            "alert_level": 7,
+            "_prev_alert_level": 6,
+            "sr": 3,
+            "ice_status": {},
+            "current_node": "Floor3",
+        }
+        _apply_alert_ice_spawn(state)
+        # Find the spawned Black ICE
+        spawn_keys = [k for k in state["ice_status"] if k.endswith("_Convergence")]
+        self.assertEqual(len(spawn_keys), 1)
+        spawn = state["ice_status"][spawn_keys[0]]
+        self.assertEqual(spawn.get("entity_type"), "black_ice")
+
+
+class TestStealthContest(unittest.TestCase):
+    """Step C: stealth_contest universal contest. Pass/fail outcomes per RAW.
+    Failed Black-ICE contest: effect + ICE-to-top-of-Initiative + break_stealth.
+    Failed Watcher contest: break_stealth (no Initiative change).
+    """
+
+    def _ice_status_with_hellhound_and_imp(self):
+        return {
+            "F2_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "status": "active",
+            },
+            "F1_Imp": {
+                "name": "Imp", "entity_type": "demon",
+                "interface_rank": 3, "pathfinder_skill": 0, "status": "active",
+            },
+        }
+
+    def test_stealth_contest_vs_black_ice_pass(self):
+        """Pass: ICE bypassed silently — no Initiative entry op."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "stealth_contest", "character": "RedVelvet",
+                  "vs": "black_ice", "target": "Hellhound", "interface_rank": 8}],
+                ice_status=self._ice_status_with_hellhound_and_imp(),
+                stealth_active=True,
+            )
+        r = result["results"][0]
+        # 8+5=13 vs 6+5=11 → pass
+        self.assertTrue(r["passed"])
+        # No Initiative entry op
+        init_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "ice_initiative_entry"]
+        self.assertEqual(len(init_ops), 0)
+        # No break_stealth op
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 0)
+
+    def test_stealth_contest_vs_black_ice_fail(self):
+        """Fail: break_stealth + ICE to top of Initiative + effect_pending."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "stealth_contest", "character": "RedVelvet",
+                  "vs": "black_ice", "target": "Hellhound", "interface_rank": 4}],
+                ice_status=self._ice_status_with_hellhound_and_imp(),
+                stealth_active=True,
+            )
+        r = result["results"][0]
+        # 4+5=9 vs 6+5=11 → fail
+        self.assertFalse(r["passed"])
+        self.assertTrue(r.get("effect_pending"))
+        self.assertEqual(r.get("initiative_priority"), "top")
+        # State ops: break_stealth + ice_initiative_entry priority=top
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 1)
+        init_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "ice_initiative_entry"]
+        self.assertEqual(len(init_ops), 1)
+        self.assertEqual(init_ops[0]["priority"], "top")
+        self.assertEqual(init_ops[0]["ice_key"], "F2_Hellhound")
+
+    def test_stealth_contest_vs_watcher_pass(self):
+        """Watcher contest pass: no effect, no break."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "stealth_contest", "character": "RedVelvet",
+                  "vs": "watcher", "target": "Imp", "interface_rank": 4}],
+                ice_status=self._ice_status_with_hellhound_and_imp(),
+                stealth_active=True,
+            )
+        r = result["results"][0]
+        # 4+5=9 vs 3+5=8 → pass
+        self.assertTrue(r["passed"])
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 0)
+
+    def test_stealth_contest_vs_watcher_fail(self):
+        """Watcher contest fail: break_stealth, NO Initiative effect."""
+        ice_status = {
+            "F1_Asura": {
+                "name": "Asura", "entity_type": "demon",
+                "interface_rank": 8, "pathfinder_skill": 2, "status": "active",
+            }
+        }
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "stealth_contest", "character": "RedVelvet",
+                  "vs": "watcher", "target": "Asura", "interface_rank": 4}],
+                ice_status=ice_status,
+                stealth_active=True,
+            )
+        r = result["results"][0]
+        # 4+5=9 vs 8+2+5=15 → fail
+        self.assertFalse(r["passed"])
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 1)
+        init_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "ice_initiative_entry"]
+        self.assertEqual(len(init_ops), 0)
+
+    def test_stealth_contest_eraser_bonus(self):
+        """Eraser +2 Cloak fires on stealth_contest."""
+        progs = [{"name": "Eraser", "category": "booster", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "stealth_contest", "character": "RedVelvet",
+                  "vs": "black_ice", "target": "Hellhound", "interface_rank": 4}],
+                ice_status=self._ice_status_with_hellhound_and_imp(),
+                active_programs=progs,
+                stealth_active=True,
+            )
+        r = result["results"][0]
+        # 4+Eraser2+5=11 vs 6+5=11 → tie → defender wins → fail
+        self.assertFalse(r["passed"])
+        self.assertTrue(any("Eraser" in str(b) for b in r.get("booster_bonuses", [])))
+
+    def test_stealth_contest_not_in_stealth(self):
+        result = resolve_actions(
+            [{"type": "stealth_contest", "character": "RedVelvet",
+              "vs": "black_ice", "target": "Hellhound", "interface_rank": 4}],
+            ice_status=self._ice_status_with_hellhound_and_imp(),
+            stealth_active=False,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "not_in_stealth")
+
+    def test_stealth_contest_vs_watcher_against_black_ice_fail_soft(self):
+        """vs='watcher' but target is Black ICE → wrong_entity_type."""
+        result = resolve_actions(
+            [{"type": "stealth_contest", "character": "RedVelvet",
+              "vs": "watcher", "target": "Hellhound", "interface_rank": 4}],
+            ice_status=self._ice_status_with_hellhound_and_imp(),
+            stealth_active=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "wrong_entity_type")
+
+    def test_stealth_contest_vs_black_ice_against_demon_fail_soft(self):
+        """vs='black_ice' but target is Demon → wrong_entity_type."""
+        result = resolve_actions(
+            [{"type": "stealth_contest", "character": "RedVelvet",
+              "vs": "black_ice", "target": "Imp", "interface_rank": 4}],
+            ice_status=self._ice_status_with_hellhound_and_imp(),
+            stealth_active=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "wrong_entity_type")
+
+    def test_stealth_contest_propagates_break_within_batch(self):
+        """First contest fails → break_stealth → second contest fails-soft as not_in_stealth."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [
+                    {"type": "stealth_contest", "character": "RedVelvet",
+                     "vs": "black_ice", "target": "Hellhound", "interface_rank": 4},
+                    {"type": "stealth_contest", "character": "RedVelvet",
+                     "vs": "watcher", "target": "Imp", "interface_rank": 4},
+                ],
+                ice_status=self._ice_status_with_hellhound_and_imp(),
+                stealth_active=True,
+            )
+        # First action: 4+5=9 vs 6+5=11 → fail → break_stealth
+        # Second action: stealth_active is now False local → not_in_stealth fail-soft
+        self.assertFalse(result["results"][0]["passed"])
+        self.assertEqual(result["results"][1].get("error"), "not_in_stealth")
+
+
+class TestWatcherSearch(unittest.TestCase):
+    """Step D: watcher_search planner-emitted Pathfinder search.
+    Once per turn per Watcher; on Watcher-win emits break_stealth.
+    """
+
+    def _ice_status_with_imp(self):
+        return {
+            "F1_Imp": {
+                "name": "Imp", "entity_type": "demon",
+                "interface_rank": 3, "pathfinder_skill": 0, "status": "active",
+            }
+        }
+
+    def test_watcher_search_pass_breaks_stealth(self):
+        ice_status = {
+            "F1_Asura": {
+                "name": "Asura", "entity_type": "demon",
+                "interface_rank": 8, "pathfinder_skill": 2, "status": "active",
+            }
+        }
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "watcher_search", "target": "Asura",
+                  "netrunner": "RedVelvet", "netrunner_interface_rank": 4}],
+                ice_status=ice_status,
+                stealth_active=True,
+                net_round=2,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["detected"])
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 1)
+        used_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "watcher_search_used"]
+        self.assertEqual(len(used_ops), 1)
+        self.assertEqual(used_ops[0]["ice_key"], "F1_Asura")
+
+    def test_watcher_search_fail_no_break(self):
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "watcher_search", "target": "Imp",
+                  "netrunner": "RedVelvet", "netrunner_interface_rank": 4}],
+                ice_status=self._ice_status_with_imp(),
+                stealth_active=True,
+                net_round=2,
+            )
+        r = result["results"][0]
+        self.assertFalse(r["detected"])
+        break_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "break_stealth"]
+        self.assertEqual(len(break_ops), 0)
+        used_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "watcher_search_used"]
+        self.assertEqual(len(used_ops), 1)
+
+    def test_watcher_search_once_per_turn_enforcement(self):
+        ice_status = self._ice_status_with_imp()
+        ice_status["F1_Imp"]["last_search_round"] = 2
+        result = resolve_actions(
+            [{"type": "watcher_search", "target": "Imp",
+              "netrunner": "RedVelvet", "netrunner_interface_rank": 4}],
+            ice_status=ice_status,
+            stealth_active=True,
+            net_round=2,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "watcher_search_already_used_this_turn")
+
+    def test_watcher_search_next_round_allowed(self):
+        ice_status = self._ice_status_with_imp()
+        ice_status["F1_Imp"]["last_search_round"] = 1
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "watcher_search", "target": "Imp",
+                  "netrunner": "RedVelvet", "netrunner_interface_rank": 4}],
+                ice_status=ice_status,
+                stealth_active=True,
+                net_round=2,
+            )
+        r = result["results"][0]
+        self.assertNotEqual(r.get("error"), "watcher_search_already_used_this_turn")
+
+    def test_watcher_search_not_in_stealth(self):
+        result = resolve_actions(
+            [{"type": "watcher_search", "target": "Imp",
+              "netrunner": "RedVelvet"}],
+            ice_status=self._ice_status_with_imp(),
+            stealth_active=False,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "not_in_stealth")
+
+    def test_watcher_search_on_non_watcher_target(self):
+        ice_status = {
+            "F1_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound", "status": "active",
+            }
+        }
+        result = resolve_actions(
+            [{"type": "watcher_search", "target": "Hellhound",
+              "netrunner": "RedVelvet"}],
+            ice_status=ice_status,
+            stealth_active=True,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "wrong_entity_type")
+
+    def test_watcher_search_in_batch_blocks_repeat(self):
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [
+                    {"type": "watcher_search", "target": "Imp",
+                     "netrunner": "RedVelvet", "netrunner_interface_rank": 4},
+                    {"type": "watcher_search", "target": "Imp",
+                     "netrunner": "RedVelvet", "netrunner_interface_rank": 4},
+                ],
+                ice_status=self._ice_status_with_imp(),
+                stealth_active=True,
+                net_round=3,
+            )
+        self.assertEqual(result["results"][1].get("error"),
+                         "watcher_search_already_used_this_turn")
+
+
+class TestStealthNoAutoCascadeInvariants(unittest.TestCase):
+    """Step F: confirm engine emits NO auto-cascades for stealth.
+    Every state op traces to a planner-emitted action. The engine validates
+    and resolves; it never adds invisible side effects.
+    """
+
+    def _ice_status_hostile_node(self):
+        return {
+            "F1_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "status": "active",
+            },
+            "F1_Imp": {
+                "name": "Imp", "entity_type": "demon",
+                "interface_rank": 3, "status": "active",
+            },
+        }
+
+    def test_move_node_does_not_auto_emit_stealth_contests(self):
+        """Stealthed move into a hostile node emits node_change ONLY."""
+        sm = {
+            "sr": 3, "difficulty": "standard",
+            "nodes": {
+                "Gateway": {"type": "gateway", "ice": "null",
+                            "connections": ["Floor1"], "contents": ""},
+                "Floor1": {"type": "data_node", "ice": "black",
+                           "connections": ["Gateway"], "contents": ""},
+            }
+        }
+        result = resolve_actions(
+            [{"type": "move_node", "character": "RedVelvet", "target": "Floor1"}],
+            ice_status=self._ice_status_hostile_node(),
+            stealth_active=True,
+            system_map=sm,
+            current_node="Gateway",
+            net_actions_remaining=3,
+        )
+        op_types = [op.get("op") for op in result["state_ops"]
+                    if isinstance(op, dict)]
+        # Only node_change emitted — NO synthesized stealth_contest
+        self.assertIn("node_change", op_types)
+        self.assertNotIn("break_stealth", op_types)
+        self.assertNotIn("ice_initiative_entry", op_types)
+        # No additional results beyond move_node itself
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["type"], "move_node")
+
+    def test_stealthed_attack_without_break_emits_no_break(self):
+        """Stealthed attack against ICE → fail-soft, no break_stealth auto-emitted."""
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        result = resolve_actions(
+            [{"type": "program_attack", "character": "RedVelvet",
+              "program": "Sword", "target": "Hellhound"}],
+            ice_status=self._ice_status_hostile_node(),
+            active_programs=progs,
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        op_types = [op.get("op") for op in result["state_ops"]
+                    if isinstance(op, dict)]
+        self.assertNotIn("break_stealth", op_types)
+
+    def test_break_stealth_op_emits_no_alert_change(self):
+        """break_stealth op handler does NOT emit any alert-bumping op."""
+        result = resolve_actions(
+            [{"type": "break_stealth", "character": "RedVelvet",
+              "reason": "test"}],
+            ice_status={},
+            stealth_active=True,
+        )
+        op_types = [op.get("op") for op in result["state_ops"]
+                    if isinstance(op, dict)]
+        self.assertNotIn("alert_increase", op_types)
+        self.assertNotIn("alert_set", op_types)
+        for op in result["state_ops"]:
+            if isinstance(op, dict):
+                self.assertNotIn("alert", str(op.get("op", "")).lower())
+
+
+class TestStealthErrorsSurfaceInPlayerErrors(unittest.TestCase):
+    """P0 fix: stealth + virus error codes are registered in
+    _PLAYER_ERROR_CODES so they appear in the top-level `player_errors`
+    list and trigger the model's RAW-violation triage path.
+    """
+
+    def _ice_status(self):
+        return {
+            "F1_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "status": "active",
+            },
+            "F1_Imp": {
+                "name": "Imp", "entity_type": "demon",
+                "interface_rank": 3, "status": "active",
+            },
+        }
+
+    def _assert_in_player_errors(self, result, error_code):
+        codes = [e.get("error") for e in result.get("player_errors", [])]
+        self.assertIn(error_code, codes,
+                      f"Expected {error_code!r} in player_errors, got {codes}")
+
+    def test_must_break_stealth_first_surfaces(self):
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        result = resolve_actions(
+            [{"type": "program_attack", "character": "RedVelvet",
+              "program": "Sword", "target": "Hellhound"}],
+            ice_status=self._ice_status(),
+            active_programs=progs,
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        self._assert_in_player_errors(result, "must_break_stealth_first")
+
+    def test_not_in_stealth_surfaces(self):
+        result = resolve_actions(
+            [{"type": "stealth_contest", "character": "RedVelvet",
+              "vs": "black_ice", "target": "Hellhound", "interface_rank": 4}],
+            ice_status=self._ice_status(),
+            stealth_active=False,
+        )
+        self._assert_in_player_errors(result, "not_in_stealth")
+
+    def test_quiet_jack_in_unavailable_surfaces(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            quiet_jack_in_used=True,
+        )
+        self._assert_in_player_errors(result, "quiet_jack_in_unavailable")
+
+    def test_cannot_quiet_jack_in_after_break_surfaces(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            stealth_broken_round=2,
+        )
+        self._assert_in_player_errors(result, "cannot_quiet_jack_in_after_break")
+
+    def test_stealth_already_active_surfaces(self):
+        result = resolve_actions(
+            [{"type": "quiet_jack_in", "character": "RedVelvet",
+              "interface_rank": 4}],
+            ice_status={},
+            net_actions_remaining=3,
+            stealth_active=True,
+        )
+        self._assert_in_player_errors(result, "stealth_already_active")
+
+    def test_watcher_search_already_used_surfaces(self):
+        ice_status = self._ice_status()
+        ice_status["F1_Imp"]["last_search_round"] = 3
+        result = resolve_actions(
+            [{"type": "watcher_search", "target": "Imp",
+              "netrunner": "RedVelvet", "netrunner_interface_rank": 4}],
+            ice_status=ice_status,
+            stealth_active=True,
+            net_round=3,
+        )
+        self._assert_in_player_errors(result, "watcher_search_already_used_this_turn")
+
+    def test_wrong_entity_type_surfaces(self):
+        result = resolve_actions(
+            [{"type": "stealth_contest", "character": "RedVelvet",
+              "vs": "watcher", "target": "Hellhound", "interface_rank": 4}],
+            ice_status=self._ice_status(),
+            stealth_active=True,
+        )
+        self._assert_in_player_errors(result, "wrong_entity_type")
+
+    def test_ice_not_found_surfaces(self):
+        result = resolve_actions(
+            [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+              "target": "NonexistentICE"}],
+            ice_status=self._ice_status(),
+        )
+        self._assert_in_player_errors(result, "ice_not_found")
+
+    def test_virus_errors_surface(self):
+        # no_viruses_planted
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 4}],
+            virus_ledger={"next_id": 1, "active": [], "archived": []},
+        )
+        self._assert_in_player_errors(result, "no_viruses_planted")
+        # virus_not_found
+        ledger = {
+            "next_id": 2,
+            "active": [{"id": 1, "target": "X", "planter": "Y", "narrative": "z",
+                        "planted_date": "", "planted_turn": 0,
+                        "status": "dormant", "log": []}],
+            "archived": []
+        }
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 99}],
+            virus_ledger=ledger,
+        )
+        self._assert_in_player_errors(result, "virus_not_found")
+        # virus_purged
+        ledger["active"][0]["status"] = "purged"
+        result = resolve_actions(
+            [{"type": "activate_virus", "character": "RedVelvet", "virus_id": 1}],
+            virus_ledger=ledger,
+        )
+        self._assert_in_player_errors(result, "virus_purged")
+
+
+class TestStealthInjectionRendering(unittest.TestCase):
+    """Step H: build_hack_injection renders [STEALTH STATUS] when active or broken."""
+
+    def _base_hack_state(self, **overrides):
+        from game_systems.cpred_hack import init_hack_state
+        state = init_hack_state(target_system="Test", sr=3, interface_rank=4)
+        state["net_actions_remaining"] = 3
+        state.update(overrides)
+        return state
+
+    def test_no_stealth_status_block_when_inactive(self):
+        from game_systems.cpred_hack import build_hack_injection
+        state = self._base_hack_state()
+        result = build_hack_injection(state, pipeline_state={})
+        self.assertNotIn("[STEALTH STATUS]", result)
+
+    def test_stealth_active_renders_block(self):
+        from game_systems.cpred_hack import build_hack_injection
+        state = self._base_hack_state(
+            stealth_active=True, net_round=2,
+            ice_status={
+                "F1_Imp": {"name": "Imp", "entity_type": "demon",
+                           "interface_rank": 3, "pathfinder_skill": 0,
+                           "status": "active"}
+            },
+        )
+        result = build_hack_injection(state, pipeline_state={})
+        self.assertIn("[STEALTH STATUS]", result)
+        self.assertIn("Stealth: ACTIVE", result)
+        self.assertIn("Imp", result)
+        self.assertIn("[/STEALTH STATUS]", result)
+
+    def test_stealth_broken_renders_block(self):
+        from game_systems.cpred_hack import build_hack_injection
+        state = self._base_hack_state(
+            stealth_active=False, stealth_broken_round=4,
+        )
+        result = build_hack_injection(state, pipeline_state={})
+        self.assertIn("[STEALTH STATUS]", result)
+        self.assertIn("BROKEN this run", result)
+        self.assertIn("re-establish requires", result)
+
+    def test_stealth_active_lists_eraser_booster(self):
+        from game_systems.cpred_hack import build_hack_injection
+        state = self._base_hack_state(
+            stealth_active=True,
+            active_programs=[
+                {"name": "Eraser", "category": "booster", "rez": 4, "status": "active"}
+            ],
+        )
+        result = build_hack_injection(state, pipeline_state={})
+        self.assertIn("Eraser", result)
+
+    def test_stealth_active_shows_watcher_search_status(self):
+        from game_systems.cpred_hack import build_hack_injection
+        state = self._base_hack_state(
+            stealth_active=True, net_round=3,
+            ice_status={
+                "F1_Imp": {"name": "Imp", "entity_type": "demon",
+                           "interface_rank": 3, "pathfinder_skill": 0,
+                           "status": "active",
+                           "last_search_round": 3},
+                "F2_Asura": {"name": "Asura", "entity_type": "demon",
+                             "interface_rank": 8, "pathfinder_skill": 2,
+                             "status": "active"},
+            },
+        )
+        result = build_hack_injection(state, pipeline_state={})
+        self.assertIn("searched round 3", result)
+        self.assertIn("search not yet used", result)
+
+
+class TestStealthAttackGuard(unittest.TestCase):
+    """Step E: stealthed attacks against ICE/Watcher require break_stealth
+    first in the same batch — engine fail-softs with `must_break_stealth_first`,
+    no NA consumed, no auto-prepend.
+    """
+
+    def _ice_status(self):
+        return {
+            "F1_Hellhound": {
+                "name": "Hellhound", "entity_type": "black_ice",
+                "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "rez_max": 20, "status": "active",
+            }
+        }
+
+    def test_stealthed_program_attack_blocked_without_break(self):
+        """program_attack vs Black ICE under stealth → must_break_stealth_first."""
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        result = resolve_actions(
+            [{"type": "program_attack", "character": "RedVelvet",
+              "program": "Sword", "target": "Hellhound"}],
+            ice_status=self._ice_status(),
+            active_programs=progs,
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "must_break_stealth_first")
+
+    def test_stealthed_attack_after_break_in_same_batch_resolves(self):
+        """break_stealth precedes program_attack in same batch → both resolve."""
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [
+                    {"type": "break_stealth", "character": "RedVelvet",
+                     "reason": "committing to attack"},
+                    {"type": "program_attack", "character": "RedVelvet",
+                     "program": "Sword", "target": "Hellhound"},
+                ],
+                ice_status=self._ice_status(),
+                active_programs=progs,
+                stealth_active=True,
+                net_actions_remaining=3,
+            )
+        # First action: break_stealth succeeds
+        self.assertTrue(result["results"][0]["success"])
+        # Second action: program_attack proceeds (didn't fail-soft)
+        self.assertNotEqual(result["results"][1].get("error"),
+                            "must_break_stealth_first")
+
+    def test_non_stealthed_attack_unchanged(self):
+        """When stealth_active=False, attack proceeds normally — no guard."""
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "program_attack", "character": "RedVelvet",
+                  "program": "Sword", "target": "Hellhound"}],
+                ice_status=self._ice_status(),
+                active_programs=progs,
+                stealth_active=False,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertNotEqual(r.get("error"), "must_break_stealth_first")
+
+    def test_stealthed_zap_blocked_without_break(self):
+        """opposed_check with zap=true vs ICE under stealth also blocked."""
+        result = resolve_actions(
+            [{"type": "opposed_check", "character": "RedVelvet",
+              "target": "Hellhound", "zap": True, "net": True,
+              "ability": "Zap", "interface_rank": 4,
+              "attacker_stat": 4, "defender_stat": 2}],
+            ice_status=self._ice_status(),
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "must_break_stealth_first")
+
+    def test_stealthed_non_zap_opposed_check_not_blocked(self):
+        """Non-zap opposed_check (e.g., Slide) under stealth → not blocked by guard
+        (Slide has its own preemptive validation)."""
+        # Setup hunting Hellhound so Slide isn't preemptive
+        ice_status = self._ice_status()
+        ice_status["F1_Hellhound"]["hunting"] = ["RedVelvet"]
+        result = resolve_actions(
+            [{"type": "opposed_check", "character": "RedVelvet",
+              "target": "Hellhound", "zap": False, "net": True,
+              "ability": "Slide", "interface_rank": 4,
+              "attacker_stat": 4, "defender_stat": 2}],
+            ice_status=ice_status,
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertNotEqual(r.get("error"), "must_break_stealth_first")
+
+    def test_stealthed_attack_no_na_consumed_on_fail_soft(self):
+        """Confirm fail-soft doesn't burn NA."""
+        progs = [{"name": "Sword", "category": "attacker", "rez": 4, "status": "active"}]
+        result = resolve_actions(
+            [{"type": "program_attack", "character": "RedVelvet",
+              "program": "Sword", "target": "Hellhound"}],
+            ice_status=self._ice_status(),
+            active_programs=progs,
+            stealth_active=True,
+            net_actions_remaining=3,
+        )
+        # The result has no cost_net_actions field (or it's 0)
+        r = result["results"][0]
+        self.assertEqual(r.get("cost_net_actions", 0), 0)
+
+
+class TestSpeedCheckVsBlackIce(unittest.TestCase):
+    """Step 0: backend Speed Check resolver for non-stealth Black ICE encounters.
+
+    Replaces the prior model-narrated path. Roll: Netrunner Interface + 1d10
+    vs Black ICE Perception + 1d10. Pass = avoid effect, fail = take effect;
+    in both cases ICE enters Initiative (RAW: only stealth contest skips
+    Initiative entry).
+    """
+
+    def _ice_status_with_hellhound(self):
+        # Hellhound: PER 6
+        return {
+            "Floor1_Hellhound": {
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "rez_current": 20, "rez_max": 20, "status": "active"
+            }
+        }
+
+    def test_speed_check_pass_avoids_effect(self):
+        """High Interface beats Hellhound PER on tied dice → pass, no effect."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+                  "target": "Hellhound", "interface_rank": 8}],
+                ice_status=self._ice_status_with_hellhound(),
+            )
+        r = result["results"][0]
+        # Interface 8 + 5 = 13 vs Hellhound PER 6 + 5 = 11 → pass
+        self.assertTrue(r["passed"])
+        self.assertFalse(r.get("effect_pending", False))
+        self.assertEqual(r["ice_name"], "Hellhound")
+        # ICE enters Initiative regardless of outcome.
+        init_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "ice_initiative_entry"]
+        self.assertEqual(len(init_ops), 1)
+        self.assertEqual(init_ops[0]["ice_key"], "Floor1_Hellhound")
+        self.assertEqual(init_ops[0]["priority"], "standard")
+
+    def test_speed_check_fail_takes_effect(self):
+        """Low Interface loses to Hellhound PER → fail, effect_pending."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+                  "target": "Hellhound", "interface_rank": 4}],
+                ice_status=self._ice_status_with_hellhound(),
+            )
+        r = result["results"][0]
+        # Interface 4 + 5 = 9 vs Hellhound PER 6 + 5 = 11 → defender wins → fail
+        self.assertFalse(r["passed"])
+        self.assertTrue(r.get("effect_pending", False))
+
+    def test_speed_check_missing_target(self):
+        result = resolve_actions(
+            [{"type": "speed_check_vs_black_ice", "character": "RedVelvet"}],
+            ice_status=self._ice_status_with_hellhound(),
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "missing_target")
+
+    def test_speed_check_ice_not_found(self):
+        result = resolve_actions(
+            [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+              "target": "Dragon"}],
+            ice_status=self._ice_status_with_hellhound(),
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "ice_not_found")
+
+    def test_speed_check_ambiguous_target(self):
+        ice_status = {
+            "Floor1_Hellhound": {"name": "Hellhound", "behavior": "black",
+                                  "ice_type": "hellhound", "rez_current": 20, "status": "active"},
+            "Floor3_Hellhound": {"name": "Hellhound", "behavior": "black",
+                                  "ice_type": "hellhound", "rez_current": 20, "status": "active"},
+        }
+        result = resolve_actions(
+            [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+              "target": "Hellhound", "interface_rank": 4}],
+            ice_status=ice_status,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "target_ambiguous")
+
+    def test_speed_check_uses_explicit_interface_rank(self):
+        """interface_rank override on action wins over state lookup."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+                  "target": "Hellhound", "interface_rank": 8}],
+                ice_status=self._ice_status_with_hellhound(),
+            )
+        r = result["results"][0]
+        # Interface 8 + 5 = 13 vs PER 6 + 5 = 11 → pass
+        self.assertTrue(r["passed"])
+
+    def test_speed_check_no_cloak_hooks(self):
+        """Speed Check uses raw Interface — Cloak boosters do NOT apply."""
+        progs = [{"name": "Eraser", "category": "booster", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "speed_check_vs_black_ice", "character": "RedVelvet",
+                  "target": "Hellhound", "interface_rank": 4}],
+                ice_status=self._ice_status_with_hellhound(),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # Interface 4 + 5 = 9 vs PER 6 + 5 = 11 → fail (Eraser would have made it 11 vs 11 tie)
+        self.assertFalse(r["passed"])
+
+
+class TestPatrolDetection(unittest.TestCase):
+    """Step 0: backend Patrol Detection resolver. Patrol PER + 1d10 (+2 if
+    alert >= 3) vs Netrunner Interface + 1d10 with ability='Cloak'.
+    """
+
+    def _ice_status_with_patrol(self):
+        # Use a Patrol-like ICE entry. ICE_STAT_BLOCKS may not have a generic
+        # "patrol" entry; in that case the resolver falls back to per=0 from the block.
+        # We test with explicit per on the entry directly.
+        return {
+            "Floor1_Patrol": {
+                "name": "Patrol", "behavior": "patrol", "ice_type": "patrol",
+                "rez_current": 10, "rez_max": 10, "status": "active",
+                "per": 4,  # explicit per fallback if ICE_STAT_BLOCKS lacks "patrol"
+            }
+        }
+
+    def test_patrol_detection_no_cloak_hook(self):
+        """Without Eraser, Patrol PER 4 + d10 vs Interface 4 + d10."""
+        # Same die for both → tie → Patrol wins (defender ties)
+        # Wait: in patrol_detection, Patrol is the ATTACKER (rolling to detect).
+        # Tie goes to defender = Netrunner = undetected.
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "patrol_detection", "character": "RedVelvet",
+                  "target": "Patrol", "interface_rank": 4}],
+                ice_status=self._ice_status_with_patrol(),
+            )
+        r = result["results"][0]
+        # Patrol 4+5=9 vs Interface 4+5=9 → tie → Netrunner wins → undetected
+        self.assertFalse(r["detected"])
+
+    def test_patrol_detection_with_eraser_bonus(self):
+        """Eraser +2 Cloak bonus on Netrunner side keeps them hidden."""
+        progs = [{"name": "Eraser", "category": "booster", "rez": 4, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=6):
+            result = resolve_actions(
+                [{"type": "patrol_detection", "character": "RedVelvet",
+                  "target": "Patrol", "interface_rank": 4}],
+                ice_status=self._ice_status_with_patrol(),
+                active_programs=progs,
+            )
+        r = result["results"][0]
+        # Patrol 4+6=10 vs Interface 4+Eraser 2+6=12 → Netrunner wins → undetected
+        self.assertFalse(r["detected"])
+        # Confirm Eraser modifier was applied
+        self.assertTrue(any("Eraser" in str(b) for b in r.get("booster_bonuses", [])))
+
+    def test_patrol_detection_alert_3_plus_bonus(self):
+        """At alert >= 3, Patrol PER gains +2."""
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=5):
+            result = resolve_actions(
+                [{"type": "patrol_detection", "character": "RedVelvet",
+                  "target": "Patrol", "interface_rank": 4}],
+                ice_status=self._ice_status_with_patrol(),
+                alert_level=3,
+            )
+        r = result["results"][0]
+        # Patrol 4+2(alert)+5=11 vs Interface 4+5=9 → Patrol wins → detected
+        self.assertTrue(r["detected"])
+
+    def test_patrol_detection_missing_target(self):
+        result = resolve_actions(
+            [{"type": "patrol_detection", "character": "RedVelvet"}],
+            ice_status=self._ice_status_with_patrol(),
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "missing_target")
+
+    def test_patrol_detection_ice_not_found(self):
+        result = resolve_actions(
+            [{"type": "patrol_detection", "character": "RedVelvet",
+              "target": "NonexistentICE"}],
+            ice_status=self._ice_status_with_patrol(),
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "ice_not_found")
+
+
 class TestProgramAttackAmbiguousTarget(unittest.TestCase):
     """Step 0e: intent-only program_attack fail-soft on ambiguous ICE name."""
 

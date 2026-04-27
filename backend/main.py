@@ -3755,6 +3755,33 @@ def _apply_tar_consumed_state_ops(pipeline_state: dict, state_ops: list) -> None
             st["tar_stacks"] = 0
 
 
+def _apply_virus_op_state_ops(pipeline_state: dict, state_ops: list) -> None:
+    """Extract virus_op state ops from resolver state_ops and apply to virus_ledger.
+
+    virus_ledger lives at pipeline_state level, NOT hack_state — so this is
+    the routing for resolver-emitted virus_op entries that the standard
+    apply_hack_state / apply_net_combat_state helpers don't handle.
+    """
+    if not isinstance(pipeline_state, dict) or not isinstance(state_ops, list):
+        return
+    payloads = []
+    for op in state_ops:
+        if not isinstance(op, dict) or op.get("op") != "virus_op":
+            continue
+        v_op = op.get("virus_op")
+        if isinstance(v_op, dict):
+            payloads.append(v_op)
+    if not payloads:
+        return
+    from pipeline import apply_virus_ops
+    pipeline_state["virus_ledger"] = apply_virus_ops(
+        pipeline_state.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+        payloads,
+        pipeline_state.get("turn_counter", 0),
+        pipeline_state.get("hud_state", {}).get("date", "")
+    )
+
+
 def _inject_resolver_ops_stateful(tool_input: dict, state_ops: list, pipeline_state: dict, gs: dict) -> None:
     """Inject resolver state_ops into a stateful tool_input dict.
 
@@ -3792,6 +3819,22 @@ def _inject_resolver_ops_stateful(tool_input: dict, state_ops: list, pipeline_st
             tool_input.get("character_states"),
             _character_state_deltas,
         )
+    # virus_op state ops (from resolver activate_virus action) → flow into
+    # tool_input["virus_ops"] so apply_single_agent_state_updates routes them
+    # through apply_virus_ops on the same turn.
+    _virus_ops_from_resolver = []
+    for _op in state_ops:
+        if not isinstance(_op, dict):
+            continue
+        if _op.get("op") == "virus_op":
+            _payload = _op.get("virus_op")
+            if isinstance(_payload, dict):
+                _virus_ops_from_resolver.append(_payload)
+    if _virus_ops_from_resolver:
+        existing_v_ops = tool_input.get("virus_ops") or []
+        if not isinstance(existing_v_ops, list):
+            existing_v_ops = []
+        tool_input["virus_ops"] = existing_v_ops + _virus_ops_from_resolver
     # Apply vehicle ops directly to combat state when available.
     # If combat is initialized later in this same tool_input, defer until after apply.
     _veh_updates = _convert_state_ops_to_vehicle_updates(state_ops)
@@ -4134,6 +4177,13 @@ def _build_sex_injection(pipeline_state: dict, sex_scene: dict) -> str:
         cb_lines.append("[/CALLBACK LEDGER]")
         if len(cb_lines) > 2:  # Has at least one open callback
             parts.append("\n".join(cb_lines))
+
+    # Virus ledger: rare in intimate scenes but include for parity — a planted
+    # virus may be referenced in pillow talk or post-coital scheming.
+    from pipeline import build_virus_ledger_injection
+    _v = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+    if _v:
+        parts.append(_v)
 
     return "\n\n".join(parts) if parts else ""
 
@@ -5820,6 +5870,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                           if isinstance(hack_state, dict) else False,
                     system_map=hack_state.get("system_map") if isinstance(hack_state, dict) else None,
                     current_node=hack_state.get("current_node") if isinstance(hack_state, dict) else None,
+                    virus_ledger=hack_ps.get("virus_ledger") if isinstance(hack_ps, dict) else None,
+                    stealth_active=bool(hack_state.get("stealth_active", False))
+                                    if isinstance(hack_state, dict) else False,
+                    quiet_jack_in_used=bool(hack_state.get("quiet_jack_in_used", False))
+                                       if isinstance(hack_state, dict) else False,
+                    stealth_broken_round=hack_state.get("stealth_broken_round")
+                                         if isinstance(hack_state, dict) else None,
+                    net_round=_safe_int(hack_state.get("net_round", 1) or 1)
+                              if isinstance(hack_state, dict) else 1,
                 )
 
                 mode_result = None
@@ -5871,6 +5930,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     game_state=hack_ps.get("game_state"),
                     pipeline_state=hack_ps,
                 )
+                # virus_op state ops live at pipeline_state level, not hack_state —
+                # apply_hack_state ignores them. Route them through here.
+                _apply_virus_op_state_ops(hack_ps, mode_result.state_ops)
+                # Also accept any virus_ops the planner emitted directly in hack_json
+                # (only effective once virus_ops is in HACK_PLANNING_SCHEMA — P2).
+                _planner_v_ops = hack_json.get("virus_ops") if isinstance(hack_json, dict) else None
+                if isinstance(_planner_v_ops, list) and _planner_v_ops:
+                    from pipeline import apply_virus_ops as _apply_v_ops
+                    hack_ps["virus_ledger"] = _apply_v_ops(
+                        hack_ps.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+                        _planner_v_ops,
+                        hack_ps.get("turn_counter", 0),
+                        hack_ps.get("hud_state", {}).get("date", "")
+                    )
+                # Explicit re-assign for parity with combat/net_combat blocks.
+                # hack_ps is a reference to data["pipeline_state"], so mutations
+                # already propagate — but a future refactor swapping in a deep
+                # copy would silently drop them. Belt-and-suspenders.
+                data["pipeline_state"] = hack_ps
                 data["hack_state"] = hack_state
 
                 # Combat clock: advance by game-system-defined round duration
@@ -6102,6 +6180,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     current_node=(_net_combat or {}).get("current_node")
                                  if isinstance(_net_combat, dict) and _net_combat.get("active")
                                  else None,
+                    virus_ledger=combat_ps.get("virus_ledger") if isinstance(combat_ps, dict) else None,
+                    stealth_active=bool((_net_combat or {}).get("stealth_active", False))
+                                   if isinstance(_net_combat, dict) and _net_combat.get("active") else False,
+                    quiet_jack_in_used=bool((_net_combat or {}).get("quiet_jack_in_used", False))
+                                       if isinstance(_net_combat, dict) and _net_combat.get("active") else False,
+                    stealth_broken_round=(_net_combat or {}).get("stealth_broken_round")
+                                         if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
+                    net_round=_safe_int((_net_combat or {}).get("net_round", 1) or 1)
+                              if isinstance(_net_combat, dict) and _net_combat.get("active") else 1,
                 )
 
                 mode_result = None
@@ -6146,6 +6233,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 combat_ps = data.get("pipeline_state", {})
                 _apply_combat_state(gs, combat_ps, combat_json)
                 _apply_tar_consumed_state_ops(combat_ps, mode_result.state_ops)
+                _apply_virus_op_state_ops(combat_ps, mode_result.state_ops)
                 data["pipeline_state"] = combat_ps
 
                 # Combat clock: advance by game-system-defined round duration
@@ -6375,6 +6463,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                           if isinstance(nc_state, dict) else False,
                     system_map=nc_state.get("system_map") if isinstance(nc_state, dict) else None,
                     current_node=nc_state.get("current_node") if isinstance(nc_state, dict) else None,
+                    virus_ledger=nc_ps.get("virus_ledger") if isinstance(nc_ps, dict) else None,
+                    stealth_active=bool(nc_state.get("stealth_active", False))
+                                   if isinstance(nc_state, dict) else False,
+                    quiet_jack_in_used=bool(nc_state.get("quiet_jack_in_used", False))
+                                       if isinstance(nc_state, dict) else False,
+                    stealth_broken_round=nc_state.get("stealth_broken_round")
+                                         if isinstance(nc_state, dict) else None,
+                    net_round=_safe_int(nc_state.get("net_round", 1) or 1)
+                              if isinstance(nc_state, dict) else 1,
                 )
 
                 mode_result = None
@@ -6423,6 +6520,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 nc_ps = data.get("pipeline_state", {})
                 gs["apply_net_combat_state"](nc_ps, nc_json, game_state=nc_ps.get("game_state"),
                                              resolver_state_ops=mode_result.state_ops)
+                _apply_virus_op_state_ops(nc_ps, mode_result.state_ops)
+                # Also accept any virus_ops the planner emitted directly in nc_json.
+                _planner_v_ops = nc_json.get("virus_ops") if isinstance(nc_json, dict) else None
+                if isinstance(_planner_v_ops, list) and _planner_v_ops:
+                    from pipeline import apply_virus_ops as _apply_v_ops
+                    nc_ps["virus_ledger"] = _apply_v_ops(
+                        nc_ps.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+                        _planner_v_ops,
+                        nc_ps.get("turn_counter", 0),
+                        nc_ps.get("hud_state", {}).get("date", "")
+                    )
                 data["pipeline_state"] = nc_ps
 
                 # Combat clock: advance by game-system-defined round duration
@@ -7535,6 +7643,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _rm_slide_used = False
                                 _rm_system_map = None
                                 _rm_current_node = None
+                                _rm_stealth_active = False
+                                _rm_quiet_jack_in_used = False
+                                _rm_stealth_broken_round = None
+                                _rm_net_round = 1
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
@@ -7551,6 +7663,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_slide_used = bool(_rm_active_state.get("slide_used_this_turn", False))
                                     _rm_system_map = _rm_active_state.get("system_map")
                                     _rm_current_node = _rm_active_state.get("current_node")
+                                    _rm_stealth_active = bool(_rm_active_state.get("stealth_active", False))
+                                    _rm_quiet_jack_in_used = bool(_rm_active_state.get("quiet_jack_in_used", False))
+                                    _rm_stealth_broken_round = _rm_active_state.get("stealth_broken_round")
+                                    _rm_net_round = _safe_int(_rm_active_state.get("net_round", 1)) or 1
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7594,6 +7710,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     slide_used_this_turn=_rm_slide_used,
                                     system_map=_rm_system_map,
                                     current_node=_rm_current_node,
+                                    virus_ledger=(_rm_tracking_ps or {}).get("virus_ledger"),
+                                    stealth_active=_rm_stealth_active,
+                                    quiet_jack_in_used=_rm_quiet_jack_in_used,
+                                    stealth_broken_round=_rm_stealth_broken_round,
+                                    net_round=_rm_net_round,
                                 )
                                 accumulated_rm_state_ops.extend(_rm_result.get("state_ops", []))
                                 _advance_tracking_maps_from_state_ops(
@@ -7616,6 +7737,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     if (isinstance(_op, dict) and _op.get("op") == "node_change"
                                             and isinstance(_op.get("to_node"), str)):
                                         _rm_current_node = _op["to_node"]
+                                # Propagate Going Quiet stealth state across iterations.
+                                for _op in _rm_result.get("state_ops", []):
+                                    if not isinstance(_op, dict):
+                                        continue
+                                    _opt = _op.get("op")
+                                    if _opt == "stealth_set_active":
+                                        _rm_stealth_active = True
+                                        _rm_quiet_jack_in_used = True
+                                    elif _opt == "quiet_jack_in_used":
+                                        _rm_quiet_jack_in_used = True
+                                    elif _opt == "break_stealth":
+                                        _rm_stealth_active = False
+                                        _rm_stealth_broken_round = _rm_net_round
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call

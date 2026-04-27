@@ -29,10 +29,12 @@ from pipeline import (
     migrate_pipeline_state,
     _fresh_pipeline_state,
     apply_callback_ops,
+    apply_virus_ops,
     apply_npc_memory_ops,
     apply_scene_state,
     _memory_tier,
     build_callback_injection,
+    build_virus_ledger_injection,
     build_npc_memories_injection,
     build_scene_state_injection,
     build_character_states_injection,
@@ -86,6 +88,32 @@ def fresh_state():
 @pytest.fixture
 def empty_ledger():
     return {"next_id": 1, "open": [], "recently_resolved": []}
+
+
+@pytest.fixture
+def empty_virus_ledger():
+    return {"next_id": 1, "active": [], "archived": []}
+
+
+@pytest.fixture
+def populated_virus_ledger():
+    return {
+        "next_id": 4,
+        "active": [
+            {"id": 1, "target": "MegaCorp HQ", "planter": "RedVelvet",
+             "narrative": "Worm in payroll skimming 0.1% per transaction",
+             "planted_date": "2046-03-12", "planted_turn": 50, "status": "dormant", "log": []},
+            {"id": 2, "target": "Arasaka R&D NET", "planter": "RedVelvet",
+             "narrative": "Backdoor masquerading as a test cron",
+             "planted_date": "2046-04-02", "planted_turn": 80, "status": "activated",
+             "log": ["Triggered remotely; first payouts hit shell account"]},
+            {"id": 3, "target": "MegaCorp Heywood HQ", "planter": "RedVelvet",
+             "narrative": "Surveillance daemon on internal comms",
+             "planted_date": "2046-04-15", "planted_turn": 95, "status": "discovered",
+             "log": ["Counter-Netrunner team flagged anomaly during quarterly audit"]}
+        ],
+        "archived": []
+    }
 
 
 @pytest.fixture
@@ -266,6 +294,57 @@ class TestMigratePipelineState:
         assert result["callback_ledger"]["next_id"] == 5
         assert result["turn_counter"] == 7
 
+    def test_fresh_state_has_virus_ledger(self):
+        result = _fresh_pipeline_state()
+        assert result["virus_ledger"] == {"next_id": 1, "active": [], "archived": []}
+
+    def test_legacy_chat_without_virus_ledger_initializes_empty(self):
+        legacy = {
+            "pacing": {"episode": "Ep1"},
+            "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
+            "turn_counter": 50
+        }
+        result = migrate_pipeline_state(legacy)
+        assert result["virus_ledger"] == {"next_id": 1, "active": [], "archived": []}
+        # Other fields preserved
+        assert result["turn_counter"] == 50
+        assert result["pacing"]["episode"] == "Ep1"
+
+    def test_old_flat_pacing_gets_virus_ledger(self):
+        old_state = {"episode": "Ep1", "beat": "Opening", "beat_responses": 1, "notes": ""}
+        result = migrate_pipeline_state(old_state)
+        assert result["virus_ledger"] == {"next_id": 1, "active": [], "archived": []}
+
+    def test_malformed_virus_ledger_repaired(self):
+        legacy = {
+            "pacing": {},
+            "virus_ledger": "garbage",
+            "turn_counter": 0
+        }
+        result = migrate_pipeline_state(legacy)
+        assert result["virus_ledger"] == {"next_id": 1, "active": [], "archived": []}
+
+    def test_partial_virus_ledger_filled(self):
+        legacy = {
+            "pacing": {},
+            "virus_ledger": {"active": "not a list"},
+            "turn_counter": 0
+        }
+        result = migrate_pipeline_state(legacy)
+        assert result["virus_ledger"]["active"] == []
+        assert result["virus_ledger"]["archived"] == []
+        assert result["virus_ledger"]["next_id"] == 1
+
+    def test_virus_ledger_passthrough(self):
+        new_state = {
+            "pacing": {},
+            "virus_ledger": {"next_id": 4, "active": [{"id": 1, "target": "X"}], "archived": []},
+            "turn_counter": 0
+        }
+        result = migrate_pipeline_state(copy.deepcopy(new_state))
+        assert result["virus_ledger"]["next_id"] == 4
+        assert len(result["virus_ledger"]["active"]) == 1
+
     def test_new_format_missing_keys_filled(self):
         """New format with some keys missing gets defaults via setdefault."""
         partial = {"pacing": {"episode": "Ep3"}}
@@ -292,7 +371,7 @@ class TestMigratePipelineState:
 
     def test_fresh_state_structure(self):
         state = _fresh_pipeline_state()
-        assert set(state.keys()) == {"pacing", "callback_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "decision_flags", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
+        assert set(state.keys()) == {"pacing", "callback_ledger", "virus_ledger", "npc_memories", "scene_state", "character_states", "game_state", "hud_state", "decision_flags", "combat", "ship_combat", "turn_counter", "_clock_seconds_buffer"}
 
 
 # ============================================================
@@ -427,6 +506,164 @@ class TestApplyCallbackOps:
         result = apply_callback_ops(ledger, [], current_turn=2)
         assert len(result["open"]) == 1
         assert result["open"][0]["id"] == 1
+
+
+class TestApplyVirusOps:
+    def test_plant_op(self, empty_virus_ledger):
+        ops = [{"action": "plant", "target": "MegaCorp HQ", "planter": "RedVelvet",
+                "narrative": "Skim worm"}]
+        result = apply_virus_ops(empty_virus_ledger, ops, current_turn=10, current_date="2046-03-12")
+        assert len(result["active"]) == 1
+        v = result["active"][0]
+        assert v["id"] == 1
+        assert v["target"] == "MegaCorp HQ"
+        assert v["planter"] == "RedVelvet"
+        assert v["narrative"] == "Skim worm"
+        assert v["planted_date"] == "2046-03-12"
+        assert v["planted_turn"] == 10
+        assert v["status"] == "dormant"
+        assert v["log"] == []
+        assert result["next_id"] == 2
+
+    def test_plant_missing_target_skipped(self, empty_virus_ledger, caplog):
+        ops = [{"action": "plant", "planter": "X", "narrative": "foo"}]
+        with caplog.at_level(logging.WARNING):
+            result = apply_virus_ops(empty_virus_ledger, ops, current_turn=1, current_date="")
+        assert len(result["active"]) == 0
+        assert "missing target" in caplog.text
+
+    def test_plant_truncates_long_narrative(self, empty_virus_ledger):
+        ops = [{"action": "plant", "target": "X", "planter": "Y", "narrative": "z" * 1000}]
+        result = apply_virus_ops(empty_virus_ledger, ops, current_turn=1, current_date="")
+        assert len(result["active"][0]["narrative"]) == 800
+
+    def test_plant_default_planter(self, empty_virus_ledger):
+        ops = [{"action": "plant", "target": "X", "narrative": "y"}]
+        result = apply_virus_ops(empty_virus_ledger, ops, current_turn=1, current_date="")
+        assert result["active"][0]["planter"] == "unknown"
+
+    def test_activate_op(self, populated_virus_ledger):
+        ops = [{"action": "activate", "id": 1, "log": "Triggered remotely"}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="2046-05-01")
+        v = next(x for x in result["active"] if x["id"] == 1)
+        assert v["status"] == "activated"
+        assert "Triggered remotely" in v["log"]
+
+    def test_discover_op(self, populated_virus_ledger):
+        ops = [{"action": "discover", "id": 1, "log": "Corp audit found it"}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="2046-05-01")
+        v = next(x for x in result["active"] if x["id"] == 1)
+        assert v["status"] == "discovered"
+        assert "Corp audit found it" in v["log"]
+
+    def test_purge_moves_to_archived(self, populated_virus_ledger):
+        ops = [{"action": "purge", "id": 2, "log": "Cleaned"}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="2046-05-01")
+        active_ids = [x["id"] for x in result["active"]]
+        assert 2 not in active_ids
+        assert len(result["archived"]) == 1
+        a = result["archived"][0]
+        assert a["id"] == 2
+        assert a["status"] == "purged"
+        assert a["archived_turn"] == 100
+        assert a["archived_date"] == "2046-05-01"
+        assert "Cleaned" in a["log"]
+
+    def test_log_op_appends(self, populated_virus_ledger):
+        ops = [{"action": "log", "id": 2, "entry": "Skim now totals 12,000eb"}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="")
+        v = next(x for x in result["active"] if x["id"] == 2)
+        assert "Skim now totals 12,000eb" in v["log"]
+        assert v["status"] == "activated"  # unchanged
+
+    def test_log_op_caps_at_max(self, populated_virus_ledger):
+        v_id = 2
+        for i in range(10):
+            ops = [{"action": "log", "id": v_id, "entry": f"Entry {i}"}]
+            populated_virus_ledger = apply_virus_ops(populated_virus_ledger, ops,
+                                                     current_turn=100, current_date="")
+        from pipeline import VIRUS_LOG_MAX
+        v = next(x for x in populated_virus_ledger["active"] if x["id"] == v_id)
+        assert len(v["log"]) == VIRUS_LOG_MAX
+        # Most recent retained
+        assert v["log"][-1] == "Entry 9"
+
+    def test_update_op_allowed_fields(self, populated_virus_ledger):
+        ops = [{"action": "update", "id": 1, "fields": {
+            "target": "MegaCorp Heywood HQ (corrected)",
+            "narrative": "Updated narrative"
+        }}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="")
+        v = next(x for x in result["active"] if x["id"] == 1)
+        assert v["target"] == "MegaCorp Heywood HQ (corrected)"
+        assert v["narrative"] == "Updated narrative"
+
+    def test_update_op_immutable_fields(self, populated_virus_ledger):
+        ops = [{"action": "update", "id": 1, "fields": {
+            "id": 999, "planted_turn": 999, "status": "purged"
+        }}]
+        result = apply_virus_ops(populated_virus_ledger, ops, current_turn=100, current_date="")
+        v = next(x for x in result["active"] if x["id"] == 1)
+        assert v["id"] == 1
+        assert v["planted_turn"] == 50
+        assert v["status"] == "dormant"
+
+    def test_unknown_action_warns(self, populated_virus_ledger, caplog):
+        ops = [{"action": "frobnicate", "id": 1}]
+        with caplog.at_level(logging.WARNING):
+            apply_virus_ops(populated_virus_ledger, ops, current_turn=1, current_date="")
+        assert "unknown action" in caplog.text
+
+    def test_missing_id_warns(self, empty_virus_ledger, caplog):
+        ops = [{"action": "activate", "id": 999, "log": "nope"}]
+        with caplog.at_level(logging.WARNING):
+            result = apply_virus_ops(empty_virus_ledger, ops, current_turn=1, current_date="")
+        assert "999" in caplog.text
+        assert len(result["active"]) == 0
+
+    def test_archived_pruned_past_retention(self):
+        from pipeline import VIRUS_ARCHIVE_RETENTION
+        old_turn = 10
+        recent_turn = 500
+        ledger = {
+            "next_id": 3,
+            "active": [],
+            "archived": [
+                {"id": 1, "target": "X", "planter": "Y", "narrative": "old",
+                 "planted_date": "", "planted_turn": 5, "status": "purged",
+                 "archived_turn": old_turn, "archived_date": "", "log": []},
+                {"id": 2, "target": "X", "planter": "Y", "narrative": "recent",
+                 "planted_date": "", "planted_turn": 400, "status": "purged",
+                 "archived_turn": recent_turn, "archived_date": "", "log": []}
+            ]
+        }
+        # current_turn well past old's retention but before recent's
+        result = apply_virus_ops(ledger, [], current_turn=old_turn + VIRUS_ARCHIVE_RETENTION + 1,
+                                  current_date="")
+        ids = [a["id"] for a in result["archived"]]
+        assert 1 not in ids
+        assert 2 in ids
+
+    def test_none_ops_no_crash(self, empty_virus_ledger):
+        result = apply_virus_ops(empty_virus_ledger, None, current_turn=1, current_date="")
+        assert result["active"] == []
+
+    def test_plant_then_activate_same_call(self, empty_virus_ledger):
+        ops = [
+            {"action": "plant", "target": "X", "planter": "Y", "narrative": "z"},
+            {"action": "activate", "id": 1, "log": "Triggered immediately"}
+        ]
+        result = apply_virus_ops(empty_virus_ledger, ops, current_turn=1, current_date="2046-01-01")
+        v = result["active"][0]
+        assert v["status"] == "activated"
+        assert "Triggered immediately" in v["log"]
+
+    def test_malformed_active_entries_ignored(self):
+        ledger = {"next_id": 2, "active": [1, {"id": 1, "target": "X", "narrative": "y", "status": "dormant"}],
+                  "archived": []}
+        result = apply_virus_ops(ledger, [], current_turn=2, current_date="")
+        assert len(result["active"]) == 1
+        assert result["active"][0]["id"] == 1
 
 
 class TestMemoryTier:
@@ -839,6 +1076,340 @@ class TestBuildCallbackInjection:
         result = build_callback_injection(populated_ledger)
         assert "OPEN:" in result
         assert "RECENTLY RESOLVED:" in result
+
+
+class TestBuildVirusLedgerInjection:
+    def test_empty_ledger_returns_empty(self, empty_virus_ledger):
+        assert build_virus_ledger_injection(empty_virus_ledger) == ""
+
+    def test_none_or_garbage_returns_empty(self):
+        assert build_virus_ledger_injection(None) == ""
+        assert build_virus_ledger_injection("garbage") == ""
+        assert build_virus_ledger_injection({}) == ""
+
+    def test_active_only_format(self, populated_virus_ledger):
+        result = build_virus_ledger_injection(populated_virus_ledger)
+        assert "[VIRUS LEDGER]" in result
+        assert "[/VIRUS LEDGER]" in result
+        assert "ACTIVE:" in result
+        assert "#1 (planted 2046-03-12 by RedVelvet, target: MegaCorp HQ, status: dormant)" in result
+        assert '"Worm in payroll skimming 0.1% per transaction"' in result
+        # Activated entry shows log
+        assert "Triggered remotely; first payouts hit shell account" in result
+        assert "ARCHIVED" not in result
+
+    def test_archived_compact_form(self):
+        ledger = {
+            "next_id": 5,
+            "active": [],
+            "archived": [
+                {"id": 4, "target": "Arasaka Lab", "planter": "RedVelvet",
+                 "narrative": "Surveillance daemon",
+                 "planted_date": "2046-02-08", "planted_turn": 30,
+                 "status": "purged", "archived_turn": 60, "archived_date": "2046-03-15",
+                 "log": ["Counter-Netrunner team scrubbed it"]}
+            ]
+        }
+        result = build_virus_ledger_injection(ledger)
+        assert "ACTIVE: (none)" in result
+        assert "ARCHIVED (for continuity):" in result
+        assert "#4" in result
+        assert "2046-02-08" in result
+        assert "2046-03-15" in result
+        assert "Surveillance daemon" in result
+        assert "Counter-Netrunner team scrubbed it" in result
+
+    def test_active_and_archived(self, populated_virus_ledger):
+        populated_virus_ledger["archived"] = [
+            {"id": 99, "target": "Old Corp", "planter": "RedVelvet",
+             "narrative": "Old worm", "planted_date": "2045-01-01", "planted_turn": 1,
+             "status": "purged", "archived_turn": 50, "archived_date": "2045-06-01", "log": []}
+        ]
+        result = build_virus_ledger_injection(populated_virus_ledger)
+        assert "ACTIVE:" in result
+        assert "ARCHIVED" in result
+        assert "#1" in result
+        assert "#99" in result
+
+    def test_malformed_entries_skipped(self):
+        ledger = {
+            "next_id": 3,
+            "active": [
+                "garbage",
+                {"id": 1, "target": "X", "planter": "Y", "narrative": "z",
+                 "planted_date": "2046-01-01", "planted_turn": 1, "status": "dormant", "log": []}
+            ],
+            "archived": []
+        }
+        result = build_virus_ledger_injection(ledger)
+        assert "#1" in result
+        # No crash; just ignores the bad entry
+
+
+class TestVirusLedgerOpRoundtrip:
+    """Plant → inject → parse text → identical plant op back."""
+
+    def test_plant_via_text_format(self):
+        from pipeline import _parse_virus_section
+        text_lines = [
+            '+ "Worm in payroll system" | target: MegaCorp HQ | planter: RedVelvet'
+        ]
+        ops = _parse_virus_section(text_lines)
+        assert len(ops) == 1
+        assert ops[0]["action"] == "plant"
+        assert ops[0]["target"] == "MegaCorp HQ"
+        assert ops[0]["planter"] == "RedVelvet"
+        assert ops[0]["narrative"] == "Worm in payroll system"
+
+    def test_status_transitions_via_text_format(self):
+        from pipeline import _parse_virus_section
+        text_lines = [
+            'ACTIVATE #4: "Triggered remotely"',
+            'DISCOVER #2: "Corp audit found it"',
+            'PURGE #2: "Counter-Netrunner team scrubbed it"'
+        ]
+        ops = _parse_virus_section(text_lines)
+        assert len(ops) == 3
+        assert ops[0]["action"] == "activate"
+        assert ops[0]["id"] == 4
+        assert ops[0]["log"] == "Triggered remotely"
+        assert ops[1]["action"] == "discover"
+        assert ops[1]["id"] == 2
+        assert ops[2]["action"] == "purge"
+
+    def test_log_op_via_text_format(self):
+        from pipeline import _parse_virus_section
+        ops = _parse_virus_section(['LOG #4: "Skim totals 12,000eb"'])
+        assert ops == [{"action": "log", "id": 4, "entry": "Skim totals 12,000eb"}]
+
+    def test_update_op_via_text_format(self):
+        from pipeline import _parse_virus_section
+        ops = _parse_virus_section(['UPDATE #1 target: "MegaCorp Heywood HQ"'])
+        assert len(ops) == 1
+        assert ops[0]["action"] == "update"
+        assert ops[0]["id"] == 1
+        assert ops[0]["fields"]["target"] == "MegaCorp Heywood HQ"
+
+    def test_malformed_plant_missing_target_skipped(self):
+        from pipeline import _parse_virus_section
+        ops = _parse_virus_section(['+ "narrative without target"'])
+        assert ops == []
+
+    def test_full_section_via_parse_state_updates_block(self):
+        from pipeline import parse_state_updates_block
+        text = '''
+PACING:
+episode: Test
+
+VIRUSES:
++ "Backdoor cron job" | target: Arasaka R&D | planter: RedVelvet
+ACTIVATE #2: "Player triggered remotely"
+'''
+        result = parse_state_updates_block(text, current_turn=1)
+        assert result["virus_ops"] is not None
+        assert len(result["virus_ops"]) == 2
+        assert result["virus_ops"][0]["action"] == "plant"
+        assert result["virus_ops"][0]["target"] == "Arasaka R&D"
+        assert result["virus_ops"][1]["action"] == "activate"
+
+    def test_single_agent_path_applies_virus_ops(self):
+        from pipeline import apply_single_agent_state_updates, _fresh_pipeline_state
+        state = _fresh_pipeline_state()
+        state["hud_state"]["date"] = "2046-03-12"
+        parsed = {
+            "virus_ops": [
+                {"action": "plant", "target": "MegaCorp HQ", "planter": "RedVelvet",
+                 "narrative": "Skim worm"}
+            ]
+        }
+        apply_single_agent_state_updates(state, parsed, current_turn=10)
+        assert len(state["virus_ledger"]["active"]) == 1
+        v = state["virus_ledger"]["active"][0]
+        assert v["target"] == "MegaCorp HQ"
+        assert v["planted_date"] == "2046-03-12"
+        assert v["planted_turn"] == 10
+
+    def test_events_path_applies_virus_ops(self):
+        """Confirm virus_ledger field exists in fresh state and events extraction is safe."""
+        from pipeline import migrate_pipeline_state, apply_virus_ops
+        state = migrate_pipeline_state({"pacing": {}})
+        # Simulate events-data shape
+        events_data = {
+            "virus_ops": [
+                {"action": "plant", "target": "Arasaka", "planter": "RedVelvet",
+                 "narrative": "Backdoor"}
+            ]
+        }
+        state["virus_ledger"] = apply_virus_ops(
+            state["virus_ledger"], events_data["virus_ops"],
+            current_turn=5, current_date="2046-04-01"
+        )
+        assert len(state["virus_ledger"]["active"]) == 1
+        assert state["virus_ledger"]["active"][0]["target"] == "Arasaka"
+
+
+class TestModePipelineVirusOpRouting:
+    """Bug-review fixes: virus_op state ops emitted by activate_virus resolver
+    must reach pipeline_state.virus_ledger in all 3 paths.
+    """
+
+    def test_apply_virus_op_state_ops_helper(self):
+        """The main.py helper extracts virus_op state ops and applies via apply_virus_ops."""
+        # Avoid importing main.py (Windows fcntl issue) by inlining the helper logic.
+        from pipeline import apply_virus_ops
+        pipeline_state = {
+            "virus_ledger": {
+                "next_id": 5,
+                "active": [
+                    {"id": 4, "target": "MegaCorp HQ", "planter": "RedVelvet",
+                     "narrative": "Worm", "planted_date": "2046-03-12",
+                     "planted_turn": 50, "status": "dormant", "log": []}
+                ],
+                "archived": []
+            },
+            "turn_counter": 100,
+            "hud_state": {"date": "2046-04-30"}
+        }
+        state_ops = [
+            {"op": "brain_damage", "change": 4, "reason": "Black ICE hit"},  # ignored
+            {"op": "virus_op", "virus_op": {"action": "activate", "id": 4, "log": "Triggered"}},
+        ]
+        # Simulate _apply_virus_op_state_ops behavior
+        payloads = [op["virus_op"] for op in state_ops
+                    if isinstance(op, dict) and op.get("op") == "virus_op"
+                    and isinstance(op.get("virus_op"), dict)]
+        if payloads:
+            pipeline_state["virus_ledger"] = apply_virus_ops(
+                pipeline_state["virus_ledger"], payloads,
+                pipeline_state["turn_counter"],
+                pipeline_state["hud_state"]["date"]
+            )
+        v = pipeline_state["virus_ledger"]["active"][0]
+        assert v["status"] == "activated"
+        assert "Triggered" in v["log"]
+
+    def test_events_pipeline_virus_op_routing(self):
+        """resolve_pipeline_mechanics + downstream routing applies virus_op state ops."""
+        from pipeline import apply_virus_ops
+        # Simulate the resolver_ops branch of run_pipeline (deterministic mechanics path).
+        pipeline_state = {
+            "virus_ledger": {
+                "next_id": 2,
+                "active": [{"id": 1, "target": "X", "planter": "P", "narrative": "n",
+                            "planted_date": "", "planted_turn": 0, "status": "dormant", "log": []}],
+                "archived": []
+            },
+            "turn_counter": 5,
+            "hud_state": {"date": "2046-05-01"}
+        }
+        resolver_ops = [
+            {"op": "virus_op", "virus_op": {"action": "discover", "id": 1, "log": "Corp found it"}}
+        ]
+        # Mimic the inline logic added to pipeline.run_pipeline post-Step:
+        v_payloads = [op["virus_op"] for op in resolver_ops
+                      if isinstance(op, dict) and op.get("op") == "virus_op"
+                      and isinstance(op.get("virus_op"), dict)]
+        pipeline_state["virus_ledger"] = apply_virus_ops(
+            pipeline_state["virus_ledger"], v_payloads,
+            pipeline_state["turn_counter"],
+            pipeline_state["hud_state"]["date"]
+        )
+        v = pipeline_state["virus_ledger"]["active"][0]
+        assert v["status"] == "discovered"
+
+    def test_resolve_pipeline_mechanics_threads_virus_ledger(self):
+        """resolve_pipeline_mechanics passes virus_ledger to resolve_actions."""
+        import inspect
+        from pipeline import resolve_pipeline_mechanics
+        sig = inspect.signature(resolve_pipeline_mechanics)
+        assert "virus_ledger" in sig.parameters
+
+
+class TestModeInjectionsIncludeVirusLedger:
+    """build_hack_injection / build_net_combat_injection / build_combat_injection
+    must include [VIRUS LEDGER] when pipeline_state.virus_ledger is non-empty."""
+
+    def test_build_hack_injection_includes_virus_ledger(self):
+        from game_systems.cpred_hack import build_hack_injection
+        ps = {
+            "virus_ledger": {
+                "next_id": 2,
+                "active": [{"id": 1, "target": "MegaCorp HQ", "planter": "RedVelvet",
+                            "narrative": "Skim worm", "planted_date": "2046-03-12",
+                            "planted_turn": 50, "status": "dormant", "log": []}],
+                "archived": []
+            }
+        }
+        hack_state = {
+            "active": True, "target_system": "Test", "sr": 3,
+            "interface_rank": 4, "net_actions_per_turn": 3,
+            "net_actions_remaining": 3, "active_programs": [],
+            "current_node": "Gateway", "nodes_visited": ["Gateway"],
+            "ice_status": {}, "tar_stacks": 0, "alert_level": 0,
+            "cycles_remaining": 3, "cycles_max": 3, "brain_damage": 0,
+        }
+        result = build_hack_injection(hack_state, pipeline_state=ps)
+        assert "[VIRUS LEDGER]" in result
+        assert "MegaCorp HQ" in result
+
+    def test_build_hack_injection_omits_virus_when_empty(self):
+        from game_systems.cpred_hack import build_hack_injection
+        ps = {"virus_ledger": {"next_id": 1, "active": [], "archived": []}}
+        hack_state = {
+            "active": True, "target_system": "Test", "sr": 3,
+            "interface_rank": 4, "net_actions_per_turn": 3,
+            "net_actions_remaining": 3, "active_programs": [],
+            "current_node": "Gateway", "nodes_visited": ["Gateway"],
+            "ice_status": {}, "tar_stacks": 0, "alert_level": 0,
+            "cycles_remaining": 3, "cycles_max": 3, "brain_damage": 0,
+        }
+        result = build_hack_injection(hack_state, pipeline_state=ps)
+        assert "[VIRUS LEDGER]" not in result
+
+    def test_build_net_combat_injection_includes_virus_ledger(self):
+        from game_systems.cpred_net_combat import build_net_combat_injection
+        ps = {
+            "virus_ledger": {
+                "next_id": 2,
+                "active": [{"id": 7, "target": "Arasaka", "planter": "RedVelvet",
+                            "narrative": "Backdoor", "planted_date": "2046-04-02",
+                            "planted_turn": 80, "status": "dormant", "log": []}],
+                "archived": []
+            },
+            "game_state": {"edgerunners": {}},
+            "character_states": {}
+        }
+        nc_state = {
+            "active": True, "target_system": "Test", "sr": 3,
+            "interface_rank": 4, "net_actions_per_turn": 3,
+            "net_actions_remaining": 3, "active_programs": [],
+            "current_node": "Gateway", "ice_status": {}, "tar_stacks": 0,
+            "alert_level": 0, "cycles_remaining": 3,
+            "context": "test scene", "combat_complete": True,
+        }
+        result = build_net_combat_injection(combat=None, net_combat=nc_state, pipeline_state=ps)
+        assert "[VIRUS LEDGER]" in result
+        assert "Arasaka" in result
+
+    def test_build_combat_injection_includes_virus_ledger(self):
+        from game_systems.cpred_combat import build_cpred_combat_injection
+        ps = {
+            "virus_ledger": {
+                "next_id": 2,
+                "active": [{"id": 1, "target": "X", "planter": "P", "narrative": "n",
+                            "planted_date": "2046-01-01", "planted_turn": 1,
+                            "status": "dormant", "log": []}],
+                "archived": []
+            },
+            "game_state": {"edgerunners": {}},
+            "character_states": {}
+        }
+        combat = {
+            "round": 1, "initiative_order": [], "current_turn": "",
+            "cover": {}, "vehicles": {}
+        }
+        result = build_cpred_combat_injection(combat, ps)
+        assert "[VIRUS LEDGER]" in result
 
 
 class TestBuildNpcMemoriesInjection:

@@ -249,6 +249,17 @@ def build_cpred_combat_injection(combat, pipeline_state):
     lines.extend(_format_vehicle_lines(combat.get("vehicles", {})))
 
     lines.append("[/COMBAT STATE]")
+
+    # Virus ledger: persistent across sessions, surfaced for tactical reference
+    # (a player may trigger a previously-planted virus during meatspace combat
+    # as a distraction or escalation).
+    if isinstance(pipeline_state, dict):
+        from pipeline import build_virus_ledger_injection
+        _v = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+        if _v:
+            lines.append("")
+            lines.append(_v)
+
     return "\n".join(lines)
 
 

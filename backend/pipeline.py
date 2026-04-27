@@ -80,6 +80,8 @@ NARRATION_TARGET_PAIRS = 20
 
 # State management constants
 CALLBACK_RESOLVED_RETENTION = 20  # Turns to keep resolved callbacks before pruning
+VIRUS_ARCHIVE_RETENTION = 200     # Turns to keep archived (discovered/purged) viruses before pruning
+VIRUS_LOG_MAX = 5                 # Max consequence log entries per virus before oldest is dropped
 DEFAULT_TURN_SECONDS = 30  # Default time per normal turn (all game systems)
 NPC_MEMORY_TIER_LIMITS = {"high": 8, "moderate": 10, "flavor": 12}
 NPC_MEMORY_MAX_PER_NPC = 30
@@ -533,6 +535,11 @@ def resolve_pipeline_mechanics(
     relationship_owner: str = "",
     relationship_present_names=None,
     character_states: dict = None,
+    virus_ledger: dict = None,
+    stealth_active: bool = False,
+    quiet_jack_in_used: bool = False,
+    stealth_broken_round=None,
+    net_round: int = 1,
 ) -> tuple:
     """Resolve structured beats from Events using deterministic code.
 
@@ -608,6 +615,11 @@ def resolve_pipeline_mechanics(
                 relationship_context=_relationship_context,
                 edgerunner_states=shadow_state.get("edgerunners"),
                 character_states=character_states,
+                virus_ledger=virus_ledger,
+                stealth_active=stealth_active,
+                quiet_jack_in_used=quiet_jack_in_used,
+                stealth_broken_round=stealth_broken_round,
+                net_round=net_round,
             )
             action_results = result.get("results", [])
             action_ops = result.get("state_ops", [])
@@ -821,6 +833,11 @@ def build_events_messages(
     )
     if cb_injection:
         injections.append(cb_injection)
+
+    # 2b. Virus ledger (planted viruses, persistent across sessions)
+    virus_injection = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+    if virus_injection:
+        injections.append(virus_injection)
 
     # 3. Decision flags (persistent plot decisions / branch points)
     df_injection = build_decision_flags_injection(pipeline_state.get("decision_flags", {}))
@@ -1322,6 +1339,7 @@ def _fresh_pipeline_state() -> dict:
     return {
         "pacing": {},
         "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
+        "virus_ledger": {"next_id": 1, "active": [], "archived": []},
         "npc_memories": {},
         "scene_state": {},
         "character_states": {},
@@ -1345,6 +1363,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         return {
             "pacing": state,
             "callback_ledger": {"next_id": 1, "open": [], "recently_resolved": []},
+            "virus_ledger": {"next_id": 1, "active": [], "archived": []},
             "npc_memories": {},
             "scene_state": {},
             "character_states": {},
@@ -1413,6 +1432,20 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
         ledger["open"] = []
     if not isinstance(ledger.get("recently_resolved"), list):
         ledger["recently_resolved"] = []
+    state.setdefault("virus_ledger", {"next_id": 1, "active": [], "archived": []})
+    vledger = state["virus_ledger"]
+    if not isinstance(vledger, dict):
+        vledger = {"next_id": 1, "active": [], "archived": []}
+        state["virus_ledger"] = vledger
+    vledger.setdefault("next_id", 1)
+    if not isinstance(vledger.get("next_id"), int):
+        vledger["next_id"] = 1
+    vledger.setdefault("active", [])
+    if not isinstance(vledger.get("active"), list):
+        vledger["active"] = []
+    vledger.setdefault("archived", [])
+    if not isinstance(vledger.get("archived"), list):
+        vledger["archived"] = []
     state.setdefault("game_state", {})
     if not isinstance(state.get("game_state"), dict):
         state["game_state"] = {}
@@ -1526,6 +1559,135 @@ def apply_callback_ops(ledger: dict, ops: list, current_turn: int) -> dict:
         "next_id": next_id,
         "open": list(open_by_id.values()),
         "recently_resolved": resolved_list
+    }
+
+
+def apply_virus_ops(ledger: dict, ops: list, current_turn: int, current_date: str) -> dict:
+    """Apply virus_ops to the virus_ledger.
+
+    Operations:
+      - plant: add a new virus to active. fields: target, planter, narrative
+      - activate / discover / purge: status transitions (with optional log entry)
+      - log: append a consequence entry to an active virus without status change
+      - update: correct fields on an active virus (target, planter, narrative)
+
+    Status transitions purge → archived after VIRUS_ARCHIVE_RETENTION turns from
+    `archived_turn`. Discovered viruses stay in `active` until purged.
+    """
+    active_list = ledger.get("active", [])
+    if not isinstance(active_list, list):
+        active_list = []
+    archived_list = ledger.get("archived", [])
+    if not isinstance(archived_list, list):
+        archived_list = []
+    next_id = ledger.get("next_id", 1)
+    if not isinstance(next_id, int):
+        next_id = 1
+
+    active_by_id = {}
+    for v in active_list:
+        if not isinstance(v, dict):
+            continue
+        vid = v.get("id")
+        try:
+            hash(vid)
+        except TypeError:
+            continue
+        active_by_id[vid] = v
+
+    ops_iter = ops if isinstance(ops, (list, tuple)) else []
+    for op in ops_iter:
+        if not isinstance(op, dict):
+            continue
+        action = op.get("action")
+
+        if action == "plant":
+            target = str(op.get("target", "") or "").strip()[:200]
+            if not target:
+                logger.warning("virus_ops plant: missing target; skipping")
+                continue
+            planter = str(op.get("planter", "") or "").strip()[:80] or "unknown"
+            narrative = str(op.get("narrative", "") or "").strip()[:800]
+            entry = {
+                "id": next_id,
+                "target": target,
+                "planter": planter,
+                "narrative": narrative,
+                "planted_date": current_date or "",
+                "planted_turn": current_turn,
+                "status": "dormant",
+                "log": []
+            }
+            active_by_id[next_id] = entry
+            next_id += 1
+
+        elif action in ("activate", "discover", "purge"):
+            target_id = op.get("id")
+            if target_id is None or target_id not in active_by_id:
+                logger.warning(f"virus_ops {action}: ID {target_id} not found in active viruses")
+                continue
+            entry = active_by_id[target_id]
+            new_status = {"activate": "activated", "discover": "discovered", "purge": "purged"}[action]
+            entry["status"] = new_status
+            log_text = str(op.get("log", "") or "").strip()[:400]
+            if log_text:
+                vlog = entry.setdefault("log", [])
+                if not isinstance(vlog, list):
+                    vlog = []
+                    entry["log"] = vlog
+                vlog.append(log_text)
+                if len(vlog) > VIRUS_LOG_MAX:
+                    entry["log"] = vlog[-VIRUS_LOG_MAX:]
+            if action == "purge":
+                # Move to archived with a stamp
+                entry["archived_turn"] = current_turn
+                entry["archived_date"] = current_date or ""
+                archived_list.append(entry)
+                active_by_id.pop(target_id, None)
+
+        elif action == "log":
+            target_id = op.get("id")
+            if target_id is None or target_id not in active_by_id:
+                logger.warning(f"virus_ops log: ID {target_id} not found in active viruses")
+                continue
+            entry = active_by_id[target_id]
+            log_text = str(op.get("entry", "") or "").strip()[:400]
+            if not log_text:
+                continue
+            vlog = entry.setdefault("log", [])
+            if not isinstance(vlog, list):
+                vlog = []
+                entry["log"] = vlog
+            vlog.append(log_text)
+            if len(vlog) > VIRUS_LOG_MAX:
+                entry["log"] = vlog[-VIRUS_LOG_MAX:]
+
+        elif action == "update":
+            target_id = op.get("id")
+            if target_id is None or target_id not in active_by_id:
+                logger.warning(f"virus_ops update: ID {target_id} not found in active viruses")
+                continue
+            fields = op.get("fields", {})
+            if not isinstance(fields, dict):
+                continue
+            allowed = {"target", "planter", "narrative"}
+            for k, v in fields.items():
+                if k in allowed:
+                    active_by_id[target_id][k] = str(v or "")[:800]
+
+        else:
+            logger.warning(f"virus_ops: unknown action {action!r}; skipping")
+
+    # Prune archived past retention
+    archived_list = [
+        a for a in archived_list if isinstance(a, dict)
+        if current_turn - a.get("archived_turn", current_turn) <= VIRUS_ARCHIVE_RETENTION
+    ]
+
+    return {
+        "next_id": next_id,
+        "active": list(active_by_id.values()),
+        "archived": archived_list
     }
 
 
@@ -2301,6 +2463,67 @@ def build_hud_state_injection(hud_state: dict, scene_state: dict, character_stat
     return "\n".join(lines)
 
 
+def build_virus_ledger_injection(ledger: dict) -> str:
+    """Build human-readable virus ledger injection.
+
+    Always include all active viruses (no scoping). Archived entries shown
+    in compact form for long-term continuity. Returns empty string if no
+    active or archived viruses exist.
+    """
+    if not isinstance(ledger, dict):
+        return ""
+    active = ledger.get("active") or []
+    archived = ledger.get("archived") or []
+    if not active and not archived:
+        return ""
+
+    lines = ["[VIRUS LEDGER]"]
+
+    if active:
+        lines.append("ACTIVE:")
+        for v in active:
+            if not isinstance(v, dict):
+                continue
+            vid = v.get("id", "?")
+            target = v.get("target", "?")
+            planter = v.get("planter", "?")
+            planted_date = v.get("planted_date") or "unknown"
+            status = v.get("status", "dormant")
+            narrative = v.get("narrative", "")
+            lines.append(
+                f"#{vid} (planted {planted_date} by {planter}, target: {target}, status: {status})"
+            )
+            if narrative:
+                lines.append(f"   \"{narrative}\"")
+            log_entries = v.get("log") or []
+            for entry in log_entries:
+                if isinstance(entry, str) and entry:
+                    lines.append(f"   - {entry}")
+    else:
+        lines.append("ACTIVE: (none)")
+
+    if archived:
+        lines.append("")
+        lines.append("ARCHIVED (for continuity):")
+        for v in archived:
+            if not isinstance(v, dict):
+                continue
+            vid = v.get("id", "?")
+            target = v.get("target", "?")
+            planted_date = v.get("planted_date") or "unknown"
+            archived_date = v.get("archived_date") or "unknown"
+            narrative = v.get("narrative", "")
+            log_entries = v.get("log") or []
+            last_log = log_entries[-1] if log_entries else ""
+            line = f"#{vid} (planted {planted_date} → purged {archived_date}, target: {target}): \"{narrative}\""
+            if last_log:
+                line += f" → \"{last_log}\""
+            lines.append(line)
+
+    lines.append("[/VIRUS LEDGER]")
+    return "\n".join(lines)
+
+
 def build_callback_injection(ledger: dict, turn_counter: int = 0) -> str:
     """Build human-readable callback ledger injection for Events."""
     open_list = ledger.get("open", [])
@@ -2650,6 +2873,12 @@ def run_pipeline(
         events_data.get("callback_ops"),
         current_turn
     )
+    pipeline_state["virus_ledger"] = apply_virus_ops(
+        pipeline_state.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+        events_data.get("virus_ops"),
+        current_turn,
+        pipeline_state.get("hud_state", {}).get("date", "")
+    )
     # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
     if events_data.get("npc_memory_ops") or events_data.get("relationship_ops"):
         filter_ops_by_scene_scope(events_data, pipeline_state.get("scene_state", {}))
@@ -2779,6 +3008,7 @@ def run_pipeline(
             relationship_owner=events_data.get("current_player", ""),
             relationship_present_names=_relationship_present_names,
             character_states=new_pipeline_state.get("character_states"),
+            virus_ledger=new_pipeline_state.get("virus_ledger"),
         )
 
         # Apply character_states from Events
@@ -2806,6 +3036,23 @@ def run_pipeline(
             gs["apply_game_state"](new_pipeline_state["game_state"],
                                     {"edgerunner_ops": resolver_ops_for_state,
                                      "relationship_ops": resolver_rel_ops}, current_turn)
+
+        # virus_op state ops live at pipeline_state level — route them to
+        # apply_virus_ops directly. Same pattern as the mode-pipeline post-
+        # processing in main.py._apply_virus_op_state_ops.
+        _v_payloads = []
+        for _op in resolver_ops or []:
+            if isinstance(_op, dict) and _op.get("op") == "virus_op":
+                _v_inner = _op.get("virus_op")
+                if isinstance(_v_inner, dict):
+                    _v_payloads.append(_v_inner)
+        if _v_payloads:
+            new_pipeline_state["virus_ledger"] = apply_virus_ops(
+                new_pipeline_state.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+                _v_payloads,
+                current_turn,
+                new_pipeline_state.get("hud_state", {}).get("date", "")
+            )
 
         new_pipeline_state["character_states"] = _apply_resolver_character_state_deltas(
             new_pipeline_state.get("character_states", {}),
@@ -3046,6 +3293,11 @@ def run_mode_pipeline(
     slide_used_this_turn: bool = False,
     system_map=None,
     current_node=None,
+    virus_ledger=None,
+    stealth_active: bool = False,
+    quiet_jack_in_used: bool = False,
+    stealth_broken_round=None,
+    net_round: int = 1,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -3235,6 +3487,11 @@ def run_mode_pipeline(
             slide_used_this_turn=slide_used_this_turn,
             system_map=system_map,
             current_node=current_node,
+            virus_ledger=virus_ledger,
+            stealth_active=stealth_active,
+            quiet_jack_in_used=quiet_jack_in_used,
+            stealth_broken_round=stealth_broken_round,
+            net_round=net_round,
         ) if combat_actions else {"results": [], "state_ops": [], "tar_consumed": False}
 
         # Merge all results
@@ -3726,6 +3983,9 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                         cb_ops = events_parsed.get("callback_ops")
                         if cb_ops:
                             ops_parts.append(f"callback_ops: {json.dumps(cb_ops, indent=2)}")
+                        v_ops = events_parsed.get("virus_ops")
+                        if v_ops:
+                            ops_parts.append(f"virus_ops: {json.dumps(v_ops, indent=2)}")
                         mem_ops = events_parsed.get("npc_memory_ops")
                         if mem_ops:
                             ops_parts.append(f"npc_memory_ops: {json.dumps(mem_ops, indent=2)}")
@@ -3850,6 +4110,8 @@ def generate_debug_transcript(chat_data: dict, chat_path: str, chat_name: str) -
                         ops_parts.append(f"pacing: {json.dumps(state_ops['pacing'], indent=2)}")
                     if state_ops.get("callback_ops"):
                         ops_parts.append(f"callback_ops: {json.dumps(state_ops['callback_ops'], indent=2)}")
+                    if state_ops.get("virus_ops"):
+                        ops_parts.append(f"virus_ops: {json.dumps(state_ops['virus_ops'], indent=2)}")
                     if state_ops.get("npc_memory_ops"):
                         ops_parts.append(f"npc_memory_ops: {json.dumps(state_ops['npc_memory_ops'], indent=2)}")
                     if state_ops.get("scene_state"):
@@ -4075,6 +4337,76 @@ def _parse_callbacks_section(lines: list) -> list:
     return ops
 
 
+def _parse_virus_section(lines: list) -> list:
+    """Parse VIRUSES section lines into virus_ops list.
+
+    Recognized formats:
+      + "narrative" | target: X | planter: Y                   (plant)
+      ACTIVATE #N: "log entry"                                  (activate)
+      DISCOVER #N: "log entry"                                  (discover)
+      PURGE #N: "log entry"                                     (purge)
+      LOG #N: "entry text"                                      (log append)
+      UPDATE #N target: "X"  /  UPDATE #N narrative: "X"        (correction)
+    """
+    import re
+    ops = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("+"):
+            # Plant: + "narrative" | target: X | planter: Y
+            text_match = re.search(r'"([^"]*)"', line)
+            narrative = text_match.group(1) if text_match else line[1:].strip()
+            target = ""
+            tgt_match = re.search(r'\|\s*target:\s*([^|]+)', line, re.IGNORECASE)
+            if tgt_match:
+                target = tgt_match.group(1).strip()
+            planter = ""
+            plt_match = re.search(r'\|\s*planter:\s*([^|]+)', line, re.IGNORECASE)
+            if plt_match:
+                planter = plt_match.group(1).strip()
+            if not target:
+                # Skip malformed plants — apply_virus_ops would warn anyway
+                continue
+            ops.append({
+                "action": "plant",
+                "target": target[:200],
+                "planter": planter[:80] or "unknown",
+                "narrative": narrative[:800]
+            })
+            continue
+
+        upper = line.upper()
+        for keyword, action_name in (("ACTIVATE", "activate"), ("DISCOVER", "discover"),
+                                       ("PURGE", "purge"), ("LOG", "log"), ("UPDATE", "update")):
+            if upper.startswith(keyword):
+                id_match = re.search(r'#(\d+)', line)
+                if not id_match:
+                    break
+                vid = int(id_match.group(1))
+                if action_name in ("activate", "discover", "purge"):
+                    text_match = re.search(r'"([^"]*)"', line)
+                    op = {"action": action_name, "id": vid}
+                    if text_match:
+                        op["log"] = text_match.group(1)[:400]
+                    ops.append(op)
+                elif action_name == "log":
+                    text_match = re.search(r'"([^"]*)"', line)
+                    if text_match:
+                        ops.append({"action": "log", "id": vid, "entry": text_match.group(1)[:400]})
+                elif action_name == "update":
+                    fields = {}
+                    for field_name in ("target", "planter", "narrative"):
+                        m = re.search(rf'{field_name}:\s*"([^"]*)"', line, re.IGNORECASE)
+                        if m:
+                            fields[field_name] = m.group(1)[:800]
+                    if fields:
+                        ops.append({"action": "update", "id": vid, "fields": fields})
+                break
+    return ops
+
+
 def _parse_memories_section(lines: list) -> list:
     """Parse MEMORIES section lines into ops list."""
     import re
@@ -4226,6 +4558,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
     result = {
         "pacing": None,
         "callback_ops": None,
+        "virus_ops": None,
         "npc_memory_ops": None,
         "plot_ops": None,
         "scene_state": None,
@@ -4243,6 +4576,7 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         "SCENE STATE": "SCENE", "CHARACTER STATES": "CHARACTERS",
         "NPC MEMORIES": "MEMORIES",
         "PLOT": "PLOT", "PLOT OPS": "PLOT",
+        "VIRUSES": "VIRUSES", "VIRUS LEDGER": "VIRUSES", "VIRUS OPS": "VIRUSES",
     }
 
     for line in text.split("\n"):
@@ -4257,6 +4591,8 @@ def parse_state_updates_block(text: str, current_turn: int) -> dict:
         result["pacing"] = _parse_pacing_section(section_lines["PACING"])
     if "CALLBACKS" in section_lines:
         result["callback_ops"] = _parse_callbacks_section(section_lines["CALLBACKS"])
+    if "VIRUSES" in section_lines:
+        result["virus_ops"] = _parse_virus_section(section_lines["VIRUSES"])
     if "MEMORIES" in section_lines:
         result["npc_memory_ops"] = _parse_memories_section(section_lines["MEMORIES"])
     if "SCENE" in section_lines:
@@ -4291,6 +4627,13 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
             pipeline_state["callback_ledger"],
             parsed["callback_ops"],
             current_turn
+        )
+    if parsed.get("virus_ops"):
+        pipeline_state["virus_ledger"] = apply_virus_ops(
+            pipeline_state.get("virus_ledger", {"next_id": 1, "active": [], "archived": []}),
+            parsed["virus_ops"],
+            current_turn,
+            pipeline_state.get("hud_state", {}).get("date", "")
         )
     # Scene-scope filtering: drop memory/relationship ops for NPCs not in scene
     # Mutates parsed in-place so downstream notification extraction also sees filtered ops
@@ -4454,6 +4797,11 @@ def build_single_agent_injections(pipeline_state: dict, game_system: dict = None
     )
     if cb:
         injections.append(cb)
+
+    # 2b. Virus ledger (planted viruses, persistent across sessions)
+    virus = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+    if virus:
+        injections.append(virus)
 
     # 3. Decision flags (persistent plot decisions / branch points)
     df = build_decision_flags_injection(pipeline_state.get("decision_flags", {}))

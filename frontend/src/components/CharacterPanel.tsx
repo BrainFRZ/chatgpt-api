@@ -325,6 +325,17 @@ export default function CharacterPanel({
           </div>
         )}
 
+        {/* Stealth (Going Quiet DLC, CPRED only) */}
+        {isCpred && (hs.stealth_active || hs.stealth_broken_round != null) && (
+          <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>
+            Stealth: {hs.stealth_active ? (
+              <span style={{ color: '#00ff41', fontWeight: 600 }}>ACTIVE</span>
+            ) : (
+              <span style={{ color: '#ef4444', fontWeight: 600 }}>BROKEN — Jack Out to retry</span>
+            )}
+          </div>
+        )}
+
         {/* Current Node */}
         {hs.current_node && (
           <div style={{ fontSize: '0.68rem', color: '#999', marginBottom: '4px' }}>

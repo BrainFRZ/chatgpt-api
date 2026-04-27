@@ -85,6 +85,11 @@ def init_net_combat_state(
         "active_debuffs": seeded_debuffs,
         "slide_used_this_turn": False,
         "_prev_combat_round": 1,
+        # Going Quiet stealth state (planner-driven)
+        "stealth_active": False,
+        "stealth_broken_round": None,
+        "quiet_jack_in_used": False,
+        "net_round": 1,
         # Completion flags
         "combat_complete": False,
         "net_complete": False,
@@ -190,6 +195,11 @@ def init_net_combat_from_hack(hack_state, combat_info=None):
         "net_action_penalty": hack_state.get("net_action_penalty", 0),
         "active_debuffs": copy.deepcopy(hack_state.get("active_debuffs") if isinstance(hack_state.get("active_debuffs"), list) else []),
         "destroyed_programs": list(hack_state.get("destroyed_programs")) if isinstance(hack_state.get("destroyed_programs"), list) else [],
+        # Going Quiet stealth carried over from hack
+        "stealth_active": bool(hack_state.get("stealth_active", False)),
+        "stealth_broken_round": hack_state.get("stealth_broken_round"),
+        "quiet_jack_in_used": bool(hack_state.get("quiet_jack_in_used", False)),
+        "net_round": int(hack_state.get("net_round", 1) or 1),
     }
     if _combined_context:
         nc["context"] = _combined_context
@@ -239,7 +249,16 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
             _prev_round = 1
         if _new_round > _prev_round:
             nc["slide_used_this_turn"] = False
+            # Going Quiet: tick net_round to mirror combat round so per-Watcher
+            # `last_search_round` enforcement works across combat turns.
+            nc["net_round"] = int(nc.get("net_round", 1) or 1) + (_new_round - _prev_round)
         nc["_prev_combat_round"] = _new_round
+    # Going Quiet stealth state defaults — legacy net_combat without these
+    # fields loads cleanly; never auto-derive stealth_active=True for legacy.
+    nc.setdefault("stealth_active", False)
+    nc.setdefault("stealth_broken_round", None)
+    nc.setdefault("quiet_jack_in_used", False)
+    nc.setdefault("net_round", 1)
     _stamp_debuff_expirations(nc, pipeline_state)
     _expire_active_debuffs(nc, pipeline_state)
     _sync_debuffs_to_edgerunner(nc, game_state, "netrunner")
@@ -391,6 +410,23 @@ def build_net_combat_injection(combat, net_combat, pipeline_state):
         map_parts = _render_system_map(nc, "report_net_combat_state")
         for mp in map_parts:
             lines.append(f"\n{mp}")
+
+        # Going Quiet stealth status (use the helper from cpred_hack).
+        from .cpred_hack import _render_stealth_status as _render_st
+        st_lines = _render_st(nc)
+        if st_lines:
+            lines.append("")
+            lines.extend(st_lines)
+
+    # Virus ledger: persistent across sessions, injected when non-empty so the
+    # planning agent can reference active viruses when emitting activate_virus
+    # actions or narrating prior-plant consequences.
+    if isinstance(pipeline_state, dict):
+        from pipeline import build_virus_ledger_injection
+        _v = build_virus_ledger_injection(pipeline_state.get("virus_ledger", {}))
+        if _v:
+            lines.append("")
+            lines.append(_v)
 
     return "\n".join(lines)
 

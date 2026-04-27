@@ -3176,7 +3176,12 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     cycles_remaining=None,
                     slide_used_this_turn=False,
                     system_map=None,
-                    current_node=None) -> dict:
+                    current_node=None,
+                    virus_ledger=None,
+                    stealth_active=False,
+                    quiet_jack_in_used=False,
+                    stealth_broken_round=None,
+                    net_round=1) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3263,6 +3268,17 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     # flag isn't written back until apply_*_state consumes the slide_used
     # state op below.
     _slide_used_local = bool(slide_used_this_turn)
+    # Going Quiet stealth: track local stealth state across this batch so
+    # actions later in the batch see updates from earlier actions (e.g.
+    # break_stealth precedes program_attack — Step E guard reads local).
+    _stealth_active_local = bool(stealth_active)
+    _quiet_jack_in_used_local = bool(quiet_jack_in_used)
+    _stealth_broken_round_local = stealth_broken_round
+    _net_round_local = int(net_round) if isinstance(net_round, int) else 1
+    # Per-watcher last_search_round overrides emitted in this batch (so a
+    # second watcher_search later in the batch sees the first one's
+    # consumption).
+    _watcher_search_used_local = {}  # ice_key -> round#
     effective_hp = {}
     if isinstance(combatant_hp, dict):
         for _k, _v in list(combatant_hp.items()):
@@ -3320,6 +3336,48 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 results.append({"type": None, "error": "Non-dict action skipped"})
                 continue
             action_type = action.get("type")
+            # Going Quiet: stealth-aware attack guard. While stealthed, any
+            # attack against an ICE entity (Black ICE, Trace, Patrol, Tar)
+            # or a Watcher (Demon, watcher_netrunner) is "directly interacting
+            # with" that entity, which RAW says breaks stealth. The engine does
+            # NOT auto-prepend break_stealth; the planner must emit it
+            # explicitly first in the same batch. If they don't, fail-soft
+            # with `must_break_stealth_first` (NA not consumed).
+            if _stealth_active_local and action_type in (
+                "program_attack", "opposed_check"
+            ):
+                _is_attack = True
+                if action_type == "opposed_check":
+                    _is_attack = bool(action.get("zap"))
+                if _is_attack:
+                    _atk_target = str(action.get("target") or "").strip()
+                    _tgt_in_ice = (
+                        bool(_atk_target) and isinstance(ice_status, dict) and (
+                            _atk_target in ice_status
+                            or any(
+                                isinstance(_v, dict)
+                                and str(_v.get("name", "")).strip().lower() == _atk_target.lower()
+                                for _v in ice_status.values()
+                            )
+                        )
+                    )
+                    if _tgt_in_ice:
+                        results.append({
+                            "type": action_type,
+                            "character": action.get("character", ""),
+                            "success": False,
+                            "error": "must_break_stealth_first",
+                            "reason": (
+                                f"Cannot attack {_atk_target!r} while stealth_active=True. "
+                                f"Per RAW (Going Quiet), directly attacking ICE or a "
+                                f"Watcher breaks stealth — emit break_stealth first in "
+                                f"the same batch, then the attack. NA not consumed."
+                            ),
+                            "formatted": (
+                                f"⚠ {action_type} {_atk_target}: stealth must be broken first"
+                            ),
+                        })
+                        continue
             if action_type == "driving_check" and not str(action.get("vehicle_name", "")).strip() and not (sequential and vehicle_tracking_enabled):
                 results.append({
                     "type": action_type,
@@ -4546,6 +4604,894 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "formatted": f"Enter Node: {_from_node} → {_mv_target} (1 NA)",
                 })
 
+            elif action_type == "quiet_jack_in":
+                # Going Quiet DLC: establish stealth on jack-in.
+                # Cost: 1 NA (RAW: "spend an additional NET Action when you
+                # Jack In"). Player is meant to enter their first stealth
+                # turn down 1 NA — that's the price. NO offset, NO subsidy.
+                # Roll: contested Interface + 1d10 vs every Watcher's
+                # Interface + Pathfinder + 1d10. Pass requires beating ALL.
+                _qj_char = action.get("character", "")
+                # Validation
+                if _stealth_active_local:
+                    results.append({
+                        "type": "quiet_jack_in",
+                        "character": _qj_char,
+                        "success": False,
+                        "error": "stealth_already_active",
+                        "reason": "Stealth is already active. Quiet Jack-In runs once per encounter.",
+                        "formatted": "⚠ quiet_jack_in: stealth already active",
+                    })
+                    continue
+                if _quiet_jack_in_used_local:
+                    results.append({
+                        "type": "quiet_jack_in",
+                        "character": _qj_char,
+                        "success": False,
+                        "error": "quiet_jack_in_unavailable",
+                        "reason": (
+                            "Quiet Jack-In already attempted this encounter. "
+                            "Jack Out and Jack In again to retry."
+                        ),
+                        "formatted": "⚠ quiet_jack_in: already used",
+                    })
+                    continue
+                if _stealth_broken_round_local is not None:
+                    results.append({
+                        "type": "quiet_jack_in",
+                        "character": _qj_char,
+                        "success": False,
+                        "error": "cannot_quiet_jack_in_after_break",
+                        "reason": (
+                            "Stealth was broken earlier this encounter. "
+                            "Re-establishment requires Jack Out + Quiet Jack-In fresh."
+                        ),
+                        "formatted": "⚠ quiet_jack_in: stealth broken; jack out first",
+                    })
+                    continue
+                if (net_actions_remaining is not None
+                        and net_actions_remaining < 1):
+                    results.append({
+                        "type": "quiet_jack_in",
+                        "character": _qj_char,
+                        "success": False,
+                        "error": "insufficient_net_actions",
+                        "reason": (
+                            f"Quiet Jack-In requires 1 NET Action; "
+                            f"{net_actions_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": (
+                            f"⚠ quiet_jack_in: needs 1 NA, have {net_actions_remaining}"
+                        ),
+                    })
+                    continue
+                # Resolve: enumerate Watchers from ice_status. Pass requires
+                # beating EVERY Watcher.
+                _qj_iface = action.get("interface_rank")
+                if _qj_iface is None and edgerunner_states and _qj_char:
+                    _qj_er = edgerunner_states.get(_qj_char) or {}
+                    _qj_iface = _lookup_stat_ci(_qj_er.get("stats", {}), "INT") or 0
+                    if not _qj_iface:
+                        _cs_entry = (character_states or {}).get(_qj_char) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _qj_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _qj_iface = 0
+                                break
+                _qj_iface = int(_qj_iface or 0)
+                # Cloak booster bonuses (Eraser +2)
+                from .cpred_program_effects import run_interface_check_hooks
+                _qj_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _qj_cloak_bonus, _qj_booster_labels = run_interface_check_hooks(
+                    "Cloak", 0, _qj_hs_proxy
+                )
+                _qj_cloak_total = sum(v for _, v in _qj_booster_labels)
+                # Enumerate Watchers (Demons + watcher_netrunner from ice_status)
+                from .cpred_hack import enumerate_watchers as _enum_watchers
+                _qj_watchers = _enum_watchers({"ice_status": ice_status or {}})
+                _qj_contests = []
+                _qj_passed_all = True
+                for _w in _qj_watchers:
+                    _w_iface = int(_w.get("interface_rank") or 0)
+                    _w_pathfinder = int(_w.get("pathfinder_skill") or 0)
+                    _w_name = _w.get("name") or _w.get("_watcher_key", "?")
+                    _qj_one = resolve_opposed_check(
+                        attacker_stat=_qj_iface + _qj_cloak_total,
+                        defender_stat=_w_iface + _w_pathfinder,
+                        attacker_label=(
+                            "Interface+Cloak" if _qj_cloak_total
+                            else "Interface"
+                        ),
+                        defender_label=f"{_w_name} Int+Pathfinder",
+                    )
+                    _qj_contests.append({
+                        "watcher_key": _w.get("_watcher_key"),
+                        "watcher_name": _w_name,
+                        "passed": _qj_one.get("success", False),
+                        "roll": _qj_one,
+                    })
+                    if not _qj_one.get("success", False):
+                        _qj_passed_all = False
+                # Always emit quiet_jack_in_used (even on fail — NA is spent).
+                all_state_ops.append({
+                    "op": "quiet_jack_in_used",
+                    "reason": "Quiet Jack-In attempted",
+                })
+                if _qj_passed_all:
+                    all_state_ops.append({
+                        "op": "stealth_set_active",
+                        "reason": "Quiet Jack-In passed against all Watchers",
+                    })
+                    _stealth_active_local = True
+                _quiet_jack_in_used_local = True
+                if net_actions_remaining is not None:
+                    net_actions_remaining = max(0, net_actions_remaining - 1)
+                results.append({
+                    "type": "quiet_jack_in",
+                    "character": _qj_char,
+                    "success": _qj_passed_all,
+                    "passed_all": _qj_passed_all,
+                    "watcher_contests": _qj_contests,
+                    "cost_net_actions": 1,
+                    "stealth_active": _stealth_active_local,
+                    "booster_bonuses": list(_qj_booster_labels),
+                    "formatted": (
+                        f"🎲 Quiet Jack-In ({len(_qj_watchers)} Watcher(s)): "
+                        f"{'STEALTH ESTABLISHED' if _qj_passed_all else 'detected — entering loud'} (1 NA)"
+                    ),
+                })
+
+            elif action_type == "break_stealth":
+                # Planner-emitted break (taking Control Node, attack against
+                # ICE/Watcher, Brute Force, etc.). Idempotent if already broken.
+                _bs_char = action.get("character", "")
+                _bs_reason = str(action.get("reason") or "").strip()[:200]
+                if not _stealth_active_local:
+                    # Idempotent: report success without emitting state op.
+                    results.append({
+                        "type": "break_stealth",
+                        "character": _bs_char,
+                        "success": True,
+                        "no_op": True,
+                        "formatted": "break_stealth: already not stealthed (no-op)",
+                    })
+                    continue
+                all_state_ops.append({
+                    "op": "break_stealth",
+                    "reason": _bs_reason or "stealth deliberately broken",
+                })
+                _stealth_active_local = False
+                _stealth_broken_round_local = _net_round_local
+                results.append({
+                    "type": "break_stealth",
+                    "character": _bs_char,
+                    "success": True,
+                    "reason": _bs_reason,
+                    "formatted": f"Stealth broken: {_bs_reason or 'planner-declared'}",
+                })
+
+            elif action_type == "stealth_contest":
+                # Going Quiet contest: parametric on `vs`.
+                # vs="black_ice": Interface + Cloak + d10 vs Black ICE PER + d10.
+                #   Pass: ICE bypassed silently (no Initiative entry, no effect).
+                #   Fail: ICE effect triggers, ICE → top of Initiative, break_stealth.
+                # vs="watcher": Interface + Cloak + d10 vs Watcher Int + Pathfinder + d10.
+                #   Pass: no effect. Fail: break_stealth.
+                _stc_char = action.get("character", "")
+                _stc_vs = str(action.get("vs") or "").strip().lower()
+                _stc_target = str(action.get("target") or "").strip()
+                _stc_trigger = str(action.get("trigger") or "encounter").strip().lower()
+                if not _stealth_active_local:
+                    results.append({
+                        "type": "stealth_contest",
+                        "character": _stc_char,
+                        "success": False,
+                        "error": "not_in_stealth",
+                        "reason": (
+                            "stealth_contest requires stealth_active=True. "
+                            "Emit quiet_jack_in first to establish stealth."
+                        ),
+                        "formatted": "⚠ stealth_contest: not in stealth",
+                    })
+                    continue
+                if _stc_vs not in ("black_ice", "watcher"):
+                    results.append({
+                        "type": "stealth_contest",
+                        "character": _stc_char,
+                        "success": False,
+                        "error": "invalid_vs",
+                        "reason": f"`vs` must be 'black_ice' or 'watcher', got {_stc_vs!r}.",
+                        "formatted": f"⚠ stealth_contest: invalid vs={_stc_vs!r}",
+                    })
+                    continue
+                if not _stc_target:
+                    results.append({
+                        "type": "stealth_contest",
+                        "character": _stc_char,
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "stealth_contest requires `target` (entity ice_status key or name).",
+                        "formatted": "⚠ stealth_contest: missing target",
+                    })
+                    continue
+                _stc_matches = _find_ice_target_matches(_stc_target, ice_status)
+                if not _stc_matches:
+                    results.append({
+                        "type": "stealth_contest",
+                        "character": _stc_char,
+                        "success": False,
+                        "error": "ice_not_found",
+                        "reason": f"No entity matching {_stc_target!r} in ice_status.",
+                        "formatted": f"⚠ stealth_contest: {_stc_target} not found",
+                    })
+                    continue
+                if len(_stc_matches) > 1:
+                    results.append({
+                        "type": "stealth_contest",
+                        "character": _stc_char,
+                        "success": False,
+                        "error": "target_ambiguous",
+                        "reason": f"{_stc_target!r} matches multiple entries.",
+                        "formatted": "⚠ stealth_contest: ambiguous target",
+                    })
+                    continue
+                _stc_key, _stc_block = _stc_matches[0]
+                # Resolve Netrunner Interface + Cloak boosters (Eraser fires automatically).
+                _stc_iface = action.get("interface_rank")
+                if _stc_iface is None and edgerunner_states and _stc_char:
+                    _stc_er = edgerunner_states.get(_stc_char) or {}
+                    _stc_iface = _lookup_stat_ci(_stc_er.get("stats", {}), "INT") or 0
+                    if not _stc_iface:
+                        _cs_entry = (character_states or {}).get(_stc_char) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _stc_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _stc_iface = 0
+                                break
+                _stc_iface = int(_stc_iface or 0)
+                from .cpred_program_effects import run_interface_check_hooks
+                _stc_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _stc_cloak_bonus, _stc_booster_labels = run_interface_check_hooks(
+                    "Cloak", 0, _stc_hs_proxy
+                )
+                _stc_cloak_total = sum(v for _, v in _stc_booster_labels)
+                # Resolve defender side based on vs branch.
+                if _stc_vs == "black_ice":
+                    # Verify target IS Black ICE (entity_type or behavior)
+                    _stc_et = str(_stc_block.get("entity_type") or "").strip().lower()
+                    _stc_beh = str(_stc_block.get("behavior") or "").strip().lower()
+                    if _stc_et and _stc_et != "black_ice":
+                        results.append({
+                            "type": "stealth_contest",
+                            "character": _stc_char,
+                            "success": False,
+                            "error": "wrong_entity_type",
+                            "reason": (
+                                f"vs='black_ice' but target {_stc_target!r} has "
+                                f"entity_type={_stc_et!r}. Use vs='watcher' for Demons/enemy Netrunners."
+                            ),
+                            "formatted": f"⚠ stealth_contest: wrong entity type",
+                        })
+                        continue
+                    if not _stc_et and _stc_beh != "black":
+                        results.append({
+                            "type": "stealth_contest",
+                            "character": _stc_char,
+                            "success": False,
+                            "error": "wrong_entity_type",
+                            "reason": (
+                                f"vs='black_ice' but target {_stc_target!r} behavior={_stc_beh!r}. "
+                                f"Black ICE only."
+                            ),
+                            "formatted": f"⚠ stealth_contest: not Black ICE",
+                        })
+                        continue
+                    _stc_ice_block = _lookup_ice_type(_stc_block.get("ice_type"))
+                    _stc_per = _stc_ice_block.get("per", 0) if _stc_ice_block else 0
+                    _stc_def_label = f"{_stc_block.get('name', _stc_target)} PER"
+                    _stc_def_total_stat = int(_stc_per)
+                else:
+                    # vs="watcher": verify entity_type
+                    _stc_et = str(_stc_block.get("entity_type") or "").strip().lower()
+                    _stc_beh = str(_stc_block.get("behavior") or "").strip().lower()
+                    if _stc_et and _stc_et not in ("demon", "watcher_netrunner"):
+                        results.append({
+                            "type": "stealth_contest",
+                            "character": _stc_char,
+                            "success": False,
+                            "error": "wrong_entity_type",
+                            "reason": (
+                                f"vs='watcher' but target {_stc_target!r} has "
+                                f"entity_type={_stc_et!r}. Watchers are demon|watcher_netrunner only."
+                            ),
+                            "formatted": "⚠ stealth_contest: target is not a Watcher",
+                        })
+                        continue
+                    if not _stc_et and _stc_beh != "demon":
+                        results.append({
+                            "type": "stealth_contest",
+                            "character": _stc_char,
+                            "success": False,
+                            "error": "wrong_entity_type",
+                            "reason": (
+                                f"vs='watcher' but target {_stc_target!r} is not a Demon "
+                                f"or watcher_netrunner."
+                            ),
+                            "formatted": "⚠ stealth_contest: target is not a Watcher",
+                        })
+                        continue
+                    _stc_w_iface = int(_stc_block.get("interface_rank") or 0)
+                    _stc_w_pf = int(_stc_block.get("pathfinder_skill") or 0)
+                    _stc_def_label = f"{_stc_block.get('name', _stc_target)} Int+Pathfinder"
+                    _stc_def_total_stat = _stc_w_iface + _stc_w_pf
+                _stc_atk_label = "Interface+Cloak" if _stc_cloak_total else "Interface"
+                _stc_result = resolve_opposed_check(
+                    attacker_stat=_stc_iface + _stc_cloak_total,
+                    defender_stat=_stc_def_total_stat,
+                    attacker_label=_stc_atk_label,
+                    defender_label=_stc_def_label,
+                )
+                _stc_passed = _stc_result.get("success", False)
+                _stc_summary = {
+                    "type": "stealth_contest",
+                    "character": _stc_char,
+                    "vs": _stc_vs,
+                    "target": _stc_target,
+                    "target_key": _stc_key,
+                    "target_name": _stc_block.get("name", _stc_target),
+                    "trigger": _stc_trigger,
+                    "passed": _stc_passed,
+                    "success": _stc_passed,
+                    "roll": _stc_result,
+                    "booster_bonuses": list(_stc_booster_labels),
+                }
+                if _stc_passed:
+                    if _stc_vs == "black_ice":
+                        # RAW: Black ICE does NOT enter Initiative on stealth pass.
+                        _stc_summary["formatted"] = (
+                            f"🎲 Stealth vs {_stc_block.get('name', _stc_target)}: "
+                            f"{_stc_result.get('formatted', '')} — slipped past silently"
+                        )
+                    else:
+                        _stc_summary["formatted"] = (
+                            f"🎲 Stealth vs Watcher {_stc_block.get('name', _stc_target)}: "
+                            f"{_stc_result.get('formatted', '')} — undetected"
+                        )
+                else:
+                    # Fail: emit break_stealth state op (defined contest result, not cascade).
+                    all_state_ops.append({
+                        "op": "break_stealth",
+                        "reason": (
+                            f"Stealth contest vs {_stc_block.get('name', _stc_target)} failed"
+                        ),
+                    })
+                    _stealth_active_local = False
+                    _stealth_broken_round_local = _net_round_local
+                    if _stc_vs == "black_ice":
+                        # RAW-defined contest result: ICE jumps to top of Initiative
+                        # AND takes effect (as if Speed Check failed).
+                        all_state_ops.append({
+                            "op": "ice_initiative_entry",
+                            "ice_key": _stc_key,
+                            "priority": "top",
+                            "reason": "Failed stealth contest vs Black ICE",
+                        })
+                        _stc_summary["effect_pending"] = True
+                        _stc_summary["initiative_priority"] = "top"
+                        _stc_summary["formatted"] = (
+                            f"🎲 Stealth vs {_stc_block.get('name', _stc_target)}: "
+                            f"{_stc_result.get('formatted', '')} — DETECTED, ICE attacks at top of Initiative"
+                        )
+                    else:
+                        _stc_summary["formatted"] = (
+                            f"🎲 Stealth vs Watcher {_stc_block.get('name', _stc_target)}: "
+                            f"{_stc_result.get('formatted', '')} — Watcher detected the runner"
+                        )
+                results.append(_stc_summary)
+
+            elif action_type == "watcher_search":
+                # Going Quiet: Watcher's active Pathfinder search.
+                # Always planner-emitted by the GM/world model when a Watcher's
+                # AI chooses to search. Engine does NOT auto-fire at turn boundaries.
+                # Cost: 1 NA charged to the Watcher's pool (not Netrunner's).
+                # Roll: Watcher Int + Pathfinder + d10 vs Netrunner Int + Cloak + d10.
+                # On Watcher win: emit break_stealth.
+                # Once-per-turn-per-Watcher enforced via last_search_round.
+                _ws_target = str(action.get("target") or "").strip()
+                _ws_runner = action.get("netrunner") or action.get("character") or ""
+                if not _stealth_active_local:
+                    results.append({
+                        "type": "watcher_search",
+                        "target": _ws_target,
+                        "success": False,
+                        "error": "not_in_stealth",
+                        "reason": (
+                            "watcher_search requires stealth_active=True. "
+                            "If stealth is broken, Watchers don't need to search."
+                        ),
+                        "formatted": "⚠ watcher_search: not in stealth",
+                    })
+                    continue
+                if not _ws_target:
+                    results.append({
+                        "type": "watcher_search",
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "watcher_search requires `target` naming the Watcher.",
+                        "formatted": "⚠ watcher_search: missing target",
+                    })
+                    continue
+                _ws_matches = _find_ice_target_matches(_ws_target, ice_status)
+                if not _ws_matches:
+                    results.append({
+                        "type": "watcher_search",
+                        "target": _ws_target,
+                        "success": False,
+                        "error": "ice_not_found",
+                        "reason": f"No Watcher matching {_ws_target!r} in ice_status.",
+                        "formatted": f"⚠ watcher_search: {_ws_target} not found",
+                    })
+                    continue
+                if len(_ws_matches) > 1:
+                    results.append({
+                        "type": "watcher_search",
+                        "target": _ws_target,
+                        "success": False,
+                        "error": "target_ambiguous",
+                        "reason": f"{_ws_target!r} matches multiple entries.",
+                        "formatted": "⚠ watcher_search: ambiguous target",
+                    })
+                    continue
+                _ws_key, _ws_block = _ws_matches[0]
+                _ws_et = str(_ws_block.get("entity_type") or "").strip().lower()
+                _ws_beh = str(_ws_block.get("behavior") or "").strip().lower()
+                _is_watcher = (_ws_et in ("demon", "watcher_netrunner")
+                               or (not _ws_et and _ws_beh == "demon"))
+                if not _is_watcher:
+                    results.append({
+                        "type": "watcher_search",
+                        "target": _ws_target,
+                        "success": False,
+                        "error": "wrong_entity_type",
+                        "reason": (
+                            f"Target {_ws_target!r} is not a Watcher (entity_type={_ws_et!r}, "
+                            f"behavior={_ws_beh!r}). Only Demons and watcher_netrunners can search."
+                        ),
+                        "formatted": "⚠ watcher_search: target is not a Watcher",
+                    })
+                    continue
+                # Once-per-turn enforcement: check ice_status entry's last_search_round
+                # plus any in-batch override.
+                _ws_last = _watcher_search_used_local.get(_ws_key)
+                if _ws_last is None:
+                    _ws_last = _ws_block.get("last_search_round")
+                try:
+                    _ws_last_int = int(_ws_last) if _ws_last is not None else None
+                except (TypeError, ValueError):
+                    _ws_last_int = None
+                if _ws_last_int is not None and _ws_last_int >= _net_round_local:
+                    results.append({
+                        "type": "watcher_search",
+                        "target": _ws_target,
+                        "success": False,
+                        "error": "watcher_search_already_used_this_turn",
+                        "reason": (
+                            f"Watcher {_ws_block.get('name', _ws_target)} already used "
+                            f"its 1-NA search this turn (last_search_round={_ws_last_int})."
+                        ),
+                        "formatted": (
+                            f"⚠ watcher_search: {_ws_block.get('name', _ws_target)} "
+                            f"already searched this turn"
+                        ),
+                    })
+                    continue
+                # Resolve Watcher Int + Pathfinder vs Netrunner Int + Cloak.
+                _ws_iface = int(_ws_block.get("interface_rank") or 0)
+                _ws_pf = int(_ws_block.get("pathfinder_skill") or 0)
+                # Netrunner side
+                _ws_n_iface = action.get("netrunner_interface_rank")
+                if _ws_n_iface is None and edgerunner_states and _ws_runner:
+                    _ws_er = edgerunner_states.get(_ws_runner) or {}
+                    _ws_n_iface = _lookup_stat_ci(_ws_er.get("stats", {}), "INT") or 0
+                    if not _ws_n_iface:
+                        _cs_entry = (character_states or {}).get(_ws_runner) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _ws_n_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _ws_n_iface = 0
+                                break
+                _ws_n_iface = int(_ws_n_iface or 0)
+                # Cloak booster bonuses on Netrunner side
+                from .cpred_program_effects import run_interface_check_hooks
+                _ws_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _ws_cloak_bonus, _ws_booster_labels = run_interface_check_hooks(
+                    "Cloak", 0, _ws_hs_proxy
+                )
+                _ws_cloak_total = sum(v for _, v in _ws_booster_labels)
+                # Watcher is the attacker (rolling to detect); Netrunner is defender.
+                _ws_atk_label = (
+                    f"{_ws_block.get('name', _ws_target)} Int+Pathfinder"
+                )
+                _ws_def_label = "Interface+Cloak" if _ws_cloak_total else "Interface"
+                _ws_result = resolve_opposed_check(
+                    attacker_stat=_ws_iface + _ws_pf,
+                    defender_stat=_ws_n_iface + _ws_cloak_total,
+                    attacker_label=_ws_atk_label,
+                    defender_label=_ws_def_label,
+                )
+                _ws_detected = _ws_result.get("success", False)
+                # Always mark Watcher as having used its search this turn.
+                all_state_ops.append({
+                    "op": "watcher_search_used",
+                    "ice_key": _ws_key,
+                    "reason": (
+                        f"Watcher {_ws_block.get('name', _ws_target)} used active search"
+                    ),
+                })
+                _watcher_search_used_local[_ws_key] = _net_round_local
+                _ws_summary = {
+                    "type": "watcher_search",
+                    "target": _ws_target,
+                    "target_key": _ws_key,
+                    "target_name": _ws_block.get("name", _ws_target),
+                    "netrunner": _ws_runner,
+                    "detected": _ws_detected,
+                    "success": _ws_detected,
+                    "roll": _ws_result,
+                    "booster_bonuses": list(_ws_booster_labels),
+                    "formatted": (
+                        f"🎲 Watcher Search ({_ws_block.get('name', _ws_target)}): "
+                        f"{_ws_result.get('formatted', '')} — "
+                        f"{'Stealth BROKEN' if _ws_detected else 'still hidden'}"
+                    ),
+                }
+                if _ws_detected:
+                    # Watcher won → break_stealth (defined contest result)
+                    all_state_ops.append({
+                        "op": "break_stealth",
+                        "reason": (
+                            f"Watcher {_ws_block.get('name', _ws_target)} detected the "
+                            f"Netrunner via active search"
+                        ),
+                    })
+                    _stealth_active_local = False
+                    _stealth_broken_round_local = _net_round_local
+                results.append(_ws_summary)
+
+            elif action_type == "speed_check_vs_black_ice":
+                # Standard non-stealth Black ICE encounter (CPRED Core p.205).
+                # Netrunner Interface + 1d10 vs Black ICE Perception + 1d10.
+                # Pass: avoid effect. Fail: take effect. Both: ICE enters Initiative.
+                # Backend rolls all dice — this replaces the prior model-narrated path.
+                _sc_char = action.get("character", "")
+                _sc_target = str(action.get("target") or "").strip()
+                if not _sc_target:
+                    results.append({
+                        "type": "speed_check_vs_black_ice",
+                        "character": _sc_char,
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "speed_check_vs_black_ice requires a `target` naming the Black ICE.",
+                        "formatted": "⚠ speed_check_vs_black_ice: missing target",
+                    })
+                    continue
+                _sc_matches = _find_ice_target_matches(_sc_target, ice_status)
+                if not _sc_matches:
+                    results.append({
+                        "type": "speed_check_vs_black_ice",
+                        "character": _sc_char,
+                        "success": False,
+                        "error": "ice_not_found",
+                        "reason": f"No Black ICE matching {_sc_target!r} in current state.",
+                        "formatted": f"⚠ speed_check_vs_black_ice: {_sc_target} not found",
+                    })
+                    continue
+                if len(_sc_matches) > 1:
+                    results.append({
+                        "type": "speed_check_vs_black_ice",
+                        "character": _sc_char,
+                        "success": False,
+                        "error": "target_ambiguous",
+                        "reason": (
+                            f"{_sc_target!r} matches multiple ICE: "
+                            f"{', '.join(k for k, _ in _sc_matches)}. Disambiguate by node-prefixed key."
+                        ),
+                        "formatted": f"⚠ speed_check_vs_black_ice: ambiguous target",
+                    })
+                    continue
+                _sc_key, _sc_block = _sc_matches[0]
+                _sc_ice_block = _lookup_ice_type(_sc_block.get("ice_type"))
+                _sc_per = _sc_ice_block.get("per", 0) if _sc_ice_block else 0
+                # Netrunner Interface — explicit override wins; else look up from edgerunner state.
+                _sc_iface = action.get("interface_rank")
+                if _sc_iface is None and edgerunner_states and _sc_char:
+                    _sc_er = edgerunner_states.get(_sc_char) or {}
+                    _sc_iface = _lookup_stat_ci(_sc_er.get("stats", {}), "INT") or 0
+                    # Interface lives on hack_state; if action.interface_rank wasn't set,
+                    # fall back to character_states lookup (Netrunner usually has Interface
+                    # as a tracked resource).
+                    if not _sc_iface:
+                        _cs_entry = (character_states or {}).get(_sc_char) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _sc_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _sc_iface = 0
+                                break
+                _sc_iface = int(_sc_iface or 0)
+                _sc_ice_name = _sc_block.get("name") or _sc_target
+                _sc_result = resolve_opposed_check(
+                    attacker_stat=_sc_iface,
+                    defender_stat=int(_sc_per),
+                    attacker_label="Interface",
+                    defender_label=f"{_sc_ice_name} PER",
+                )
+                _sc_passed = _sc_result.get("success", False)
+                # ICE always enters Initiative on a Speed Check (RAW: pass avoids
+                # the effect but the ICE still acts). Emit ice_initiative_entry op.
+                all_state_ops.append({
+                    "op": "ice_initiative_entry",
+                    "ice_key": _sc_key,
+                    "priority": "standard",
+                    "reason": f"Black ICE {_sc_ice_name} encountered via Speed Check",
+                })
+                _sc_summary = {
+                    "type": "speed_check_vs_black_ice",
+                    "character": _sc_char,
+                    "target": _sc_target,
+                    "ice_key": _sc_key,
+                    "ice_name": _sc_ice_name,
+                    "success": _sc_passed,  # True = avoided effect
+                    "passed": _sc_passed,
+                    "roll": _sc_result,
+                    "formatted": (
+                        f"🎲 Speed Check vs {_sc_ice_name}: "
+                        f"{_sc_result.get('formatted', '')}"
+                    ),
+                }
+                if not _sc_passed:
+                    # Failed Speed Check → take effect. The actual effect ops (brain
+                    # damage, body_fire, movement_lock, etc.) are emitted by the
+                    # existing program_attack_vs_netrunner resolver flow when the
+                    # planner emits ICE attack actions. The contract guides them.
+                    _sc_summary["effect_pending"] = True
+                results.append(_sc_summary)
+
+            elif action_type == "patrol_detection":
+                # Patrol ICE detection roll (CPRED Core p.205): GM/world-emitted.
+                # Patrol PER + 1d10 (+2 if alert >= 3) vs Netrunner Interface +
+                # 1d10 with ability="Cloak" so Eraser fires.
+                _pd_actor = action.get("character", "")  # Netrunner being detected
+                _pd_target = str(action.get("target") or action.get("patrol") or "").strip()
+                if not _pd_target:
+                    results.append({
+                        "type": "patrol_detection",
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "patrol_detection requires `target` naming the Patrol ICE.",
+                        "formatted": "⚠ patrol_detection: missing target",
+                    })
+                    continue
+                _pd_matches = _find_ice_target_matches(_pd_target, ice_status)
+                if not _pd_matches:
+                    results.append({
+                        "type": "patrol_detection",
+                        "success": False,
+                        "error": "ice_not_found",
+                        "reason": f"No Patrol ICE matching {_pd_target!r}.",
+                        "formatted": f"⚠ patrol_detection: {_pd_target} not found",
+                    })
+                    continue
+                if len(_pd_matches) > 1:
+                    results.append({
+                        "type": "patrol_detection",
+                        "success": False,
+                        "error": "target_ambiguous",
+                        "reason": f"{_pd_target!r} matches multiple ICE entries.",
+                        "formatted": "⚠ patrol_detection: ambiguous target",
+                    })
+                    continue
+                _pd_key, _pd_block = _pd_matches[0]
+                _pd_ice_block = _lookup_ice_type(_pd_block.get("ice_type"))
+                _pd_per = _pd_ice_block.get("per", 0) if _pd_ice_block else int(_pd_block.get("per", 0))
+                # Alert 3+ Active Search bonus: Patrol PER +2 (per HACK_CONTRACT).
+                _pd_extra_mods_def = []
+                if alert_level >= 3:
+                    _pd_per += 2
+                    _pd_extra_mods_def.append(("Active Search", 2))
+                # Netrunner Interface (target of detection)
+                _pd_iface = action.get("interface_rank")
+                if _pd_iface is None and edgerunner_states and _pd_actor:
+                    _pd_er = edgerunner_states.get(_pd_actor) or {}
+                    _pd_iface = _lookup_stat_ci(_pd_er.get("stats", {}), "INT") or 0
+                    if not _pd_iface:
+                        _cs_entry = (character_states or {}).get(_pd_actor) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _pd_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _pd_iface = 0
+                                break
+                _pd_iface = int(_pd_iface or 0)
+                # Cloak booster bonuses (Eraser +2) on the Netrunner side.
+                from .cpred_program_effects import run_interface_check_hooks
+                _pd_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _pd_cloak_bonus, _pd_booster_labels = run_interface_check_hooks(
+                    "Cloak", 0, _pd_hs_proxy
+                )
+                _pd_extra_mods_atk = list(_pd_booster_labels)
+                _pd_ice_name = _pd_block.get("name") or _pd_target
+                # Note: Patrol is the "attacker" (rolling to detect); Netrunner
+                # is the "defender" (rolling to evade). Tie goes to defender = Netrunner = undetected.
+                _pd_result = resolve_opposed_check(
+                    attacker_stat=int(_pd_per),
+                    defender_stat=_pd_iface,
+                    attacker_label=f"{_pd_ice_name} PER",
+                    defender_label="Interface",
+                    extra_modifiers_attacker=None,  # PER bonus already folded into stat
+                )
+                # Inject Cloak modifiers into defender side via post-roll add (extra_modifiers
+                # on resolve_opposed_check only handles attacker side; we add Cloak labels via
+                # a result-side annotation since defender-side mods aren't first-class).
+                if _pd_extra_mods_atk:
+                    _pd_extra_label = " ".join(
+                        f"+{lbl} {val}" for (lbl, val) in _pd_extra_mods_atk
+                    )
+                    # Re-roll with Cloak applied to defender_stat.
+                    _pd_iface_with_cloak = _pd_iface + sum(v for _, v in _pd_extra_mods_atk)
+                    _pd_result = resolve_opposed_check(
+                        attacker_stat=int(_pd_per),
+                        defender_stat=_pd_iface_with_cloak,
+                        attacker_label=f"{_pd_ice_name} PER",
+                        defender_label=f"Interface {_pd_extra_label}",
+                    )
+                _pd_detected = _pd_result.get("success", False)  # success=True means Patrol won
+                _pd_summary = {
+                    "type": "patrol_detection",
+                    "character": _pd_actor,
+                    "target": _pd_target,
+                    "ice_key": _pd_key,
+                    "ice_name": _pd_ice_name,
+                    "detected": _pd_detected,
+                    "success": _pd_detected,  # for parity with other checks
+                    "roll": _pd_result,
+                    "booster_bonuses": _pd_extra_mods_atk,
+                    "formatted": (
+                        f"🎲 Patrol Detection ({_pd_ice_name}): "
+                        f"{_pd_result.get('formatted', '')}"
+                    ),
+                }
+                results.append(_pd_summary)
+
+            elif action_type == "activate_virus":
+                # Player-initiated trigger of a previously-planted virus.
+                # Looks up by id (preferred) or by target string (fallback).
+                # Emits a virus_op {action: "activate", id, log} for the events
+                # processor to apply — the resolver itself does NOT mutate
+                # virus_ledger directly (that's owned by the events apply path).
+                _vc_char = action.get("character", "")
+                _v_id = action.get("virus_id") if action.get("virus_id") is not None else action.get("id")
+                _v_target = str(action.get("target") or "").strip()
+                _v_log = str(action.get("log") or action.get("reason") or "").strip()[:400]
+
+                _vledger = virus_ledger if isinstance(virus_ledger, dict) else {}
+                _v_active = _vledger.get("active") if isinstance(_vledger.get("active"), list) else []
+
+                if not _v_active:
+                    results.append({
+                        "type": "activate_virus",
+                        "character": _vc_char,
+                        "success": False,
+                        "error": "no_viruses_planted",
+                        "reason": "No viruses are currently planted. Plant one with a successful Virus check first.",
+                        "formatted": "⚠ activate_virus: no viruses planted",
+                    })
+                    continue
+
+                _matched = None
+                if _v_id is not None:
+                    try:
+                        _v_id_int = int(_v_id)
+                    except (TypeError, ValueError):
+                        _v_id_int = None
+                    if _v_id_int is not None:
+                        for _v in _v_active:
+                            if isinstance(_v, dict) and _v.get("id") == _v_id_int:
+                                _matched = _v
+                                break
+                if _matched is None and _v_target:
+                    needle = _v_target.lower()
+                    for _v in _v_active:
+                        if isinstance(_v, dict) and str(_v.get("target", "")).lower() == needle:
+                            _matched = _v
+                            break
+
+                if _matched is None:
+                    _avail = ", ".join(
+                        f"#{v.get('id')} ({v.get('target', '?')}, {v.get('status', '?')})"
+                        for v in _v_active if isinstance(v, dict)
+                    )
+                    results.append({
+                        "type": "activate_virus",
+                        "character": _vc_char,
+                        "success": False,
+                        "error": "virus_not_found",
+                        "reason": (
+                            f"No virus matched id={_v_id!r} / target={_v_target!r}. "
+                            f"Active viruses: {_avail or '(none)'}."
+                        ),
+                        "formatted": f"⚠ activate_virus: not found",
+                    })
+                    continue
+
+                _matched_status = str(_matched.get("status", "")).lower()
+                if _matched_status == "purged":
+                    results.append({
+                        "type": "activate_virus",
+                        "character": _vc_char,
+                        "virus_id": _matched.get("id"),
+                        "success": False,
+                        "error": "virus_purged",
+                        "reason": (
+                            f"Virus #{_matched.get('id')} at "
+                            f"{_matched.get('target', '?')} is purged — cannot activate."
+                        ),
+                        "formatted": f"⚠ activate_virus #{_matched.get('id')}: purged",
+                    })
+                    continue
+
+                # Emit the virus op for the events-apply path. No NA cost —
+                # remote-trigger of a pre-planted asset.
+                all_state_ops.append({
+                    "op": "virus_op",
+                    "virus_op": {
+                        "action": "activate",
+                        "id": _matched.get("id"),
+                        **({"log": _v_log} if _v_log else {})
+                    }
+                })
+                results.append({
+                    "type": "activate_virus",
+                    "character": _vc_char,
+                    "virus_id": _matched.get("id"),
+                    "target": _matched.get("target"),
+                    "narrative": _matched.get("narrative", ""),
+                    "success": True,
+                    "formatted": (
+                        f"Virus triggered: #{_matched.get('id')} "
+                        f"({_matched.get('target', '?')})"
+                    ),
+                })
+
             elif action_type == "boosted_action":
                 # Step 6b: activate a Boosted Action program (Surge / Mask /
                 # Fortify / Spoof Signal). Atomic: 1 NET Action + 1 Cycle
@@ -5204,7 +6150,16 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     # illegal action, no resources spent, no state changed" — the model must
     # NOT advance the world (skip report_*_state, route to OOC clarification
     # with the action's reason, prompt for retry).
+    #
+    # ⚠ REGISTRATION REQUIRED: When you add a new fail-soft error code to a
+    # resolver branch (e.g. a new `error: "foo_bar"` field on a result dict),
+    # add the code here AND in the contract enumerations (cpred.py error-code
+    # lists in HACK_CONTRACT, NET_COMBAT_CONTRACT, etc.). Without registration:
+    # (1) the error doesn't appear in the top-level `player_errors` list,
+    # (2) the model's RAW-violation triage path doesn't fire,
+    # (3) the model may narrate the failure in fiction instead of OOC retry.
     _PLAYER_ERROR_CODES = {
+        # Existing codes
         "slide_preemptive", "slide_already_used",
         "program_not_firable", "program_not_loaded",
         "illegal_status_transition", "insufficient_net_actions",
@@ -5212,6 +6167,13 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
         "missing_program", "reinstall_requires_backup_drive",
         "missing_target", "no_system_map", "invalid_current_node",
         "invalid_move",
+        # Going Quiet stealth (Step B/C/D/E)
+        "not_in_stealth", "quiet_jack_in_unavailable",
+        "cannot_quiet_jack_in_after_break", "stealth_already_active",
+        "watcher_search_already_used_this_turn",
+        "must_break_stealth_first", "wrong_entity_type", "ice_not_found",
+        # Virus ledger
+        "no_viruses_planted", "virus_not_found", "virus_purged",
     }
     player_errors = []
     for _idx, _r in enumerate(results):
