@@ -5,28 +5,39 @@ import rehypeKatex from 'rehype-katex';
 import { styles } from '../styles';
 import { ChatMessage, ModelInfo, convertMathDelimiters, formatTimestamp } from '../types';
 
-/** Format the in-fiction time/date/location HUD line saved on each
- * assistant message.  Reads from msg.pipeline_state_after.hud_state —
- * the deterministic backend-tracked snapshot at the moment that
- * message was generated.  Returns null if there's nothing usable to
- * display (older messages, mode-only messages without a HUD update).
+/** Format the in-fiction time/date/location HUD line for an assistant
+ * message.  Reads from msg.pipeline_state_after.hud_state — the
+ * deterministic backend-tracked snapshot at the moment that message
+ * was generated.
+ *
+ * Mode messages (sex_mode / hack_mode / combat_mode / net_combat_mode /
+ * ship_combat_mode) are sealed pipelines that DON'T write back to the
+ * main pipeline_state, so they have no hud_state of their own.  For
+ * those, we walk backward through `messages` to the most recent
+ * assistant message that DOES have a hud_state and inherit it — that's
+ * the scene-start time, semantically "this is happening some time
+ * during the scene that started at X."
  *
  * Format: "2045-06-12 · 21:43 · Delphi's Apartment, Watson"
  *   - HHMM (4-digit) → HH:MM for readability
- *   - YYYY-MM-DD passed through (already readable)
+ *   - YYYY-MM-DD passed through
  *   - Location passed through
- *   - Middle dots as separators, dim color, monospace font
+ *   - Middle dots as separators
  */
-function getMessageHudLine(msg: any): string | null {
-  if (!msg || msg.role !== 'assistant') return null;
+function _extractHudFromMsg(msg: any): any | null {
+  if (!msg || typeof msg !== 'object') return null;
   const psa = msg.pipeline_state_after;
   if (!psa || typeof psa !== 'object') return null;
   const hud = psa.hud_state;
   if (!hud || typeof hud !== 'object') return null;
+  return hud;
+}
+
+function _formatHudLine(hud: any): string | null {
+  if (!hud) return null;
   const date = typeof hud.date === 'string' ? hud.date.trim() : '';
   const rawTime = typeof hud.time === 'string' ? hud.time.trim() : '';
   const location = typeof hud.location === 'string' ? hud.location.trim() : '';
-  // HHMM → HH:MM (e.g. "2143" → "21:43"); leave as-is if already colonized.
   let time = rawTime;
   if (rawTime && /^\d{3,4}$/.test(rawTime)) {
     const padded = rawTime.padStart(4, '0');
@@ -35,6 +46,22 @@ function getMessageHudLine(msg: any): string | null {
   const parts = [date, time, location].filter(p => !!p);
   if (parts.length === 0) return null;
   return parts.join(' · ');
+}
+
+function getMessageHudLine(msg: any, allMessages: any[], index: number): string | null {
+  if (!msg || msg.role !== 'assistant') return null;
+  // First try this message's own snapshot.
+  let hud = _extractHudFromMsg(msg);
+  if (hud) return _formatHudLine(hud);
+  // Mode message — inherit from the most recent prior assistant message
+  // that has a hud_state (the normal-mode message that opened the scene).
+  for (let j = index - 1; j >= 0; j--) {
+    const prior = allMessages[j];
+    if (!prior || prior.role !== 'assistant') continue;
+    hud = _extractHudFromMsg(prior);
+    if (hud) return _formatHudLine(hud);
+  }
+  return null;
 }
 
 interface ChatViewProps {
@@ -534,7 +561,7 @@ export default function ChatView({
                        Lets you scroll back through the chat and see when
                        each scene happened in fiction time. */}
                   {(() => {
-                    const hudLine = getMessageHudLine(msg);
+                    const hudLine = getMessageHudLine(msg, messages, i);
                     if (!hudLine) return null;
                     return (
                       <div style={{
