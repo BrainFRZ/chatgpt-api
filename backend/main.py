@@ -961,15 +961,22 @@ def get_base_instructions(username: str) -> str:
 
 def build_system_content(username: str, project: str, include_base: bool = True,
                          default_instructions: str = None,
-                         fallback_to_user_instructions: bool = False) -> str:
+                         fallback_to_user_instructions: bool = False,
+                         beat_state: dict | None = None) -> str:
     """Build the full system prompt: instructions + project files + base instructions.
     Base instructions go LAST (after project files) for maximum end-of-prompt salience.
+
+    If `beat_state` is supplied AND a `Plot - Session N.md` file exists for
+    the active session, a `[CURRENT BEAT]` block is appended at the very end
+    (after base_instructions) — last-thing-the-model-sees salience for the
+    pacing rule "stay on this beat until its goals are met."
 
     Args:
         include_base: If False, skip base_instructions.di entirely.
         default_instructions: Custom fallback when project has no instructions.di.
         fallback_to_user_instructions: If True and project instructions.di is missing,
             fall back to user-level instructions.di before the hardcoded default.
+        beat_state: pipeline_state.beat_state dict (current_session, current_beat, etc).
     """
     instructions = get_instructions(username, project)
     # If project instructions.di was missing (got hardcoded default), apply overrides
@@ -991,6 +998,18 @@ def build_system_content(username: str, project: str, include_base: bool = True,
             base = get_base_instructions(username)
             if base:
                 parts.append(base)
+        # [CURRENT BEAT] injection — appended LAST so it sits closest to the
+        # turn boundary (highest salience).  Only fires when beat_state is
+        # supplied AND a Plot - Session N.md is parseable for that session.
+        if beat_state:
+            try:
+                from game_systems.plot_beats import build_current_beat_injection
+                uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
+                beat_block = build_current_beat_injection(beat_state, uploads_dir)
+                if beat_block:
+                    parts.append(beat_block)
+            except Exception as e:  # noqa: BLE001 — never break system prompt
+                logger.warning("build_system_content: beat injection failed: %s", e)
         return "\n\n".join(parts)
     else:
         return instructions
@@ -1226,7 +1245,124 @@ def _consume_plot_prefix(msg: dict) -> bool:
     return True
 
 
-def _build_plot_injection(username: str, project: str) -> str:
+def _consume_beat_prefix(msg: dict) -> dict | None:
+    """Detect and strip a `/beat <N>` or `/beat next` prefix from a user
+    message.  Returns a directive dict for the caller to apply to
+    pipeline_state.beat_state, or None if no /beat command.
+
+    Forms (case-insensitive):
+      "/beat next"  → {"action": "next"}
+      "/beat 3"     → {"action": "set", "beat": 3}
+      "/beat reset" → {"action": "reset"}
+      "/beat"       → {"action": "show"}   (no-op; future: render summary)
+
+    Mutates msg['content'] in place to remove the prefix.
+    """
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return None
+    stripped = content.lstrip()
+    if not stripped:
+        return None
+    lower = stripped.lower()
+    if not lower.startswith("/beat"):
+        return None
+    after_cmd = stripped[len("/beat"):]
+    if after_cmd and after_cmd[0] not in (" ", "\t", "\n", "\r"):
+        return None
+    rest = after_cmd.strip()
+    msg["_beat_used"] = True
+    # Parse the argument off the front of `rest`; whatever's after stays.
+    parts = rest.split(None, 1)
+    arg = (parts[0].lower() if parts else "")
+    remainder = (parts[1] if len(parts) > 1 else "")
+    msg["content"] = remainder
+    if not arg:
+        return {"action": "show"}
+    if arg in ("next", "advance", "complete"):
+        return {"action": "next"}
+    if arg in ("reset", "restart"):
+        return {"action": "reset"}
+    if arg.isdigit():
+        return {"action": "set", "beat": int(arg)}
+    return {"action": "unknown", "raw": arg}
+
+
+def _consume_session_prefix(msg: dict) -> dict | None:
+    """`/session <N>` slash command — switch to session N's plot doc.
+    Resets current_beat to 1 and clears completed_beats for the new session.
+    """
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return None
+    stripped = content.lstrip()
+    if not stripped:
+        return None
+    lower = stripped.lower()
+    if not lower.startswith("/session"):
+        return None
+    after_cmd = stripped[len("/session"):]
+    if after_cmd and after_cmd[0] not in (" ", "\t", "\n", "\r"):
+        return None
+    rest = after_cmd.strip()
+    parts = rest.split(None, 1)
+    arg = (parts[0] if parts else "")
+    remainder = (parts[1] if len(parts) > 1 else "")
+    msg["content"] = remainder
+    msg["_session_used"] = True
+    if arg.isdigit():
+        return {"action": "set", "session": int(arg)}
+    return {"action": "unknown", "raw": arg}
+
+
+def _apply_beat_directive(pipeline_state: dict, directive: dict,
+                          uploads_dir: str | None = None) -> str:
+    """Apply a /beat or /session directive to pipeline_state.beat_state.
+    Returns a short OOC confirmation string for the next system message
+    so the player sees "Beat 2 → 3" feedback.
+    """
+    from game_systems.plot_beats import (
+        normalize_beat_state, advance_beat, set_beat, set_session,
+    )
+    bs = normalize_beat_state(pipeline_state.get("beat_state"))
+    action = directive.get("action") if isinstance(directive, dict) else None
+    if action == "next":
+        new_bs = advance_beat(bs, uploads_dir=uploads_dir)
+        msg = (f"[OOC] Beat advanced: Session {bs['current_session']}, "
+               f"Beat {bs['current_beat']} → "
+               f"Session {new_bs['current_session']}, "
+               f"Beat {new_bs['current_beat']}.")
+        bs = new_bs
+    elif action == "set":
+        if "beat" in directive:
+            new_bs = set_beat(bs, directive["beat"])
+            msg = (f"[OOC] Beat set: Session {bs['current_session']}, "
+                   f"Beat {bs['current_beat']} → Beat {new_bs['current_beat']}.")
+            bs = new_bs
+        elif "session" in directive:
+            new_bs = set_session(bs, directive["session"])
+            msg = (f"[OOC] Session switched: {bs['current_session']} → "
+                   f"{new_bs['current_session']}, Beat 1.")
+            bs = new_bs
+        else:
+            msg = "[OOC] Beat directive missing target."
+    elif action == "reset":
+        from game_systems.plot_beats import init_beat_state
+        bs = init_beat_state()
+        msg = "[OOC] Beat state reset to Session 1, Beat 1."
+    elif action == "show":
+        msg = (f"[OOC] Beat state: Session {bs['current_session']}, "
+               f"Beat {bs['current_beat']}. "
+               f"Completed this session: "
+               f"{bs['completed_beats'] or 'none'}.")
+    else:
+        msg = f"[OOC] Unknown beat directive: {directive!r}"
+    pipeline_state["beat_state"] = bs
+    return msg
     """Load plot docs only for one-shot injection via /plot command.
 
     Filters to filenames starting with "plot" (case-insensitive) — typically
@@ -4426,6 +4562,37 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     # Prepare request parameters before starting the generator
     branch_path = get_path_to_root(data["messages"], user_msg_id)
 
+    # /beat and /session slash-command consumers — fire BEFORE mode dispatch
+    # so they work in any mode.  Beat advancement is recorded on the chat's
+    # pipeline_state.beat_state and an OOC confirmation line is appended to
+    # the user message so the next turn shows what changed.  Sex / hack /
+    # combat modes still won't see [CURRENT BEAT] in their prompts (those
+    # paths don't include it), so the directive is purely a state-mutation
+    # that becomes visible when normal mode resumes.
+    try:
+        _beat_directive = _consume_beat_prefix(branch_path[-1])
+        _session_directive = _consume_session_prefix(branch_path[-1]) if not _beat_directive else None
+        if _beat_directive or _session_directive:
+            _ps_for_beat = data.setdefault("pipeline_state", {})
+            _uploads_for_beat = (
+                os.path.join(get_project_dir(username, request.project), "uploads")
+                if request.project else None
+            )
+            _confirm = _apply_beat_directive(
+                _ps_for_beat,
+                _beat_directive or _session_directive,
+                uploads_dir=_uploads_for_beat,
+            )
+            # Prepend OOC confirmation to the user message so it's visible
+            # in this turn's narration ("Beat 2 → 3, model: continue").
+            _existing = branch_path[-1].get("content") or ""
+            if isinstance(_existing, str):
+                branch_path[-1]["content"] = (
+                    _confirm + ("\n\n" + _existing if _existing.strip() else "")
+                )
+    except Exception as _e:
+        logger.warning(f"/beat or /session directive failed: {_e}")
+
     context_limits = provider.context_limits
     threshold = context_limits.target if model_switched else context_limits.threshold
     token_counter = getattr(provider, 'count_tokens_buffered', provider.count_tokens)
@@ -5292,6 +5459,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             sa_doc_stems = get_staged_project_filenames(username, request.project)
             sa_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
             injections_str = build_single_agent_injections(stateful_pipeline_state, game_system=gs, dice_pool=sa_dice_pool, doc_file_stems=sa_doc_stems, name_dice=sa_name_dice)
+
+            # [CURRENT BEAT] injection — appended after the standard
+            # injection bundle so the pacing rule sits closest to the
+            # user message.  Sex / hack / combat / net_combat modes use
+            # different code paths and don't include this — beats only
+            # advance in normal narrative mode.
+            try:
+                from game_systems.plot_beats import build_current_beat_injection
+                _beat_block = build_current_beat_injection(
+                    stateful_pipeline_state.get("beat_state"),
+                    os.path.join(get_project_dir(username, request.project), "uploads"),
+                )
+                if _beat_block:
+                    injections_str = (injections_str + "\n\n" + _beat_block) if injections_str else _beat_block
+            except Exception as _e:
+                logger.warning(f"Beat injection failed: {_e}")
 
             # Strip transient _conversion_doc before it can be persisted
             _gs_state = stateful_pipeline_state.get("game_state")

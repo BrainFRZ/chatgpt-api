@@ -58,6 +58,7 @@
 !backend/game_systems/cpred_program_effects.py
 !backend/game_systems/cpred_architecture_gen.py
 !backend/game_systems/cpred_plot_encounters.py
+!backend/game_systems/plot_beats.py
 !backend/game_systems/cpred_identity.py
 !backend/game_systems/dnd5e_cyber.py
 !backend/game_systems/novels.py
@@ -66,6 +67,7 @@
 !backend/tests/test_multi_model.py
 !backend/tests/test_cpred_mechanics.py
 !backend/tests/test_cpred_program_effects.py
+!backend/tests/test_plot_beats.py
 !backend/tests/test_cpred_fuzzing.py
 !backend/tests/test_cyberdeck_equipment_fuzz.py
 !backend/tests/test_hack_mechanics_fuzz.py
