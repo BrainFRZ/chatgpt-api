@@ -2389,10 +2389,12 @@ RAW VIOLATIONS — TRIAGE BEFORE GIVING UP: If you propose actions that violate 
 
 Never `meatspace_round: true` and never narrate the rejected action as fiction.
 
+SUBVOCAL DIALOGUE: A jacked-in Netrunner can subvocalize to meatspace allies via throat mic, free (0 NA, no resource cost). If the user's prompt includes dialogue or questions addressed to an NPC ally (Fixer, Solo, anyone on comms), capture the dialogue intent in `scene_notes` so the narrator knows to write the NPC's reply. Example: `scene_notes: "RedVelvet asks Delphi via subvocal: confirms the gig goal + asks about virus payload + reports she's at Gateway. Narrator should write Delphi's in-voice reply grounded in plot context."` Do NOT emit a NET action for the dialogue itself — it's free chatter, not a mechanical action.
+
 OUTPUT: JSON with these fields:
 - actions: array of mechanical actions to resolve
 - hack_state_updates: judgment-based state changes (alert_level, nodes_visited, programs_used, cycles_remaining, system_map changes, ice_status, net_actions_used)
-- scene_notes: what happened this exchange for the narrator
+- scene_notes: what happened this exchange for the narrator (INCLUDING subvocal dialogue intent — see above)
 - hack_complete: boolean
 - narrative_summary: 1-3 sentence summary ONLY when hack_complete=true
 - meatspace_round: boolean — true if meatspace crew round should be narrated"""
@@ -2417,7 +2419,7 @@ HACK_PLANNING_SCHEMA = {
 
 HACK_NARRATION_CONTRACT = """You are the HACK NARRATOR for a Cyberpunk RED NET encounter.
 
-You receive resolved NET actions with dice results from the backend. Your ONLY job is to write the narrative.
+You receive resolved NET actions with dice results from the backend. Your job is to write the narrative.
 
 RULES:
 - Use the formatted roll strings from resolved_actions for all 🎲 lines — do NOT invent dice results
@@ -2427,6 +2429,26 @@ RULES:
 - Include 🎲 roll breakdown lines for every resolved action
 - If meatspace_round is true, narrate the meatspace crew's round ABOVE NET content, separated by ---
 - End each exchange presenting available options to the player
+
+SUBVOCAL COMMS WITH THE MEAT CREW:
+A jacked-in Netrunner can subvocalize through their throat mic to allies in meatspace — the Fixer, the Solo on overwatch, anyone on comms. Per CPRED RAW, this is free (no NA cost) and happens in real time. If the user's prompt includes dialogue or questions directed at a meatspace NPC (e.g., "Delphi, run the goal back for me", "Nix, anything moving on the cameras?", "babe, what's the gig?"), you MUST:
+1. Narrate the NPC's voice replying in the runner's earbud BEFORE narrating the NET action result. Their response goes at the top of your reply, in standard dialogue formatting.
+2. Ground the NPC reply in any plot context available — `[PLOT DOCS]` block, project files, prior chat history, character profiles. NPC must answer truthfully and in-voice.
+3. Keep the NET narration AFTER the dialogue, separated by `---` if needed for clarity.
+4. The dialogue costs the runner 0 NA. Their NET Action(s) (Probe, Backdoor, etc.) still resolve as normal.
+
+Format:
+```
+[Subvocal: NPC name speaks in runner's ear, in-character reply, possibly multiple lines]
+
+---
+
+[NET narration — what the runner experiences in the architecture]
+[🎲 roll breakdowns for resolved NET actions]
+[Available options]
+```
+
+NEVER ignore subvocal dialogue. NEVER respond with only NET narration when the user explicitly addressed an NPC. The runner is mid-fiction, not mid-mechanics-only-puzzle.
 
 RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The Planner already triaged — if it routed `player_errors` to you with `meatspace_round: false` + scene_notes flagging OOC, that means the user genuinely asked for an illegal action (Planner was unable to interpret it as something legal). Skip the normal narrative. Output a brief OOC clarification — "(OOC: ...)" prefix or italics — paraphrasing the `reason` field, then prompt the player to retry. Examples: "(OOC: Slide only escapes a Black ICE that's already engaged you — none of the active ICE are hunting you yet. What would you like to do instead?)", "(OOC: Sword is currently Derezzed. To get it back online: 1 NA to Reactivate (Derezzed → Deactivated), then 1 NA to fire it (auto-activates per RAW Errata p.3). Or you can spend 1 NA on activate_program to leave it Active without firing.)" Do NOT roll dice, do NOT narrate fiction, do NOT advance time.
 
@@ -2508,6 +2530,8 @@ RULES:
 - 2-5 sentences per section
 - Name combatants. Chrome reflects neon. Data streams as light.
 - End each exchange setting up the next combatant's situation
+
+SUBVOCAL COMMS WITH THE MEAT CREW: A jacked-in Netrunner can subvocalize through their throat mic to allies (Fixer, Solo, etc.) — free, no NA cost. If the user's prompt includes dialogue or questions addressed to an NPC ally, narrate the NPC's reply in the runner's earbud BEFORE the NET section. Ground the reply in any `[PLOT DOCS]` or project context available. NEVER ignore subvocal dialogue. The runner is mid-fiction, not mid-mechanics-only-puzzle.
 
 RAW VIOLATIONS (top-level `player_errors` non-empty in resolved_actions): The Planner already triaged — if you're seeing `player_errors` with `meatspace_round: false` + scene_notes flagging OOC, that means the user genuinely asked for an illegal action. Skip the normal narrative — output a brief OOC clarification ("(OOC: ...)" prefix or italics) paraphrasing the `reason` field, then prompt for retry. Do NOT roll dice, do NOT narrate fiction, do NOT advance time. Other (legal) actions in the same batch may still narrate normally if they resolved.
 

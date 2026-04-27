@@ -1195,6 +1195,9 @@ def _consume_plot_prefix(msg: dict) -> bool:
     excluded for token efficiency. Mutates msg['content'] in place to remove
     the prefix so the saved chat history doesn't preserve the slash command.
 
+    Also stamps `_plot_used: True` on the message dict so the chat history
+    preserves a marker that /plot fired this turn (useful for diagnostics).
+
     Recognized forms (case-insensitive):
       "/plot"             → strip, return True (empty body)
       "/plot foo"         → strip, msg.content = "foo", return True
@@ -1219,6 +1222,7 @@ def _consume_plot_prefix(msg: dict) -> bool:
         return False
     # Strip the prefix and any leading whitespace from the remainder
     msg["content"] = after_cmd.lstrip()
+    msg["_plot_used"] = True
     return True
 
 
