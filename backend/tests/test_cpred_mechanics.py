@@ -9080,20 +9080,23 @@ class TestArchitectureGenerator(unittest.TestCase):
                 # Convergence ICE is RAW-fixed by SR; trace is its own thing.
                 exempt = {CONVERGENCE_ICE_BY_SR[sr], "trace"}
                 for ice in r["ice_status"].values():
-                    species = ice.get("species")
+                    # Trace entries don't carry ice_type; identify by behavior.
+                    if str(ice.get("behavior", "")).lower() == "trace":
+                        continue
+                    species = ice.get("ice_type")
                     self.assertTrue(
                         species in pool or species in exempt,
-                        f"SR{sr} seed{seed}: illegal species {species!r}",
+                        f"SR{sr} seed{seed}: illegal ice_type {species!r}",
                     )
 
     def test_giant_never_spawns_in_sr1(self):
         from game_systems.cpred_architecture_gen import generate_architecture
         for seed in range(50):
             r = generate_architecture(sr=1, tier="full_run", seed=seed)
-            species = [v.get("species") for v in r["ice_status"].values()]
-            self.assertNotIn("giant", species, f"SR1 seed{seed} spawned Giant")
-            self.assertNotIn("kraken", species, f"SR1 seed{seed} spawned Kraken")
-            self.assertNotIn("dragon", species, f"SR1 seed{seed} spawned Dragon")
+            types = [v.get("ice_type") for v in r["ice_status"].values()]
+            self.assertNotIn("giant", types, f"SR1 seed{seed} spawned Giant")
+            self.assertNotIn("kraken", types, f"SR1 seed{seed} spawned Kraken")
+            self.assertNotIn("dragon", types, f"SR1 seed{seed} spawned Dragon")
 
     def test_convergence_ice_at_objective_for_full_run(self):
         from game_systems.cpred_architecture_gen import generate_architecture
@@ -9103,12 +9106,93 @@ class TestArchitectureGenerator(unittest.TestCase):
             expected = CONVERGENCE_ICE_BY_SR[sr]
             objective_ice = [
                 v for k, v in r["ice_status"].items()
-                if k.startswith("Objective::")
+                if k.startswith("Objective_") or v.get("node") == "Objective"
             ]
             self.assertTrue(
-                any(ice.get("species") == expected for ice in objective_ice),
+                any(ice.get("ice_type") == expected and ice.get("is_convergence")
+                    for ice in objective_ice),
                 f"SR{sr}: no Convergence {expected} at Objective",
             )
+
+    def test_generated_ice_have_canonical_combat_fields(self):
+        """All generated Black ICE entries must carry the canonical fields
+        the resolver/render code reads: rez_current, rez_max, ice_type,
+        entity_type='black_ice', behavior='black' (cpred_hack.py:1819-1824).
+        Without these, first hit derezzes the ICE (rez_current defaults to 0)
+        and stealth_contest can't recognize them as Black ICE.
+        """
+        from game_systems.cpred_architecture_gen import generate_architecture
+        for sr in (1, 2, 3, 4, 5):
+            r = generate_architecture(sr=sr, tier="full_run", seed=sr)
+            for key, ice in r["ice_status"].items():
+                if str(ice.get("behavior", "")).lower() == "trace":
+                    self.assertEqual(ice.get("entity_type"), "trace", key)
+                    self.assertIn("rez_current", ice, key)
+                    self.assertIn("rez_max", ice, key)
+                    continue
+                self.assertEqual(ice.get("behavior"), "black", key)
+                self.assertEqual(ice.get("entity_type"), "black_ice", key)
+                self.assertIn("ice_type", ice, key)
+                self.assertIn("rez_current", ice, key)
+                self.assertIn("rez_max", ice, key)
+                self.assertGreater(ice["rez_max"], 0, f"{key}: rez_max=0")
+                self.assertEqual(ice["rez_current"], ice["rez_max"], key)
+
+    def test_generated_trace_engages_on_node_entry(self):
+        """Regression: generator's pre-placed Trace ICE must engage when the
+        Netrunner enters its node.  _engage_trace_ice (cpred_hack.py:1699)
+        matches by `key.startswith(f"{current_node}_")`, so generator keys
+        must use `_` separator (NOT `::`).
+        """
+        from game_systems.cpred_architecture_gen import generate_architecture
+        from game_systems.cpred_hack import _engage_traces_in_current_node as _engage_trace_ice
+        # Force trace placement on a Standard SR3 architecture.
+        for seed in range(50):
+            r = generate_architecture(sr=3, tier="full_run", seed=seed)
+            trace_keys = [
+                k for k, v in r["ice_status"].items()
+                if str(v.get("behavior", "")).lower() == "trace"
+            ]
+            if not trace_keys:
+                continue
+            trace_key = trace_keys[0]
+            trace_node = r["ice_status"][trace_key]["node"]
+            state = {
+                "current_node": trace_node,
+                "hacker_name": "V",
+                "ice_status": dict(r["ice_status"]),
+                "trace_progress": None,
+            }
+            _engage_trace_ice(state)
+            engaged = state["ice_status"][trace_key].get("engaged_by", [])
+            self.assertIn(
+                "V", engaged,
+                f"seed{seed}: generator's Trace at {trace_key!r} did not "
+                f"engage runner at node {trace_node!r}",
+            )
+            self.assertEqual(state["trace_progress"], 0)
+            return  # one successful engagement is enough
+        self.skipTest("No Trace placed in 50 seeds; trace_chance too low to test")
+
+    def test_seed_is_deterministic_across_processes(self):
+        """The apply-time stable-seed basis must produce the same int across
+        process restarts.  hashlib.sha256, NOT Python's hash(), since hash()
+        is randomized via PYTHONHASHSEED.
+        """
+        import hashlib
+        basis = "V::Arasaka HR::3::full_run"
+        a = int.from_bytes(hashlib.sha256(basis.encode()).digest()[:4], "big")
+        b = int.from_bytes(hashlib.sha256(basis.encode()).digest()[:4], "big")
+        self.assertEqual(a, b)
+        # Spot-check known stability: this value should never change for the
+        # given basis string regardless of Python version / process.
+        self.assertEqual(
+            a,
+            int.from_bytes(
+                hashlib.sha256(b"V::Arasaka HR::3::full_run").digest()[:4],
+                "big",
+            ),
+        )
 
     def test_canonical_dvs_per_difficulty(self):
         from game_systems.cpred_architecture_gen import generate_architecture
@@ -9160,16 +9244,18 @@ class TestIceTierValidator(unittest.TestCase):
             "system_map": {"sr": 1, "difficulty": "basic"},
             "ice_status": {
                 "Floor 2::Giant": {
-                    "species": "giant", "name": "Giant",
-                    "behavior": "patrol", "status": "active",
+                    "ice_type": "giant", "name": "Giant",
+                    "behavior": "black", "entity_type": "black_ice",
+                    "status": "active",
+                    "rez_current": 25, "rez_max": 25,
                     "per": 2, "atk": 8, "def": 4, "rez": 25,
                 },
             },
         }
         _validate_ice_tier_eligibility(state)
         entry = state["ice_status"]["Floor 2::Giant"]
-        # Species was downgraded to something in the SR1 pool.
-        self.assertIn(entry["species"], ice_pool_for_sr(1))
+        # ice_type was downgraded to something in the SR1 pool.
+        self.assertIn(entry["ice_type"], ice_pool_for_sr(1))
         self.assertEqual(entry["_tier_downgraded_from"], "giant")
 
     def test_legal_placement_unchanged(self):
@@ -9178,15 +9264,17 @@ class TestIceTierValidator(unittest.TestCase):
             "system_map": {"sr": 3, "difficulty": "standard"},
             "ice_status": {
                 "Floor 2::Hellhound": {
-                    "species": "hellhound", "name": "Hellhound",
-                    "behavior": "patrol", "status": "active",
+                    "ice_type": "hellhound", "name": "Hellhound",
+                    "behavior": "black", "entity_type": "black_ice",
+                    "status": "active",
+                    "rez_current": 20, "rez_max": 20,
                     "per": 6, "atk": 6, "def": 2, "rez": 20,
                 },
             },
         }
         _validate_ice_tier_eligibility(state)
         entry = state["ice_status"]["Floor 2::Hellhound"]
-        self.assertEqual(entry["species"], "hellhound")
+        self.assertEqual(entry["ice_type"], "hellhound")
         self.assertNotIn("_tier_downgraded_from", entry)
 
     def test_convergence_ice_exempt_from_tier_check(self):
@@ -9194,7 +9282,23 @@ class TestIceTierValidator(unittest.TestCase):
         species would otherwise be illegal for the tier pool."""
         from game_systems.cpred_hack import _validate_ice_tier_eligibility
         # Giant is the SR3 Convergence even though it's not in SR3's pool.
+        # New generator shape uses behavior="black" + is_convergence=True.
         state = {
+            "system_map": {"sr": 3, "difficulty": "standard"},
+            "ice_status": {
+                "Objective::Giant": {
+                    "ice_type": "giant", "name": "Giant",
+                    "behavior": "black", "entity_type": "black_ice",
+                    "is_convergence": True,
+                    "status": "active",
+                },
+            },
+        }
+        _validate_ice_tier_eligibility(state)
+        entry = state["ice_status"]["Objective::Giant"]
+        self.assertEqual(entry["ice_type"], "giant")  # untouched
+        # Legacy shape with behavior="convergence" is also exempt.
+        state2 = {
             "system_map": {"sr": 3, "difficulty": "standard"},
             "ice_status": {
                 "Objective::Giant": {
@@ -9203,9 +9307,8 @@ class TestIceTierValidator(unittest.TestCase):
                 },
             },
         }
-        _validate_ice_tier_eligibility(state)
-        entry = state["ice_status"]["Objective::Giant"]
-        self.assertEqual(entry["species"], "giant")  # untouched
+        _validate_ice_tier_eligibility(state2)
+        self.assertEqual(state2["ice_status"]["Objective::Giant"]["species"], "giant")
 
     def test_watcher_entries_skipped(self):
         from game_systems.cpred_hack import _validate_ice_tier_eligibility

@@ -726,10 +726,16 @@ def _generate_architecture_if_missing(state, tool_input):
         sm.get("target_system") if isinstance(sm, dict) else None
     )
     hint = (sm.get("structure_hint") if isinstance(sm, dict) else None)
-    # Stable seed for re-applies of the same hack: hash hacker_name + target.
-    # Without it, every apply_hack_state call would re-roll a different map.
+    # Stable seed for re-applies of the same hack across server restarts.
+    # Python's built-in hash() is randomized per-process via PYTHONHASHSEED,
+    # so the same string would produce different ints on each restart and
+    # the architecture would re-roll on every restart.  Use hashlib.sha256
+    # for cross-process determinism.
+    import hashlib
     seed_basis = f"{state.get('hacker_name') or ''}::{target_system or ''}::{sr}::{tier}"
-    seed = hash(seed_basis) & 0xFFFFFFFF
+    seed = int.from_bytes(
+        hashlib.sha256(seed_basis.encode("utf-8")).digest()[:4], "big"
+    )
     from .cpred_architecture_gen import generate_architecture
     gen = generate_architecture(
         sr=sr, tier=tier, hint=hint, target_system=target_system, seed=seed,
@@ -793,10 +799,17 @@ def _validate_ice_tier_eligibility(state):
             continue
         # Trace ICE has its own canonical handling; skip pool check.
         behavior = str(entry.get("behavior", "")).strip().lower()
-        if behavior in ("trace", "convergence"):
+        if behavior == "trace":
             continue
+        # Convergence ICE is RAW-fixed by SR; skip pool check (the entry
+        # may carry behavior="black" + is_convergence=True from the
+        # generator, or behavior="convergence" from legacy / planner data).
+        if behavior == "convergence" or entry.get("is_convergence"):
+            continue
+        # Engine-canonical species field is `ice_type`; fall back to `species`
+        # (legacy generator) or `name` (lowercased).
         species = str(
-            entry.get("species") or entry.get("name") or ""
+            entry.get("ice_type") or entry.get("species") or entry.get("name") or ""
         ).strip().lower()
         if not species:
             continue
@@ -820,11 +833,19 @@ def _validate_ice_tier_eligibility(state):
         # concern; the validator's job is just to make the state RAW-legal.
         substitute = sorted(candidates)[0]
         sub_block = ICE_STAT_BLOCKS.get(substitute) or {}
-        # Patch the entry in place: rename species/name + restat.
-        entry["species"] = substitute
+        # Patch the entry in place: update canonical ice_type + name + rez.
+        entry["ice_type"] = substitute
+        if "species" in entry:
+            entry["species"] = substitute  # legacy mirror
         if "name" in entry:
             entry["name"] = sub_block.get("name", substitute.title())
-        for stat_key in ("per", "spd", "atk", "def", "rez", "damage_dice",
+        # Update rez_current/rez_max to the substitute's stats so the
+        # downgraded entry matches the substitute's HP, not the illegal
+        # original's HP.
+        sub_rez = int(sub_block.get("rez", 0))
+        entry["rez_current"] = sub_rez
+        entry["rez_max"] = sub_rez
+        for stat_key in ("per", "spd", "atk", "def", "damage_dice",
                          "effect", "effect_desc"):
             if stat_key in sub_block:
                 entry[stat_key] = sub_block[stat_key]

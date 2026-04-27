@@ -156,17 +156,60 @@ def _gen_full_run(sr: int, hint: Optional[str], rng: random.Random) -> dict:
     ice_status: dict = {}
     eligible_ice = ice_pool_for_sr(sr)
 
+    def _make_black_ice(species_key: str, node_name: str,
+                        is_convergence: bool = False) -> dict:
+        """Canonical Black ICE entry shape — must match the contract enum
+        (cpred.py:1865) and what _apply_alert_ice_spawn emits at line 1819
+        so resolver/render code reads it identically.
+
+        Required fields downstream consumers rely on:
+          - `behavior: "black"` — the schema enum value (not "convergence").
+            stealth_contest checks `behavior == "black"` as fallback when
+            `entity_type` is absent (cpred_mechanics.py:5101).
+          - `entity_type: "black_ice"` — primary stealth_contest check
+            (cpred_mechanics.py:5088).
+          - `ice_type: <species_key>` — speed_check and stealth_contest use
+            this to look up PER/DEF stats via _lookup_ice_type
+            (cpred_mechanics.py:5114, 5435).
+          - `rez_current` + `rez_max` — rez_damage op decrements rez_current;
+            without these, defaulting to 0 means first hit derezzes the ICE
+            (cpred_hack.py:675-676).
+          - `name` (display), `status: "active"`, `node` (location).
+
+        Convergence Black ICE uses the same shape with an `is_convergence`
+        flag so the planner / narrator can reference it specifically without
+        breaking the schema enum.
+        """
+        block = ICE_STAT_BLOCKS[species_key]
+        rez = int(block.get("rez", 0))
+        entry = {
+            "name": block["name"],
+            "behavior": "black",
+            "ice_type": species_key,
+            "entity_type": "black_ice",
+            "rez_current": rez,
+            "rez_max": rez,
+            "status": "active",
+            "node": node_name,
+        }
+        if is_convergence:
+            entry["is_convergence"] = True
+        return entry
+
+    # ICE entry keys MUST match the `<node>_<suffix>` pattern used by
+    # _engage_trace_ice (cpred_hack.py:1699) — that matcher uses
+    # `key.startswith(f"{current_node}_")` to engage ICE on node entry.
+    # Using `::` as a separator (the prior pattern) silently broke trace
+    # engagement.  Stacking suffix is `_2`, `_3`, etc. to stay within the
+    # underscore convention.
     # 1) Convergence Black ICE — RAW-fixed by SR; placed at the Objective.
+    #    Key is `<node>_Convergence` to match _apply_alert_ice_spawn's
+    #    auto-spawned key (cpred_hack.py:1816).
     conv_key = (CONVERGENCE_ICE_BY_SR.get(sr) or "").lower()
     if conv_key and conv_key in ICE_STAT_BLOCKS:
-        block = ICE_STAT_BLOCKS[conv_key]
-        ice_status[f"Objective::{block['name']}"] = {
-            **block,
-            "species": conv_key,
-            "behavior": "convergence",
-            "node": "Objective",
-            "status": "active",
-        }
+        ice_status["Objective_Convergence"] = _make_black_ice(
+            conv_key, "Objective", is_convergence=True
+        )
 
     # 2) Standard ICE distributed across core + lobby (NOT Gateway).
     ice_lo, ice_hi = ARCHITECTURE_ICE_COUNT.get(difficulty, (2, 3))
@@ -183,35 +226,29 @@ def _gen_full_run(sr: int, hint: Optional[str], rng: random.Random) -> dict:
             continue
         node_name = rng.choice(placement_pool)
         # Allow stacking — CRB permits multiple ICE per floor.
-        key = f"{node_name}::{block.get('name', species.title())}"
+        base_key = f"{node_name}_{block.get('name', species.title())}"
+        key = base_key
         suffix = 2
         while key in ice_status:
-            key = f"{node_name}::{block.get('name', species.title())} #{suffix}"
+            key = f"{base_key}_{suffix}"
             suffix += 1
-        ice_status[key] = {
-            **block,
-            "species": species,
-            "behavior": "patrol",  # default; planner can promote on its turn
-            "node": node_name,
-            "status": "active",
-        }
+        ice_status[key] = _make_black_ice(species, node_name)
 
     # 3) Trace ICE — independent roll; placed mid-core when present.
+    # Trace shape matches _apply_alert_ice_spawn (cpred_hack.py:1802-1808):
+    # key `<node>_Trace`, rez = SR * 2, entity_type "trace", behavior "trace".
     trace_chance = ARCHITECTURE_TRACE_CHANCE.get(difficulty, 0.0)
     if rng.random() < trace_chance and core_names:
-        # Mid-core placement so the runner has time to detect it.
         trace_node = core_names[len(core_names) // 2]
-        ice_status[f"{trace_node}::Trace"] = {
-            "name": "Trace",
-            "species": "trace",
+        trace_rez = sr * 2
+        ice_status[f"{trace_node}_Trace"] = {
+            "name": "Trace ICE",
             "behavior": "trace",
-            "class": "trace",
-            "per": 6, "spd": 4, "atk": 0, "def": 4, "rez": 15,
-            "damage_dice": 0,
-            "effect": "trace_progress",
-            "effect_desc": "Each turn rezzed, Trace progresses; on completion, corp learns runner location.",
-            "node": trace_node,
+            "entity_type": "trace",
+            "rez_current": trace_rez,
+            "rez_max": trace_rez,
             "status": "active",
+            "node": trace_node,
         }
 
     return {
