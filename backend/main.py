@@ -1186,6 +1186,66 @@ def load_project_files(username: str, project: str) -> str:
 
     return combined
 
+
+def _consume_plot_prefix(msg: dict) -> bool:
+    """Detect and strip a leading `/plot` slash-command on a user message.
+
+    The /plot command is a per-turn opt-in to inject project plot/lore docs
+    into mode pipelines (hack/combat/net_combat/sex) where they're normally
+    excluded for token efficiency. Mutates msg['content'] in place to remove
+    the prefix so the saved chat history doesn't preserve the slash command.
+
+    Recognized forms (case-insensitive):
+      "/plot"             → strip, return True (empty body)
+      "/plot foo"         → strip, msg.content = "foo", return True
+      "/plot\nfoo"        → strip, msg.content = "foo", return True
+
+    Returns True if the prefix was consumed; False if no /plot command.
+    """
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return False
+    stripped = content.lstrip()
+    if not stripped:
+        return False
+    # Match `/plot` followed by space, newline, or end-of-string
+    lower = stripped.lower()
+    if not lower.startswith("/plot"):
+        return False
+    after_cmd = stripped[len("/plot"):]
+    if after_cmd and after_cmd[0] not in (" ", "\t", "\n", "\r"):
+        return False
+    # Strip the prefix and any leading whitespace from the remainder
+    msg["content"] = after_cmd.lstrip()
+    return True
+
+
+def _build_plot_injection(username: str, project: str) -> str:
+    """Load plot/project docs for one-shot injection via /plot command.
+
+    Wraps the existing `load_project_files` blob in clear START/END markers
+    so the model treats it as ephemeral context (the prefix is stripped from
+    the saved user message; the docs are NOT in mode_messages history).
+    """
+    if not username or not project:
+        return ""
+    try:
+        blob = load_project_files(username, project)
+    except Exception:
+        return ""
+    if not blob or not blob.strip():
+        return ""
+    return (
+        "[PLOT DOCS — one-shot injection via /plot, NOT persisted in history]\n"
+        "Use this context for THIS reply only. Reference what's in here to ground "
+        "your narration; do not echo the docs back verbatim.\n"
+        f"{blob}\n"
+        "[/PLOT DOCS]"
+    )
+
+
 def get_staged_project_filenames(username: str, project: str) -> set:
     """Return a set of lowercased filename stems (no extensions) for all staged, non-mode-specific project files."""
     uploads_dir = os.path.join(get_project_dir(username, project), "uploads")
@@ -4731,8 +4791,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # User message with hack state injection + dice pool prepended
         hack_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
+        # /plot one-shot: strip prefix from saved message, prepend plot docs to user_content only
+        _hack_plot_requested = _consume_plot_prefix(branch_path[-1])
         user_content = build_message_content(branch_path[-1])
         user_content = hack_injection + "\n\n" + (hack_dice_pool + "\n\n" if hack_dice_pool else "") + user_content
+        if _hack_plot_requested:
+            _hack_plot_blob = _build_plot_injection(username, request.project or "")
+            if _hack_plot_blob:
+                user_content = _hack_plot_blob + "\n\n" + user_content
+                logger.info(f"Hack mode: /plot injection requested by {username}, prepended {len(_hack_plot_blob)} chars")
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + hack_history + [new_user_msg]
@@ -4803,9 +4870,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if found_start and msg.get("combat_mode"):
                 combat_history.append({"role": msg["role"], "content": msg["content"]})
 
+        # /plot one-shot: strip prefix from saved message, prepend plot docs to user_content only
+        _combat_plot_requested = _consume_plot_prefix(branch_path[-1])
         user_content = build_message_content(branch_path[-1])
         combat_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
         user_content = combat_injection + "\n\n" + (combat_dice_pool + "\n\n" if combat_dice_pool else "") + user_content
+        if _combat_plot_requested:
+            _combat_plot_blob = _build_plot_injection(username, request.project or "")
+            if _combat_plot_blob:
+                user_content = _combat_plot_blob + "\n\n" + user_content
+                logger.info(f"Combat mode: /plot injection requested by {username}, prepended {len(_combat_plot_blob)} chars")
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + combat_history + [new_user_msg]
@@ -4892,9 +4966,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if found_start and (msg.get("combat_mode") or msg.get("net_combat_mode") or msg.get("hack_mode")):
                 nc_history.append({"role": msg["role"], "content": msg["content"]})
 
+        # /plot one-shot: strip prefix from saved message, prepend plot docs to user_content only
+        _nc_plot_requested = _consume_plot_prefix(branch_path[-1])
         user_content = build_message_content(branch_path[-1])
         nc_dice_pool = "" if (gs and gs.get("id") == "cpred") else (generate_dice_pool(gs["id"]) if gs else "")
         user_content = nc_injection + "\n\n" + (nc_dice_pool + "\n\n" if nc_dice_pool else "") + user_content
+        if _nc_plot_requested:
+            _nc_plot_blob = _build_plot_injection(username, request.project or "")
+            if _nc_plot_blob:
+                user_content = _nc_plot_blob + "\n\n" + user_content
+                logger.info(f"Net combat mode: /plot injection requested by {username}, prepended {len(_nc_plot_blob)} chars")
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + nc_history + [new_user_msg]
@@ -5083,7 +5164,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if found_start and msg.get("sex_mode"):
                 sex_history.append({"role": msg["role"], "content": msg["content"]})
 
+        # /plot one-shot: strip prefix from saved message, prepend plot docs to user_content only
+        _sex_plot_requested = _consume_plot_prefix(branch_path[-1])
         user_content = build_message_content(branch_path[-1])
+        if _sex_plot_requested:
+            _sex_plot_blob = _build_plot_injection(username, request.project or "")
+            if _sex_plot_blob:
+                user_content = _sex_plot_blob + "\n\n" + user_content
+                logger.info(f"Sex mode: /plot injection requested by {username}, prepended {len(_sex_plot_blob)} chars")
         new_user_msg = {"role": "user", "content": user_content}
 
         messages_for_api = [system_msg] + seed_pair + sex_history + [new_user_msg]
