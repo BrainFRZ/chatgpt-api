@@ -731,8 +731,17 @@ def _generate_architecture_if_missing(state, tool_input):
     # so the same string would produce different ints on each restart and
     # the architecture would re-roll on every restart.  Use hashlib.sha256
     # for cross-process determinism.
+    #
+    # `start_message_id` (set by main.py when the hack opens) is included so
+    # the same runner re-hacking the same target on a different occasion
+    # gets a fresh architecture — without it, RedVelvet hitting "Arasaka HR
+    # Server" twice would face identical layouts.  Within a single hack the
+    # ID is stable, so re-applies within that scene reproduce the same map.
     import hashlib
-    seed_basis = f"{state.get('hacker_name') or ''}::{target_system or ''}::{sr}::{tier}"
+    seed_basis = (
+        f"{state.get('hacker_name') or ''}::{target_system or ''}::"
+        f"{sr}::{tier}::{state.get('start_message_id') or ''}"
+    )
     seed = int.from_bytes(
         hashlib.sha256(seed_basis.encode("utf-8")).digest()[:4], "big"
     )

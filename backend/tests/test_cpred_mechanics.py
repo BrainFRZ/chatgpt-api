@@ -9365,6 +9365,40 @@ class TestApplyHackStateAutoGenerates(unittest.TestCase):
         nodes = state["system_map"]["nodes"]
         self.assertEqual(set(nodes.keys()), {"Gateway", "Obstacle", "Objective"})
 
+    def test_re_hacking_same_target_yields_different_map_per_encounter(self):
+        """start_message_id is part of the seed basis so the same runner
+        hitting the same target on different occasions gets fresh layouts.
+        Within one hack the ID is stable → re-applies reproduce the same map.
+        """
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        # Encounter 1
+        s1 = init_hack_state(tier="full_run", sr=3, hacker_name="V",
+                             target_system="Arasaka HR")
+        s1["start_message_id"] = "msg-001"
+        apply_hack_state(s1, tool_input={})
+        # Encounter 2 — same runner, same target, different scene.
+        s2 = init_hack_state(tier="full_run", sr=3, hacker_name="V",
+                             target_system="Arasaka HR")
+        s2["start_message_id"] = "msg-042"
+        apply_hack_state(s2, tool_input={})
+        self.assertNotEqual(
+            sorted(s1["ice_status"].keys()),
+            sorted(s2["ice_status"].keys()),
+            "Same runner+target on different start_message_ids must vary",
+        )
+        # Re-apply within the same encounter → identical map (idempotency
+        # is guaranteed by has_nodes short-circuit; this just verifies the
+        # seed stability invariant for a freshly re-init'd state).
+        s1b = init_hack_state(tier="full_run", sr=3, hacker_name="V",
+                              target_system="Arasaka HR")
+        s1b["start_message_id"] = "msg-001"
+        apply_hack_state(s1b, tool_input={})
+        self.assertEqual(
+            sorted(s1["ice_status"].keys()),
+            sorted(s1b["ice_status"].keys()),
+            "Same basis must reproduce the same map deterministically",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
