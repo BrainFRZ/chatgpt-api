@@ -1664,6 +1664,7 @@ export default function CharacterPanel({
           currentNode={netMapSource.current_node || ''}
           nodesVisited={netMapSource.nodes_visited || []}
           iceStatus={netMapSource.ice_status || {}}
+          sr={netMapSource.sr ?? netMapSource.system_map.sr}
           onClose={() => setShowNetMap(false)}
         />
       )}

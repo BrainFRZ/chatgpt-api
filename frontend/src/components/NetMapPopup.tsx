@@ -7,6 +7,10 @@ interface NetMapPopupProps {
   currentNode: string;
   nodesVisited: string[];
   iceStatus: Record<string, any>;
+  /** SR override — backend stores SR at hack_state.sr, NOT inside the
+   * system_map dict. Without this prop the header badge renders as "SR ".
+   */
+  sr?: number | string;
   onClose: () => void;
 }
 
@@ -24,8 +28,12 @@ function computeLayout(systemMap: SystemMap): Record<string, NodePosition> {
   const names = Object.keys(nodes);
   if (names.length === 0) return {};
 
-  // Find gateway or first node
-  const gateway = names.find(n => nodes[n]?.type === 'gateway') || names[0];
+  // Find gateway or first node — type matching is case-insensitive because
+  // the model emits TitleCase ("Gateway") while the renderer enum is lower.
+  const gateway =
+    names.find(n => normalizeNodeType(nodes[n]?.type) === 'gateway')
+    || names.find(n => n === 'Gateway' || n.toLowerCase() === 'gateway')
+    || names[0];
 
   // BFS to assign layers
   const layers: Record<string, number> = {};
@@ -108,14 +116,32 @@ function starPoints(cx: number, cy: number, r: number): string {
   return pts.join(' ');
 }
 
+/** Normalize a node `type` string (model uses TitleCase + spaces; backend
+ * sometimes uses snake_case; CRB has multiple aliases) to one of the
+ * canonical shape buckets the renderer understands.  Without this every
+ * non-matching type falls through to the default tiny rectangle, which
+ * is what makes Service Port / Password gates render as half-ghosts.
+ */
+function normalizeNodeType(type: unknown): string {
+  if (!type) return 'data_node';
+  const t = String(type).trim().toLowerCase().replace(/[ -]+/g, '_');
+  if (t === 'gateway') return 'gateway';
+  if (t === 'target' || t === 'objective' || t === 'goal') return 'target';
+  if (t === 'password' || t === 'password_gate' || t === 'password_node') return 'password_gate';
+  if (t === 'control' || t === 'control_node' || t === 'control_room') return 'control_node';
+  if (t === 'file' || t === 'file_node' || t === 'data' || t === 'data_node') return 'data_node';
+  return 'data_node';
+}
+
 function NodeShape({ type, cx, cy, stroke, fill, opacity, glowing }: {
   type: string; cx: number; cy: number; stroke: string; fill: string; opacity: number; glowing?: boolean;
 }) {
   const filter = glowing ? 'url(#glow)' : undefined;
   const r = NODE_RADIUS;
   const common = { stroke, strokeWidth: glowing ? 2 : 1.5, fill, opacity, filter };
+  const canonical = normalizeNodeType(type);
 
-  switch (type) {
+  switch (canonical) {
     case 'gateway':
       return <polygon points={hexagonPoints(cx, cy, r)} {...common} />;
     case 'password_gate':
@@ -124,7 +150,7 @@ function NodeShape({ type, cx, cy, stroke, fill, opacity, glowing }: {
       return <polygon points={starPoints(cx, cy, r + 2)} {...common} />;
     case 'control_node':
       return <circle cx={cx} cy={cy} r={r - 2} {...common} />;
-    default: // data_node or unknown
+    default: // data_node
       return <rect x={cx - r + 4} y={cy - r + 6} width={(r - 4) * 2} height={(r - 6) * 2} rx={3} {...common} />;
   }
 }
@@ -141,14 +167,46 @@ function iceColor(ice: string | null): string | null {
   }
 }
 
+/** Find every ICE entry placed at the given node.  Backend keys ice_status
+ * as `<node>_<species>` and also stores the node in each entry's `node`
+ * field — the lookup checks both so we don't miss ICE just because the
+ * key separator differs from what the renderer assumed.  Returns the
+ * highest-severity color, with Black > Trace > Tar > Patrol precedence
+ * so the dot accurately signals threat at a glance.
+ */
 function iceStatusColor(iceStatus: Record<string, any>, nodeName: string): string | null {
-  // Check if there's ICE at this node in iceStatus
-  const status = iceStatus[nodeName];
-  if (!status || typeof status !== 'object') return null;
-  if (status.status === 'derezzed' || status.status === 'disabled') return '#333';
-  if (status.status === 'bypassed') return '#555';
-  // Active — use behavior color
-  return iceColor(status.behavior) || iceColor(null);
+  if (!iceStatus || typeof iceStatus !== 'object') return null;
+  const matches: any[] = [];
+  for (const [key, status] of Object.entries(iceStatus)) {
+    if (!status || typeof status !== 'object') continue;
+    const matchesNode =
+      key === nodeName
+      || key.startsWith(`${nodeName}_`)
+      || key.startsWith(`${nodeName}::`)
+      || (status as any).node === nodeName;
+    if (matchesNode) matches.push(status);
+  }
+  if (matches.length === 0) return null;
+  // If ANY active ICE present, use the highest-severity active one.
+  const severity: Record<string, number> = { black: 4, trace: 3, tar: 2, patrol: 1 };
+  let best: any = null;
+  for (const m of matches) {
+    if (m.status === 'derezzed' || m.status === 'disabled' || m.status === 'destroyed') continue;
+    if (m.status === 'bypassed') continue;
+    const beh = String(m.behavior || '').toLowerCase();
+    if (!best || (severity[beh] || 0) > (severity[String(best.behavior || '').toLowerCase()] || 0)) {
+      best = m;
+    }
+  }
+  if (best) return iceColor(String(best.behavior || '').toLowerCase());
+  // No active ICE — show a dim dot to signal "ICE was here, now gone".
+  const anyDerezzed = matches.some(m =>
+    m.status === 'derezzed' || m.status === 'disabled' || m.status === 'destroyed'
+  );
+  const anyBypassed = matches.some(m => m.status === 'bypassed');
+  if (anyDerezzed) return '#333';
+  if (anyBypassed) return '#555';
+  return null;
 }
 
 // --- Edge dissolve particles ---
@@ -181,8 +239,9 @@ function DissolveParticles({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: num
 // --- Main component ---
 
 const NetMapPopup: React.FC<NetMapPopupProps> = ({
-  systemMap, revealedNodes, currentNode, nodesVisited, iceStatus, onClose,
+  systemMap, revealedNodes, currentNode, nodesVisited, iceStatus, sr, onClose,
 }) => {
+  const displaySr = sr ?? (systemMap as any)?.sr ?? '?';
   const positions = useMemo(() => computeLayout(systemMap), [systemMap]);
   const revealedSet = useMemo(() => new Set(revealedNodes), [revealedNodes]);
   const visitedSet = useMemo(() => new Set(nodesVisited), [nodesVisited]);
@@ -261,7 +320,7 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
               borderRadius: '3px',
               fontFamily: 'monospace',
             }}>
-              SR {systemMap.sr}
+              SR {displaySr}
             </span>
           </div>
           <button
@@ -323,8 +382,8 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
                     key={`${from}-${to}`}
                     x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
                     stroke="#00ff41"
-                    strokeWidth={1}
-                    opacity={0.4}
+                    strokeWidth={1.5}
+                    opacity={0.7}
                     filter="url(#edgeGlow)"
                   />
                 );
@@ -404,13 +463,17 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
                     {name}
                   </text>
 
-                  {/* DV badge */}
-                  {isVisited && node.dv > 0 && (
+                  {/* DV badge — visible for every revealed node, not just
+                       visited.  Pathfinder is supposed to reveal DV per
+                       rulebook §16, so dimming it for not-yet-entered
+                       nodes was hiding the one value the runner actually
+                       used Pathfinder to learn. */}
+                  {node.dv > 0 && (
                     <text
                       x={pos.x}
                       y={pos.y + 4}
                       textAnchor="middle"
-                      fill={isCurrent ? '#00ff41' : '#00aa30'}
+                      fill={isCurrent ? '#00ff41' : isVisited ? '#00aa30' : '#00802099'}
                       fontSize="8"
                       fontFamily='monospace'
                       fontWeight={600}
@@ -433,18 +496,20 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
                     />
                   )}
 
-                  {/* Type label for visited nodes */}
-                  {isVisited && node.type !== 'gateway' && (
+                  {/* Type label — visible for every revealed non-Gateway
+                       node (was: only visited).  Pathfinder reveals layout
+                       including node types. */}
+                  {normalizeNodeType(node.type) !== 'gateway' && (
                     <text
                       x={pos.x}
                       y={pos.y - NODE_RADIUS - 4}
                       textAnchor="middle"
-                      fill="#00802060"
+                      fill={isVisited ? '#00802099' : '#00802070'}
                       fontSize="6.5"
                       fontFamily='monospace'
                       style={{ textTransform: 'uppercase' }}
                     >
-                      {node.type.replace('_', ' ')}
+                      {String(node.type || '').replace(/_/g, ' ')}
                     </text>
                   )}
                 </g>
