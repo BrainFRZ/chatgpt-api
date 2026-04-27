@@ -4733,6 +4733,33 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 _quiet_jack_in_used_local = True
                 if net_actions_remaining is not None:
                     net_actions_remaining = max(0, net_actions_remaining - 1)
+                # Homerule: Quiet Jack-In auto-activates Eraser if loaded and
+                # deactivated. Justifies a slice of the 1 NA cost — going to
+                # the trouble of jacking in quietly without Cloak boosters
+                # active is mechanically incoherent (Patrol ICE can be at
+                # Gateway, runner needs Cloak +2 from turn 1). Fires whether
+                # the contest passed or failed (NA was spent either way).
+                _qj_eraser_activated = False
+                if isinstance(active_programs, list):
+                    for _ap in active_programs:
+                        if not isinstance(_ap, dict):
+                            continue
+                        if str(_ap.get("name", "")).strip().lower() != "eraser":
+                            continue
+                        if str(_ap.get("status", "")).strip().lower() != "deactivated":
+                            break  # already active or destroyed; no-op
+                        # Mutate the running snapshot so subsequent actions in
+                        # this batch see Eraser active (same pattern as Slide).
+                        _ap["status"] = "active"
+                        all_state_ops.append({
+                            "op": "program_status_change",
+                            "program_name": _ap.get("name"),
+                            "old_status": "deactivated",
+                            "new_status": "active",
+                            "reason": "Auto-activated by Quiet Jack-In (homerule)",
+                        })
+                        _qj_eraser_activated = True
+                        break
                 results.append({
                     "type": "quiet_jack_in",
                     "character": _qj_char,
@@ -4742,9 +4769,11 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "cost_net_actions": 1,
                     "stealth_active": _stealth_active_local,
                     "booster_bonuses": list(_qj_booster_labels),
+                    "eraser_auto_activated": _qj_eraser_activated,
                     "formatted": (
                         f"🎲 Quiet Jack-In ({len(_qj_watchers)} Watcher(s)): "
                         f"{'STEALTH ESTABLISHED' if _qj_passed_all else 'detected — entering loud'} (1 NA)"
+                        + (" — Eraser auto-activated" if _qj_eraser_activated else "")
                     ),
                 })
 

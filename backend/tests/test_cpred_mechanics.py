@@ -7687,6 +7687,77 @@ class TestQuietJackIn(unittest.TestCase):
         self.assertTrue(r["passed_all"])
         self.assertTrue(any("Eraser" in str(b) for b in r.get("booster_bonuses", [])))
 
+    def test_quiet_jack_in_auto_activates_eraser_on_pass(self):
+        """Homerule: Eraser auto-activates as part of Quiet Jack-In."""
+        progs = [{"name": "Eraser", "category": "booster", "rez": 7, "status": "deactivated"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status={},
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["passed_all"])
+        self.assertTrue(r["eraser_auto_activated"])
+        self.assertEqual(progs[0]["status"], "active")
+        # state op emitted
+        psc = [op for op in result["state_ops"]
+               if isinstance(op, dict) and op.get("op") == "program_status_change"]
+        self.assertEqual(len(psc), 1)
+        self.assertEqual(psc[0]["program_name"], "Eraser")
+
+    def test_quiet_jack_in_auto_activates_eraser_on_fail_too(self):
+        """Eraser auto-activates even on failed Quiet Jack-In (NA spent)."""
+        ice_status = self._watchers_ice_status(
+            ("F1_Asura", "Asura", "demon", 8, 2),
+        )
+        progs = [{"name": "Eraser", "category": "booster", "rez": 7, "status": "deactivated"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=2):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status=ice_status,
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertFalse(r["passed_all"])
+        self.assertTrue(r["eraser_auto_activated"])
+        self.assertEqual(progs[0]["status"], "active")
+
+    def test_quiet_jack_in_no_op_when_eraser_already_active(self):
+        progs = [{"name": "Eraser", "category": "booster", "rez": 7, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status={},
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertFalse(r["eraser_auto_activated"])
+        # No status_change op (Eraser was already active)
+        psc = [op for op in result["state_ops"]
+               if isinstance(op, dict) and op.get("op") == "program_status_change"]
+        self.assertEqual(len(psc), 0)
+
+    def test_quiet_jack_in_no_op_when_no_eraser_loaded(self):
+        progs = [{"name": "Worm", "category": "booster", "rez": 7, "status": "deactivated"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=8):
+            result = resolve_actions(
+                [{"type": "quiet_jack_in", "character": "RedVelvet",
+                  "interface_rank": 4}],
+                ice_status={},
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        self.assertTrue(r["passed_all"])
+        self.assertFalse(r["eraser_auto_activated"])
+
     def test_quiet_jack_in_excludes_trace_from_watchers(self):
         """Trace ICE is NOT a Watcher — Quiet Jack-In ignores Trace entries."""
         ice_status = {
