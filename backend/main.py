@@ -6000,6 +6000,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                          if isinstance(hack_state, dict) else None,
                     net_round=_safe_int(hack_state.get("net_round", 1) or 1)
                               if isinstance(hack_state, dict) else 1,
+                    backdoor_grace=hack_state.get("backdoor_grace")
+                                   if isinstance(hack_state, dict) else None,
                 )
 
                 mode_result = None
@@ -6310,6 +6312,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                          if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
                     net_round=_safe_int((_net_combat or {}).get("net_round", 1) or 1)
                               if isinstance(_net_combat, dict) and _net_combat.get("active") else 1,
+                    backdoor_grace=(_net_combat or {}).get("backdoor_grace")
+                                   if isinstance(_net_combat, dict) and _net_combat.get("active") else None,
                 )
 
                 mode_result = None
@@ -6593,6 +6597,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                          if isinstance(nc_state, dict) else None,
                     net_round=_safe_int(nc_state.get("net_round", 1) or 1)
                               if isinstance(nc_state, dict) else 1,
+                    backdoor_grace=nc_state.get("backdoor_grace")
+                                   if isinstance(nc_state, dict) else None,
                 )
 
                 mode_result = None

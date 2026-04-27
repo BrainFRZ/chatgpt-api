@@ -3183,7 +3183,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     stealth_active=False,
                     quiet_jack_in_used=False,
                     stealth_broken_round=None,
-                    net_round=1) -> dict:
+                    net_round=1,
+                    backdoor_grace=None) -> dict:
     """Resolve a batch of mechanical actions.
 
     Each action is a dict with "type" and type-specific fields.
@@ -3277,6 +3278,18 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
     _quiet_jack_in_used_local = bool(quiet_jack_in_used)
     _stealth_broken_round_local = stealth_broken_round
     _net_round_local = int(net_round) if isinstance(net_round, int) else 1
+    # Backdoor Entry grace: ICE in `_grace_node` skip encounter rolls this
+    # turn (rulebook §Net Actions: "1 round grace").  Encounter resolvers
+    # (patrol_detection, speed_check_vs_black_ice) fail-soft when the
+    # target is in the grace node and the round matches.
+    _grace_node = None
+    _grace_round = None
+    if isinstance(backdoor_grace, dict):
+        _grace_node = backdoor_grace.get("node")
+        try:
+            _grace_round = int(backdoor_grace.get("round")) if backdoor_grace.get("round") is not None else None
+        except (TypeError, ValueError):
+            _grace_round = None
     # Per-watcher last_search_round overrides emitted in this batch (so a
     # second watcher_search later in the batch sees the first one's
     # consumption).
@@ -5418,6 +5431,197 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     _stealth_broken_round_local = _net_round_local
                 results.append(_ws_summary)
 
+            elif action_type == "backdoor_entry":
+                # Project rulebook §Net Actions: Backdoor Entry — enter a
+                # node stealthily.  `Interface + 1d10` vs `highest ICE PER
+                # in destination + 1d10`.  Pass: enter, all ICE in the
+                # destination gets 1 round of grace (no encounter rolls
+                # this turn).  Fail: enter normally, ICE in destination
+                # triggers as if a standard Move Node.
+                #
+                # This is the post-stealth-break fallback for slipping
+                # past ICE.  While stealth_active=True, planner should
+                # emit stealth_contest instead (Cloak-based, fires Eraser).
+                # Backdoor Entry uses Interface ONLY — Eraser does NOT
+                # fire because the rulebook specifies Interface, not Cloak.
+                _be_char = action.get("character", "")
+                _be_target_node = str(action.get("target") or "").strip()
+                if not _be_target_node:
+                    results.append({
+                        "type": "backdoor_entry",
+                        "character": _be_char,
+                        "success": False,
+                        "error": "missing_target",
+                        "reason": "backdoor_entry requires a `target` naming the destination node.",
+                        "formatted": "⚠ backdoor_entry: missing target",
+                    })
+                    continue
+                if not isinstance(system_map, dict) or not isinstance(system_map.get("nodes"), dict):
+                    results.append({
+                        "type": "backdoor_entry",
+                        "character": _be_char,
+                        "success": False,
+                        "error": "no_system_map",
+                        "reason": "backdoor_entry needs a populated system_map.",
+                        "formatted": "⚠ backdoor_entry: no system_map",
+                    })
+                    continue
+                _be_nodes = system_map["nodes"]
+                if _be_target_node not in _be_nodes:
+                    results.append({
+                        "type": "backdoor_entry",
+                        "character": _be_char,
+                        "success": False,
+                        "error": "destination_not_found",
+                        "reason": f"Destination {_be_target_node!r} not in system_map.",
+                        "formatted": f"⚠ backdoor_entry: {_be_target_node} not found",
+                    })
+                    continue
+                # Validate adjacency from current_node.
+                if current_node and current_node in _be_nodes:
+                    _be_conns = _be_nodes[current_node].get("connections") or []
+                    if _be_target_node not in _be_conns:
+                        results.append({
+                            "type": "backdoor_entry",
+                            "character": _be_char,
+                            "success": False,
+                            "error": "not_connected",
+                            "reason": (
+                                f"{_be_target_node!r} is not connected to current "
+                                f"node {current_node!r}."
+                            ),
+                            "formatted": f"⚠ backdoor_entry: {_be_target_node} not adjacent",
+                        })
+                        continue
+                if (net_actions_remaining is not None
+                        and net_actions_remaining < 1):
+                    results.append({
+                        "type": "backdoor_entry",
+                        "character": _be_char,
+                        "success": False,
+                        "error": "insufficient_net_actions",
+                        "reason": (
+                            f"Backdoor Entry costs 1 NET Action; "
+                            f"{net_actions_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": (
+                            f"⚠ backdoor_entry: needs 1 NA, have {net_actions_remaining}"
+                        ),
+                    })
+                    continue
+                # Find highest active ICE PER in destination.  Match by
+                # entry.node OR key prefix (matches both alert-spawn
+                # `<node>_<suffix>` and generator-placed convention).
+                _be_per_max = 0
+                _be_top_ice = None
+                _be_top_key = None
+                for _ice_k, _ice_v in (ice_status or {}).items():
+                    if not isinstance(_ice_v, dict):
+                        continue
+                    if str(_ice_v.get("status", "active")).strip().lower() != "active":
+                        continue
+                    _at_dest = (
+                        _ice_v.get("node") == _be_target_node
+                        or (isinstance(_ice_k, str)
+                            and _ice_k.startswith(f"{_be_target_node}_"))
+                        or _ice_k == _be_target_node
+                    )
+                    if not _at_dest:
+                        continue
+                    _per = _ice_v.get("per")
+                    if not _per:
+                        _block = _lookup_ice_type(_ice_v.get("ice_type"))
+                        _per = _block.get("per", 0) if _block else 0
+                    try:
+                        _per = int(_per)
+                    except (TypeError, ValueError):
+                        _per = 0
+                    if _per > _be_per_max:
+                        _be_per_max = _per
+                        _be_top_ice = _ice_v.get("name") or _ice_k
+                        _be_top_key = _ice_k
+                # Always emit node_change — you enter the node either way.
+                # Field name matches the existing apply handler in
+                # cpred_hack.py:1276 (`to_node`, not `to`).
+                all_state_ops.append({
+                    "op": "node_change",
+                    "from_node": current_node,
+                    "to_node": _be_target_node,
+                })
+                # No ICE in destination → trivial pass, no contest needed.
+                if _be_per_max <= 0 or _be_top_key is None:
+                    if net_actions_remaining is not None:
+                        net_actions_remaining = max(0, net_actions_remaining - 1)
+                    results.append({
+                        "type": "backdoor_entry",
+                        "character": _be_char,
+                        "target": _be_target_node,
+                        "success": True,
+                        "no_ice": True,
+                        "cost_net_actions": 1,
+                        "formatted": (
+                            f"Backdoor Entry → {_be_target_node}: no ICE present, "
+                            f"entered freely."
+                        ),
+                    })
+                    continue
+                # Resolve Netrunner Interface (no Cloak booster — RAW
+                # specifies Interface, not Cloak).
+                _be_iface = action.get("interface_rank")
+                if _be_iface is None and edgerunner_states and _be_char:
+                    _be_er = edgerunner_states.get(_be_char) or {}
+                    _be_iface = _lookup_stat_ci(_be_er.get("stats", {}), "INT") or 0
+                    if not _be_iface:
+                        _cs_entry = (character_states or {}).get(_be_char) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _be_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _be_iface = 0
+                                break
+                _be_iface = int(_be_iface or 0)
+                _be_result = resolve_opposed_check(
+                    attacker_stat=_be_iface,
+                    defender_stat=_be_per_max,
+                    attacker_label="Interface",
+                    defender_label=f"{_be_top_ice} PER",
+                )
+                _be_passed = bool(_be_result.get("success"))
+                if _be_passed:
+                    all_state_ops.append({
+                        "op": "backdoor_entry_grace",
+                        "node": _be_target_node,
+                        "actor": _be_char,
+                        "round": _net_round_local,
+                    })
+                    # Activate grace for any subsequent encounter actions
+                    # in the same batch (e.g. planner emits backdoor_entry
+                    # then immediately Disable on an ICE in the same node).
+                    _grace_node = _be_target_node
+                    _grace_round = _net_round_local
+                if net_actions_remaining is not None:
+                    net_actions_remaining = max(0, net_actions_remaining - 1)
+                results.append({
+                    "type": "backdoor_entry",
+                    "character": _be_char,
+                    "target": _be_target_node,
+                    "ice_pivot": _be_top_ice,
+                    "ice_pivot_key": _be_top_key,
+                    "ice_per": _be_per_max,
+                    "success": _be_passed,
+                    "passed": _be_passed,
+                    "roll": _be_result,
+                    "cost_net_actions": 1,
+                    "formatted": (
+                        f"🎲 Backdoor Entry → {_be_target_node} "
+                        f"(vs {_be_top_ice} PER {_be_per_max}): "
+                        f"{_be_result.get('formatted', '')} — "
+                        f"{'1 round grace from all ICE in node' if _be_passed else 'detected, ICE triggers normally'}"
+                    ),
+                })
+
             elif action_type == "speed_check_vs_black_ice":
                 # Standard non-stealth Black ICE encounter (CPRED Core p.205).
                 # Netrunner Interface + 1d10 vs Black ICE Perception + 1d10.
@@ -5460,6 +5664,30 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     })
                     continue
                 _sc_key, _sc_block = _sc_matches[0]
+                # Backdoor Entry grace: skip Speed Check this turn if the
+                # target ICE is in the graced node (project rulebook: 1
+                # round grace).  Returns a soft skip, no NA refund needed
+                # because Speed Check itself is free.
+                _sc_ice_node = _sc_block.get("node")
+                if (_grace_node and _sc_ice_node == _grace_node
+                        and (_grace_round is None or _grace_round == _net_round_local)):
+                    results.append({
+                        "type": "speed_check_vs_black_ice",
+                        "character": _sc_char,
+                        "target": _sc_target,
+                        "ice_key": _sc_key,
+                        "success": True,
+                        "skipped": "backdoor_grace",
+                        "reason": (
+                            f"{_sc_block.get('name', _sc_target)} is in {_grace_node!r} "
+                            f"under Backdoor Entry grace (1 round); Speed Check skipped."
+                        ),
+                        "formatted": (
+                            f"⏭ Speed Check vs {_sc_block.get('name', _sc_target)}: "
+                            f"backdoor grace, skipped"
+                        ),
+                    })
+                    continue
                 _sc_ice_block = _lookup_ice_type(_sc_block.get("ice_type"))
                 _sc_per = _sc_ice_block.get("per", 0) if _sc_ice_block else 0
                 # Netrunner Interface — explicit override wins; else look up from edgerunner state.

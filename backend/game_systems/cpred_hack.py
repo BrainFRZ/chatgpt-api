@@ -1376,6 +1376,21 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                     node = sm["nodes"].get(target)
                     if isinstance(node, dict):
                         node["bypassed"] = True
+        elif op_t == "backdoor_entry_grace":
+            # Successful Backdoor Entry: the runner slipped into the node
+            # and the ICE there grants 1 round of grace before triggering.
+            # Stored on hack_state so encounter resolvers (patrol_detection,
+            # speed_check_vs_black_ice) and the planner contract know to
+            # skip ICE rolls in that node for this turn.  Cleared on the
+            # next meatspace_due / turn-tick alongside slide_used_this_turn.
+            target_node = op.get("node")
+            grace_round = op.get("round")
+            if isinstance(target_node, str) and target_node:
+                state["backdoor_grace"] = {
+                    "node": target_node,
+                    "round": grace_round,
+                    "actor": op.get("actor"),
+                }
         elif op_t == "net_actions_grant":
             # Overclock and any future immediate-NA-grant boosted actions:
             # add to the current turn's NA pool. The resolver already
@@ -1933,6 +1948,11 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
             # the Netrunner can Slide again next turn if a Black ICE is
             # still on them.
             hack_state["slide_used_this_turn"] = False
+            # Backdoor Entry grace expires after the round it was earned.
+            # (Project rulebook: "Success = enter without triggering for
+            # 1 round.")  Clear at turn boundary so encounter rolls fire
+            # next turn if the ICE is still active.
+            hack_state.pop("backdoor_grace", None)
             # Going Quiet: tick the round counter so per-Watcher
             # `last_search_round` enforcement works across turns.
             hack_state["net_round"] = int(hack_state.get("net_round", 1) or 1) + 1

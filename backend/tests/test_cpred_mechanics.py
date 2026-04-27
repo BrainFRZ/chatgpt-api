@@ -9400,5 +9400,188 @@ class TestApplyHackStateAutoGenerates(unittest.TestCase):
         )
 
 
+class TestBackdoorEntry(unittest.TestCase):
+    """Project rulebook §Net Actions: Backdoor Entry — enter a node
+    stealthily.  Interface + d10 vs highest ICE PER in destination + d10.
+    Pass: enter, ICE in destination grants 1 round grace (encounter rolls
+    skipped this turn).  Fail: enter, ICE triggers normally.
+    """
+
+    def _two_node_map(self):
+        return {
+            "sr": 3,
+            "difficulty": "standard",
+            "nodes": {
+                "Gateway": {"type": "gateway", "dv": 8, "connections": ["Floor 1"]},
+                "Floor 1": {"type": "data_node", "dv": 8, "connections": ["Gateway"]},
+            },
+        }
+
+    def _ice_status_with_asp_at_floor1(self):
+        return {
+            "Floor 1_Asp": {
+                "name": "Asp", "behavior": "black", "ice_type": "asp",
+                "entity_type": "black_ice", "rez_current": 15, "rez_max": 15,
+                "status": "active", "node": "Floor 1", "per": 4,
+            }
+        }
+
+    def test_pass_emits_grace_and_node_change(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        # Patch RNG so Interface 4 + d10[8]=12 beats Asp PER 4 + d10[3]=7
+        with patch("random.randint", side_effect=[8, 3]):
+            res = resolve_actions(
+                [{"type": "backdoor_entry", "character": "V",
+                  "target": "Floor 1", "interface_rank": 4}],
+                system_map=self._two_node_map(),
+                current_node="Gateway",
+                ice_status=self._ice_status_with_asp_at_floor1(),
+                net_actions_remaining=3,
+            )
+        r = res["results"][0]
+        self.assertTrue(r["success"])
+        self.assertEqual(r["target"], "Floor 1")
+        self.assertEqual(r["ice_pivot"], "Asp")
+        ops = res["state_ops"]
+        self.assertTrue(any(op["op"] == "node_change" and op.get("to_node") == "Floor 1"
+                            for op in ops))
+        self.assertTrue(any(op["op"] == "backdoor_entry_grace"
+                            and op.get("node") == "Floor 1"
+                            for op in ops))
+
+    def test_fail_no_grace_op(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        with patch("random.randint", side_effect=[2, 9]):  # 4+2=6 vs 4+9=13
+            res = resolve_actions(
+                [{"type": "backdoor_entry", "character": "V",
+                  "target": "Floor 1", "interface_rank": 4}],
+                system_map=self._two_node_map(),
+                current_node="Gateway",
+                ice_status=self._ice_status_with_asp_at_floor1(),
+                net_actions_remaining=3,
+            )
+        r = res["results"][0]
+        self.assertFalse(r["success"])
+        ops = res["state_ops"]
+        self.assertTrue(any(op["op"] == "node_change" for op in ops),
+                        "node_change emitted even on fail (you enter the node)")
+        self.assertFalse(any(op["op"] == "backdoor_entry_grace" for op in ops))
+
+    def test_no_ice_skips_contest(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        res = resolve_actions(
+            [{"type": "backdoor_entry", "character": "V",
+              "target": "Floor 1", "interface_rank": 4}],
+            system_map=self._two_node_map(),
+            current_node="Gateway",
+            ice_status={},
+            net_actions_remaining=3,
+        )
+        r = res["results"][0]
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("no_ice"))
+        # node_change emitted, but no grace op (no ICE to grant grace from).
+        ops = res["state_ops"]
+        self.assertTrue(any(op["op"] == "node_change" for op in ops))
+        self.assertFalse(any(op["op"] == "backdoor_entry_grace" for op in ops))
+
+    def test_not_adjacent_fail_soft(self):
+        from game_systems.cpred_mechanics import resolve_actions
+        sm = self._two_node_map()
+        sm["nodes"]["Far"] = {"type": "data_node", "dv": 8, "connections": []}
+        res = resolve_actions(
+            [{"type": "backdoor_entry", "character": "V",
+              "target": "Far", "interface_rank": 4}],
+            system_map=sm,
+            current_node="Gateway",
+            net_actions_remaining=3,
+        )
+        r = res["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "not_connected")
+
+    def test_grace_skips_speed_check_same_batch(self):
+        """After a successful Backdoor Entry into a node with Black ICE,
+        a same-batch speed_check_vs_black_ice on that ICE auto-skips."""
+        from game_systems.cpred_mechanics import resolve_actions
+        # Use Hellhound (Black ICE) so speed_check_vs_black_ice applies.
+        ice = {
+            "Floor 1_Hellhound": {
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "entity_type": "black_ice", "rez_current": 20, "rez_max": 20,
+                "status": "active", "node": "Floor 1", "per": 6,
+            }
+        }
+        # 2 d10 rolls for backdoor (Interface 4+8 vs Hellhound PER 6+2 → pass).
+        # speed_check should be skipped — no rolls — but pad for safety.
+        with patch("random.randint", side_effect=[8, 2, 5, 5]):
+            res = resolve_actions(
+                [
+                    {"type": "backdoor_entry", "character": "V",
+                     "target": "Floor 1", "interface_rank": 4},
+                    {"type": "speed_check_vs_black_ice", "character": "V",
+                     "target": "Hellhound", "interface_rank": 4},
+                ],
+                system_map=self._two_node_map(),
+                current_node="Gateway",
+                ice_status=ice,
+                net_actions_remaining=3,
+            )
+        backdoor_r = res["results"][0]
+        sc_r = res["results"][1]
+        self.assertTrue(backdoor_r["success"])
+        self.assertEqual(sc_r.get("skipped"), "backdoor_grace")
+
+    def test_external_grace_flag_skips_speed_check(self):
+        """Pre-existing backdoor_grace from prior turn (apply layer set
+        hack_state.backdoor_grace before resolver fired) skips the SC."""
+        from game_systems.cpred_mechanics import resolve_actions
+        ice = {
+            "Floor 1_Hellhound": {
+                "name": "Hellhound", "behavior": "black", "ice_type": "hellhound",
+                "entity_type": "black_ice", "rez_current": 20, "rez_max": 20,
+                "status": "active", "node": "Floor 1", "per": 6,
+            }
+        }
+        res = resolve_actions(
+            [{"type": "speed_check_vs_black_ice", "character": "V",
+              "target": "Hellhound", "interface_rank": 4}],
+            system_map=self._two_node_map(),
+            current_node="Floor 1",
+            ice_status=ice,
+            backdoor_grace={"node": "Floor 1", "round": 1},
+            net_round=1,
+        )
+        r = res["results"][0]
+        self.assertEqual(r.get("skipped"), "backdoor_grace")
+
+
+class TestBackdoorEntryApply(unittest.TestCase):
+    """apply_hack_state handles backdoor_entry_grace op + clears it on
+    turn boundary."""
+
+    def test_grace_op_stored_on_state(self):
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        state = init_hack_state(tier="quick_hack", sr=3, hacker_name="V")
+        apply_hack_state(state, tool_input={})  # generate map
+        ops = [{"op": "backdoor_entry_grace", "node": "Obstacle",
+                "round": 1, "actor": "V"}]
+        apply_hack_state(state, tool_input={"hack_state": {}}, resolver_state_ops=ops)
+        self.assertEqual(state["backdoor_grace"]["node"], "Obstacle")
+        self.assertEqual(state["backdoor_grace"]["round"], 1)
+
+    def test_grace_clears_on_turn_boundary(self):
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        state = init_hack_state(tier="quick_hack", sr=3, hacker_name="V")
+        apply_hack_state(state, tool_input={})
+        state["backdoor_grace"] = {"node": "Obstacle", "round": 1, "actor": "V"}
+        # Consume all NAs to trigger turn boundary.
+        nas = state["net_actions_per_turn"]
+        apply_hack_state(state, tool_input={
+            "hack_state": {"net_actions_used": nas}
+        })
+        self.assertNotIn("backdoor_grace", state)
+
+
 if __name__ == "__main__":
     unittest.main()
