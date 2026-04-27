@@ -1364,6 +1364,18 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
             for n in new_nodes:
                 if isinstance(n, str) and n and n not in revealed:
                     revealed.append(n)
+        elif op_t == "node_bypassed":
+            # Successful Backdoor against a Password node.  Mark the gate
+            # as bypassed on the system_map so the renderer shows
+            # "(BYPASSED)" and the Pathfinder resolver stops treating it
+            # as an obstruction.  Idempotent — re-bypassing is a no-op.
+            target = op.get("node")
+            if isinstance(target, str) and target:
+                sm = state.get("system_map")
+                if isinstance(sm, dict) and isinstance(sm.get("nodes"), dict):
+                    node = sm["nodes"].get(target)
+                    if isinstance(node, dict):
+                        node["bypassed"] = True
         elif op_t == "net_actions_grant":
             # Overclock and any future immediate-NA-grant boosted actions:
             # add to the current turn's NA pool. The resolver already

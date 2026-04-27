@@ -511,18 +511,26 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
 
                   {/* Type label — visible for every revealed non-Gateway
                        node (was: only visited).  Pathfinder reveals layout
-                       including node types. */}
+                       including node types.  Bypassed gates carry a
+                       "(BYPASSED)" suffix so the runner sees at a glance
+                       which obstacles are no longer barriers. */}
                   {normalizeNodeType(node.type) !== 'gateway' && (
                     <text
                       x={pos.x}
                       y={pos.y - NODE_RADIUS - 4}
                       textAnchor="middle"
-                      fill={isVisited ? '#00802099' : '#00802070'}
+                      fill={(node as any).bypassed
+                        ? '#00aa3066'
+                        : isVisited ? '#00802099' : '#00802070'}
                       fontSize="6.5"
                       fontFamily='monospace'
-                      style={{ textTransform: 'uppercase' }}
+                      style={{
+                        textTransform: 'uppercase',
+                        textDecoration: (node as any).bypassed ? 'line-through' : 'none',
+                      }}
                     >
                       {String(node.type || '').replace(/_/g, ' ')}
+                      {(node as any).bypassed ? ' (BYPASSED)' : ''}
                     </text>
                   )}
                 </g>

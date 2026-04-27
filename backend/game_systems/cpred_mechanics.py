@@ -3874,6 +3874,30 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     result["ability"] = action.get("ability")
                     if _net_extra_mods:
                         result["booster_bonuses"] = _net_extra_mods
+                # Auto-emit node_bypassed op when a Backdoor check passes
+                # against a Password node.  Per CPRED RAW, a successful
+                # Backdoor authenticates the runner past the gate — the
+                # node remains in the architecture but no longer blocks
+                # movement OR Pathfinder vision through it.  Without this
+                # the planner has to remember to set the flag manually,
+                # which it forgets, leaving bypassed gates rendering as
+                # still-active obstructions.
+                if (action.get("net")
+                        and result.get("success")
+                        and str(action.get("ability", "")).strip().lower() == "backdoor"
+                        and action.get("target")
+                        and isinstance(system_map, dict)
+                        and isinstance(system_map.get("nodes"), dict)):
+                    _bd_target = action["target"]
+                    _bd_node = system_map["nodes"].get(_bd_target)
+                    if isinstance(_bd_node, dict):
+                        _bd_type = str(_bd_node.get("type", "")).strip().lower()
+                        if _bd_type in ("password", "password_gate", "password_node"):
+                            all_state_ops.append({
+                                "op": "node_bypassed",
+                                "node": _bd_target,
+                                "reason": f"Backdoor passed by {actor_name} (DV {action.get('dv')})",
+                            })
                 # Emit wb_boost_spend op to consume the boost
                 if _wb_boost:
                     all_state_ops.append({
@@ -4899,12 +4923,16 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         _pf_newly_revealed.append(_pf_node_name)
                         _pf_revealed_set.add(_pf_node_name)
                     # Obstruction check: if this node's dv > check, stop
-                    # exploration through it (its own neighbors not queued)
+                    # exploration through it (its own neighbors not queued).
+                    # Already-bypassed nodes are NOT obstructions — once the
+                    # runner has authenticated past a Password gate, it no
+                    # longer blocks Pathfinder vision through it.
                     try:
                         _pf_node_dv = int(_pf_node.get("dv") or 0)
                     except (TypeError, ValueError):
                         _pf_node_dv = 0
-                    if _pf_node_dv > _pf_check:
+                    _pf_is_bypassed = bool(_pf_node.get("bypassed"))
+                    if _pf_node_dv > _pf_check and not _pf_is_bypassed:
                         if _pf_obstruction_at is None:
                             _pf_obstruction_at = _pf_node_name
                         continue  # don't enqueue children of obstruction
