@@ -4779,6 +4779,186 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     ),
                 })
 
+            elif action_type == "pathfinder":
+                # Project rulebook §Interface Abilities: Pathfinder reveals
+                # architecture layout. NOT a DV check — roll
+                # Interface + d10 (+ See Ya +2 if active) = check_result.
+                # BFS from current_node, reveal up to check_result connected
+                # unrevealed nodes, stopping at any node whose dv exceeds
+                # check_result (the obstruction itself is revealed; further
+                # exploration through it is blocked). Once per run.
+                _pf_char = action.get("character", "")
+                _pf_iface_override = action.get("interface_rank")
+                if not isinstance(system_map, dict) or not isinstance(system_map.get("nodes"), dict):
+                    results.append({
+                        "type": "pathfinder",
+                        "character": _pf_char,
+                        "success": False,
+                        "error": "no_system_map",
+                        "reason": "Pathfinder requires a populated system_map.",
+                        "formatted": "⚠ Pathfinder: no system_map",
+                    })
+                    continue
+                # Per-batch tracking would be ideal, but this flag lives on
+                # hack_state and the resolver only sees a snapshot. Pass
+                # through scratch state via action input if planner sets it;
+                # otherwise rely on planner contract honoring once-per-run.
+                # The proper enforcement happens via a state flag that's
+                # passed in (see contract update).
+                _pf_already_used = bool(action.get("_pathfinder_used") or False)
+                if _pf_already_used:
+                    results.append({
+                        "type": "pathfinder",
+                        "character": _pf_char,
+                        "success": False,
+                        "error": "pathfinder_already_used",
+                        "reason": (
+                            "Pathfinder is once per run (project rulebook). "
+                            "Cannot use again until next encounter."
+                        ),
+                        "formatted": "⚠ Pathfinder: already used this run",
+                    })
+                    continue
+                if (net_actions_remaining is not None
+                        and net_actions_remaining < 1):
+                    results.append({
+                        "type": "pathfinder",
+                        "character": _pf_char,
+                        "success": False,
+                        "error": "insufficient_net_actions",
+                        "reason": (
+                            f"Pathfinder requires 1 NET Action; "
+                            f"{net_actions_remaining} remaining. No actions consumed."
+                        ),
+                        "formatted": (
+                            f"⚠ Pathfinder: needs 1 NA, have {net_actions_remaining}"
+                        ),
+                    })
+                    continue
+                # Resolve Interface
+                _pf_iface = _pf_iface_override
+                if _pf_iface is None and edgerunner_states and _pf_char:
+                    _pf_er = edgerunner_states.get(_pf_char) or {}
+                    _pf_iface = _lookup_stat_ci(_pf_er.get("stats", {}), "INT") or 0
+                    if not _pf_iface:
+                        _cs_entry = (character_states or {}).get(_pf_char) or {}
+                        _cs_data = _cs_entry.get("data", _cs_entry) if isinstance(_cs_entry, dict) else {}
+                        for _r in _cs_data.get("resources", []) or []:
+                            if str(_r.get("label", "")).strip().lower() == "interface":
+                                try:
+                                    _pf_iface = int(_r.get("current") or _r.get("max") or 0)
+                                except (TypeError, ValueError):
+                                    _pf_iface = 0
+                                break
+                _pf_iface = int(_pf_iface or 0)
+                # Pathfinder booster bonuses (See Ya +2)
+                from .cpred_program_effects import run_interface_check_hooks
+                _pf_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _pf_bonus, _pf_booster_labels = run_interface_check_hooks(
+                    "Pathfinder", 0, _pf_hs_proxy
+                )
+                _pf_bonus_total = sum(v for _, v in _pf_booster_labels)
+                # Roll d10 with explode/fumble (resolve_check style)
+                _pf_die = _roll_check_die()
+                _pf_check = _pf_iface + _pf_bonus_total + _pf_die["total"]
+                # BFS from current_node, reveal up to _pf_check nodes
+                _pf_nodes = system_map.get("nodes") or {}
+                _pf_revealed_set = set(state_revealed_set := set(
+                    n for n in (action.get("revealed_nodes") or []) if isinstance(n, str)
+                ))
+                # Build initial revealed set from action input (planner
+                # passes current revealed_nodes via the action), since the
+                # resolver doesn't have direct hack_state access.
+                _pf_start = current_node or "Gateway"
+                _pf_max = max(int(_pf_check), 1)
+                _pf_newly_revealed = []  # ordered by BFS visit
+                _pf_obstruction_at = None
+                # BFS queue
+                from collections import deque
+                _pf_queue = deque()
+                # Seed: enqueue unrevealed neighbors of start node
+                _pf_visited = set([_pf_start])
+                _pf_start_block = _pf_nodes.get(_pf_start) or {}
+                for _nb in (_pf_start_block.get("connections") or []):
+                    if isinstance(_nb, str) and _nb not in _pf_visited:
+                        _pf_queue.append(_nb)
+                while _pf_queue and len(_pf_newly_revealed) < _pf_max:
+                    _pf_node_name = _pf_queue.popleft()
+                    if _pf_node_name in _pf_visited:
+                        continue
+                    _pf_visited.add(_pf_node_name)
+                    _pf_node = _pf_nodes.get(_pf_node_name)
+                    if not isinstance(_pf_node, dict):
+                        continue
+                    # Reveal this node if not already revealed
+                    if _pf_node_name not in _pf_revealed_set:
+                        _pf_newly_revealed.append(_pf_node_name)
+                        _pf_revealed_set.add(_pf_node_name)
+                    # Obstruction check: if this node's dv > check, stop
+                    # exploration through it (its own neighbors not queued)
+                    try:
+                        _pf_node_dv = int(_pf_node.get("dv") or 0)
+                    except (TypeError, ValueError):
+                        _pf_node_dv = 0
+                    if _pf_node_dv > _pf_check:
+                        if _pf_obstruction_at is None:
+                            _pf_obstruction_at = _pf_node_name
+                        continue  # don't enqueue children of obstruction
+                    # Otherwise, enqueue this node's unrevealed neighbors
+                    for _nb in (_pf_node.get("connections") or []):
+                        if (isinstance(_nb, str)
+                                and _nb not in _pf_visited
+                                and _nb not in _pf_queue):
+                            _pf_queue.append(_nb)
+                # Format roll display
+                _pf_mods = []
+                if _pf_iface:
+                    _pf_mods.append(("Interface", _pf_iface))
+                for _lbl, _v in _pf_booster_labels:
+                    _pf_mods.append((_lbl, _v))
+                _pf_mods_str = " ".join(
+                    (f"+{lbl} {val}" if val > 0 else f"{lbl} {val}")
+                    for (lbl, val) in _pf_mods
+                )
+                _pf_formatted = (
+                    f"🎲 Pathfinder: {_format_die(_pf_die)} {_pf_mods_str} "
+                    f"= {_pf_check} → reveal up to {_pf_max} "
+                    f"node{'s' if _pf_max != 1 else ''}, revealed "
+                    f"{len(_pf_newly_revealed)} new"
+                    + (f" (stopped at obstruction {_pf_obstruction_at!r}, dv > {_pf_check})"
+                       if _pf_obstruction_at else "")
+                )
+                # Emit state ops
+                all_state_ops.append({
+                    "op": "pathfinder_used",
+                    "actor": _pf_char,
+                    "check_result": _pf_check,
+                })
+                if _pf_newly_revealed:
+                    all_state_ops.append({
+                        "op": "node_reveal",
+                        "nodes": list(_pf_newly_revealed),
+                        "source": "Pathfinder",
+                    })
+                if net_actions_remaining is not None:
+                    net_actions_remaining = max(0, net_actions_remaining - 1)
+                results.append({
+                    "type": "pathfinder",
+                    "character": _pf_char,
+                    "success": True,
+                    "check_result": _pf_check,
+                    "max_reveal": _pf_max,
+                    "nodes_revealed": list(_pf_newly_revealed),
+                    "obstruction_at": _pf_obstruction_at,
+                    "cost_net_actions": 1,
+                    "booster_bonuses": list(_pf_booster_labels),
+                    "formatted": _pf_formatted,
+                })
+
             elif action_type == "break_stealth":
                 # Planner-emitted break (taking Control Node, attack against
                 # ICE/Watcher, Brute Force, etc.). Idempotent if already broken.
@@ -6224,6 +6404,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
         "must_break_stealth_first", "wrong_entity_type", "ice_not_found",
         # Virus ledger
         "no_viruses_planted", "virus_not_found", "virus_purged",
+        # Pathfinder once-per-run enforcement
+        "pathfinder_already_used",
     }
     player_errors = []
     for _idx, _r in enumerate(results):

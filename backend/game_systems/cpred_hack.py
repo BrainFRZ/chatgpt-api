@@ -157,6 +157,8 @@ def init_hack_state(
         "stealth_broken_round": None,
         "quiet_jack_in_used": False,
         "net_round": 1,
+        # Pathfinder once-per-run flag (project rulebook §Interface Abilities)
+        "pathfinder_used": False,
         # Boosted-action / Defender state. Step 3 uses fortify_pending; Step 6b
         # adds surge_pending, mask_pending, etc. on_turn_end clears one-shot
         # flags after they fire.
@@ -856,6 +858,7 @@ def _apply_net_model_fields(state, hs, tool_input):
     state.setdefault("stealth_broken_round", None)
     state.setdefault("quiet_jack_in_used", False)
     state.setdefault("net_round", 1)
+    state.setdefault("pathfinder_used", False)
     # revealed_nodes validation + auto-merge
     if not isinstance(state.get("revealed_nodes"), list):
         visited_fallback = state.get("nodes_visited", [])
@@ -1045,6 +1048,25 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                     elif et not in ("demon", "watcher_netrunner"):
                         continue
                     _entry["stealth_aware"] = True
+        elif op_t == "pathfinder_used":
+            # Project rulebook: Pathfinder is once per run. Set the flag
+            # so subsequent attempts in the same encounter fail-soft via
+            # the resolver's _pathfinder_used input.
+            state["pathfinder_used"] = True
+        elif op_t == "node_reveal":
+            # Pathfinder (and future architecture-reveal abilities) emits
+            # this op to mark nodes as revealed. Merges into hack_state's
+            # revealed_nodes list, preserving order and de-duplicating.
+            new_nodes = op.get("nodes") or []
+            if not isinstance(new_nodes, list):
+                new_nodes = []
+            revealed = state.setdefault("revealed_nodes", [])
+            if not isinstance(revealed, list):
+                revealed = []
+                state["revealed_nodes"] = revealed
+            for n in new_nodes:
+                if isinstance(n, str) and n and n not in revealed:
+                    revealed.append(n)
         elif op_t == "net_actions_grant":
             # Overclock and any future immediate-NA-grant boosted actions:
             # add to the current turn's NA pool. The resolver already

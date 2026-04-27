@@ -7314,6 +7314,134 @@ class TestProgramStatusChangeActions(unittest.TestCase):
         self.assertEqual(r5["success"], False)
 
 
+class TestPathfinder(unittest.TestCase):
+    """Pathfinder is NOT a DV check — it reveals up to check_result connected
+    unrevealed nodes via BFS from current node, stopping at obstructions
+    where dv > check_result. Once per run, costs 1 NA.
+    """
+
+    def _build_arch(self):
+        # Linear architecture with 5 nodes; only Gateway revealed initially.
+        # Node3 has dv=12 (obstruction for medium-low checks).
+        return {
+            "sr": 2,
+            "difficulty": "standard",
+            "nodes": {
+                "Gateway": {"type": "Gateway", "connections": ["Node1"]},
+                "Node1":   {"type": "data_node", "dv": 8, "connections": ["Gateway", "Node2"]},
+                "Node2":   {"type": "Password", "dv": 8, "connections": ["Node1", "Node3"]},
+                "Node3":   {"type": "Password", "dv": 12, "connections": ["Node2", "Node4"]},
+                "Node4":   {"type": "Target", "connections": ["Node3"]},
+            }
+        }
+
+    def test_pathfinder_reveals_up_to_check_result_nodes(self):
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=3):
+            result = resolve_actions(
+                [{"type": "pathfinder", "character": "RedVelvet",
+                  "interface_rank": 4,
+                  "revealed_nodes": ["Gateway"]}],
+                system_map=self._build_arch(),
+                current_node="Gateway",
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # Interface 4 + d10[3] = 7 → can reveal up to 7 nodes; arch has 5 total
+        # BFS from Gateway: Node1 (dv 8 ≤ 7? NO, 8 > 7 → obstruction; reveal Node1, stop further)
+        self.assertEqual(r["check_result"], 7)
+        self.assertEqual(r["max_reveal"], 7)
+        self.assertEqual(r["nodes_revealed"], ["Node1"])
+        self.assertEqual(r["obstruction_at"], "Node1")
+
+    def test_pathfinder_high_check_reveals_everything(self):
+        # check 14 should clear DV 8 nodes and only stop at DV 12
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=10):
+            result = resolve_actions(
+                [{"type": "pathfinder", "character": "RedVelvet",
+                  "interface_rank": 4,
+                  "revealed_nodes": ["Gateway"]}],
+                system_map=self._build_arch(),
+                current_node="Gateway",
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # Interface 4 + d10[10 explodes + 10] = 24 → way over everything; reveals all
+        self.assertGreater(r["check_result"], 12)
+        self.assertEqual(set(r["nodes_revealed"]), {"Node1", "Node2", "Node3", "Node4"})
+        self.assertIsNone(r["obstruction_at"])
+
+    def test_pathfinder_see_ya_bonus_applies(self):
+        progs = [{"name": "See Ya", "category": "booster", "rez": 7, "status": "active"}]
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=4):
+            result = resolve_actions(
+                [{"type": "pathfinder", "character": "RedVelvet",
+                  "interface_rank": 4,
+                  "revealed_nodes": ["Gateway"]}],
+                system_map=self._build_arch(),
+                current_node="Gateway",
+                active_programs=progs,
+                net_actions_remaining=3,
+            )
+        r = result["results"][0]
+        # Interface 4 + See Ya 2 + d10[4] = 10 → clears Node1 (dv 8) and Node2 (dv 8), stops at Node3 (dv 12)
+        self.assertEqual(r["check_result"], 10)
+        self.assertEqual(set(r["nodes_revealed"]), {"Node1", "Node2", "Node3"})
+        self.assertEqual(r["obstruction_at"], "Node3")
+        self.assertTrue(any("See Ya" in str(b) for b in r.get("booster_bonuses", [])))
+
+    def test_pathfinder_already_used_fail_soft(self):
+        result = resolve_actions(
+            [{"type": "pathfinder", "character": "RedVelvet",
+              "interface_rank": 4,
+              "_pathfinder_used": True,
+              "revealed_nodes": ["Gateway"]}],
+            system_map=self._build_arch(),
+            current_node="Gateway",
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "pathfinder_already_used")
+
+    def test_pathfinder_no_system_map(self):
+        result = resolve_actions(
+            [{"type": "pathfinder", "character": "RedVelvet"}],
+            net_actions_remaining=3,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "no_system_map")
+
+    def test_pathfinder_insufficient_na(self):
+        result = resolve_actions(
+            [{"type": "pathfinder", "character": "RedVelvet"}],
+            system_map=self._build_arch(),
+            current_node="Gateway",
+            net_actions_remaining=0,
+        )
+        r = result["results"][0]
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"], "insufficient_net_actions")
+
+    def test_pathfinder_emits_state_ops(self):
+        with patch("game_systems.cpred_mechanics.random.randint", return_value=4):
+            result = resolve_actions(
+                [{"type": "pathfinder", "character": "RedVelvet",
+                  "interface_rank": 4,
+                  "revealed_nodes": ["Gateway"]}],
+                system_map=self._build_arch(),
+                current_node="Gateway",
+                net_actions_remaining=3,
+            )
+        used_ops = [op for op in result["state_ops"]
+                    if isinstance(op, dict) and op.get("op") == "pathfinder_used"]
+        self.assertEqual(len(used_ops), 1)
+        reveal_ops = [op for op in result["state_ops"]
+                      if isinstance(op, dict) and op.get("op") == "node_reveal"]
+        self.assertEqual(len(reveal_ops), 1)
+        self.assertGreater(len(reveal_ops[0]["nodes"]), 0)
+
+
 class TestActivateVirus(unittest.TestCase):
     """Player-initiated trigger of a previously-planted virus.
 

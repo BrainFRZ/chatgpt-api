@@ -7768,6 +7768,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _rm_quiet_jack_in_used = False
                                 _rm_stealth_broken_round = None
                                 _rm_net_round = 1
+                                _rm_pathfinder_used = False
+                                _rm_revealed_nodes = []
                                 if isinstance(_rm_active_state, dict):
                                     _rm_tar = _safe_int(_rm_active_state.get("tar_stacks", 0))
                                     _rm_alert = _safe_int(_rm_active_state.get("alert_level", 0))
@@ -7788,6 +7790,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _rm_quiet_jack_in_used = bool(_rm_active_state.get("quiet_jack_in_used", False))
                                     _rm_stealth_broken_round = _rm_active_state.get("stealth_broken_round")
                                     _rm_net_round = _safe_int(_rm_active_state.get("net_round", 1)) or 1
+                                    _rm_pathfinder_used = bool(_rm_active_state.get("pathfinder_used", False))
+                                    _rm_rn = _rm_active_state.get("revealed_nodes")
+                                    if isinstance(_rm_rn, list):
+                                        _rm_revealed_nodes = list(_rm_rn)
                                 if not isinstance(_rm_gs, dict):
                                     _rm_gs = {}
                                 _rm_tracking_ps = data.get("pipeline_state") if isinstance(data.get("pipeline_state"), dict) else stateful_pipeline_state
@@ -7811,6 +7817,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         _rm_tracking_ps or {},
                                     ),
                                 )
+                                # Pathfinder once-per-run + revealed_nodes need to flow
+                                # to the action handler. Inject into pathfinder actions
+                                # so the handler sees the current state.
+                                for _act in (_rm_input.get("actions") or []):
+                                    if not isinstance(_act, dict):
+                                        continue
+                                    if _act.get("type") == "pathfinder":
+                                        _act["_pathfinder_used"] = _rm_pathfinder_used
+                                        if "revealed_nodes" not in _act:
+                                            _act["revealed_nodes"] = list(_rm_revealed_nodes)
                                 _rm_result = _rm_resolve_actions(
                                     _rm_input.get("actions", []),
                                     relationships=_rm_gs.get("relationships"),
@@ -7871,6 +7887,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     elif _opt == "break_stealth":
                                         _rm_stealth_active = False
                                         _rm_stealth_broken_round = _rm_net_round
+                                    elif _opt == "pathfinder_used":
+                                        _rm_pathfinder_used = True
+                                    elif _opt == "node_reveal":
+                                        _new_nodes = _op.get("nodes") or []
+                                        if isinstance(_new_nodes, list):
+                                            for _nn in _new_nodes:
+                                                if isinstance(_nn, str) and _nn not in _rm_revealed_nodes:
+                                                    _rm_revealed_nodes.append(_nn)
                                 logger.info(f"resolve_mechanics[{_rm_iteration}]: resolved {len(_rm_input.get('actions', []))} actions for {username}")
 
                                 # Accumulate usage from this call

@@ -2368,7 +2368,8 @@ You decide:
 The backend resolves dice. Do NOT roll dice or calculate outcomes.
 
 DICE ACTION TYPES for the "actions" array:
-- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true, ability (REQUIRED when net=true; closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} — for flat Interface checks
+- skill_check: {type, character, stat_value (=Interface rank), skill_value (=0), dv, seriously_wounded?, net?: true, ability (REQUIRED when net=true; closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)} — for flat Interface checks. **NOTE:** `ability="Pathfinder"` on a skill_check is for non-architecture-reveal Pathfinder rolls only (e.g., a Watcher's Pathfinder check via the watcher_search action). For the Netrunner's "reveal architecture" Pathfinder, use the dedicated `pathfinder` action type — it has no DV.
+- pathfinder: {type, character, interface_rank?} — Project rulebook §Interface Abilities. Reveal architecture nodes via BFS from current_node. NO DV. Roll = Interface + d10 + See Ya +2 (if active) = check_result; reveal up to `check_result` connected unrevealed nodes, stopping at any node whose `dv` exceeds `check_result` (the obstruction itself is revealed; further BFS through it is blocked). **Once per run** (`pathfinder_used` flag, fail-soft `pathfinder_already_used` on repeat). Costs 1 NA.
 - opposed_check: {type, character, attacker_stat (=Interface rank), attacker_skill? (=0 for NET), defender_stat (=ICE stat), defender_skill? (=0 for NET), attacker_label, defender_label, attacker_skill_label?, defender_skill_label?, net?: true, ability (REQUIRED when net=true; same closed enum), zap?: true, interface_rank?: N, target?: "ICE name"} — for Zap, Slide. When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET checks.
 - program_attack: {type, character, interface_rank, program_atk, target_def, program_damage_dice, target_rez, program_name, target (ICE name)} — for Program attacks vs ICE
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
@@ -2513,7 +2514,8 @@ MEATSPACE ACTION TYPES (same schemas as combat planning — backend auto-resolve
 - ranged_attack, melee_attack, autofire, skill_check, death_save, initiative
 
 NET ACTION TYPES:
-- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true, ability (REQUIRED — closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative))
+- skill_check: flat Interface checks (stat_value=Interface, skill_value=0, dv=target, net: true, ability (REQUIRED — closed enum: Backdoor/Cloak/Control/Eye-Dee/Pathfinder/Slide/Virus/Zap/Initiative)). For the Netrunner's architecture-reveal Pathfinder, use the dedicated `pathfinder` action type instead — it has no DV.
+- pathfinder: {type, character, interface_rank?} — Architecture-reveal Pathfinder per project rulebook. NO DV. Reveals up to `check_result` connected unrevealed nodes via BFS from current_node, stopping at obstructions where `dv > check_result`. Once per run, costs 1 NA.
 - opposed_check: Zap/Slide (attacker_stat=Interface, attacker_skill=0, defender_stat=ICE stat, defender_skill=0, net: true, ability (REQUIRED — same enum), zap?: true, interface_rank?: N, target?: "ICE name"). When zap=true, backend rolls 1d6 REZ damage on hit. Skill fields default to 0 for NET.
 - program_attack: Program vs ICE (interface_rank, program_atk, target_def, program_damage_dice, target_rez)
 - program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. "Hellhound"), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)} — Backend auto-reads ATK/damage from ICE table.
