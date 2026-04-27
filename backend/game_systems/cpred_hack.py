@@ -4,7 +4,10 @@ import logging
 import random
 
 from .cpred_mechanics import _resolve_jack_out_cascade
-from .cpred_tables import ICE_STAT_BLOCKS, SR_BASE_DV, CONVERGENCE_ICE_BY_SR
+from .cpred_tables import (
+    ICE_STAT_BLOCKS, SR_BASE_DV, CONVERGENCE_ICE_BY_SR,
+    ARCHITECTURE_DIFFICULTY_DV, SR_DIFFICULTY_RATING,
+)
 from .cpred_core import _safe_int, _render_transition, _update_seriously_wounded, _wound_flag, get_deck_slots
 
 logger = logging.getLogger(__name__)
@@ -676,6 +679,57 @@ def _apply_rez_damage_to_ice_status(state, op):
             victim["hunting"] = []
 
 
+def _autofill_missing_node_dvs(state):
+    """Fill in missing per-node `dv` values on the system_map from the
+    architecture's difficulty rating. CRB p.210: all Password / File /
+    Control Node DVs in an architecture share the same DV based on the
+    difficulty rating chosen by the planner. If difficulty isn't set, infer
+    from SR via SR_DIFFICULTY_RATING.
+
+    This prevents the "model invents DVs on the fly" bug class: planners
+    sometimes forget to populate `dv` on architecture nodes; without
+    auto-fill, every subsequent action against that node gets a fresh
+    fabricated DV.
+
+    Node types eligible for auto-fill: password, password_gate, file, control,
+    control_node, data_node. Gateway and Target nodes are skipped (no
+    inherent DV).
+    """
+    if not isinstance(state, dict):
+        return
+    sm = state.get("system_map")
+    if not isinstance(sm, dict):
+        return
+    nodes = sm.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    # Resolve canonical difficulty: explicit > inferred from SR > "standard"
+    difficulty = sm.get("difficulty")
+    if not isinstance(difficulty, str) or difficulty.lower() not in ARCHITECTURE_DIFFICULTY_DV:
+        try:
+            sr = int(state.get("sr", sm.get("sr", 0)) or 0)
+        except (TypeError, ValueError):
+            sr = 0
+        difficulty = SR_DIFFICULTY_RATING.get(sr, "standard")
+        sm["difficulty"] = difficulty  # write back so subsequent renders see it
+    canonical_dv = ARCHITECTURE_DIFFICULTY_DV.get(str(difficulty).lower(), 8)
+    eligible_types = {
+        "password", "password_gate",
+        "file", "data_node",
+        "control", "control_node",
+    }
+    for node_name, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type", "")).strip().lower()
+        if node_type not in eligible_types:
+            continue
+        dv = node.get("dv")
+        # Auto-fill when None, missing, or non-numeric
+        if dv is None or not isinstance(dv, (int, float)):
+            node["dv"] = canonical_dv
+
+
 def _apply_net_model_fields(state, hs, tool_input):
     """Apply model-reported NET fields, system map, revealed_nodes, available_actions."""
     if isinstance(hs, dict):
@@ -714,6 +768,14 @@ def _apply_net_model_fields(state, hs, tool_input):
                 state[field] = hs[field]
         if hs.get("system_map") and not state.get("system_map"):
             state["system_map"] = hs["system_map"]
+    # Auto-fill missing per-node DVs on the system_map. CRB p.210: Password,
+    # File, and Control Node DVs share the same difficulty-rating DV across
+    # the architecture. If the planner forgot to populate dv (or left it
+    # null), fill it from ARCHITECTURE_DIFFICULTY_DV[difficulty]. If
+    # difficulty isn't set, infer from SR via SR_DIFFICULTY_RATING. Without
+    # this, the model invents DVs on the fly during play — non-deterministic
+    # and ungrounded.
+    _autofill_missing_node_dvs(state)
     # Going Quiet stealth state defaults — legacy hack_state without these
     # fields loads cleanly; never auto-derive stealth_active=True for legacy.
     state.setdefault("stealth_active", False)
