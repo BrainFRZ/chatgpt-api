@@ -716,6 +716,11 @@ class TestApplyAlertAutoSpawn(unittest.TestCase):
         hs["_prev_alert_level"] = 0
         hs["sr"] = 3
         hs["ice_status"] = {}
+        # Provide a stub system_map so the auto-architecture generator doesn't
+        # fire and pre-place a Trace ICE (which would block the alert spawn).
+        hs["system_map"] = {"sr": 3, "difficulty": "standard",
+                            "nodes": {"Gateway": {"type": "gateway", "dv": 8,
+                                                  "connections": []}}}
         cpred_apply_hack_state(hs, {"hack_state": {"alert_level": 5}})
         self.assertIn("Gateway_Trace", hs["ice_status"])
         trace = hs["ice_status"]["Gateway_Trace"]
@@ -763,6 +768,10 @@ class TestApplyAlertAutoSpawn(unittest.TestCase):
         hs["sr"] = 3
         hs["ice_status"] = {}
         hs["current_node"] = "Gateway"
+        # Stub system_map suppresses auto-generator (which would pre-place Trace).
+        hs["system_map"] = {"sr": 3, "difficulty": "standard",
+                            "nodes": {"Gateway": {"type": "gateway", "dv": 8,
+                                                  "connections": []}}}
         cpred_apply_hack_state(hs, {"hack_state": {"alert_level": 7}})
         self.assertIn("Gateway_Trace", hs["ice_status"])
         self.assertIn("Gateway_Convergence", hs["ice_status"])
@@ -1096,6 +1105,11 @@ class TestNetCombatApplyMechanics(unittest.TestCase):
         nc["ice_status"] = {
             "GW_Hellhound": {"name": "Hellhound", "rez_current": 8, "rez_max": 8, "status": "active"},
         }
+        # Stub system_map keeps the auto-architecture generator from placing
+        # additional Hellhounds that would race the rez_damage target match.
+        nc["system_map"] = {"sr": 3, "difficulty": "standard",
+                            "nodes": {"Gateway": {"type": "gateway", "dv": 8,
+                                                  "connections": []}}}
         ps = _minimal_pipeline_state(nc)
         ops = [{"op": "rez_damage", "target": "Hellhound", "damage": 10}]
         cpred_apply_net_combat_state(ps, {"hack_state": {}}, resolver_state_ops=ops)
@@ -1146,6 +1160,10 @@ class TestNetCombatApplyMechanics(unittest.TestCase):
         nc["_prev_alert_level"] = 0
         nc["ice_status"] = {}
         nc["current_node"] = "DataNode1"
+        # Stub system_map suppresses auto-generator (which would pre-place Trace).
+        nc["system_map"] = {"sr": 3, "difficulty": "standard",
+                            "nodes": {"Gateway": {"type": "gateway", "dv": 8,
+                                                  "connections": []}}}
         ps = _minimal_pipeline_state(nc)
         cpred_apply_net_combat_state(ps, {"hack_state": {"alert_level": 7}})
         ice = ps["net_combat"]["ice_status"]

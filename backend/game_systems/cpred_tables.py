@@ -556,6 +556,100 @@ LOBBY_NODE_TABLE = [
     {"type": "password", "dv": 8},
 ]
 
+# ---------------------------------------------------------------------------
+# Eligible ICE pool by Architecture Difficulty Rating — CRB p.211 ICE tables.
+# Architectures roll ICE from the pool matching their Difficulty.  Lower-tier
+# systems never spawn Giants/Krakens/Dragons; higher tiers stop spawning the
+# weakest ICE.  Used by the generator to curate ICE selection per SR so a
+# Giant cannot appear in an SR1 (Basic) system.
+#
+# Convergence ICE is selected separately via CONVERGENCE_ICE_BY_SR — that
+# spawn is RAW-fixed by SR and is NOT drawn from this pool.
+# ---------------------------------------------------------------------------
+ICE_POOL_BY_DIFFICULTY = {
+    "basic":    ["skunk", "wisp", "asp", "raven", "hellhound", "killer"],
+    "standard": ["asp", "hellhound", "wisp", "liche", "scorpion", "raven",
+                 "killer", "sabertooth"],
+    "uncommon": ["hellhound", "liche", "kraken", "sabertooth", "dragon",
+                 "raven", "asp", "scorpion"],
+    "advanced": ["kraken", "liche", "dragon", "sabertooth", "giant"],
+}
+
+
+def ice_pool_for_sr(sr: int) -> list[str]:
+    """Return the eligible ICE species (lowercase keys into ICE_STAT_BLOCKS)
+    for an architecture of the given SR.  Falls back to standard pool on
+    out-of-range SR.
+    """
+    rating = SR_DIFFICULTY_RATING.get(int(sr or 0), "standard")
+    return list(ICE_POOL_BY_DIFFICULTY.get(rating, ICE_POOL_BY_DIFFICULTY["standard"]))
+
+
+def ice_is_eligible_for_sr(ice_key: str, sr: int) -> bool:
+    """True if `ice_key` (e.g. "giant", "hellhound") is RAW-legal for an
+    architecture of the given SR per CRB p.211 ICE tables.  Used to validate
+    planner-supplied ICE placements before they reach the resolver.
+    """
+    if not ice_key:
+        return False
+    return str(ice_key).strip().lower() in ice_pool_for_sr(sr)
+
+
+# ---------------------------------------------------------------------------
+# Architecture shape tables — CRB p.210-211.
+# These drive the backend architecture generator (cpred_architecture_gen.py)
+# so the planner only has to specify SR + tier (+ optional narrative hint),
+# and the engine produces a RAW-legal system_map every time.
+# ---------------------------------------------------------------------------
+
+# Floor count range per Difficulty Rating (inclusive).  CRB p.211: "Minimum
+# of 5 floors" for full architectures; difficulty mostly affects core depth.
+ARCHITECTURE_FLOOR_RANGE = {
+    "basic":    (4, 5),
+    "standard": (5, 6),
+    "uncommon": (6, 8),
+    "advanced": (8, 10),
+}
+
+# Number of non-Black, non-Convergence ICE placed in core (after Lobby).
+# Excludes the auto-placed Convergence Black ICE at the Objective.
+ARCHITECTURE_ICE_COUNT = {
+    "basic":    (1, 2),
+    "standard": (2, 3),
+    "uncommon": (3, 4),
+    "advanced": (4, 5),
+}
+
+# Whether a Trace ICE is included in the architecture (in addition to ICE
+# count above).  Lower-tier systems may not have Trace at all.
+ARCHITECTURE_TRACE_CHANCE = {
+    "basic":    0.0,    # SR1 systems rarely run Trace per RAW
+    "standard": 0.5,
+    "uncommon": 0.85,
+    "advanced": 1.0,
+}
+
+# Probability the architecture has at least one branch (non-linear topology).
+# Branched architectures place a side path off a core node leading to an
+# alternate File node.  CRB allows branches at any tier; higher tiers do it
+# more often.
+ARCHITECTURE_BRANCH_CHANCE = {
+    "basic":    0.0,
+    "standard": 0.25,
+    "uncommon": 0.5,
+    "advanced": 0.7,
+}
+
+# Weighted node-type distribution for CORE floors (everything between the
+# 2-floor Lobby and the final Objective).  Tracks CRB's per-difficulty
+# random tables.  Higher-tier cores are denser with Password/Control gates.
+CORE_NODE_TYPE_WEIGHTS = {
+    "basic":    {"file": 50, "password": 35, "control": 15},
+    "standard": {"file": 35, "password": 35, "control": 30},
+    "uncommon": {"file": 25, "password": 35, "control": 40},
+    "advanced": {"file": 15, "password": 35, "control": 50},
+}
+
 DRIVING_CHECK_DVS = {
     "maintain_control": 10,
     "swerve": 13,

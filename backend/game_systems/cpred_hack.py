@@ -7,6 +7,7 @@ from .cpred_mechanics import _resolve_jack_out_cascade
 from .cpred_tables import (
     ICE_STAT_BLOCKS, SR_BASE_DV, CONVERGENCE_ICE_BY_SR,
     ARCHITECTURE_DIFFICULTY_DV, SR_DIFFICULTY_RATING,
+    ICE_POOL_BY_DIFFICULTY, ice_pool_for_sr, ice_is_eligible_for_sr,
 )
 from .cpred_core import _safe_int, _render_transition, _update_seriously_wounded, _wound_flag, get_deck_slots
 
@@ -681,6 +682,164 @@ def _apply_rez_damage_to_ice_status(state, op):
             victim["hunting"] = []
 
 
+def _generate_architecture_if_missing(state, tool_input):
+    """If the planner provides only `{sr, tier}` (or no system_map at all),
+    auto-generate a full RAW-legal Architecture from cpred_architecture_gen.
+
+    Triggers when:
+      - state.system_map is None / missing / empty `nodes` dict, AND
+      - state has SR + tier set (init_hack_state provides defaults)
+
+    Skips when:
+      - planner provided a non-empty system_map (their narrative wins; the
+        autofill / min-arch / tier-validation passes will normalize it)
+      - tool_input explicitly opts out via `auto_generate_architecture=False`
+    """
+    if not isinstance(state, dict):
+        return
+    if isinstance(tool_input, dict) and tool_input.get("auto_generate_architecture") is False:
+        return
+    sm = state.get("system_map")
+    has_nodes = (
+        isinstance(sm, dict)
+        and isinstance(sm.get("nodes"), dict)
+        and len(sm["nodes"]) > 0
+    )
+    if has_nodes:
+        return  # planner-supplied map; let normalizers clean it
+    # Pre-existing ice_status without a system_map means callers are
+    # constructing partial state directly (alert-spawn / rez_damage tests do
+    # this).  Don't override their ICE setup — the generator only fires for
+    # genuinely fresh hacks where both system_map and ice_status are empty.
+    existing_ice = state.get("ice_status")
+    if isinstance(existing_ice, dict) and len(existing_ice) > 0:
+        return
+    sr = state.get("sr") or (sm.get("sr") if isinstance(sm, dict) else None) or 2
+    try:
+        sr = int(sr)
+    except (TypeError, ValueError, OverflowError):
+        sr = 2
+    if sr < 1 or sr > 5:
+        sr = max(1, min(5, sr)) if isinstance(sr, int) else 2
+    tier = str(state.get("tier") or "full_run").strip().lower()
+    target_system = state.get("target_system") or (
+        sm.get("target_system") if isinstance(sm, dict) else None
+    )
+    hint = (sm.get("structure_hint") if isinstance(sm, dict) else None)
+    # Stable seed for re-applies of the same hack: hash hacker_name + target.
+    # Without it, every apply_hack_state call would re-roll a different map.
+    seed_basis = f"{state.get('hacker_name') or ''}::{target_system or ''}::{sr}::{tier}"
+    seed = hash(seed_basis) & 0xFFFFFFFF
+    from .cpred_architecture_gen import generate_architecture
+    gen = generate_architecture(
+        sr=sr, tier=tier, hint=hint, target_system=target_system, seed=seed,
+    )
+    state["system_map"] = gen["system_map"]
+    # Merge any generated ICE into ice_status (Quick Hack returns empty dict).
+    gen_ice = gen.get("ice_status") or {}
+    if gen_ice:
+        existing_ice = state.get("ice_status")
+        if not isinstance(existing_ice, dict):
+            existing_ice = {}
+        for k, v in gen_ice.items():
+            existing_ice.setdefault(k, v)
+        state["ice_status"] = existing_ice
+    logger.info(
+        "Hack apply: auto-generated %s architecture (SR%d, %s, %d nodes, %d ICE)",
+        tier, sr,
+        gen["system_map"].get("difficulty"),
+        len(gen["system_map"].get("nodes", {})),
+        len(gen_ice),
+    )
+
+
+def _validate_ice_tier_eligibility(state):
+    """CRB p.211 ICE tables: each Difficulty Rating has a curated pool of
+    eligible ICE.  A planner-placed Giant in an SR1 (Basic) system is
+    RAW-illegal — Giants only appear in Advanced architectures.
+
+    Defense pattern (same as _autofill_missing_node_dvs): don't trust the
+    planner's compliance, normalize at the apply boundary.
+
+    For each ICE entry in `ice_status` whose `species`/`name` is not in the
+    SR's eligible pool, downgrade it to a random tier-eligible substitute and
+    log a warning.  Convergence ICE (entity_type / behavior == "convergence"
+    or matching CONVERGENCE_ICE_BY_SR for the SR) is exempt — convergence
+    spawn is RAW-fixed by SR via a separate table.
+    """
+    if not isinstance(state, dict):
+        return
+    ice_status = state.get("ice_status")
+    if not isinstance(ice_status, dict) or not ice_status:
+        return
+    sm = state.get("system_map") or {}
+    sr = sm.get("sr") or state.get("sr") or 2
+    try:
+        sr = int(sr)
+    except (TypeError, ValueError, OverflowError):
+        sr = 2
+    if not (1 <= sr <= 5):
+        sr = max(1, min(5, sr)) if isinstance(sr, int) else 2
+    eligible = set(ice_pool_for_sr(sr))
+    if not eligible:
+        return
+    convergence_key = (CONVERGENCE_ICE_BY_SR.get(sr) or "").lower()
+    downgrades = []
+    for ice_key, entry in list(ice_status.items()):
+        if not isinstance(entry, dict):
+            continue
+        # Watchers (demon / watcher_netrunner) are NOT in the ICE pool.
+        if entry.get("entity_type") in ("demon", "watcher_netrunner"):
+            continue
+        # Trace ICE has its own canonical handling; skip pool check.
+        behavior = str(entry.get("behavior", "")).strip().lower()
+        if behavior in ("trace", "convergence"):
+            continue
+        species = str(
+            entry.get("species") or entry.get("name") or ""
+        ).strip().lower()
+        if not species:
+            continue
+        # Convergence ICE for this SR is always legal regardless of tier pool.
+        if species == convergence_key:
+            continue
+        if species in eligible:
+            continue
+        # Tier-illegal: pick a substitute from the eligible pool.
+        # Prefer same class (anti_personnel vs anti_program) when possible.
+        original_class = (ICE_STAT_BLOCKS.get(species) or {}).get("class")
+        candidates = [
+            k for k in eligible
+            if not original_class
+            or (ICE_STAT_BLOCKS.get(k) or {}).get("class") == original_class
+        ]
+        if not candidates:
+            candidates = list(eligible)
+        # Deterministic: pick the first candidate alphabetically so test
+        # snapshots are stable.  RNG-based substitution would be a generation
+        # concern; the validator's job is just to make the state RAW-legal.
+        substitute = sorted(candidates)[0]
+        sub_block = ICE_STAT_BLOCKS.get(substitute) or {}
+        # Patch the entry in place: rename species/name + restat.
+        entry["species"] = substitute
+        if "name" in entry:
+            entry["name"] = sub_block.get("name", substitute.title())
+        for stat_key in ("per", "spd", "atk", "def", "rez", "damage_dice",
+                         "effect", "effect_desc"):
+            if stat_key in sub_block:
+                entry[stat_key] = sub_block[stat_key]
+        entry["_tier_downgraded_from"] = species  # diagnostic flag
+        downgrades.append((ice_key, species, substitute))
+    if downgrades:
+        logger.warning(
+            "Hack apply: SR%d (%s) had %d tier-illegal ICE; downgraded: %s",
+            sr,
+            SR_DIFFICULTY_RATING.get(sr, "standard"),
+            len(downgrades),
+            [f"{k}: {orig} -> {sub}" for k, orig, sub in downgrades],
+        )
+
+
 def _ensure_minimum_architecture(state):
     """Quick Hacks must have ≥3 linear nodes (Gateway → Obstacle → Objective)
     per project rulebook §3. Full Runs must have ≥4 nodes per §4.
@@ -939,6 +1098,12 @@ def _apply_net_model_fields(state, hs, tool_input):
                 state[field] = hs[field]
         if hs.get("system_map") and not state.get("system_map"):
             state["system_map"] = hs["system_map"]
+    # Auto-generate the architecture if the planner only supplied SR + tier
+    # (or provided no system_map at all).  The generator produces a complete
+    # RAW-legal map per CRB p.210-211 random tables — floor count, node types,
+    # DVs, ICE placement (with tier-curated species pool), Trace, Convergence
+    # Black ICE — leaving the planner to overlay narrative names/contents.
+    _generate_architecture_if_missing(state, tool_input)
     # Auto-fill missing per-node DVs on the system_map. CRB p.210: Password,
     # File, and Control Node DVs share the same difficulty-rating DV across
     # the architecture. If the planner forgot to populate dv (or left it
@@ -950,6 +1115,10 @@ def _apply_net_model_fields(state, hs, tool_input):
     # Ensure tier minimum architecture: Quick Hack ≥3 nodes, Full Run ≥4.
     # Auto-extends with placeholder Objective if planner skimped.
     _ensure_minimum_architecture(state)
+    # CRB p.211 ICE tables: validate every ICE in the architecture is from
+    # the SR's eligible pool.  Downgrades tier-illegal placements (e.g. a
+    # planner-placed Giant in an SR1 system) to a substitute from the pool.
+    _validate_ice_tier_eligibility(state)
     # Going Quiet stealth state defaults — legacy hack_state without these
     # fields loads cleanly; never auto-derive stealth_active=True for legacy.
     state.setdefault("stealth_active", False)

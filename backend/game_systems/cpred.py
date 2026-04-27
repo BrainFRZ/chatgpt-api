@@ -1662,26 +1662,32 @@ Per CPRED RAW, every character gets **1 Move Action + 1 Action** per turn. The N
 
 If the player instead spends their **Action** on a Meat Action (shoot, reload, a skill check, etc.), that consumes the NET half of the turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to close the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
 
-### Architecture Difficulty Rating (p.210-211)
-When generating a NET architecture, choose a Difficulty Rating based on SR:
+### Architecture Generation — BACKEND-AUTHORITATIVE (p.210-211)
+**The backend generates the entire structural Architecture from SR + tier.** You do NOT roll floor counts, pick node types, assign DVs, or place ICE species. Provide `{sr, tier, target_system}` and the engine emits a complete RAW-legal `system_map` per CRB random tables: floor count, node types (Lobby table for first 2 floors, weighted core distribution after), canonical DV per Difficulty Rating, ICE placement with tier-curated species pool (no Giants in SR1), Convergence Black ICE at the Objective, optional Trace ICE, optional branched topology.
+
+**Your role is narrative overlay, not structural generation:**
+- Name the target system (e.g. "Arasaka HR Server", "STILLWATER Archive") in `target_system`.
+- On subsequent turns, fill the empty `contents` field on each node with what the runner actually finds (a payroll database, a security camera feed, a holographic chairman's vanity wall). The engine never writes contents.
+- Optionally pass `structure_hint: "linear"` or `"branched"` to override the random branch roll.
+- If your scenario REQUIRES a specific architecture (a key plot system the GM designed), you can supply a full `system_map` directly — the engine will normalize DVs and ICE eligibility against RAW but keep your structure.
+
+**Difficulty Rating reference (informational; backend applies these):**
 - SR 1 → Basic (DV 6) | SR 2-3 → Standard (DV 8) | SR 4 → Uncommon (DV 10) | SR 5 → Advanced (DV 12)
-All Password, File, and Control Node nodes use the SAME DV from the chosen rating. DVs do NOT escalate by node depth.
-Black ICE nodes do NOT use this DV — their stats are resolved by backend from ICE type.
-**Lobby (first two nodes):** The first two nodes may use lighter content regardless of rating — File DV6, Password DV6, or Password DV8.
-**Custom architectures:** GMs may mix DVs across nodes for narrative purposes (CRB p.209), but the default is uniform DV from the Difficulty Rating.
+- Lobby nodes (first 2) may use lighter DVs (6 or 8) regardless of rating.
+- Black ICE entries do NOT use the architecture DV — backend resolves their stats from ICE type.
+- Eligible ICE species per tier are drawn from the curated pool — Giants only appear in Advanced (SR5), Skunks only in Basic (SR1) up through Uncommon, etc. RAW-illegal placements (planner-supplied) are auto-downgraded at apply time.
 
 ### Quick Hack Flow (Rulebook §3)
-3 linear nodes (entry → obstacle → objective).
-- Exchange 1: Choose Difficulty Rating by SR (see above). Generate the 3-node linear architecture and store in hack_state.system_map (same JSON format as Full Run — just 3 nodes with linear connections). Initialize revealed_nodes with the starting node. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
+3 linear nodes (Gateway → Obstacle → Objective). Backend generates the structure from `{sr, tier: "quick_hack"}` — you only narrate the jack-in, the NET environment, and present options.
+- Exchange 1: Set `tier: "quick_hack"` and `sr` in hack_state. Backend generates the 3-node map. Describe jacking in, the NET environment, first ICE. Present options. Do NOT resolve for the player.
 - Exchanges 2-5: Navigate obstacle nodes, resolve ICE encounters and checks. One player decision + resolution per exchange.
 - Final exchange: Objective node + completion. Set hack_complete: true.
 - Target 3-6 exchanges total. NEVER compress multiple phases into one exchange. NEVER choose actions for the player.
 
 ### Full Run Flow (Rulebook §4)
-4-6 node network with routing choices.
-- Exchange 1: Choose Difficulty Rating by SR (see above). Generate system architecture per Rulebook §4. Store in hack_state.system_map as JSON: {"sr": N, "difficulty": "basic|standard|uncommon|advanced", "nodes": {"NodeName": {"type": "gateway|data_node|control_node|password_gate|target", "ice": "patrol|tar|black|trace|null", "dv": N, "connections": [...], "contents": "..."}}}
-- Initialize revealed_nodes with the starting node. Describe the Gateway node. The player does NOT see the full map — reveal only through navigation and Probe/Pathfinder.
-- Subsequent exchanges: Player navigates, fights ICE, accesses objectives. Only reveal nodes the Netrunner can see.
+Backend generates 4-10 node network from `{sr, tier: "full_run"}` per the per-difficulty floor-count table — you do NOT generate it.
+- Exchange 1: Set `tier: "full_run"`, `sr`, and `target_system` in hack_state. Backend produces the full system_map (Gateway + Lobby + Core + Objective, ICE placed, Convergence at Objective, optional Trace and branch). Initialize `revealed_nodes` with the Gateway. Describe the Gateway node. The player does NOT see the full map — reveal only through navigation and Pathfinder.
+- Subsequent exchanges: Player navigates, fights ICE, accesses objectives. Only reveal nodes the Netrunner can see. Fill node `contents` as the runner discovers them.
 - Target 5-10 exchanges total.
 
 ### State Tracking

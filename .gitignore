@@ -56,6 +56,7 @@
 !backend/game_systems/cpred_tables.py
 !backend/game_systems/cpred_mechanics.py
 !backend/game_systems/cpred_program_effects.py
+!backend/game_systems/cpred_architecture_gen.py
 !backend/game_systems/cpred_identity.py
 !backend/game_systems/dnd5e_cyber.py
 !backend/game_systems/novels.py

@@ -9037,5 +9037,231 @@ class TestProgramAttackAmbiguousTarget(unittest.TestCase):
         self.assertNotIn("error", r)
 
 
+class TestArchitectureGenerator(unittest.TestCase):
+    """Backend architecture generator (cpred_architecture_gen.generate_architecture).
+
+    Generator takes {sr, tier, seed} and produces a complete RAW-legal
+    system_map + ice_status per CRB p.210-211 random tables.
+    """
+
+    def test_quick_hack_is_three_linear_nodes(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        r = generate_architecture(sr=2, tier="quick_hack", seed=1)
+        names = list(r["system_map"]["nodes"].keys())
+        self.assertEqual(names, ["Gateway", "Obstacle", "Objective"])
+        self.assertEqual(r["system_map"]["topology"], "linear")
+        # Quick Hacks have no ICE pre-placed (planner handles encounters).
+        self.assertEqual(r["ice_status"], {})
+
+    def test_full_run_floor_count_in_range_for_difficulty(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        from game_systems.cpred_tables import (
+            ARCHITECTURE_FLOOR_RANGE, SR_DIFFICULTY_RATING,
+        )
+        for sr in (1, 2, 3, 4, 5):
+            r = generate_architecture(sr=sr, tier="full_run", seed=sr * 13)
+            difficulty = SR_DIFFICULTY_RATING[sr]
+            lo, hi = ARCHITECTURE_FLOOR_RANGE[difficulty]
+            count = len(r["system_map"]["nodes"])
+            # Generator may add 1 side-branch node on top of floor count.
+            self.assertGreaterEqual(count, lo, f"SR{sr} below floor floor")
+            self.assertLessEqual(count, hi + 1, f"SR{sr} above floor ceiling")
+
+    def test_all_placed_ice_species_in_eligible_pool(self):
+        """RAW-critical: SR1 must never spawn a Giant; SR5 may."""
+        from game_systems.cpred_architecture_gen import generate_architecture
+        from game_systems.cpred_tables import (
+            ice_pool_for_sr, CONVERGENCE_ICE_BY_SR,
+        )
+        for sr in (1, 2, 3, 4, 5):
+            for seed in range(20):
+                r = generate_architecture(sr=sr, tier="full_run", seed=seed)
+                pool = set(ice_pool_for_sr(sr))
+                # Convergence ICE is RAW-fixed by SR; trace is its own thing.
+                exempt = {CONVERGENCE_ICE_BY_SR[sr], "trace"}
+                for ice in r["ice_status"].values():
+                    species = ice.get("species")
+                    self.assertTrue(
+                        species in pool or species in exempt,
+                        f"SR{sr} seed{seed}: illegal species {species!r}",
+                    )
+
+    def test_giant_never_spawns_in_sr1(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        for seed in range(50):
+            r = generate_architecture(sr=1, tier="full_run", seed=seed)
+            species = [v.get("species") for v in r["ice_status"].values()]
+            self.assertNotIn("giant", species, f"SR1 seed{seed} spawned Giant")
+            self.assertNotIn("kraken", species, f"SR1 seed{seed} spawned Kraken")
+            self.assertNotIn("dragon", species, f"SR1 seed{seed} spawned Dragon")
+
+    def test_convergence_ice_at_objective_for_full_run(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        from game_systems.cpred_tables import CONVERGENCE_ICE_BY_SR
+        for sr in (1, 2, 3, 4, 5):
+            r = generate_architecture(sr=sr, tier="full_run", seed=sr)
+            expected = CONVERGENCE_ICE_BY_SR[sr]
+            objective_ice = [
+                v for k, v in r["ice_status"].items()
+                if k.startswith("Objective::")
+            ]
+            self.assertTrue(
+                any(ice.get("species") == expected for ice in objective_ice),
+                f"SR{sr}: no Convergence {expected} at Objective",
+            )
+
+    def test_canonical_dvs_per_difficulty(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        from game_systems.cpred_tables import (
+            ARCHITECTURE_DIFFICULTY_DV, SR_DIFFICULTY_RATING,
+        )
+        for sr in (1, 2, 3, 4, 5):
+            r = generate_architecture(sr=sr, tier="full_run", seed=sr)
+            expected_dv = ARCHITECTURE_DIFFICULTY_DV[SR_DIFFICULTY_RATING[sr]]
+            # Lobby DVs may differ (they're rolled from LOBBY_NODE_TABLE).
+            for name, node in r["system_map"]["nodes"].items():
+                if name in ("Lobby 1", "Lobby 2"):
+                    continue
+                self.assertEqual(
+                    node["dv"], expected_dv,
+                    f"SR{sr} {name}: DV {node['dv']} != canonical {expected_dv}",
+                )
+
+    def test_seed_determinism(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        a = generate_architecture(sr=3, tier="full_run", seed=42)
+        b = generate_architecture(sr=3, tier="full_run", seed=42)
+        self.assertEqual(a, b)
+
+    def test_topology_linear_or_branched(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        r = generate_architecture(sr=5, tier="full_run", seed=2)
+        self.assertIn(r["system_map"]["topology"], ("linear", "branched"))
+
+    def test_target_system_propagates_to_system_map(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        r = generate_architecture(sr=2, tier="full_run",
+                                  target_system="Arasaka HR Server", seed=1)
+        self.assertEqual(r["system_map"]["target_system"], "Arasaka HR Server")
+
+    def test_sr_clamped_to_legal_range(self):
+        from game_systems.cpred_architecture_gen import generate_architecture
+        self.assertEqual(generate_architecture(sr=99, seed=1)["system_map"]["sr"], 5)
+        self.assertEqual(generate_architecture(sr=-3, seed=1)["system_map"]["sr"], 1)
+
+
+class TestIceTierValidator(unittest.TestCase):
+    """_validate_ice_tier_eligibility downgrades RAW-illegal ICE placements."""
+
+    def test_giant_in_sr1_gets_downgraded(self):
+        from game_systems.cpred_hack import _validate_ice_tier_eligibility
+        from game_systems.cpred_tables import ice_pool_for_sr
+        state = {
+            "system_map": {"sr": 1, "difficulty": "basic"},
+            "ice_status": {
+                "Floor 2::Giant": {
+                    "species": "giant", "name": "Giant",
+                    "behavior": "patrol", "status": "active",
+                    "per": 2, "atk": 8, "def": 4, "rez": 25,
+                },
+            },
+        }
+        _validate_ice_tier_eligibility(state)
+        entry = state["ice_status"]["Floor 2::Giant"]
+        # Species was downgraded to something in the SR1 pool.
+        self.assertIn(entry["species"], ice_pool_for_sr(1))
+        self.assertEqual(entry["_tier_downgraded_from"], "giant")
+
+    def test_legal_placement_unchanged(self):
+        from game_systems.cpred_hack import _validate_ice_tier_eligibility
+        state = {
+            "system_map": {"sr": 3, "difficulty": "standard"},
+            "ice_status": {
+                "Floor 2::Hellhound": {
+                    "species": "hellhound", "name": "Hellhound",
+                    "behavior": "patrol", "status": "active",
+                    "per": 6, "atk": 6, "def": 2, "rez": 20,
+                },
+            },
+        }
+        _validate_ice_tier_eligibility(state)
+        entry = state["ice_status"]["Floor 2::Hellhound"]
+        self.assertEqual(entry["species"], "hellhound")
+        self.assertNotIn("_tier_downgraded_from", entry)
+
+    def test_convergence_ice_exempt_from_tier_check(self):
+        """Convergence ICE is RAW-fixed by SR; never downgraded even if
+        species would otherwise be illegal for the tier pool."""
+        from game_systems.cpred_hack import _validate_ice_tier_eligibility
+        # Giant is the SR3 Convergence even though it's not in SR3's pool.
+        state = {
+            "system_map": {"sr": 3, "difficulty": "standard"},
+            "ice_status": {
+                "Objective::Giant": {
+                    "species": "giant", "name": "Giant",
+                    "behavior": "convergence", "status": "active",
+                },
+            },
+        }
+        _validate_ice_tier_eligibility(state)
+        entry = state["ice_status"]["Objective::Giant"]
+        self.assertEqual(entry["species"], "giant")  # untouched
+
+    def test_watcher_entries_skipped(self):
+        from game_systems.cpred_hack import _validate_ice_tier_eligibility
+        state = {
+            "system_map": {"sr": 1, "difficulty": "basic"},
+            "ice_status": {
+                "Floor 2::Imp": {
+                    "name": "Imp", "entity_type": "demon",
+                    "interface_rank": 3, "status": "active",
+                },
+            },
+        }
+        _validate_ice_tier_eligibility(state)
+        self.assertEqual(state["ice_status"]["Floor 2::Imp"]["entity_type"], "demon")
+
+
+class TestApplyHackStateAutoGenerates(unittest.TestCase):
+    """apply_hack_state auto-generates the system_map when planner provides
+    only {sr, tier} — no manual map required."""
+
+    def test_apply_with_only_sr_and_tier_generates_map(self):
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        state = init_hack_state(tier="full_run", sr=3, hacker_name="V")
+        # No system_map provided.
+        self.assertIsNone(state["system_map"])
+        apply_hack_state(state, tool_input={})
+        # Now populated by generator.
+        self.assertIsInstance(state["system_map"], dict)
+        nodes = state["system_map"]["nodes"]
+        self.assertGreaterEqual(len(nodes), 5)  # SR3 standard: 5-6 floors
+        self.assertIn("Gateway", nodes)
+        self.assertIn("Objective", nodes)
+
+    def test_apply_skips_generator_when_planner_supplies_map(self):
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        state = init_hack_state(tier="full_run", sr=3, hacker_name="V")
+        custom = {
+            "sr": 3, "difficulty": "standard",
+            "nodes": {
+                "Gateway":   {"type": "gateway", "dv": 8, "connections": ["Vault"]},
+                "Vault":     {"type": "target",  "dv": 8, "connections": ["Gateway"]},
+            },
+        }
+        state["system_map"] = custom
+        apply_hack_state(state, tool_input={})
+        # Planner-supplied map preserved (post-min-arch extension to 4 nodes).
+        self.assertIn("Gateway", state["system_map"]["nodes"])
+        self.assertIn("Vault", state["system_map"]["nodes"])
+
+    def test_apply_with_quick_hack_generates_three_linear(self):
+        from game_systems.cpred_hack import init_hack_state, apply_hack_state
+        state = init_hack_state(tier="quick_hack", sr=1, hacker_name="V")
+        apply_hack_state(state, tool_input={})
+        nodes = state["system_map"]["nodes"]
+        self.assertEqual(set(nodes.keys()), {"Gateway", "Obstacle", "Objective"})
+
+
 if __name__ == "__main__":
     unittest.main()
