@@ -463,17 +463,16 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
                     {name}
                   </text>
 
-                  {/* DV badge — visible for every revealed node, not just
-                       visited.  Pathfinder is supposed to reveal DV per
-                       rulebook §16, so dimming it for not-yet-entered
-                       nodes was hiding the one value the runner actually
-                       used Pathfinder to learn. */}
-                  {node.dv > 0 && (
+                  {/* DV badge — only for VISITED nodes per RAW.  Pathfinder
+                       reveals layout (existence, type, connections, ICE)
+                       but NOT the DV; the runner has to actually enter
+                       the node to learn how hard the gate/check is. */}
+                  {isVisited && node.dv > 0 && (
                     <text
                       x={pos.x}
                       y={pos.y + 4}
                       textAnchor="middle"
-                      fill={isCurrent ? '#00ff41' : isVisited ? '#00aa30' : '#00802099'}
+                      fill={isCurrent ? '#00ff41' : '#00aa30'}
                       fontSize="8"
                       fontFamily='monospace'
                       fontWeight={600}
