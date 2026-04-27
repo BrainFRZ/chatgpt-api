@@ -376,17 +376,29 @@ const NetMapPopup: React.FC<NetMapPopupProps> = ({
               const toRevealed = revealedSet.has(to);
 
               if (bothRevealed) {
-                // Both revealed — full solid edge.  No filter: feGaussianBlur
+                // Both revealed — dashed line between node EDGES (not
+                // centers), matching the stub aesthetic.  Offset both
+                // endpoints by ~NODE_RADIUS along the line direction so
+                // the line stops at the node boundary on each side and
+                // doesn't cut through labels.  No SVG filter: feGaussianBlur
                 // on a vertical line has a degenerate (zero-width) bounding
                 // box that some renderers clip, hiding the line entirely.
-                // Bumping strokeWidth + opacity gives the same readability.
+                const edx = p2.x - p1.x;
+                const edy = p2.y - p1.y;
+                const edist = Math.hypot(edx, edy) || 1;
+                const offset = 38;  // past NODE_RADIUS + label band
+                const sx = p1.x + (edx / edist) * offset;
+                const sy = p1.y + (edy / edist) * offset;
+                const ex = p2.x - (edx / edist) * offset;
+                const ey = p2.y - (edy / edist) * offset;
                 return (
                   <line
                     key={`${from}-${to}`}
-                    x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+                    x1={sx} y1={sy} x2={ex} y2={ey}
                     stroke="#00ff41"
-                    strokeWidth={2}
-                    opacity={0.85}
+                    strokeWidth={1.25}
+                    opacity={0.7}
+                    strokeDasharray="4 3"
                     strokeLinecap="round"
                   />
                 );
