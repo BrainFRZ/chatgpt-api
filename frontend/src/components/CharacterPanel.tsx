@@ -357,9 +357,58 @@ export default function CharacterPanel({
                 <div style={{ fontSize: '0.65rem', color: '#666', marginBottom: '2px' }}>Programs</div>
                 <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
                   {hs.active_programs.map((p: { name: string; category: string; rez: number; status: string }, i: number) => {
-                    const dimmed = p.status !== 'active';
+                    // Status visual encoding (per Hacking Rulebook program lifecycle):
+                    //   active      → lit (full color, no decoration)
+                    //   deactivated → grayed (dimmed, no decoration; just stored, recoverable in 1 NA)
+                    //   derezzed    → grayed + double strikethrough (recoverable in 2 NA: deactivate → activate)
+                    //   destroyed   → very dim + double strikethrough (permanent loss unless Backup Drive saved)
+                    const status = String(p.status || '').toLowerCase();
+                    let color = categoryColor(p.category);
+                    let opacity = 1;
+                    let textDecorationLine: 'none' | 'line-through' = 'none';
+                    let textDecorationStyle: 'solid' | 'double' = 'solid';
+                    let textDecorationThickness: string | undefined = undefined;
+                    let bgColor = `${categoryColor(p.category)}18`;
+                    if (status === 'deactivated') {
+                      // Grayed out, no decoration
+                      color = '#666';
+                      opacity = 0.55;
+                      bgColor = '#1a1a1a';
+                    } else if (status === 'derezzed') {
+                      // Grayed + double strikethrough — distinct from deactivated
+                      color = '#666';
+                      opacity = 0.55;
+                      bgColor = '#1a1a1a';
+                      textDecorationLine = 'line-through';
+                      textDecorationStyle = 'double';
+                      textDecorationThickness = '2px';
+                    } else if (status === 'destroyed') {
+                      // Very dim + double strikethrough — most extreme
+                      color = '#444';
+                      opacity = 0.35;
+                      bgColor = '#0d0d0d';
+                      textDecorationLine = 'line-through';
+                      textDecorationStyle = 'double';
+                      textDecorationThickness = '2px';
+                    }
+                    // active falls through with default lit styling
                     return (
-                      <span key={i} style={{ fontSize: '0.6rem', padding: '1px 5px', borderRadius: '3px', backgroundColor: `${categoryColor(p.category)}18`, color: dimmed ? '#666' : categoryColor(p.category), fontWeight: 500, opacity: dimmed ? 0.6 : 1, textDecoration: dimmed ? 'line-through' : 'none' }}>
+                      <span
+                        key={i}
+                        title={`${p.name} (${p.category}, ${status}${p.rez > 0 ? `, REZ ${p.rez}` : ''})`}
+                        style={{
+                          fontSize: '0.6rem',
+                          padding: '1px 5px',
+                          borderRadius: '3px',
+                          backgroundColor: bgColor,
+                          color,
+                          fontWeight: 500,
+                          opacity,
+                          textDecorationLine,
+                          textDecorationStyle,
+                          textDecorationThickness,
+                        }}
+                      >
                         {p.name} {p.rez > 0 ? `R${p.rez}` : ''}
                       </span>
                     );
