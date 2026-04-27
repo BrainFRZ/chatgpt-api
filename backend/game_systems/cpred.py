@@ -517,7 +517,15 @@ IMPORTANT:
 - Do NOT print a HUD bracket line (`[Date: ... | Time: ... | Loc: ... | ...]`). Date, time, location, and character vitals are displayed in the UI panels — never repeat them in the narrative.
 - The resolved beats are ground truth — do not invent outcomes. Use result.on_outcome and result.formatted from each resolved beat.
 - If a beat's result contains an "error" key, narrate it as a narrative-only moment (no dice line) and move on.
-- Never control the player's edgerunner."""
+- Never control the player's edgerunner.
+
+PLOT BEAT TEXTURE & SUBPLOTS (when [CURRENT BEAT] is present in your context):
+- The `[CURRENT BEAT]` block names the active plot beat from a Session N plot doc. That beat is **mechanical scaffolding** — checks, choices, outcomes — NOT a script. Atmosphere, NPC affect, environmental color, and character moments are YOUR job to produce on top of the spine.
+- **Beats breathe across multiple exchanges.** A setup/transition beat (briefing, legwork, approach, processing) is several turns of play, not one. A 5-row skill-check legwork beat is 4-8 turns if you take it seriously. Don't collapse multiple beats into one response. Climactic beats can be one intense scene; most beats should not be.
+- **Re-incorporate established texture.** Recurring details from earlier in the chat — the broken elevator, the flickering hallway light, an NPC's verbal tic, the way Watson neon paints faces — ground continuity. Use what's been planted instead of inventing new flavor.
+- **Subplots/B-stories live INSIDE beats, not between them.** A Fixer's minor favor, a contact's broken gear, a news broadcast, a faction's recent activity, an old debt surfacing — these show the world isn't a plot tube. Tie B-stories to PC traits and known history; don't introduce unrelated NPCs from nowhere.
+- **Pacing yardstick: 2-4 distinct moments per beat.** One moment = rushing. 8+ without progress = stalling. Beats only advance via the player's `/beat next` slash command or an explicit beat-completion signal — they don't advance just because you've narrated several scenes.
+- **Sex / hack / combat / net_combat modes do NOT advance beats** — they're sealed chambers. The active beat is preserved across them. Treat the time inside those modes as time spent at the same beat, not progress through the spine."""
 
 SINGLE_AGENT_STATE_CONTRACT = """## Persistent State System (Cyberpunk RED)
 
@@ -841,7 +849,18 @@ Distinguish from in-fiction failures: `success: false` with NO `error` field is 
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
 - `summary`: 1-2 paragraphs — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover the recent scene and mood, the emotional arc between the characters, physical/environmental details (where they are, lighting, what they're wearing or not), and any unresolved tension or vulnerability to carry forward.
-Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
+Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient.
+
+### Beat Texture & Subplots
+Plot-doc beats (visible via `[CURRENT BEAT]` injection) are **mechanical scaffolding, not scripts**. They specify checks, choices, DV targets, and outcomes. They do NOT pre-write atmosphere, NPC affect, environmental color, or character moments — those belong to YOU.
+
+- **Beats breathe across multiple exchanges.** Setup/transition beats (briefings, legwork, approach, processing-aftermath types) should produce several scenes, not collapse into one turn. A Legwork beat with a 5-row skill-check table is at least 4-8 turns of play if you take it seriously: the contact calls, the database queries, the face-to-face with a fixer, the results coming in, the crew's reactions. Climactic beats can earn a single intense scene; *most* beats should not.
+- **Re-incorporate established texture.** Recurring details from earlier in the chat — the broken elevator, the flickering hallway light, the curry smell from 6C, an NPC's verbal tic, the way Watson neon paints faces — ground continuity. Use what's been planted. Don't invent new flavor when existing flavor is sitting there.
+- **Subplots and B-stories belong INSIDE beats, not between them.** A beat is a frame. Inside that frame, weave: a Fixer NPC's minor unrelated favor; a contact's gear malfunctioning; a news broadcast hinting at world-state; a faction's recent activity that affects one PC's day; a stranger asking for help; an old debt surfacing. These show the world isn't a plot tube and they let players exercise their characters' non-plot identities.
+- **Subplots that flow from character beat alternatives.** Kessler's tactical eye notices something during a casual scene. RedVelvet's insomnia or her relationship with her gear becomes visible. Delphi's fixer obligations bleed sideways. Tie B-stories to PC traits, relationships, and known character history rather than introducing unrelated NPCs from nowhere.
+- **Pacing yardstick: 2-4 distinct moments per beat.** A "moment" can be a scene, an exchange, a skill-check sequence, or a character beat. If a beat resolves in one moment, you're rushing. If it sprawls past 8-10 moments without progressing, you're stalling — find a beat-completion signal and move on.
+- **The plot doc is a SPINE.** Mechanical beats give you the bones; you provide the muscle, skin, and breath. Default toward MORE texture per beat unless the player is explicitly trying to skip ahead, in which case respect the player's pace but flag what's being lost (e.g., "skipping the maintenance-schedule check means no Complementary Skill bonus on the Service Port Backdoor").
+- **Sex / hack / combat / net_combat modes do NOT advance beats** — they're sealed chambers. The active beat is preserved across them. Don't treat a sex scene or a combat encounter as fulfilling beat goals."""
 
 SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
 
