@@ -92,6 +92,36 @@ def _advance_mode_hud_clock(pipeline_state: dict, seconds: Optional[int]) -> Non
         replace_snapshot=False,
     )
 
+
+def _stamp_message_hud_snapshot(assistant_msg_data: dict, pipeline_state_source: dict | None) -> None:
+    """Ensure an assistant message carries a hud_state snapshot for the
+    frontend per-message timestamp header (ChatView.getMessageHudLine).
+
+    Stateful normal-mode messages get a full pipeline_state_after via the
+    standard save path; mode messages (sex / hack / combat / net_combat /
+    ship_combat) don't, but the live `pipeline_state.hud_state` is current
+    by the time we save (mode dispatchers call `_advance_mode_hud_clock`
+    before save). This snapshots just the hud_state slice into
+    pipeline_state_after so the frontend can read date/time/location.
+
+    Idempotent — won't overwrite an existing pipeline_state_after that
+    already has hud_state populated.
+    """
+    import copy
+    if not isinstance(assistant_msg_data, dict):
+        return
+    src = pipeline_state_source if isinstance(pipeline_state_source, dict) else {}
+    hud = src.get("hud_state")
+    if not isinstance(hud, dict):
+        return
+    psa = assistant_msg_data.get("pipeline_state_after")
+    if isinstance(psa, dict):
+        if isinstance(psa.get("hud_state"), dict):
+            return  # already populated
+        psa["hud_state"] = copy.deepcopy(hud)
+    else:
+        assistant_msg_data["pipeline_state_after"] = {"hud_state": copy.deepcopy(hud)}
+
 # ============================================================
 # Configuration Constants
 # ============================================================
@@ -2833,7 +2863,7 @@ def send_message(request: SendMessageRequest):
         if reasoning_summary:
             assistant_msg_data["reasoning"] = reasoning_summary
 
-        data["messages"].append(assistant_msg_data)
+        _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
 
         # Update current_leaf_id to the new assistant message
         data["current_leaf_id"] = assistant_msg_id
@@ -6076,7 +6106,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if _active_ship_combat and "start_message_id" not in _active_ship_combat:
                 _active_ship_combat["start_message_id"] = assistant_msg_id
 
-            data["messages"].append(assistant_msg_data)
+            _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
             data["current_leaf_id"] = assistant_msg_id
             save_chat(username, request.chat_name, data, request.project)
 
@@ -6382,7 +6412,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if data.get("hack_state"):
                     assistant_msg_data["hack_state_after"] = copy.deepcopy(data["hack_state"])
 
-                data["messages"].append(assistant_msg_data)
+                _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
                 save_chat(username, request.chat_name, data, request.project)
 
@@ -6672,7 +6702,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if active_combat and "start_message_id" not in active_combat:
                     active_combat["start_message_id"] = assistant_msg_id
 
-                data["messages"].append(assistant_msg_data)
+                _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
                 save_chat(username, request.chat_name, data, request.project)
 
@@ -6941,7 +6971,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if active_combat and "start_message_id" not in active_combat:
                     active_combat["start_message_id"] = assistant_msg_id
 
-                data["messages"].append(assistant_msg_data)
+                _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
                 save_chat(username, request.chat_name, data, request.project)
 
@@ -7148,7 +7178,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if data.get("pipeline_state"):
                     assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
 
-                data["messages"].append(assistant_msg_data)
+                _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
                 save_chat(username, request.chat_name, data, request.project)
 
@@ -7597,7 +7627,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if pipeline_result.stage_usage is not None:
                     assistant_msg_data["pipeline_stage_usage"] = pipeline_result.stage_usage
 
-                data["messages"].append(assistant_msg_data)
+                _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
 
                 # Track combat start_message_id when combat begins via pipeline
@@ -8929,7 +8959,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     assistant_msg_data["ship_combat_bootstrap_messages"] = copy.deepcopy(ship_combat_bootstrap_messages_snapshot)
 
                         if not _sex_handoff_detected:
-                            data["messages"].append(assistant_msg_data)
+                            _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                             data["current_leaf_id"] = assistant_msg_id
 
                         # Track combat start_message_id when combat begins
@@ -9323,7 +9353,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         "cost": "unknown",
                         "model": model_id
                     }
-                    data["messages"].append(assistant_msg_data)
+                    _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                     data["current_leaf_id"] = assistant_msg_id
                     save_chat(username, request.chat_name, data, request.project)
                     logger.info(f"CancelledError: saved partial response ({len(accumulated_content)} chars) for user {username}")
@@ -9353,7 +9383,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         "cost": "unknown",
                         "model": model_id
                     }
-                    data["messages"].append(assistant_msg_data)
+                    _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                     data["current_leaf_id"] = assistant_msg_id
                     save_chat(username, request.chat_name, data, request.project)
                 except Exception as save_err:
