@@ -9532,6 +9532,33 @@ class TestBackdoorEntry(unittest.TestCase):
         self.assertTrue(backdoor_r["success"])
         self.assertEqual(sc_r.get("skipped"), "backdoor_grace")
 
+    def test_eraser_fires_on_backdoor_entry_homerule(self):
+        """HOMERULE: Eraser (+2 Cloak) applies to Backdoor Entry — same job
+        as Going Quiet stealth_contest, so the Cloak-tied booster fires.
+        """
+        from game_systems.cpred_mechanics import resolve_actions
+        active_programs = [
+            {"name": "Eraser", "category": "booster", "rez": 7, "status": "active"}
+        ]
+        # Both d10s = 5 → tied, ICE wins ties unless attacker advantage.
+        # Without Eraser: Interface 4 + 5 = 9 vs Asp PER 4 + 5 = 9 → ICE wins.
+        # With Eraser: Interface 4 + Cloak 2 + 5 = 11 vs 9 → runner wins.
+        with patch("random.randint", side_effect=[5, 5]):
+            res = resolve_actions(
+                [{"type": "backdoor_entry", "character": "V",
+                  "target": "Floor 1", "interface_rank": 4}],
+                system_map=self._two_node_map(),
+                current_node="Gateway",
+                ice_status=self._ice_status_with_asp_at_floor1(),
+                active_programs=active_programs,
+                net_actions_remaining=3,
+            )
+        r = res["results"][0]
+        self.assertTrue(r["success"], "Eraser +2 should flip the tied roll")
+        self.assertTrue(any(label.lower().startswith("eraser")
+                            or "cloak" in label.lower()
+                            for label, _ in r["booster_bonuses"]))
+
     def test_external_grace_flag_skips_speed_check(self):
         """Pre-existing backdoor_grace from prior turn (apply layer set
         hack_state.backdoor_grace before resolver fired) skips the SC."""

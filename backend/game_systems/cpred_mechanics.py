@@ -5582,10 +5582,28 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                                     _be_iface = 0
                                 break
                 _be_iface = int(_be_iface or 0)
+                # HOMERULE: Backdoor Entry is the pre-Going-Quiet equivalent
+                # of stealth_contest — same job (slip past ICE on entry),
+                # just from the project rulebook before ability-tagging.
+                # Tagging it as a Cloak check so Eraser (+2 Cloak) fires
+                # keeps the booster's "stealth gear" intuition intact and
+                # leaves Going Quiet differentiated by OUTCOME (silent
+                # bypass vs 1-round grace), not odds.
+                from .cpred_program_effects import run_interface_check_hooks
+                _be_hs_proxy = {
+                    "active_programs": active_programs,
+                    "installed_hardware": installed_hardware,
+                    "active_boosts": active_boosts,
+                }
+                _, _be_booster_labels = run_interface_check_hooks(
+                    "Cloak", _be_iface, _be_hs_proxy
+                )
+                _be_bonus_total = sum(v for _, v in _be_booster_labels)
                 _be_result = resolve_opposed_check(
-                    attacker_stat=_be_iface,
+                    attacker_stat=_be_iface + _be_bonus_total,
                     defender_stat=_be_per_max,
-                    attacker_label="Interface",
+                    attacker_label=("Interface+Cloak" if _be_booster_labels
+                                    else "Interface"),
                     defender_label=f"{_be_top_ice} PER",
                 )
                 _be_passed = bool(_be_result.get("success"))
@@ -5613,6 +5631,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "success": _be_passed,
                     "passed": _be_passed,
                     "roll": _be_result,
+                    "booster_bonuses": list(_be_booster_labels),
                     "cost_net_actions": 1,
                     "formatted": (
                         f"🎲 Backdoor Entry → {_be_target_node} "
