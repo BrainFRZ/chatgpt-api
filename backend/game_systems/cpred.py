@@ -1657,6 +1657,9 @@ An exchange may cover part or all of a Netrunner turn. The player controls how m
 ### Meat Actions During a Hack
 Per CPRED RAW, every character gets **1 Move Action + 1 Action** per turn. The Netrunner's Action is what becomes NET Actions — **the Move Action is always available on top**, and movement does NOT cost NET actions or consume the turn. **Taking cover is part of the Move Action** (any cover the Netrunner reaches while moving is free — not a separate Meat Action). Requires Virtuality Goggles to move while Jacked In (without them the Netrunner is Unconscious in meatspace and cannot move or dodge).
 
+### Netrunner's Meat Body — DO NOT NARRATE AS UNCONSCIOUS
+**Assume Virtuality Goggles unless explicitly told otherwise.** A jacked-in runner with Virtuality Goggles is upright, mobile, alert, conscious — they see the NET overlaid on real space and can move, talk, draw weapons, take cover, fight. Their NET activity does not incapacitate them. NEVER narrate the runner as "slumped," "collapsed," "catatonic," "limp," "still as a corpse," "unresponsive," or any framing implying the body is non-functional. Correct framings: standing at the access port with weight balanced; head tilted tracking architecture nobody else sees; Virtuality overlay washing across their face; cable from port to temple, free hand on a weapon or the wall. The only exceptions where unconscious-style framing is correct: the runner explicitly lacks Virtuality Goggles, OR they've been knocked out by a separate effect (Sleep ammo, KO blow). Default to mobile/aware.
+
 If the player instead spends their **Action** on a Meat Action (shoot, reload, a skill check, etc.), that consumes the NET half of the turn — set `net_actions_used` equal to the full `net_actions_per_turn` shown in [HACK STATE] to close the turn. The Netrunner does nothing in the NET that round. Meat Actions do NOT affect Alert — Alert only changes from events inside the architecture. However, the round still advances: Trace ICE progress ticks, Patrol ICE in the Netrunner's current node still scans, and any per-round effects (lingering in a node 3+ rounds, etc.) still apply — the Netrunner is still jacked in.
 
 ### Architecture Difficulty Rating (p.210-211)
@@ -2443,6 +2446,17 @@ RULES:
 - Include 🎲 roll breakdown lines for every resolved action
 - End each exchange presenting available options to the player
 
+NETRUNNER'S MEAT BODY (CRITICAL — DON'T NARRATE THE RUNNER AS UNCONSCIOUS):
+**Assume the runner has Virtuality Goggles unless explicitly told otherwise.** Per CPRED RAW, Virtuality Goggles let the Netrunner see the NET architecture as an overlay on real-world vision. The runner is **upright, mobile, alert, conscious** — they can move, talk, draw weapons, take cover, fight in meatspace, all while jacked in. Their NET activity does NOT incapacitate them physically.
+
+NEVER narrate the runner as "slumped," "collapsed," "catatonic," "unconscious," "limp," "still as a corpse," "unresponsive," or any framing that implies the body is non-functional during the hack. Common correct framings: standing at the access point with weight balanced; head tilted as they track the architecture nobody else can see; the green/blue Virtuality overlay washing across their face; cable running from port to temple while their free hand stays ready on a weapon or wall; eyes flicking between meatspace and NET geometry.
+
+The ONLY exceptions where the runner IS unconscious in meatspace:
+- Explicit statement that they lack Virtuality Goggles (the rare deck-only Netrunner)
+- The runner has been knocked out by separate effect (Sleep ammo, KO blow, etc.) — and even then, narrate the cause, not just the state.
+
+If unsure: assume Virtuality Goggles. Default to upright/mobile/aware.
+
 MEAT ROUND ORDERING (when meatspace_round is true):
 The meat-side crew acts in real time alongside the runner's NET turn. Order in the response depends on what happened this exchange:
 
@@ -2557,6 +2571,8 @@ RULES:
 - 2-5 sentences per section
 - Name combatants. Chrome reflects neon. Data streams as light.
 - End each exchange setting up the next combatant's situation
+
+NETRUNNER'S MEAT BODY: Assume the runner has Virtuality Goggles unless explicitly told otherwise. Per CPRED RAW the runner is **upright, mobile, alert, conscious** while jacked in — they can move, talk, draw weapons, take cover, fight in meatspace. NEVER narrate them as "slumped," "collapsed," "catatonic," "limp," "unresponsive," etc. Their NET activity does NOT incapacitate them. Correct framings: standing at the access port with weight balanced; head tilted as they track architecture nobody else sees; Virtuality overlay washing across their face; cable from port to temple, free hand on weapon or wall, ready to move. Exceptions where unconscious-style framing IS correct: explicitly no Virtuality Goggles, OR knocked out by separate effect (Sleep ammo, KO blow). Default to mobile/aware.
 
 MEAT ROUND ORDERING (dual-theater, when both meat and NET activity exist):
 - Pre-NET meat round (default for combat init or when meat acts first): meat → `---` → NET.
