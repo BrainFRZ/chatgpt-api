@@ -2298,33 +2298,14 @@ class TestStep6cWriteback(unittest.TestCase):
         }})
         self.assertNotIn("jack_out_lock_rounds_remaining", hs["active_boosts"])
 
-    # ----- Overclock turn-boundary integration -----
+    # ----- Overclock immediate +2 NA homerule -----
 
-    def test_overclock_grants_plus_one_na_at_turn_reset(self):
-        from game_systems.cpred_hack import apply_hack_state, init_hack_state
-        hs = init_hack_state(tier="full_run", interface_rank=4)
-        base_na = hs["net_actions_per_turn"]
-        hs["active_boosts"] = {"overclock_pending": True}
-        # Consume all NA → triggers turn boundary reset
-        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na}})
-        self.assertEqual(hs["net_actions_remaining"], base_na + 1)
-        # Single-shot — flag cleared
-        self.assertNotIn("overclock_pending", hs["active_boosts"])
-
-    def test_overclock_does_not_persist_across_turns(self):
-        from game_systems.cpred_hack import apply_hack_state, init_hack_state
-        hs = init_hack_state(tier="full_run", interface_rank=4)
-        base_na = hs["net_actions_per_turn"]
-        hs["active_boosts"] = {"overclock_pending": True}
-        # First turn boundary: bonus applies
-        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na}})
-        self.assertEqual(hs["net_actions_remaining"], base_na + 1)
-        # Second turn boundary: no more bonus
-        apply_hack_state(hs, {"hack_state": {"net_actions_used": base_na + 1}})
-        self.assertEqual(hs["net_actions_remaining"], base_na)
-
-    def test_overclock_flag_via_boosted_action_resolver(self):
-        """End-to-end: boosted_action sets overclock_pending."""
+    def test_overclock_grants_plus_two_na_immediately(self):
+        """Homerule: Overclock grants +2 NAs to the current turn pool
+        immediately at activation. Net: spend 1 NA + 1 Cycle, gain 2 NAs
+        back this turn = +1 effective action for 1 Cycle. Replaces the
+        prior 'next NA does 2 actions' / '+1 NA next turn' rule which
+        was a strict net loss."""
         from game_systems.cpred_mechanics import resolve_actions
         progs = [{"name": "Overclock", "status": "active", "rez": 7,
                   "category": "boosted_action"}]
@@ -2337,7 +2318,58 @@ class TestStep6cWriteback(unittest.TestCase):
         )
         r = result["results"][0]
         self.assertTrue(r["success"])
-        self.assertEqual(r["active_boost"], "overclock_pending")
+        self.assertEqual(r["extra_na_grant"], 2)
+        # net_actions_grant op emitted
+        grant_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "net_actions_grant"]
+        self.assertEqual(len(grant_ops), 1)
+        self.assertEqual(grant_ops[0]["amount"], 2)
+        self.assertEqual(grant_ops[0]["source"], "Overclock")
+
+    def test_overclock_other_boosted_actions_get_no_extra_na(self):
+        """Surge/Mask/Fortify/Spoof Signal don't get the +2 NA grant —
+        only Overclock."""
+        from game_systems.cpred_mechanics import resolve_actions
+        progs = [{"name": "Surge", "status": "active", "rez": 7,
+                  "category": "boosted_action"}]
+        result = resolve_actions(
+            [{"type": "boosted_action", "character": "RedVelvet",
+              "program": "Surge"}],
+            active_programs=progs,
+            net_actions_remaining=3,
+            cycles_remaining=2,
+        )
+        r = result["results"][0]
+        self.assertEqual(r["extra_na_grant"], 0)
+        grant_ops = [op for op in result["state_ops"]
+                     if isinstance(op, dict) and op.get("op") == "net_actions_grant"]
+        self.assertEqual(len(grant_ops), 0)
+
+    def test_overclock_pending_flag_clears_at_turn_boundary(self):
+        """Diagnostic flag still gets set + cleared even though the NA
+        bonus is now immediate, not deferred."""
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active_boosts"] = {"overclock_pending": True}
+        apply_hack_state(hs, {"hack_state": {"net_actions_used": hs["net_actions_per_turn"]}})
+        # Flag clears at turn boundary
+        self.assertNotIn("overclock_pending", hs["active_boosts"])
+        # NAs reset to base (no +1 carry-over — that was the bug)
+        self.assertEqual(hs["net_actions_remaining"], hs["net_actions_per_turn"])
+
+    def test_overclock_immediate_grant_persists_via_apply(self):
+        """net_actions_grant op flows through apply_hack_state to mutate
+        hack_state.net_actions_remaining live."""
+        from game_systems.cpred_hack import apply_hack_state, init_hack_state
+        from game_systems.cpred_hack import _apply_resolver_net_ops
+        hs = init_hack_state(tier="full_run", interface_rank=4)
+        hs["active"] = True
+        hs["net_actions_remaining"] = 2  # 1 NA already spent on Overclock activation
+        # Apply the resolver-emitted grant op
+        _apply_resolver_net_ops(hs, [
+            {"op": "net_actions_grant", "amount": 2, "source": "Overclock"}
+        ])
+        self.assertEqual(hs["net_actions_remaining"], 4)
 
 
 class TestStep6dPvpKickerGate(unittest.TestCase):

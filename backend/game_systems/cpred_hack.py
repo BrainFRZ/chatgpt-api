@@ -1045,6 +1045,19 @@ def _apply_resolver_net_ops(state, resolver_state_ops, game_state=None):
                     elif et not in ("demon", "watcher_netrunner"):
                         continue
                     _entry["stealth_aware"] = True
+        elif op_t == "net_actions_grant":
+            # Overclock and any future immediate-NA-grant boosted actions:
+            # add to the current turn's NA pool. The resolver already
+            # mutated its running counter; this persists the change to
+            # hack_state so the post-apply HUD/render shows the boosted pool.
+            try:
+                amount = int(op.get("amount", 0))
+            except (TypeError, ValueError):
+                amount = 0
+            if amount > 0:
+                cur = state.get("net_actions_remaining")
+                if isinstance(cur, int):
+                    state["net_actions_remaining"] = cur + amount
         elif op_t == "watcher_search_used":
             # Mark a Watcher's last_search_round to enforce once-per-turn.
             ice_key = op.get("ice_key")
@@ -1558,16 +1571,16 @@ def apply_hack_state(hack_state, tool_input, resolver_state_ops=None, game_state
         remaining = max(0, remaining - net_actions_used)
         if remaining <= 0:
             # Turn complete — reset for next turn and flag meatspace.
-            # Step 6c: Overclock grants +1 NA on the upcoming turn. Consume
-            # the active_boosts.overclock_pending flag here at the boundary.
+            # Overclock note: prior model gave +1 NA on the upcoming turn,
+            # which was a strict net loss (1 Cycle spent for 0 action gain).
+            # Overclock now grants +2 NAs IMMEDIATELY at activation time
+            # (handled inline in the boosted_action resolver). The
+            # overclock_pending flag is cleared below as a one-shot diagnostic.
             base_na = hack_state.get("net_actions_per_turn", 3)
             boosts = hack_state.get("active_boosts", {}) if isinstance(hack_state.get("active_boosts"), dict) else {}
-            if boosts.get("overclock_pending"):
-                hack_state["net_actions_remaining"] = base_na + 1
-                # Clear the flag (single-shot bonus)
-                boosts.pop("overclock_pending", None)
-            else:
-                hack_state["net_actions_remaining"] = base_na
+            hack_state["net_actions_remaining"] = base_na
+            # Clear the diagnostic flag at turn boundary (one-shot per activation)
+            boosts.pop("overclock_pending", None)
             # Step 6c: tick the Superglue jack-out lock countdown each
             # turn boundary. The lock lives on the TARGET's state (not on
             # the deck of whoever fired Superglue), so decrement is

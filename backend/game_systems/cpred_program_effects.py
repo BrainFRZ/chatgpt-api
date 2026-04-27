@@ -372,13 +372,15 @@ def _superglue_on_attack_hit(attack_result, prog, hack_state):
 
 
 def _overclock_on_turn_end(hack_state, game_state):
-    """Overclock pending flag persists until consumed by the next turn's
-    NA reset (apply_hack_state turn-boundary code reads
-    active_boosts.overclock_pending and applies +1 NA). on_turn_end is a
-    no-op for the flag itself; the reset path handles consumption.
+    """Overclock now grants +2 NAs IMMEDIATELY at activation time
+    (handled inline in the boosted_action resolver in cpred_mechanics —
+    homerule fix for the strict-net-loss bug of the original 'next NA
+    does 2 actions' rule). The overclock_pending flag is set for
+    diagnostic purposes only and clears at turn-boundary reset
+    (apply_hack_state). on_turn_end is a no-op.
 
     This hook exists so Overclock has a presence in the turn-end pipeline
-    if future logic needs to inspect or expire it. For now: pure no-op."""
+    if future logic needs to inspect it. For now: pure no-op."""
     return []
 
 

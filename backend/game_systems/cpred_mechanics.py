@@ -2116,9 +2116,11 @@ _BOOSTED_ACTION_PROGRAMS = {
     "Mask":         ("mask_pending",         None, None),
     "Fortify":      ("fortify_pending",      None, None),
     "Spoof Signal": ("spoof_signal_pending", "spoof_signal_rounds_remaining", 2),
-    # Step 6c: Overclock grants +1 NA next turn. The flag is consumed by
-    # apply_hack_state's turn-boundary NA reset (cpred_hack.py); no
-    # duration field — it's a single-shot bonus on the next reset.
+    # Overclock: grants +2 NAs IMMEDIATELY to the current turn's pool
+    # (net effect: spend 1 NA + 1 Cycle to gain 2 NAs back this turn,
+    # for +1 effective action). Handled inline in the boosted_action
+    # resolver below — the flag is set for diagnostic/narrative purposes
+    # and clears at turn boundary, but the NA bonus is applied now.
     "Overclock":    ("overclock_pending",    None, None),
 }
 
@@ -5652,6 +5654,22 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     net_actions_remaining = max(0, net_actions_remaining - 1)
                 if _cycles_remaining is not None:
                     _cycles_remaining = max(0, _cycles_remaining - 1)
+                # Overclock: immediate +2 NAs to current turn pool. Net effect
+                # is +1 effective action over the 1 NA Overclock cost (so
+                # Overclock trades 1 Cycle for +1 action this turn). Cleaner
+                # than the prior deferred "+1 NA next turn" model, which was
+                # a strict net loss (Cycle spent for zero action gain).
+                _ba_extra_na_grant = 0
+                if _ba_canonical == "Overclock":
+                    _ba_extra_na_grant = 2
+                    if net_actions_remaining is not None:
+                        net_actions_remaining = net_actions_remaining + 2
+                    all_state_ops.append({
+                        "op": "net_actions_grant",
+                        "amount": 2,
+                        "source": "Overclock",
+                        "actor": _ba_char,
+                    })
                 results.append({
                     "type": "boosted_action",
                     "character": _ba_char,
@@ -5659,6 +5677,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     "success": True,
                     "cost_net_actions": 1,
                     "cost_cycles": 1,
+                    "extra_na_grant": _ba_extra_na_grant,
                     "active_boost": _flag_key,
                     "duration_field": _duration_field,
                     "duration_value": _duration,
@@ -5667,6 +5686,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                         f"(1 NA, 1 Cycle, {_flag_key} → True"
                         + (f", {_duration_field}={_duration}"
                            if _duration_field else "")
+                        + (f", +{_ba_extra_na_grant} NA this turn"
+                           if _ba_extra_na_grant else "")
                         + ")"
                     ),
                     "state_ops": [_ba_state_op, _cycle_op],
@@ -6258,7 +6279,7 @@ RESOLVE_MECHANICS_TOOL = {
         "- deactivate_program: {type, character, program} — active|derezzed → deactivated. Costs 1 NET Action. Per RAW Errata p.3, the Derezzed → Deactivated transition is also routed here (the first half of '2 NA to recover from Derez').\n"
         "- reactivate_program: {type, character, program} — LEGACY ALIAS for `deactivate_program` from the derezzed state. derezzed → deactivated. Costs 1 NET Action. Per RAW Errata p.3, recovering a Derezzed program is `deactivate_program` (1 NA, → Deactivated) followed by either `activate_program` (1 NA, → Active) OR `program_attack` (1 NA, auto-activates and fires) — for 2 NA total to fully recover. The legacy 'atomic 2-NA Reactivate' was a pre-Errata-p.3 model and no longer matches RAW.\n"
         "- reinstall_program: {type, character, program} — destroyed → deactivated. Costs 1 Meat Action. Only valid if Backup Drive is installed (and saved this program from destruction).\n"
-        "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal/Overclock)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending / overclock_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown; Overclock grants +1 NET Action on the next turn (consumed at turn-boundary reset).\n"
+        "- boosted_action: {type, character, program (Surge/Mask/Fortify/Spoof Signal/Overclock)} — activate a Boosted Action program. Costs 1 NET Action + 1 Cycle ATOMIC: if either is insufficient, fails soft with NEITHER consumed. Sets the corresponding active_boosts flag (surge_pending / mask_pending / fortify_pending / spoof_signal_pending / overclock_pending) which the registry hooks read on next matching event. Spoof Signal also sets a 2-round countdown; Overclock grants +2 NET Actions IMMEDIATELY to the current turn's pool (net effect: spend 1 NA + 1 Cycle for +1 effective action this turn — homerule fix to avoid the strict-net-loss bug of the original 'next NA does 2 actions' rule).\n"
         "- program_attack_vs_netrunner: {type, character (ICE name), ice_type (e.g. 'Hellhound'), interface_rank (Netrunner's), target_def (Netrunner's DEF), target (Netrunner name)}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ice_attack_vs_program: {type, character (ICE name), ice_type (e.g. 'Dragon'), target_program, target_program_def, target_program_rez}. Backend auto-reads ATK/damage from ICE table.\n"
         "- ambush: {type, character, stealth_stat, stealth_skill, targets: [{name, perception_stat, perception_skill}]}\n"

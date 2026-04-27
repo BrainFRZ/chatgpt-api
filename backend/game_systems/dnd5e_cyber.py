@@ -491,7 +491,7 @@ Alert rises on: failed Hacking check (+1), Patrol ICE detection (+2), Data Spike
 - **Data Spike** → Attack one ICE. Hacking check vs (10 + SR). Success = ICE destroyed. Alert +1.
 - **Deploy Program** → Activate a prepared program at its normal Program Slot cost.
 - **Jack Out** → Disconnect immediately. Safe unless Trace ICE has completed.
-Boosted actions (1 Process each): **Surge** (Advantage on next check), **Mask** (suppress Alert from next failure), **Overclock** (two basic actions this round), **Fortify** (add Firewall to INT save vs Black ICE until next turn), **Spoof Signal** (false signature at visited node, diverts Patrol for 2 rounds; Ghost: free).
+Boosted actions (1 Process each): **Surge** (Advantage on next check), **Mask** (suppress Alert from next failure), **Overclock** (gain +2 immediate basic actions this turn — net +1 effective action for 1 Process), **Fortify** (add Firewall to INT save vs Black ICE until next turn), **Spoof Signal** (false signature at visited node, diverts Patrol for 2 rounds; Ghost: free).
 
 ### ICE Types
 - **Patrol**: Detection threshold = 10 + SR. On detection: Alert +2. Passive — doesn't attack.
