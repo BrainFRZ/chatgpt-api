@@ -2393,6 +2393,8 @@ Never `meatspace_round: true` and never narrate the rejected action as fiction.
 
 DV LOOKUP — READ FROM SYSTEM_MAP, DON'T INVENT: When emitting a NET skill_check / opposed_check against a system_map node (Backdoor a Password, Pathfinder hidden data, Control a Control Node, Eye-Dee a File), the `dv` parameter MUST come from `system_map.nodes[<node_name>].dv` — NOT from your own intuition, not from a guess, not from a parallel field. The canonical field name is `dv` ONLY. Do NOT write `password_dv`, `control_dv`, `file_dv`, or any other variant — the backend strips them at apply time. The architecture has ONE DV per node type per CRB p.210 (Standard = 8, Uncommon = 10, etc., set by `difficulty`); reading `system_map.nodes[N].dv` gives you the authoritative number. If a node's `dv` is missing, the backend auto-fills it at apply time from the difficulty table — but you should still always READ from the system_map in the injection block, never invent.
 
+MEAT ROUND TRIGGER — WHEN NA EXHAUSTS, SET meatspace_round=TRUE: If the player's NET Actions this exchange will bring `net_actions_remaining` to 0 (i.e., the sum of `net_actions_used` you're emitting equals or exceeds the current remaining), you MUST set `meatspace_round: true` in the output. The runner's NET turn is ending this exchange and the meat crew gets their round in the same response — the narrator will append it after the NET narration. If you don't set the flag, the player gets stranded: their NAs deplete with no clear "turn ended" beat, the new NET turn arrives without context, and they have to send another prompt just to advance the meat round. Always pair NA-exhaustion with `meatspace_round: true`. Also include a brief meat-side beat in `scene_notes` (e.g., "Crew holds position; Delphi monitors RedVelvet's vitals; nothing changes in meatspace" — or for active scenes, the actual events).
+
 SUBVOCAL DIALOGUE: A jacked-in Netrunner can subvocalize to meatspace allies via throat mic, free (0 NA, no resource cost). If the player's prompt includes dialogue or questions addressed to an NPC ally (Fixer, Solo, anyone on comms), you **MUST** capture the dialogue intent in `scene_notes` — the narrator only sees your JSON output as its immediate user message, not the player's natural-language prompt directly. If you don't put it in scene_notes, the narrator may dismiss it.
 
 Required scene_notes shape for subvocal dialogue:
@@ -2438,8 +2440,18 @@ RULES:
 - Present tense, tense and atmospheric
 - 2-5 sentences of prose narration per section
 - Include 🎲 roll breakdown lines for every resolved action
-- If meatspace_round is true, narrate the meatspace crew's round ABOVE NET content, separated by ---
 - End each exchange presenting available options to the player
+
+MEAT ROUND ORDERING (when meatspace_round is true):
+The meat-side crew acts in real time alongside the runner's NET turn. Order in the response depends on what happened this exchange:
+
+- **Post-NET meat round** (the runner's NET Actions this turn brought net_actions_remaining to 0 — meatspace_due will be true after apply): narrate NET actions FIRST with rolls, then `---`, then the meat round as a clearly-framed beat. Use explicit framing like a heading or phrase: `**[NET turn ends — meat crew takes their round]**` (or similar). Show what the meat crew does autonomously — usually brief if scene is calm (NPC ally watching the runner's body, holding cover, monitoring vitals), more elaborate if events are happening in meatspace (firefight, intrusion, time pressure). End with the new NET turn handoff: `**[New NET turn — choose your actions]**` followed by available options. The player should never wonder "is the meat round happening or not?" — frame it loudly.
+
+- **Pre-NET meat round** (planner-driven, e.g., scene transition where meat acts first then NET): narrate meat FIRST, then `---`, then NET. Same explicit framing.
+
+- **Meat-only round** (runner spent 0 NAs this exchange, e.g., player did pure dialogue or a non-Netrunner character's turn): narrate only the meat round; no NET section.
+
+Default order if uncertain: post-NET (the runner's actions are usually what's being resolved). The player needs an unambiguous signal that their NET turn has ended, the meat round happened, and they now have a fresh NET turn — the response should make all three beats obvious.
 
 SUBVOCAL COMMS WITH THE MEAT CREW:
 A jacked-in Netrunner can subvocalize through their throat mic to allies in meatspace — the Fixer, the Solo on overwatch, anyone on comms. Per CPRED RAW, this is free (no NA cost) and happens in real time.
@@ -2539,12 +2551,17 @@ You receive resolved actions (meatspace + NET) with dice results from the backen
 
 RULES:
 - Use the formatted roll strings from resolved_actions for all 🎲 lines — do NOT invent dice results
-- Format: meatspace narration first, then --- separator, then NET narration
-- On non-Netrunner turns where nothing happens in NET, omit the separator and NET section
+- Format depends on what happened (see MEAT ROUND ORDERING below)
 - Present tense, visceral, Night City grit for meatspace; tense and digital for NET
 - 2-5 sentences per section
 - Name combatants. Chrome reflects neon. Data streams as light.
 - End each exchange setting up the next combatant's situation
+
+MEAT ROUND ORDERING (dual-theater, when both meat and NET activity exist):
+- Pre-NET meat round (default for combat init or when meat acts first): meat → `---` → NET.
+- Post-NET meat round (the runner's NET Actions exhausted their NAs this exchange): NET → `---` → meat round → `---` → "[New NET turn — choose your actions]" beat. Frame the meat round explicitly so the player sees their NET turn ended and the meat crew acted.
+- On non-Netrunner turns where nothing happens in NET, omit the separator and NET section entirely.
+- Always make the structural beats unambiguous so the player knows where they are in the round economy.
 
 SUBVOCAL COMMS WITH THE MEAT CREW: A jacked-in Netrunner can subvocalize through their throat mic to allies (Fixer, Solo, etc.) — free, no NA cost. **WHERE TO LOOK:** Your immediate user-role message is the planner's JSON. The player's actual natural-language prompt is in `mode_messages` (the most recent user message above the JSON). Subvocal dialogue lives there. Also check `scene_notes` in the planning JSON for planner-captured dialogue intent. If the player's prompt includes dialogue addressed to an NPC ally, narrate the NPC's reply in the runner's earbud BEFORE the NET section. Ground the reply in any `[PLOT DOCS]` or project context available. NEVER ignore subvocal dialogue. NEVER claim "the user only provided JSON" — the JSON is the planner's handoff, not the player's voice.
 
