@@ -681,6 +681,101 @@ def _apply_rez_damage_to_ice_status(state, op):
             victim["hunting"] = []
 
 
+def _ensure_minimum_architecture(state):
+    """Quick Hacks must have ≥3 linear nodes (Gateway → Obstacle → Objective)
+    per project rulebook §3. Full Runs must have ≥4 nodes per §4.
+
+    If the planner's generated architecture is below the tier minimum,
+    auto-extend with placeholder Objective node(s) wired linearly from the
+    deepest existing node. The planner can fill in narrative `contents` on
+    a subsequent turn — but the structural skeleton is guaranteed at apply
+    time so Pathfinder/move_node always have somewhere to go.
+
+    Same defense pattern as _autofill_missing_node_dvs and
+    _restore_active_programs_if_lost: don't trust the planner's compliance,
+    enforce the structural minimum at the boundary.
+    """
+    if not isinstance(state, dict):
+        return
+    sm = state.get("system_map")
+    if not isinstance(sm, dict):
+        return
+    nodes = sm.get("nodes")
+    if not isinstance(nodes, dict):
+        return
+    if len(nodes) == 0:
+        return  # totally empty; planner needs to generate from scratch
+    tier = str(state.get("tier", "")).strip().lower()
+    if tier == "quick_hack":
+        min_nodes = 3
+    elif tier == "full_run":
+        min_nodes = 4
+    else:
+        return  # unknown tier, don't auto-extend
+    if len(nodes) >= min_nodes:
+        return
+    # Resolve canonical DV for the placeholder Objective node.
+    difficulty = sm.get("difficulty", "standard")
+    canonical_dv = ARCHITECTURE_DIFFICULTY_DV.get(str(difficulty).lower(), 8)
+    # Find the deepest existing node by BFS from Gateway. Append new
+    # placeholder node(s) to the end of the chain.
+    start = "Gateway" if "Gateway" in nodes else next(iter(nodes.keys()), None)
+    if start is None:
+        return
+    visited = set()
+    queue = [start]
+    deepest = start
+    while queue:
+        cur = queue.pop(0)
+        if cur in visited:
+            continue
+        visited.add(cur)
+        deepest = cur
+        block = nodes.get(cur)
+        if isinstance(block, dict):
+            for nb in (block.get("connections") or []):
+                if isinstance(nb, str) and nb not in visited:
+                    queue.append(nb)
+    # Generate placeholder Objective node(s) until we hit the minimum.
+    needed = min_nodes - len(nodes)
+    placeholder_added = []
+    for i in range(needed):
+        # Final placeholder is the Target/Objective; intermediate placeholders
+        # are obstacles. For Quick Hack with 1 missing, it's the Target.
+        is_final = (i == needed - 1)
+        node_name = f"Objective" if is_final else f"Obstacle {i + 1}"
+        # If the name collides, append a suffix.
+        suffix = 2
+        while node_name in nodes:
+            node_name = (f"Objective {suffix}" if is_final
+                         else f"Obstacle {i + 1}.{suffix}")
+            suffix += 1
+        new_node = {
+            "type": "target" if is_final else "password",
+            "dv": canonical_dv,
+            "connections": [deepest],  # back-link to deepest
+            "contents": "",  # planner fills narrative on next turn
+            "_placeholder": True,  # diagnostic flag
+        }
+        nodes[node_name] = new_node
+        # Also wire deepest → node_name (forward link)
+        deep_block = nodes.get(deepest)
+        if isinstance(deep_block, dict):
+            conns = deep_block.setdefault("connections", [])
+            if isinstance(conns, list) and node_name not in conns:
+                conns.append(node_name)
+        deepest = node_name
+        placeholder_added.append(node_name)
+    if placeholder_added:
+        logger.warning(
+            "Hack apply: %s architecture had %d nodes, below tier "
+            "minimum (%d). Auto-extended with placeholder(s): %s. Planner "
+            "should fill narrative `contents` on next turn.",
+            tier, len(nodes) - len(placeholder_added),
+            min_nodes, placeholder_added,
+        )
+
+
 def _autofill_missing_node_dvs(state):
     """Normalize per-node DVs on the system_map from the architecture's
     difficulty rating. CRB p.210: all Password / File / Control Node DVs in
@@ -852,6 +947,9 @@ def _apply_net_model_fields(state, hs, tool_input):
     # this, the model invents DVs on the fly during play — non-deterministic
     # and ungrounded.
     _autofill_missing_node_dvs(state)
+    # Ensure tier minimum architecture: Quick Hack ≥3 nodes, Full Run ≥4.
+    # Auto-extends with placeholder Objective if planner skimped.
+    _ensure_minimum_architecture(state)
     # Going Quiet stealth state defaults — legacy hack_state without these
     # fields loads cleanly; never auto-derive stealth_active=True for legacy.
     state.setdefault("stealth_active", False)
