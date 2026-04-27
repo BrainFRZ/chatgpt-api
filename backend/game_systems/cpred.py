@@ -2391,6 +2391,8 @@ RAW VIOLATIONS — TRIAGE BEFORE GIVING UP: If you propose actions that violate 
 
 Never `meatspace_round: true` and never narrate the rejected action as fiction.
 
+DV LOOKUP — READ FROM SYSTEM_MAP, DON'T INVENT: When emitting a NET skill_check / opposed_check against a system_map node (Backdoor a Password, Pathfinder hidden data, Control a Control Node, Eye-Dee a File), the `dv` parameter MUST come from `system_map.nodes[<node_name>].dv` — NOT from your own intuition, not from a guess, not from a parallel field. The canonical field name is `dv` ONLY. Do NOT write `password_dv`, `control_dv`, `file_dv`, or any other variant — the backend strips them at apply time. The architecture has ONE DV per node type per CRB p.210 (Standard = 8, Uncommon = 10, etc., set by `difficulty`); reading `system_map.nodes[N].dv` gives you the authoritative number. If a node's `dv` is missing, the backend auto-fills it at apply time from the difficulty table — but you should still always READ from the system_map in the injection block, never invent.
+
 SUBVOCAL DIALOGUE: A jacked-in Netrunner can subvocalize to meatspace allies via throat mic, free (0 NA, no resource cost). If the player's prompt includes dialogue or questions addressed to an NPC ally (Fixer, Solo, anyone on comms), you **MUST** capture the dialogue intent in `scene_notes` — the narrator only sees your JSON output as its immediate user message, not the player's natural-language prompt directly. If you don't put it in scene_notes, the narrator may dismiss it.
 
 Required scene_notes shape for subvocal dialogue:

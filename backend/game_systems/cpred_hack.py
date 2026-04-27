@@ -680,20 +680,23 @@ def _apply_rez_damage_to_ice_status(state, op):
 
 
 def _autofill_missing_node_dvs(state):
-    """Fill in missing per-node `dv` values on the system_map from the
-    architecture's difficulty rating. CRB p.210: all Password / File /
-    Control Node DVs in an architecture share the same DV based on the
-    difficulty rating chosen by the planner. If difficulty isn't set, infer
-    from SR via SR_DIFFICULTY_RATING.
+    """Normalize per-node DVs on the system_map from the architecture's
+    difficulty rating. CRB p.210: all Password / File / Control Node DVs in
+    an architecture share the same DV based on the difficulty rating. If
+    difficulty isn't set, infer from SR via SR_DIFFICULTY_RATING.
 
-    This prevents the "model invents DVs on the fly" bug class: planners
-    sometimes forget to populate `dv` on architecture nodes; without
-    auto-fill, every subsequent action against that node gets a fresh
-    fabricated DV.
+    Three normalization passes:
+    1. Strip variant DV fields (password_dv, control_dv, file_dv, data_dv,
+       node_dv) — only the canonical `dv` is allowed. The planner sometimes
+       invents these field names, then reads its own invention next turn,
+       polluting downstream skill_check DVs.
+    2. Auto-fill missing `dv` from canonical_dv (existing behavior).
+    3. Existing explicit `dv` values are PRESERVED — homerule overrides for
+       hardened nodes (e.g., a DV+2 password in an otherwise Standard arch)
+       are valid. Strip-and-autofill only kicks in for missing values.
 
-    Node types eligible for auto-fill: password, password_gate, file, control,
-    control_node, data_node. Gateway and Target nodes are skipped (no
-    inherent DV).
+    Node types eligible: password, password_gate, file, control,
+    control_node, data_node. Gateway and Target nodes are skipped.
     """
     if not isinstance(state, dict):
         return
@@ -718,9 +721,25 @@ def _autofill_missing_node_dvs(state):
         "file", "data_node",
         "control", "control_node",
     }
+    # Variant DV field names the planner sometimes invents — strip them.
+    # Canonical field is `dv` only.
+    variant_dv_fields = (
+        "password_dv", "control_dv", "file_dv", "data_dv", "node_dv",
+    )
     for node_name, node in nodes.items():
         if not isinstance(node, dict):
             continue
+        # Strip variant DV fields. If `dv` is missing but a variant has a
+        # numeric value, use it as the seed (preserves intent if the planner
+        # invented a sensible value), then drop the variant field.
+        seed_dv = None
+        for vf in variant_dv_fields:
+            if vf in node:
+                v = node.pop(vf)
+                if seed_dv is None and isinstance(v, (int, float)):
+                    seed_dv = int(v)
+        if seed_dv is not None and node.get("dv") is None:
+            node["dv"] = seed_dv
         node_type = str(node.get("type", "")).strip().lower()
         if node_type not in eligible_types:
             continue
