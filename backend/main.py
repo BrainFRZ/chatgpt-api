@@ -28,7 +28,7 @@ import threading
 
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
-from providers.openai_provider import OpenAIProvider, OpenAI54Provider
+from providers.openai_provider import OpenAIProvider, OpenAI54Provider, OpenAI55Provider
 from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider
 from combat_state import replace_combat_dict_preserving_backend_keys
 
@@ -52,6 +52,7 @@ from pipeline import (
     _persist_hud_state_with_backend_clock,
     _advance_hud_clock,
     _format_duration,
+    _bump_beat_response_counter,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 from game_systems.cpred_identity import (
@@ -91,6 +92,24 @@ def _advance_mode_hud_clock(pipeline_state: dict, seconds: Optional[int]) -> Non
         seconds=seconds,
         replace_snapshot=False,
     )
+
+
+def _hud_for_done_event(assistant_msg_data: dict) -> dict | None:
+    """Pull the hud_state slice out of a freshly-saved assistant message so it
+    can ride along on the SSE `done` event. Without this, the frontend builds
+    the new message from `done_data` with no `pipeline_state_after`, and the
+    per-message timestamp header (ChatView.getMessageHudLine) falls through to
+    inheriting the previous assistant message's HUD — which makes the stamp
+    diverge from the live sidebar clock until a page reload.
+    """
+    import copy
+    if not isinstance(assistant_msg_data, dict):
+        return None
+    psa = assistant_msg_data.get("pipeline_state_after")
+    if not isinstance(psa, dict):
+        return None
+    hud = psa.get("hud_state")
+    return copy.deepcopy(hud) if isinstance(hud, dict) else None
 
 
 def _stamp_message_hud_snapshot(assistant_msg_data: dict, pipeline_state_source: dict | None) -> None:
@@ -158,6 +177,7 @@ PRICING = {
 # Register available model providers
 ProviderRegistry.register(OpenAIProvider())
 ProviderRegistry.register(OpenAI54Provider())
+ProviderRegistry.register(OpenAI55Provider())
 ProviderRegistry.register(AnthropicProvider())
 ProviderRegistry.register(AnthropicOpus45Provider())
 ProviderRegistry.register(AnthropicOpusProvider())
@@ -166,15 +186,15 @@ ProviderRegistry.register(AnthropicOpusProvider())
 DEFAULT_MODEL = "claude-opus-4.5"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
-COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
+COMBAT_AUTO_SWITCH_MODEL = "gpt-5.5"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
+    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.5 if OpenAI key."""
     if get_api_key(username, "anthropic"):
         return DEFAULT_MODEL  # claude-opus-4.5
     if get_api_key(username, "openai"):
-        return "gpt-5.4"
+        return "gpt-5.5"
     return DEFAULT_MODEL
 
 # ============================================================
@@ -200,7 +220,7 @@ def get_claude_provider():
 
 def get_gpt_provider():
     """Get any GPT provider for token counting (they use the same tokenizer)."""
-    return ProviderRegistry.get("gpt-5.4") or ProviderRegistry.get("gpt-5.2")
+    return ProviderRegistry.get("gpt-5.5") or ProviderRegistry.get("gpt-5.4") or ProviderRegistry.get("gpt-5.2")
 
 
 @contextmanager
@@ -2155,64 +2175,6 @@ class SetAnthropicSyncRequest(BaseModel):
     chat_name: str
     project: str | None = None
     sync: bool
-
-
-class ConfirmTimeJumpRequest(BaseModel):
-    username: str
-    chat_name: str
-    project: str | None = None
-    confirm: bool
-
-
-@app.post("/api/confirm-time-jump")
-async def confirm_time_jump(request: ConfirmTimeJumpRequest):
-    """Apply or dismiss a pending large time jump (>24h) requested by the model.
-
-    The pending jump is stashed in `pipeline_state["_pending_time_jump"]` by the
-    backend when the model emits an absolute time/date that implies a delta of
-    24h–30d. The frontend renders a confirmation modal and POSTs the user's
-    decision here. The pending request is cleared either way.
-    """
-    username = request.username.strip().lower()
-    data = load_chat(username, request.chat_name, request.project)
-    if not data:
-        raise HTTPException(status_code=404, detail="Chat not found")
-
-    ps = data.get("pipeline_state") or {}
-    pending = ps.get("_pending_time_jump")
-    if not isinstance(pending, dict) or not pending.get("seconds"):
-        # Idempotent: nothing pending, nothing to do.
-        return {"status": "ok", "applied": False}
-
-    applied = False
-    if request.confirm:
-        seconds = int(pending.get("seconds", 0) or 0)
-        if seconds > 0:
-            _advance_hud_clock(ps, seconds)
-            ps.setdefault("_pending_time_notifications", []).append({
-                "type": "time_passed",
-                "duration": pending.get("duration", _format_duration(seconds)),
-                "reason": "",
-            })
-            applied = True
-
-    # Always clear the pending request after a confirm/cancel.
-    ps.pop("_pending_time_jump", None)
-    data["pipeline_state"] = ps
-    save_chat(username, request.chat_name, data, request.project)
-
-    # Broadcast updated state so other open clients see the change.
-    chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
-    await sync_manager.broadcast_to_chat(
-        chat_key,
-        SyncEvent(type=SyncEventType.STATE_UPDATE, data={"pipeline_state": data["pipeline_state"]})
-    )
-
-    return {
-        "status": "ok",
-        "applied": applied,
-        "pipeline_state": data["pipeline_state"],
-    }
 
 
 @app.post("/api/set-anthropic-sync")
@@ -5088,11 +5050,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Inject combat-specific project files if present
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            tokens_cache = load_file_tokens_cache(username, request.project)
             char_sheet_loaded = False
             for fname in _combat_file_list(gs):
                 # Character Sheets: load first found (.md preferred over .yaml)
                 is_char_sheet = fname.startswith("Character Sheets")
                 if is_char_sheet and char_sheet_loaded:
+                    continue
+                if not tokens_cache.get(fname, {}).get("staged", True):
                     continue
                 fpath = os.path.join(uploads_dir, fname)
                 if os.path.exists(fpath):
@@ -5169,10 +5134,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # Inject project files: Combat Ruleset, Hacking Rulebook, Character Sheets
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            tokens_cache = load_file_tokens_cache(username, request.project)
             char_sheet_loaded = False
             for fname in (gs.get("net_combat_files") or []):
                 is_char_sheet = fname.startswith("Character Sheets")
                 if is_char_sheet and char_sheet_loaded:
+                    continue
+                if not tokens_cache.get(fname, {}).get("staged", True):
                     continue
                 fpath = os.path.join(uploads_dir, fname)
                 if os.path.exists(fpath):
@@ -5260,12 +5228,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         if request.project:
             uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            tokens_cache = load_file_tokens_cache(username, request.project)
             for fname in ["Ship Systems.md", "Core Conversion.md"]:
+                if not tokens_cache.get(fname, {}).get("staged", True):
+                    continue
                 fpath = os.path.join(uploads_dir, fname)
                 if os.path.exists(fpath):
                     with open(fpath, 'r', encoding='utf-8') as f:
                         ship_combat_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
             for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                if not tokens_cache.get(fname, {}).get("staged", True):
+                    continue
                 fpath = os.path.join(uploads_dir, fname)
                 if os.path.exists(fpath):
                     with open(fpath, 'r', encoding='utf-8') as f:
@@ -5914,12 +5887,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             _ship_system_content = _ship_contract + ("\n\n" + _ship_profile if _ship_profile else "")
             if request.project:
                 uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                tokens_cache = load_file_tokens_cache(username, request.project)
                 for fname in ["Ship Systems.md", "Core Conversion.md"]:
+                    if not tokens_cache.get(fname, {}).get("staged", True):
+                        continue
                     fpath = os.path.join(uploads_dir, fname)
                     if os.path.exists(fpath):
                         with open(fpath, 'r', encoding='utf-8') as f:
                             _ship_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
                 for fname in ["Character Sheets.md", "Character Sheets.yaml"]:
+                    if not tokens_cache.get(fname, {}).get("staged", True):
+                        continue
                     fpath = os.path.join(uploads_dir, fname)
                     if os.path.exists(fpath):
                         with open(fpath, 'r', encoding='utf-8') as f:
@@ -6437,6 +6415,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'hack_mode': True,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -6480,10 +6459,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     combat_planning_system += "\n\n" + combat_profile
                 if request.project:
                     uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                    tokens_cache = load_file_tokens_cache(username, request.project)
                     char_sheet_loaded = False
                     for fname in _combat_file_list(gs):
                         is_char_sheet = fname.startswith("Character Sheets")
                         if is_char_sheet and char_sheet_loaded:
+                            continue
+                        if not tokens_cache.get(fname, {}).get("staged", True):
                             continue
                         fpath = os.path.join(uploads_dir, fname)
                         if os.path.exists(fpath):
@@ -6727,6 +6709,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'combat_mode': True,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -6771,10 +6754,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     nc_planning_system += "\n\n" + nc_profile
                 if request.project:
                     uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+                    tokens_cache = load_file_tokens_cache(username, request.project)
                     char_sheet_loaded = False
                     for fname in (gs.get("net_combat_files") or []):
                         is_char_sheet = fname.startswith("Character Sheets")
                         if is_char_sheet and char_sheet_loaded:
+                            continue
+                        if not tokens_cache.get(fname, {}).get("staged", True):
                             continue
                         fpath = os.path.join(uploads_dir, fname)
                         if os.path.exists(fpath):
@@ -6997,6 +6983,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'net_combat_mode': True,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7203,6 +7190,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     _mode_flag_key: True,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7288,6 +7276,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'ship_combat_mode': True,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if ship_combat_started_this_turn:
                     done_data['ship_combat_started'] = True
@@ -7394,7 +7383,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Run pipeline in thread pool to avoid blocking the event loop
                 # during synchronous API calls (Events/Mechanics stages)
                 doc_stems = extract_project_file_stems(agent_files.get("narration", ""))
-                pipeline_name_dice = generate_name_dice(os.path.join(get_project_dir(username, request.project), "uploads"))
+                pipeline_uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads") if request.project else None
+                pipeline_name_dice = generate_name_dice(pipeline_uploads_dir or "")
                 pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,
@@ -7408,7 +7398,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     game_system=gs["id"],
                     trim_anchor_id=pipeline_trim_anchor_id,
                     doc_file_stems=doc_stems,
-                    name_dice=pipeline_name_dice
+                    name_dice=pipeline_name_dice,
+                    uploads_dir=pipeline_uploads_dir,
                 )
 
                 client_disconnected = False
@@ -7763,7 +7754,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': branch_total_messages,
                     'model': model_id,
                     'service_tier': service_tier,
-                    'pipeline_stages': pipeline_result.stages_run
+                    'pipeline_stages': pipeline_result.stages_run,
+                    'hud_state': _hud_for_done_event(assistant_msg_data),
                 }
                 if not client_disconnected:
                     yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
@@ -7828,6 +7820,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'ship_combat_mode': True,
                             'ship_combat_started': True,
                             'ship_combat_system_init': True,
+                            'hud_state': _hud_for_done_event(_chain_assistant_msg_data),
                         }
                         if _chain_hidden_init:
                             ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)
@@ -8463,9 +8456,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
                                     stateful_pipeline_state["turn_counter"] += 1
+                                    _bump_beat_response_counter(stateful_pipeline_state)
                                 current_turn = stateful_pipeline_state["turn_counter"]
+                                _stateful_uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads") if request.project else None
                                 apply_single_agent_state_updates(
-                                    stateful_pipeline_state, tool_input, current_turn, game_system=gs
+                                    stateful_pipeline_state, tool_input, current_turn, game_system=gs,
+                                    uploads_dir=_stateful_uploads_dir,
                                 )
                                 _apply_deferred_stateful_vehicle_updates(tool_input, stateful_pipeline_state, gs)
                                 data["pipeline_state"] = stateful_pipeline_state
@@ -8496,9 +8492,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         is_ooc = retry_result.get("is_ooc", False)
                                         if not is_ooc:
                                             stateful_pipeline_state["turn_counter"] += 1
+                                            _bump_beat_response_counter(stateful_pipeline_state)
                                         current_turn = stateful_pipeline_state["turn_counter"]
+                                        _stateful_uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads") if request.project else None
                                         apply_single_agent_state_updates(
-                                            stateful_pipeline_state, retry_result, current_turn, game_system=gs
+                                            stateful_pipeline_state, retry_result, current_turn, game_system=gs,
+                                            uploads_dir=_stateful_uploads_dir,
                                         )
                                         _apply_deferred_stateful_vehicle_updates(retry_result, stateful_pipeline_state, gs)
                                         data["pipeline_state"] = stateful_pipeline_state
@@ -9144,7 +9143,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'assistant_message_id': assistant_msg_id,
                             'current_leaf_id': parent_id if _sex_handoff_detected else assistant_msg_id,
                             'total_messages': branch_total_messages,
-                            'model': model_id
+                            'model': model_id,
+                            'hud_state': _hud_for_done_event(assistant_msg_data),
                         }
                         if service_tier:
                             done_data['service_tier'] = service_tier
@@ -9283,6 +9283,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     'ship_combat_mode': True,
                                     'ship_combat_started': True,
                                     'ship_combat_system_init': True,
+                                    'hud_state': _hud_for_done_event(_chain_assistant_msg_data),
                                 }
                                 if _chain_hidden_init:
                                     ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)

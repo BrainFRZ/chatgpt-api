@@ -758,6 +758,7 @@ function App() {
       .catch(() => {
         // Fallback models if API fails
         setAvailableModels([
+          { id: 'gpt-5.5', name: 'GPT-5.5', pricing: { input_new: 5.00, input_cached: 0.50, output: 30, reasoning: 30 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.4', name: 'GPT-5.4', pricing: { input_new: 2.50, input_cached: 0.25, output: 15, reasoning: 15 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } },
@@ -1159,39 +1160,6 @@ function App() {
     } catch (err) {
       setAnthropicSync(!newValue);
       console.error('Could not save anthropic sync preference:', err);
-    }
-  };
-
-  const handleConfirmTimeJump = async (confirm: boolean) => {
-    if (!user || !currentChat) return;
-    // Optimistically clear the pending request locally so the modal closes immediately.
-    setPipelineState((prev: any) => {
-      if (!prev || !prev._pending_time_jump) return prev;
-      const next = { ...prev };
-      delete next._pending_time_jump;
-      return next;
-    });
-    try {
-      const response = await fetch('/api/confirm-time-jump', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: user.username,
-          chat_name: currentChat,
-          project: currentProject,
-          confirm,
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.pipeline_state) {
-          setPipelineState(data.pipeline_state);
-        }
-      } else {
-        console.error('Could not confirm time jump:', response.status);
-      }
-    } catch (err) {
-      console.error('Could not confirm time jump:', err);
     }
   };
 
@@ -2889,8 +2857,6 @@ function App() {
         handleApiKeyModalCancel={handleApiKeyModalCancel}
         savingApiKey={savingApiKey}
         availableModels={availableModels}
-        pendingTimeJump={pipelineState?._pending_time_jump || null}
-        onConfirmTimeJump={handleConfirmTimeJump}
       />
 
       {docsRefreshed && (

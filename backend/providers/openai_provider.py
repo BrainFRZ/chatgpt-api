@@ -1,5 +1,5 @@
 """
-OpenAI GPT provider implementations (GPT-5.2, GPT-5.4).
+OpenAI GPT provider implementations (GPT-5.2, GPT-5.4, GPT-5.5).
 """
 
 from typing import Any, Optional, Iterator
@@ -57,6 +57,16 @@ FLEX_PRICING_54 = Pricing(
 )
 STANDARD_PRICING_54 = Pricing(
     input_base=2.50, cache_write=2.50, cache_read=0.25, output=15.0, reasoning=15.0
+)
+
+# Pricing constants for GPT-5.5 service tiers
+# Standard: $5.00 input / $0.50 cached / $30.00 output (per million tokens)
+# Flex (batch): 50% of standard
+FLEX_PRICING_55 = Pricing(
+    input_base=2.50, cache_write=2.50, cache_read=0.25, output=15.0, reasoning=15.0
+)
+STANDARD_PRICING_55 = Pricing(
+    input_base=5.00, cache_write=5.00, cache_read=0.50, output=30.0, reasoning=30.0
 )
 
 
@@ -429,6 +439,34 @@ class OpenAI54Provider(OpenAIProvider):
     def get_pricing_for_tier(self, tier: str) -> Pricing:
         """Get pricing based on service tier."""
         return FLEX_PRICING_54 if tier == 'flex' else STANDARD_PRICING_54
+
+
+class OpenAI55Provider(OpenAIProvider):
+    """Provider for OpenAI GPT-5.5 model. Inherits all behavior from GPT-5.2 provider."""
+
+    MODEL_NAME = "gpt-5.5"
+
+    @property
+    def model_id(self) -> str:
+        return "gpt-5.5"
+
+    @property
+    def display_name(self) -> str:
+        return "GPT-5.5"
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing(
+            input_base=5.00,
+            cache_write=5.00,
+            cache_read=0.50,
+            output=30.0,
+            reasoning=30.0
+        )
+
+    def get_pricing_for_tier(self, tier: str) -> Pricing:
+        """Get pricing based on service tier."""
+        return FLEX_PRICING_55 if tier == 'flex' else STANDARD_PRICING_55
 
 
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:

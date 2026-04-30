@@ -89,11 +89,12 @@ class TestGetModels:
     def test_returns_all_models(self):
         """Verify all registered models are returned."""
         models = main.list_models()
-        assert len(models) == 5
+        assert len(models) == 6
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
         assert "gpt-5.4" in model_ids
+        assert "gpt-5.5" in model_ids
         assert "claude-sonnet-4.5" in model_ids
         assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
@@ -611,6 +612,71 @@ class TestOpenAIProvider:
         assert count2 > count
 
 
+class TestOpenAI55Provider:
+    """Unit tests for OpenAI GPT-5.5 provider."""
+
+    def test_model_properties(self):
+        """Test provider properties are correct."""
+        from providers.openai_provider import OpenAI55Provider
+        provider = OpenAI55Provider()
+
+        assert provider.model_id == "gpt-5.5"
+        assert provider.display_name == "GPT-5.5"
+        assert provider.pricing.input_base == 5.00
+        assert provider.pricing.cache_read == 0.50
+        assert provider.pricing.output == 30.0
+        assert provider.pricing.reasoning == 30.0
+
+    def test_build_request_uses_55_model(self):
+        """Test that GPT-5.5 build_request emits the correct model name."""
+        from providers.openai_provider import OpenAI55Provider
+        provider = OpenAI55Provider()
+
+        params = provider.build_request(
+            messages=[{"role": "user", "content": "Hi"}],
+            username="user",
+            project="project",
+            chat_name="chat",
+            is_free_chat=False
+        )
+
+        assert params["model"] == "gpt-5.5"
+
+    def test_calculate_cost_standard_tier(self):
+        """Test cost calculation uses GPT-5.5 standard pricing."""
+        from providers.openai_provider import OpenAI55Provider
+        from providers import ParsedResponse
+        provider = OpenAI55Provider()
+
+        parsed = ParsedResponse(
+            content="Hello",
+            reasoning=None,
+            input_tokens=1000,
+            cache_read_tokens=800,
+            cache_creation_tokens=0,
+            output_tokens=100,
+            reasoning_tokens=50
+        )
+
+        # Cost = (200 new * 5.00 + 800 cached * 0.50 + 100 output * 30.0 + 50 reasoning * 30.0) / 1M
+        expected = (200 * 5.00 + 800 * 0.50 + 100 * 30.0 + 50 * 30.0) / 1_000_000
+        cost = provider.calculate_cost(parsed)
+        assert abs(cost - expected) < 0.0000001
+
+    def test_get_pricing_for_tier(self):
+        """Flex tier should be 50% of standard."""
+        from providers.openai_provider import OpenAI55Provider
+        provider = OpenAI55Provider()
+
+        flex = provider.get_pricing_for_tier("flex")
+        standard = provider.get_pricing_for_tier("standard")
+
+        assert standard.input_base == 5.00
+        assert standard.output == 30.0
+        assert flex.input_base == 2.50
+        assert flex.output == 15.0
+
+
 class TestAnthropicProvider:
     """Unit tests for Anthropic provider."""
 
@@ -835,11 +901,12 @@ class TestProviderRegistry:
         from providers import ProviderRegistry
 
         models = ProviderRegistry.list_models()
-        assert len(models) == 5
+        assert len(models) == 6
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
         assert "gpt-5.4" in model_ids
+        assert "gpt-5.5" in model_ids
         assert "claude-sonnet-4.5" in model_ids
         assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
@@ -849,6 +916,7 @@ class TestProviderRegistry:
         from providers import ProviderRegistry
 
         assert ProviderRegistry.get_required_api_key("gpt-5.2") == "openai"
+        assert ProviderRegistry.get_required_api_key("gpt-5.5") == "openai"
         assert ProviderRegistry.get_required_api_key("claude-sonnet-4.5") == "anthropic"
 
 
