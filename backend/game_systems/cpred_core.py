@@ -438,10 +438,20 @@ def compute_rel_bonus(relationships, factions, target, check_context=None):
 #             ],
 #             "cyberware_effects": ["Cybereye (Low-Light)", "Neural Link"],
 #             "lifestyle": null,
-#             "housing": null
+#             "housing": null,
+#             "gear": {"medikit": 2, "smart_goggles": 1},
+#             "ammo_pool": {"medium_pistol": {"basic": 30, "ap": 6}},
+#             "outfit": {"description": "Long Coat (Bag Lady Chic)", "style_rating": 1}
 #         }
 #     }
 # }
+#
+# Weapon record (in edgerunners[name].weapons):
+#   {"name": "Militech Avenger", "damage": "2d6", "type": "ranged",
+#    "skill": "Handgun", "caliber": "medium_pistol",
+#    "current_ammo": 8, "max_ammo": 8, "loaded_type": "basic"}
+# loaded_type ∈ {basic, ap, expansive, rubber, incendiary, biotoxin, emp, sleep, poison, smart}.
+# caliber matches a key in ammo_pool so weapon_load can debit reserves.
 
 
 # Monthly rent from Core Rulebook p.379 + Errata p.4 (eb/month)
@@ -519,6 +529,9 @@ def _default_edgerunner():
         "skills": {},                  # {"Handgun": 6, "Evasion": 6, "Athletics": 4, "Stealth": 2, "Interface": 6, ...}
         "rep": 0,                      # Reputation rank (for facedowns)
         "active_debuffs": [],          # NET stat debuffs (Liche/Scorpion/Nervescrub) — meatspace, persists across hack boundaries; entries carry expires_at_time/date stamped from HUD clock at apply time
+        "gear": {},                    # Counted consumables/items: {"medikit": 2, "smart_goggles": 1, ...}
+        "ammo_pool": {},               # Reserve ammo by caliber/type: {"medium_pistol": {"basic": 30, "ap": 6}, ...}
+        "outfit": None,                # Wardrobe & Style: {"description": "...", "style_rating": 0..2} — affects COOL-based social/facedown
     }
 
 
@@ -574,6 +587,12 @@ def apply_game_state(game_state, agent_json, turn):
       {"edgerunner": "V", "op": "cyberware", "action": "add", "value": "Cybereye (Low-Light)"}
       {"edgerunner": "V", "op": "cyberware", "action": "remove", "value": "Cybereye (Low-Light)"}
       {"edgerunner": "V", "op": "set", "fields": {"hp": {"current": 35, "max": 40}, ...}}
+      {"edgerunner": "V", "op": "gear_set", "gear": {"medikit": 2, "smart_goggles": 1}}
+      {"edgerunner": "V", "op": "gear_change", "item": "medikit", "change": -1, "reason": "Stabilized Delphi"}
+      {"edgerunner": "V", "op": "ammo_pool_set", "ammo_pool": {"medium_pistol": {"basic": 30, "ap": 6}}}
+      {"edgerunner": "V", "op": "ammo_pool_change", "caliber": "medium_pistol", "ammo_type": "ap", "change": 6, "reason": "Bought AP rounds"}
+      {"edgerunner": "V", "op": "weapon_load", "weapon": "Militech Avenger", "ammo_type": "ap", "rounds": 8, "reason": "Swapped to AP magazine"}
+      {"edgerunner": "V", "op": "outfit_set", "value": {"description": "Long Coat (Bag Lady Chic)", "style_rating": 1}}
     """
     ops = agent_json.get("edgerunner_ops")
 
@@ -822,7 +841,10 @@ def apply_game_state(game_state, agent_json, turn):
                             break
 
                 elif op == "ammo":
-                    # Resolver-generated: subtract rounds_consumed from weapon
+                    # Resolver-generated: subtract rounds_consumed from weapon's
+                    # current_ammo (magazine). Does NOT touch ammo_pool — pool
+                    # is only debited on weapon_load (reload). Model should not
+                    # emit this op directly; use weapon_ammo for manual fixes.
                     wname = op_data.get("weapon_name", "")
                     consumed = int(op_data.get("rounds_consumed", 0))
                     if wname and consumed > 0:
@@ -882,6 +904,136 @@ def apply_game_state(game_state, agent_json, turn):
                         conditions = er.get("conditions", [])
                         if condition in conditions:
                             conditions.remove(condition)
+
+                elif op == "gear_set":
+                    new_gear = op_data.get("gear", {})
+                    if isinstance(new_gear, dict):
+                        cleaned = {}
+                        for k, v in new_gear.items():
+                            if not isinstance(k, str) or not k:
+                                continue
+                            try:
+                                count = int(v)
+                            except (TypeError, ValueError):
+                                continue
+                            if count > 0:
+                                cleaned[k] = count
+                        er["gear"] = cleaned
+
+                elif op == "gear_change":
+                    item = op_data.get("item")
+                    if isinstance(item, str) and item:
+                        change = int(op_data.get("change", 0))
+                        gear = er.setdefault("gear", {})
+                        new_count = gear.get(item, 0) + change
+                        if new_count <= 0:
+                            gear.pop(item, None)
+                        else:
+                            gear[item] = new_count
+
+                elif op == "ammo_pool_set":
+                    new_pool = op_data.get("ammo_pool", {})
+                    if isinstance(new_pool, dict):
+                        cleaned_pool = {}
+                        for caliber, types in new_pool.items():
+                            if not isinstance(caliber, str) or not isinstance(types, dict):
+                                continue
+                            cleaned_types = {}
+                            for ammo_type, count in types.items():
+                                if not isinstance(ammo_type, str):
+                                    continue
+                                try:
+                                    n = int(count)
+                                except (TypeError, ValueError):
+                                    continue
+                                if n > 0:
+                                    cleaned_types[ammo_type] = n
+                            if cleaned_types:
+                                cleaned_pool[caliber] = cleaned_types
+                        er["ammo_pool"] = cleaned_pool
+
+                elif op == "ammo_pool_change":
+                    caliber = op_data.get("caliber")
+                    ammo_type = op_data.get("ammo_type", "basic")
+                    if isinstance(caliber, str) and caliber and isinstance(ammo_type, str) and ammo_type:
+                        change = int(op_data.get("change", 0))
+                        pool = er.setdefault("ammo_pool", {})
+                        types = pool.setdefault(caliber, {})
+                        new_count = types.get(ammo_type, 0) + change
+                        if new_count <= 0:
+                            types.pop(ammo_type, None)
+                            if not types:
+                                pool.pop(caliber, None)
+                        else:
+                            types[ammo_type] = new_count
+
+                elif op == "weapon_load":
+                    weapon_ref = op_data.get("weapon", "")
+                    wname = weapon_ref.get("name", "") if isinstance(weapon_ref, dict) else weapon_ref
+                    ammo_type = op_data.get("ammo_type", "basic")
+                    rounds_req = int(op_data.get("rounds", 0))
+                    if not (isinstance(wname, str) and wname and isinstance(ammo_type, str) and ammo_type):
+                        continue
+                    target_weapon = next((w for w in er.get("weapons", []) if w.get("name") == wname), None)
+                    if not target_weapon:
+                        continue
+                    max_ammo = int(target_weapon.get("max_ammo") or 0)
+                    current_ammo = int(target_weapon.get("current_ammo") or 0)
+                    current_type = target_weapon.get("loaded_type") or "basic"
+                    caliber = target_weapon.get("caliber") or ""
+                    pool = er.setdefault("ammo_pool", {})
+
+                    # rounds=0: type re-tag only valid on empty magazine
+                    if rounds_req == 0:
+                        if current_ammo == 0:
+                            target_weapon["loaded_type"] = ammo_type
+                        continue
+
+                    # Mag swap: discard current rounds (RAW p.171 — reloading
+                    # ejects the partial magazine; rounds are lost). Top-off
+                    # only happens when ammo_type matches current_type.
+                    if ammo_type != current_type and current_ammo > 0:
+                        current_ammo = 0  # mag ejected, rounds lost
+
+                    # Cap by magazine capacity (if max_ammo known) and pool
+                    capacity_left = max(0, max_ammo - current_ammo) if max_ammo > 0 else rounds_req
+                    desired = min(rounds_req, capacity_left) if max_ammo > 0 else rounds_req
+                    available = int(pool.get(caliber, {}).get(ammo_type, 0)) if caliber else desired
+                    loaded = min(desired, available) if caliber else desired
+
+                    if loaded <= 0:
+                        # Pool empty for this type — still commit the discard
+                        # (so a failed mag-swap leaves the weapon empty + tagged)
+                        target_weapon["current_ammo"] = current_ammo
+                        target_weapon["loaded_type"] = ammo_type
+                        continue
+
+                    target_weapon["current_ammo"] = current_ammo + loaded
+                    target_weapon["loaded_type"] = ammo_type
+                    if caliber:
+                        types = pool.setdefault(caliber, {})
+                        remaining = available - loaded
+                        if remaining <= 0:
+                            types.pop(ammo_type, None)
+                            if not types:
+                                pool.pop(caliber, None)
+                        else:
+                            types[ammo_type] = remaining
+
+                elif op == "outfit_set":
+                    value = op_data.get("value")
+                    if value is None:
+                        er["outfit"] = None
+                    elif isinstance(value, dict):
+                        desc = value.get("description")
+                        if not isinstance(desc, str):
+                            desc = ""
+                        try:
+                            rating = int(value.get("style_rating", 0))
+                        except (TypeError, ValueError):
+                            rating = 0
+                        rating = max(-1, min(2, rating))
+                        er["outfit"] = {"description": desc, "style_rating": rating}
 
                 elif op == "deck_slots_set":
                     er["deck_slots"] = copy.deepcopy(op_data.get("deck_slots", []))

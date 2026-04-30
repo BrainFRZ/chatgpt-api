@@ -33,6 +33,7 @@ from game_systems.dnd5e import (
     SINGLE_AGENT_STATE_CONTRACT,
     STATE_REPORT_TOOL,
 )
+from game_systems.plot_beats import derive_canonical_pacing
 
 # ============================================================
 # Pipeline Stage Configuration
@@ -224,47 +225,6 @@ def _format_duration(seconds: int) -> str:
     return out
 
 
-def _compute_clock_delta_seconds(
-    prev_date: str,
-    prev_time: str,
-    new_date: str,
-    new_time: str,
-) -> Optional[int]:
-    """Compute the forward delta in seconds from (prev_date, prev_time) to a new clock,
-    validating date and time INDEPENDENTLY.
-
-    - If new_date is missing/invalid OR earlier than prev_date → fall back to prev_date.
-    - If new_time is missing/invalid → fall back to prev_time.
-    - The combined effective new clock is then compared against the prev clock.
-    - Returns the resulting delta in seconds (may be 0). Returns None if prev cannot be
-      parsed at all (no basis for comparison).
-
-    The caller decides whether the delta is small enough to auto-apply, large enough to
-    require user confirmation, or so absurd it should be ignored.
-    """
-    prev_d = _parse_clock_date(prev_date)
-    prev_t = _parse_clock_time(prev_time)
-    if prev_d is None or prev_t is None:
-        return None
-
-    new_d_parsed = _parse_clock_date(new_date)
-    new_t_parsed = _parse_clock_time(new_time)
-
-    # Date validated independently: only accept forward (or equal); else use prev.
-    effective_d = new_d_parsed if (new_d_parsed is not None and new_d_parsed >= prev_d) else prev_d
-    # Time validated independently: only accept parseable HHMM; else use prev.
-    effective_t = new_t_parsed if new_t_parsed is not None else prev_t
-
-    prev_dt = prev_d.replace(hour=prev_t[0], minute=prev_t[1])
-    new_dt = effective_d.replace(hour=effective_t[0], minute=effective_t[1])
-    return int((new_dt - prev_dt).total_seconds())
-
-
-# Implicit-advance bounds: under this, auto-apply; up to PENDING_MAX, prompt user; above, reject.
-IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS = 24 * 3600       # 24 hours
-IMPLICIT_ADVANCE_PENDING_LIMIT_SECONDS = 30 * 86400   # 30 days
-
-
 def _push_time_passed_notification(pipeline_state: dict, seconds: int, reason: str = "") -> None:
     """Append a time_passed notification for the frontend to render."""
     pipeline_state.setdefault("_pending_time_notifications", []).append({
@@ -284,16 +244,11 @@ def _persist_hud_state_with_backend_clock(
 ) -> bool:
     """Persist hud_state while keeping time/date backend-owned after initial seed.
 
-    Once a clock seed exists, the model's incoming time/date are validated INDEPENDENTLY:
-
-    - If the model emits a forward-going absolute time/date and the implied delta is
-      0–24h, the backend treats it as an implicit time advancement and overrides the
-      caller-supplied *seconds*. A `time_passed` notification is queued.
-    - If the implied delta is 24h–30d, the clock advances by the default *seconds* but
-      the requested jump is stashed in `pipeline_state["_pending_time_jump"]` for the
-      frontend to surface as a confirmation modal.
-    - Backwards, equal, absurd (>30d), or unparseable model time/date is silently
-      ignored — the clock advances by the caller-supplied *seconds*.
+    Once a clock seed exists, the model's incoming `time`/`date` are IGNORED — the
+    clock advances only by the caller-supplied *seconds* (DEFAULT_TURN_SECONDS by
+    default; overridden via `hud_state.time_override = {minutes, reason}`). This
+    keeps the contract enforced rather than advisory: model drift on `time`/`date`
+    becomes a no-op rather than a spurious skip.
 
     When *incoming_hud_state* is omitted, the existing HUD snapshot is preserved and
     only the clock is advanced. When *replace_snapshot* is False, incoming fields are
@@ -307,14 +262,10 @@ def _persist_hud_state_with_backend_clock(
     prev_date = prev_hud.get("date", "") if isinstance(prev_hud, dict) else ""
     hud_base = copy.deepcopy(prev_hud) if isinstance(prev_hud, dict) else {}
 
-    incoming_time = ""
-    incoming_date = ""
     if incoming_hud_state is None:
         hud = hud_base
     elif isinstance(incoming_hud_state, dict):
         incoming = copy.deepcopy(incoming_hud_state)
-        incoming_time = incoming.get("time", "") or ""
-        incoming_date = incoming.get("date", "") or ""
         hud = {**hud_base, **incoming} if not replace_snapshot else incoming
     else:
         hud = {} if replace_snapshot else hud_base
@@ -323,42 +274,15 @@ def _persist_hud_state_with_backend_clock(
     pipeline_state["hud_state"] = hud
 
     if prev_time:
+        # Once seeded, time/date are backend-owned. Drop any model-supplied
+        # values and restore the previous clock; advancement happens via
+        # `seconds` (which the caller derived from `time_override`).
         hud["time"] = prev_time
         hud["date"] = prev_date
         if is_ooc:
             return False
 
-        effective_seconds = seconds
-        implicit_seconds = 0
-
-        if incoming_time or incoming_date:
-            delta = _compute_clock_delta_seconds(prev_date, prev_time, incoming_date, incoming_time)
-            if delta is not None and 0 < delta <= IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS:
-                effective_seconds = delta
-                implicit_seconds = delta
-            elif delta is not None and IMPLICIT_ADVANCE_AUTO_LIMIT_SECONDS < delta <= IMPLICIT_ADVANCE_PENDING_LIMIT_SECONDS:
-                # Stash for user confirmation; clock advances by default `seconds` only.
-                from datetime import timedelta
-                prev_d = _parse_clock_date(prev_date)
-                prev_t = _parse_clock_time(prev_time)
-                if prev_d is not None and prev_t is not None:
-                    from_dt = prev_d.replace(hour=prev_t[0], minute=prev_t[1])
-                    to_dt = from_dt + timedelta(seconds=delta)
-                    pipeline_state["_pending_time_jump"] = {
-                        "seconds": delta,
-                        "duration": _format_duration(delta),
-                        "from_date": from_dt.strftime("%Y-%m-%d"),
-                        "from_time": from_dt.strftime("%H%M"),
-                        "to_date": to_dt.strftime("%Y-%m-%d"),
-                        "to_time": to_dt.strftime("%H%M"),
-                    }
-            # else: ignore (negative, zero, >30d, or unparseable prev)
-
-        _advance_hud_clock(pipeline_state, effective_seconds)
-
-        if implicit_seconds > 0:
-            _push_time_passed_notification(pipeline_state, implicit_seconds, reason="")
-
+        _advance_hud_clock(pipeline_state, seconds)
         return True
 
     # Fresh chat/bootstrap: accept the model-provided absolute clock once.
@@ -782,7 +706,17 @@ def _sync_cpred_character_states_from_game_state(
 
         updates[name] = data
 
-    result = apply_character_states(character_states, updates, current_turn)
+    # Write directly — do NOT go through apply_character_states. Its
+    # _merge_character_data has a "preserve old max" guard against model
+    # hallucination, which would here undo our authoritative sync (e.g.
+    # if the model previously emitted RedVelvet with HP 35/35 and Luck
+    # 6/6 by hallucinating Delphi's stats, the merge would refuse to
+    # accept the correct 30/30 + 8/8 from edgerunners). The values in
+    # `updates` come from game_state.edgerunners and ARE the source of
+    # truth; the merge guard is meant for model output, not this sync.
+    result = character_states
+    for name, data in updates.items():
+        result[name] = {"data": data, "last_updated": current_turn}
     for name in tracked_names:
         entry = result.get(name)
         if not isinstance(entry, dict):
@@ -2809,7 +2743,8 @@ def run_pipeline(
     game_system: str = "dnd5e",
     trim_anchor_id: Optional[str] = None,
     doc_file_stems: set = None,
-    name_dice: str = ""
+    name_dice: str = "",
+    uploads_dir: Optional[str] = None,
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -2863,11 +2798,13 @@ def run_pipeline(
     # Increment turn counter only for in-character turns — OOC shouldn't age TTLs
     if events_route != "output":
         pipeline_state["turn_counter"] += 1
+        _bump_beat_response_counter(pipeline_state)
     current_turn = pipeline_state["turn_counter"]
 
     # Extract and apply state from Events output
     if isinstance(events_data.get("pacing"), dict):
         pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **events_data["pacing"]}
+    _apply_canonical_pacing(pipeline_state, uploads_dir)
     pipeline_state["callback_ledger"] = apply_callback_ops(
         pipeline_state["callback_ledger"],
         events_data.get("callback_ops"),
@@ -4616,12 +4553,64 @@ def _replace_combat_dict(pipeline_state: dict, new_combat) -> None:
     replace_combat_dict_preserving_backend_keys(pipeline_state, new_combat)
 
 
-def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int, game_system: dict = None) -> dict:
+def _bump_beat_response_counter(pipeline_state: dict) -> None:
+    """Increment beat_state.beat_responses by 1. Called once per
+    in-character turn (i.e. when turn_counter increments). The counter
+    resets to 0 when the beat advances via /beat, /session, or planner
+    signal. The pipeline mirrors it into pacing.responses every turn so
+    the sidebar shows a true per-beat counter rather than the model's
+    drift-prone total-since-session-start emit.
+    """
+    from game_systems.plot_beats import normalize_beat_state
+    bs = normalize_beat_state(pipeline_state.get("beat_state"))
+    bs["beat_responses"] = int(bs.get("beat_responses", 0) or 0) + 1
+    pipeline_state["beat_state"] = bs
+
+
+def _apply_canonical_pacing(pipeline_state: dict, uploads_dir: Optional[str]) -> None:
+    """Override pacing.episode and pacing.beat with values parsed from the
+    plot doc for the active session/beat, and mirror beat_state.beat_responses
+    into pacing.responses (the sidebar's "Responses" counter). The model
+    is allowed to emit any of these (the schema accepts them) but they're
+    treated as advisory — the backend decides the canonical values.
+
+    Called every turn after the model's pacing has been merged in, so any
+    drift the model introduced is corrected before the state is saved.
+    """
+    pacing = pipeline_state.get("pacing")
+    if not isinstance(pacing, dict):
+        pacing = {}
+        pipeline_state["pacing"] = pacing
+
+    # Mirror the backend-tracked per-beat counter into pacing.responses.
+    # Done unconditionally — this counter is correct even when no plot
+    # doc exists (it just counts in-character turns since the last beat
+    # advance, which defaults to since-chat-start).
+    bs = pipeline_state.get("beat_state")
+    if isinstance(bs, dict) and "beat_responses" in bs:
+        try:
+            pacing["responses"] = int(bs["beat_responses"])
+        except (TypeError, ValueError):
+            pass
+
+    if not uploads_dir:
+        return
+    canonical = derive_canonical_pacing(bs or {}, uploads_dir)
+    if not canonical:
+        return
+    if "episode" in canonical:
+        pacing["episode"] = canonical["episode"]
+    if "beat" in canonical:
+        pacing["beat"] = canonical["beat"]
+
+
+def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current_turn: int, game_system: dict = None, uploads_dir: Optional[str] = None) -> dict:
     """Apply parsed state updates to pipeline_state using existing apply_* functions."""
     if not isinstance(parsed, dict):
         return pipeline_state
     if isinstance(parsed.get("pacing"), dict):
         pipeline_state["pacing"] = {**pipeline_state.get("pacing", {}), **parsed["pacing"]}
+    _apply_canonical_pacing(pipeline_state, uploads_dir)
     if parsed.get("callback_ops"):
         pipeline_state["callback_ledger"] = apply_callback_ops(
             pipeline_state["callback_ledger"],

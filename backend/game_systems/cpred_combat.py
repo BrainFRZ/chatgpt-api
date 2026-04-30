@@ -79,8 +79,32 @@ def build_cpred_combat_profile(character_states, combat, game_state=None, **_kw)
                     if w.get("type") == "melee":
                         weapon_strs.append(f"{wname} ({wdmg}, {w.get('skill', 'Melee Weapon')})")
                     else:
-                        weapon_strs.append(f"{wname} ({wdmg}, {w.get('current_ammo', 0)}/{w.get('max_ammo', 0)} ammo)")
+                        loaded = w.get("loaded_type") or "basic"
+                        ammo_tag = f", {loaded.upper()}" if loaded and loaded != "basic" else ""
+                        weapon_strs.append(f"{wname} ({wdmg}, {w.get('current_ammo', 0)}/{w.get('max_ammo', 0)} ammo{ammo_tag})")
                 lines.append(f"    Weapons: {'; '.join(weapon_strs)}")
+
+            ammo_pool = er.get("ammo_pool", {}) or {}
+            if isinstance(ammo_pool, dict) and ammo_pool:
+                pool_strs = []
+                for caliber, types in ammo_pool.items():
+                    if isinstance(types, dict) and types:
+                        type_strs = ", ".join(f"{t}:{n}" for t, n in types.items())
+                        pool_strs.append(f"{caliber} [{type_strs}]")
+                if pool_strs:
+                    lines.append(f"    Ammo Reserves: {'; '.join(pool_strs)}")
+
+            gear = er.get("gear", {}) or {}
+            if isinstance(gear, dict) and gear:
+                gear_strs = ", ".join(f"{n}× {item}" for item, n in gear.items())
+                lines.append(f"    Gear: {gear_strs}")
+
+            outfit = er.get("outfit")
+            if isinstance(outfit, dict):
+                desc = outfit.get("description") or ""
+                rating = outfit.get("style_rating", 0)
+                rating_tag = f"+{rating}" if rating > 0 else (str(rating) if rating else "0")
+                lines.append(f"    Outfit: {desc} (Style {rating_tag})" if desc else f"    Outfit: Style {rating_tag}")
 
             if injuries:
                 dv_total = sum(ci.get("dv_mod", 0) for ci in injuries if ci.get("status") != "quick_fixed")

@@ -303,6 +303,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            // Stamp the message with the post-pipeline HUD so ChatView's per-message
+            // timestamp matches the live sidebar clock immediately, without waiting
+            // for a page reload to fetch the saved pipeline_state_after.
+            if (data.hud_state) (assistantMessage as any).pipeline_state_after = { hud_state: data.hud_state };
             if (data.artifact_ops) assistantMessage.artifact_ops = data.artifact_ops;
             if (data.artifacts) deps.setArtifacts(data.artifacts);
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
@@ -368,6 +372,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            if (data.hud_state) (assistantMessage as any).pipeline_state_after = { hud_state: data.hud_state };
 
             deps.setMessages(prev => {
               const base = prev.slice(0, -1); // drop chain placeholder

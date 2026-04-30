@@ -1654,12 +1654,12 @@ SCHEMA A - Route to Mechanics (default for in-character gameplay):
 {
   "route": "mechanics",
   "pacing": {
-    "episode": "<current episode name>",
-    "beat": "<current narrative beat>",
-    "beat_responses": <number of responses on this beat>,
-    "notes": "<pacing observations>"
+    "episode": "<BACKEND-OWNED when a Plot - Session N.md exists. Echo from [PIPELINE STATE]; the backend overwrites with `Session N: <Title>` from the plot doc's `## Session N: \"Title\"` heading every turn. Don't invent.>",
+    "beat": "<BACKEND-OWNED when a Plot - Session N.md exists. Echo from [PIPELINE STATE]; the backend overwrites with `Beat N: <Title>` from the plot doc's `### Beat N:` header every turn.>",
+    "responses": <BACKEND-OWNED. Mirrors beat_state.beat_responses — count of in-character turns since the current beat began. Echo from [PIPELINE STATE]; backend overwrites every turn.>,
+    "notes": "<pacing observations — yours to manage>"
   },
-  "time_passed": "<how much in-world time this turn covers. Default '30 seconds' for normal conversation. Override when scene involves travel, extended activities, rest, etc. (e.g. '2 hours', '10 minutes'). The backend computes the clock. If the clock is empty, provide hud_state.time and hud_state.date once as the initial seed; otherwise do NOT manually set them. During combat, time is locked at 6 seconds/round by the backend (30 seconds/round in ship combat); time_passed is ignored.>",
+  "// clock advancement": "Backend-owned. Default 30s/turn (6s/round in combat, 30s/round in ship combat). Use hud_state.time_override = {minutes, reason} to advance more. Never set hud_state.time or hud_state.date after the initial seed — those values are IGNORED once seeded.",
   "beats": ["<beat 1>", "<beat 2>", ...],
   "player_action": "<what the player is attempting>",
   "callbacks": [
@@ -1746,10 +1746,10 @@ SCHEMA B - Route to Output (ONLY for pure OOC questions that involve NO game mec
 {
   "route": "output",
   "pacing": {
-    "episode": "<current episode name>",
-    "beat": "<current narrative beat>",
-    "beat_responses": <number of responses on this beat>,
-    "notes": "<pacing observations>"
+    "episode": "<BACKEND-OWNED when a Plot - Session N.md exists. Echo from [PIPELINE STATE]; the backend overwrites with `Session N: <Title>` from the plot doc's `## Session N: \"Title\"` heading every turn. Don't invent.>",
+    "beat": "<BACKEND-OWNED when a Plot - Session N.md exists. Echo from [PIPELINE STATE]; the backend overwrites with `Beat N: <Title>` from the plot doc's `### Beat N:` header every turn.>",
+    "responses": <BACKEND-OWNED. Mirrors beat_state.beat_responses — count of in-character turns since the current beat began. Echo from [PIPELINE STATE]; backend overwrites every turn.>,
+    "notes": "<pacing observations — yours to manage>"
   },
   "time_passed": "0 minutes",
   "content": "<your conversational OOC response>",
@@ -2138,19 +2138,23 @@ Date, time, location, trackables, ship Hull/Shields, and funds are displayed in 
 
 Read the `[HUD STATE]` injection for the previous turn's values to stay aware of the current date/time/location for narrative purposes. Do not repeat them in your output.
 
-Time is managed by the backend. Default advancement is 30 seconds per normal turn (6 seconds per round in combat, 30 seconds per round in ship combat).
+**The clock is backend-owned.** Default advancement is 30 seconds per normal turn (6 seconds per round in combat, 30 seconds per round in ship combat). You do **not** set the clock yourself.
 
-To advance time for an extended action (travel, rest, downtime, ship transit, time skip), set `hud_state.time` (and `hud_state.date` if the scene crosses midnight or skips days) to the new absolute clock value. The backend validates date and time **independently**:
-- Forward-going deltas up to 24h are auto-applied. The user gets a `📊 Time +X minutes` notification.
-- Forward-going deltas of 24h–30d trigger a UI confirmation modal — the user approves or dismisses the jump.
-- Backwards, equal, absurd (>30d), or unparseable values are silently ignored. Get the date right or omit it.
+Once seeded, `hud_state.time` and `hud_state.date` are **read-only from your perspective** — values you emit there are IGNORED by the backend. The contract is enforced rather than advisory.
 
-You may also use `hud_state.time_override = {"minutes": N, "reason": "..."}` for explicit advancement, but the absolute time/date approach is preferred when you know the target time.
+The **only** way to advance the clock more than the default 30s is `hud_state.time_override = {"minutes": N, "reason": "..."}`. Use it whenever the scene clearly covers more in-world time:
+- A few minutes of conversation: omit `time_override`.
+- Travel, gearing up, ship maneuvers: `minutes: 5–60`.
+- Short rest, meal: `minutes: 60`.
+- Long rest / sleep through to morning: `minutes: ~480` (8h).
+- Multi-day ship transit / next day same time: `minutes: 1440` per day.
 
-**Be conservative** — only advance more than the default 30s when the scene clearly covers more in-world time. Don't slide the clock forward just because the prose feels long.
+**Narrative-clock consistency is your responsibility.** If your narrative ends with "Morning comes," "We arrive in-system," or "The next day," your `time_override.minutes` MUST be large enough to actually move the clock to that point. The backend will not auto-detect transitions from prose. Conversely, if no real time passes, do NOT use `time_override`.
 
-If the clock is empty, provide `time` and `date` once as the initial seed. Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
-Report updated values via `report_state` tool's `hud_state` field (location, trackables, time/date, time_override — funds auto-derived).
+**Seeding only:** if `[HUD STATE]` shows no time/date, provide `time` and `date` once as the initial seed. After that, the backend owns them.
+
+Update trackables if they changed. Funds are auto-derived from ship.credits for the character panel — do NOT set funds in hud_state; use ship_ops credits to change balances.
+Report updated values via `report_state` tool's `hud_state` field (location, trackables, time_override — date/time backend-owned, funds auto-derived).
 
 ### Bootstrap (first turn or empty state):
 When state blocks are absent or empty, review your context to initialize:
@@ -2261,9 +2265,9 @@ STATE_REPORT_TOOL = {
                 "type": "object",
                 "required": ["episode", "beat", "responses"],
                 "properties": {
-                    "episode": {"type": "string"},
-                    "beat": {"type": "string"},
-                    "responses": {"type": "integer"},
+                    "episode": {"type": "string", "description": "Backend-overwritten from the plot doc's `## Session N: \"Title\"` heading when one exists. Echo what you saw in [PIPELINE STATE]."},
+                    "beat": {"type": "string", "description": "Backend-overwritten from the plot doc's `### Beat N:` header when one exists. Echo from [PIPELINE STATE]."},
+                    "responses": {"type": "integer", "description": "Backend-overwritten every turn. Mirrors beat_state.beat_responses (count of in-character turns since the current beat began). Echo from [PIPELINE STATE]; don't try to compute it yourself."},
                     "notes": {"type": "string"}
                 }
             },
@@ -2411,17 +2415,17 @@ STATE_REPORT_TOOL = {
                 "type": "object",
                 "description": "Current in-world HUD state. Report every in-character turn.",
                 "properties": {
-                    "date": {"type": "string"},
-                    "time": {"type": "string", "description": "HHMM format"},
+                    "date": {"type": "string", "description": "SEED ONLY — provide once on the first turn when the clock is empty. Once seeded the backend owns the date; values you emit here are IGNORED. Cross dates with time_override."},
+                    "time": {"type": "string", "description": "HHMM. SEED ONLY — provide once on the first turn when the clock is empty. Once seeded the backend owns the time; values you emit here are IGNORED. Advance the clock with time_override."},
                     "location": {"type": "string"},
                     "funds": {"description": "Auto-derived from ship.credits. Do NOT set — use ship_ops credits instead."},
                     "trackables": {"description": "null or object of resource name → value"},
                     "time_override": {
                         "type": "object",
-                        "description": "Override default 30s turn duration. Only outside combat. Omit for normal turns.",
+                        "description": "THE ONLY way to advance the clock more than the default 30s/turn. Only outside combat. Omit for normal turns.",
                         "properties": {
-                            "minutes": {"type": "number", "description": "Duration in minutes"},
-                            "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Hyperspace jump to Kepler-442')"}
+                            "minutes": {"type": "number", "description": "Duration in minutes. For multi-hour or multi-day skips set this large enough to land the clock where the narrative ENDS (e.g. ~480 for sleep, 1440 per day for ship transit)."},
+                            "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Hyperspace jump to Kepler-442', 'Sleep through to morning')"}
                         }
                     }
                 }

@@ -1884,13 +1884,38 @@ def _apply_trace_auto_increment(state, tick_condition):
 
 
 def _apply_alert_ice_spawn(state):
-    """Auto-spawn ICE at alert thresholds: Trace at 5+, Black ICE (by SR) at 7+."""
+    """Auto-spawn ICE at alert thresholds: Trace at 5+, Black ICE (by SR) at 7+.
+
+    Also activates dormant watchers (enemy netrunners) when Alert reaches their
+    deploy_alert threshold. Dormant watchers are defined in Plot Encounters YAML
+    with status="dormant" and deploy_alert=N.
+    """
     try:
         prev_alert = int(state.get("_prev_alert_level", 0))
         new_alert = int(state.get("alert_level", 0))
         ice_status = state.get("ice_status", {})
         if not isinstance(ice_status, dict):
             ice_status = {}
+
+        # Activate dormant watchers whose deploy_alert threshold has been reached.
+        # Only activate on the first crossing (prev < threshold <= new).
+        for key, entry in list(ice_status.items()):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("status") != "dormant":
+                continue
+            if entry.get("entity_type") != "watcher_netrunner":
+                continue
+            deploy_threshold = int(entry.get("deploy_alert", 0) or 0)
+            if deploy_threshold <= 0:
+                continue
+            if prev_alert < deploy_threshold <= new_alert:
+                entry["status"] = "active"
+                logger.info(
+                    "Activated dormant watcher %r at Alert %d (threshold %d)",
+                    key, new_alert, deploy_threshold,
+                )
+
         # Lockdown (5+): auto-spawn Trace ICE at Gateway if none exists
         if new_alert >= 5 and prev_alert < 5:
             has_trace = any(

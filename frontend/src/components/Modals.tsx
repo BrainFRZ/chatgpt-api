@@ -2,15 +2,6 @@ import React from 'react';
 import { styles } from '../styles';
 import { ModelInfo } from '../types';
 
-interface PendingTimeJump {
-  seconds: number;
-  duration: string;
-  from_date: string;
-  from_time: string;
-  to_date: string;
-  to_time: string;
-}
-
 interface ModalsProps {
   showUpdatesModal: boolean;
   setShowUpdatesModal: (v: boolean) => void;
@@ -27,14 +18,6 @@ interface ModalsProps {
   handleApiKeyModalCancel: () => void;
   savingApiKey: boolean;
   availableModels: ModelInfo[];
-  pendingTimeJump: PendingTimeJump | null;
-  onConfirmTimeJump: (confirm: boolean) => void;
-}
-
-function formatHHMM(s: string): string {
-  if (!s || s.length < 3) return s || '';
-  const padded = s.padStart(4, '0');
-  return `${padded.slice(0, 2)}:${padded.slice(2)}`;
 }
 
 export default function Modals(props: ModalsProps) {
@@ -54,8 +37,6 @@ export default function Modals(props: ModalsProps) {
     handleApiKeyModalCancel,
     savingApiKey,
     availableModels,
-    pendingTimeJump,
-    onConfirmTimeJump,
   } = props;
 
   return (
@@ -139,46 +120,6 @@ export default function Modals(props: ModalsProps) {
         </div>
       )}
 
-      {/* Time-jump confirmation modal — fires when the model implies a forward time jump > 24h. */}
-      {pendingTimeJump && (
-        <div style={styles.modalOverlay}>
-          <div style={{...styles.modal, maxWidth: '440px'}} onClick={(e) => e.stopPropagation()}>
-            <h3 style={styles.modalTitle}>Advance the in-game clock?</h3>
-            <p style={styles.modalDescription}>
-              The story implies time has advanced by <strong>{pendingTimeJump.duration}</strong>.
-              Apply this jump to the clock?
-            </p>
-            <div style={{
-              padding: '12px 14px',
-              background: '#1a1a1a',
-              border: '1px solid #333',
-              borderRadius: '4px',
-              marginBottom: '16px',
-              fontFamily: 'monospace',
-              fontSize: '0.85rem',
-              color: '#ddd',
-              lineHeight: 1.6,
-            }}>
-              <div>From: {pendingTimeJump.from_date} {formatHHMM(pendingTimeJump.from_time)}</div>
-              <div>To: &nbsp;&nbsp;{pendingTimeJump.to_date} {formatHHMM(pendingTimeJump.to_time)}</div>
-            </div>
-            <div style={styles.modalActions}>
-              <button
-                onClick={() => onConfirmTimeJump(false)}
-                style={styles.modalCancelButton}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => onConfirmTimeJump(true)}
-                style={styles.modalSaveButton}
-              >
-                Apply jump
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }

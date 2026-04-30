@@ -46,6 +46,15 @@ Schema:
           species: skunk                         # ICE_STAT_BLOCKS key, lowercase
           node: "Watchdog"                       # which node it lives in
           effect_desc: "..."                     # optional override of canonical effect text
+      watchers:                                  # enemy netrunners / demons (optional)
+        - key: "Specter"                         # ice_status key
+          name: "Specter"                        # display name
+          node: "Data Archives"                  # starting node
+          interface: 14                          # Interface skill (attack/defense base)
+          rez: 3                                 # hits to defeat (like Black ICE rez)
+          deploy_alert: 3                        # Alert level that triggers deployment (0 = start active)
+          programs: ["Sword", "Shield", "Armor"] # equipped programs (for narration)
+          effect_desc: "Contract netrunner..."   # description for combat
 
 Resolution order (cpred_hack.py:_generate_architecture_if_missing):
   1. If state.system_map has nodes → planner-supplied; honor it
@@ -228,6 +237,40 @@ def materialize_encounter(encounter: dict) -> dict:
         # Convergence flag if specified.
         if ice_in.get("is_convergence"):
             entry["is_convergence"] = True
+        ice_status[key] = entry
+
+    # Process watchers (enemy netrunners / demons).
+    # These are added to ice_status with entity_type="watcher_netrunner".
+    # If deploy_alert > 0, they start dormant and activate when Alert reaches threshold.
+    for watcher_in in (encounter.get("watchers") or []):
+        if not isinstance(watcher_in, dict):
+            continue
+        key = watcher_in.get("key") or watcher_in.get("name") or "Watcher"
+        deploy_alert = int(watcher_in.get("deploy_alert", 0) or 0)
+        interface = int(watcher_in.get("interface", 10) or 10)
+        rez = int(watcher_in.get("rez", 3) or 3)
+        entry = {
+            "name": watcher_in.get("name") or key,
+            "behavior": "watcher",
+            "entity_type": "watcher_netrunner",
+            "interface": interface,
+            "atk": interface,
+            "def": interface,
+            "rez_current": rez,
+            "rez_max": rez,
+            "status": "dormant" if deploy_alert > 0 else "active",
+            "node": watcher_in.get("node") or "",
+            "programs": list(watcher_in.get("programs") or []),
+        }
+        if deploy_alert > 0:
+            entry["deploy_alert"] = deploy_alert
+        if watcher_in.get("effect_desc"):
+            entry["effect_desc"] = watcher_in["effect_desc"]
+        # Per/Spd for stealth detection if specified.
+        if watcher_in.get("per"):
+            entry["per"] = int(watcher_in["per"])
+        if watcher_in.get("spd"):
+            entry["spd"] = int(watcher_in["spd"])
         ice_status[key] = entry
 
     return {

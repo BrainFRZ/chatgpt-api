@@ -4614,6 +4614,52 @@ class TestSyncCharacterStatesArmor(unittest.TestCase):
         self.assertEqual(labels["Armor (Body)"]["current"], 0)
 
 
+class TestSyncOverridesStaleCharacterStateMax(unittest.TestCase):
+    """Regression: when character_states already contains stale max values
+    (e.g. the model hallucinated Delphi's stats under RedVelvet's name),
+    the projection sync MUST overwrite them with the authoritative
+    edgerunners values. Previously, going through apply_character_states
+    triggered _merge_character_data's "preserve old max" guard which
+    silently undid the sync."""
+
+    def _sync(self, character_states, game_state, turn=1):
+        from pipeline import _sync_cpred_character_states_from_game_state
+        return _sync_cpred_character_states_from_game_state(character_states, game_state, turn)
+
+    def test_stale_max_is_overwritten_not_preserved(self):
+        # character_states has Delphi's stats (35/60 HP/Humanity, 6 Luck)
+        # leaked under RedVelvet's name from a prior model emit.
+        cs = {
+            "RedVelvet": {
+                "data": {
+                    "type": "pc", "class": "Rockerboy",
+                    "vitals": [
+                        {"label": "HP", "current": 35, "max": 35},
+                        {"label": "Humanity", "current": 60, "max": 60},
+                    ],
+                    "resources": [{"label": "Luck", "current": 6, "max": 6}],
+                    "conditions": [],
+                }
+            }
+        }
+        # Authoritative edgerunner state: Netrunner stats (30/30, 43/50, 8/8).
+        gs = {"edgerunners": {"RedVelvet": {
+            "hp": {"current": 30, "max": 30},
+            "humanity": {"current": 43, "max": 50},
+            "luck": {"current": 8, "max": 8},
+        }}}
+        result = self._sync(cs, gs)
+        data = result["RedVelvet"]["data"]
+        labels = {v["label"]: v for v in data["vitals"]}
+        self.assertEqual(labels["HP"]["current"], 30)
+        self.assertEqual(labels["HP"]["max"], 30)              # was 35 — must be overwritten
+        self.assertEqual(labels["Humanity"]["current"], 43)
+        self.assertEqual(labels["Humanity"]["max"], 50)        # was 60 — must be overwritten
+        res = {r["label"]: r for r in data["resources"]}
+        self.assertEqual(res["Luck"]["current"], 8)            # was 6 — must be overwritten
+        self.assertEqual(res["Luck"]["max"], 8)
+
+
 class TestSyncConditionsFromEdgerunner(unittest.TestCase):
     """General conditions from edgerunner state merged into character_states."""
 
@@ -5129,6 +5175,186 @@ class TestLuckResetRomSBonus(unittest.TestCase):
             "rounds_consumed": 10,
         }]}, turn=1)
         self.assertNotIn("Guard", gs["edgerunners"])
+
+
+class TestGearAmmoOutfitOps(unittest.TestCase):
+    """Tests for gear / ammo_pool / outfit / weapon_load ops."""
+
+    def _gs(self):
+        gs = init_cpred_game_state()
+        # seed an edgerunner via set
+        apply_cpred_game_state(gs, {"edgerunner_ops": [{
+            "edgerunner": "V", "op": "set",
+            "fields": {
+                "hp": {"current": 40, "max": 40, "seriously_wounded": False},
+                "weapons": [{
+                    "name": "Avenger", "damage": "2d6", "type": "ranged",
+                    "skill": "Handgun", "caliber": "medium_pistol",
+                    "current_ammo": 0, "max_ammo": 8, "loaded_type": "basic",
+                }],
+            },
+        }]}, turn=1)
+        return gs
+
+    def test_gear_set_filters_invalid(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [{
+            "edgerunner": "V", "op": "gear_set",
+            "gear": {"medikit": 2, "smart_goggles": 1, "trash": 0, "junk": "nope"},
+        }]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["gear"], {"medikit": 2, "smart_goggles": 1})
+
+    def test_gear_change_increments_and_prunes(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "gear_change", "item": "medikit", "change": 3, "reason": "bought"},
+            {"edgerunner": "V", "op": "gear_change", "item": "medikit", "change": -3, "reason": "used"},
+        ]}, turn=1)
+        self.assertNotIn("medikit", gs["edgerunners"]["V"]["gear"])
+
+    def test_ammo_pool_set_and_change(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 30, "ap": 6}}},
+            {"edgerunner": "V", "op": "ammo_pool_change",
+             "caliber": "medium_pistol", "ammo_type": "ap", "change": -6, "reason": "used"},
+        ]}, turn=1)
+        pool = gs["edgerunners"]["V"]["ammo_pool"]
+        self.assertEqual(pool, {"medium_pistol": {"basic": 30}})
+
+    def test_weapon_load_debits_pool_and_sets_loaded_type(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 30, "ap": 6}}},
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "ap", "rounds": 8, "reason": "swap mag"},
+        ]}, turn=1)
+        weapon = gs["edgerunners"]["V"]["weapons"][0]
+        self.assertEqual(weapon["current_ammo"], 6)  # only 6 AP available
+        self.assertEqual(weapon["loaded_type"], "ap")
+        self.assertNotIn("ap", gs["edgerunners"]["V"]["ammo_pool"]["medium_pistol"])
+
+    def test_weapon_load_caps_at_max_ammo(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 60}}},
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "basic", "rounds": 100, "reason": "reload"},
+        ]}, turn=1)
+        weapon = gs["edgerunners"]["V"]["weapons"][0]
+        self.assertEqual(weapon["current_ammo"], 8)  # capped at max
+        self.assertEqual(gs["edgerunners"]["V"]["ammo_pool"]["medium_pistol"]["basic"], 52)
+
+    def test_weapon_load_swap_discards_partial_mag(self):
+        """Switching ammo type with rounds in mag discards the partial mag (RAW p.171)."""
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 30, "ap": 8}}},
+            # First load 4 basic (partial mag)
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "basic", "rounds": 4, "reason": "topoff"},
+            # Then swap to AP — discards the 4 basic, loads 8 AP
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "ap", "rounds": 8, "reason": "swap mag"},
+        ]}, turn=1)
+        weapon = gs["edgerunners"]["V"]["weapons"][0]
+        self.assertEqual(weapon["current_ammo"], 8)
+        self.assertEqual(weapon["loaded_type"], "ap")
+        # Pool: basic=30-4=26 (4 are discarded, NOT returned), ap=0
+        self.assertEqual(gs["edgerunners"]["V"]["ammo_pool"]["medium_pistol"]["basic"], 26)
+        self.assertNotIn("ap", gs["edgerunners"]["V"]["ammo_pool"]["medium_pistol"])
+
+    def test_weapon_load_topoff_same_type_does_not_discard(self):
+        """Reloading same ammo type tops off without discarding."""
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 30}}},
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "basic", "rounds": 4, "reason": "first"},
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "basic", "rounds": 4, "reason": "topoff"},
+        ]}, turn=1)
+        weapon = gs["edgerunners"]["V"]["weapons"][0]
+        self.assertEqual(weapon["current_ammo"], 8)
+        # 30 - 4 - 4 = 22 (no discard)
+        self.assertEqual(gs["edgerunners"]["V"]["ammo_pool"]["medium_pistol"]["basic"], 22)
+
+    def test_weapon_load_pool_empty_still_commits_discard(self):
+        """Failed mag-swap (pool empty) still ejects current rounds and tags type."""
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "ammo_pool_set",
+             "ammo_pool": {"medium_pistol": {"basic": 8}}},
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "basic", "rounds": 8, "reason": "load"},
+            # Pool now empty for AP. Try swap → discards basic mag, loads 0 AP
+            {"edgerunner": "V", "op": "weapon_load",
+             "weapon": "Avenger", "ammo_type": "ap", "rounds": 8, "reason": "swap"},
+        ]}, turn=1)
+        weapon = gs["edgerunners"]["V"]["weapons"][0]
+        self.assertEqual(weapon["current_ammo"], 0)  # mag ejected, none loaded
+        self.assertEqual(weapon["loaded_type"], "ap")
+
+    def test_outfit_set_clamps_rating(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [{
+            "edgerunner": "V", "op": "outfit_set",
+            "value": {"description": "Bag Lady Chic, long coat", "style_rating": 99},
+        }]}, turn=1)
+        self.assertEqual(gs["edgerunners"]["V"]["outfit"]["style_rating"], 2)
+
+    def test_outfit_set_null_clears(self):
+        gs = self._gs()
+        apply_cpred_game_state(gs, {"edgerunner_ops": [
+            {"edgerunner": "V", "op": "outfit_set",
+             "value": {"description": "x", "style_rating": 1}},
+            {"edgerunner": "V", "op": "outfit_set", "value": None},
+        ]}, turn=1)
+        self.assertIsNone(gs["edgerunners"]["V"]["outfit"])
+
+    def test_resolve_ammo_flags_derives_ap_from_loaded_type(self):
+        from game_systems.cpred_mechanics import _resolve_ammo_flags
+        edgerunners = {
+            "V": {"weapons": [
+                {"name": "Avenger", "loaded_type": "ap"},
+                {"name": "Combat Knife", "loaded_type": "basic"},
+            ]}
+        }
+        is_ap, is_rubber = _resolve_ammo_flags(
+            {"character": "V", "weapon_name": "Avenger"}, edgerunners)
+        self.assertTrue(is_ap)
+        self.assertFalse(is_rubber)
+
+    def test_resolve_ammo_flags_derives_rubber(self):
+        from game_systems.cpred_mechanics import _resolve_ammo_flags
+        edgerunners = {"V": {"weapons": [{"name": "Avenger", "loaded_type": "rubber"}]}}
+        is_ap, is_rubber = _resolve_ammo_flags(
+            {"character": "V", "weapon_name": "Avenger"}, edgerunners)
+        self.assertFalse(is_ap)
+        self.assertTrue(is_rubber)
+
+    def test_resolve_ammo_flags_explicit_overrides_loaded_type(self):
+        from game_systems.cpred_mechanics import _resolve_ammo_flags
+        edgerunners = {"V": {"weapons": [{"name": "Avenger", "loaded_type": "ap"}]}}
+        # Model explicitly passes is_ap=False — must respect it
+        is_ap, is_rubber = _resolve_ammo_flags(
+            {"character": "V", "weapon_name": "Avenger", "is_ap": False, "is_rubber": False},
+            edgerunners)
+        self.assertFalse(is_ap)
+        self.assertFalse(is_rubber)
+
+    def test_resolve_ammo_flags_no_weapon_match(self):
+        from game_systems.cpred_mechanics import _resolve_ammo_flags
+        edgerunners = {"V": {"weapons": [{"name": "Avenger", "loaded_type": "ap"}]}}
+        is_ap, is_rubber = _resolve_ammo_flags(
+            {"character": "V", "weapon_name": "Unknown"}, edgerunners)
+        self.assertFalse(is_ap)
+        self.assertFalse(is_rubber)
 
 
 class TestResolveFindItem(unittest.TestCase):

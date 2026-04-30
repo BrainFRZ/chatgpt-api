@@ -211,6 +211,45 @@ def _lookup_edgerunner(edgerunner_states: dict, name: str) -> dict | None:
     return None
 
 
+def _resolve_ammo_flags(action: dict, edgerunner_states: dict | None) -> tuple[bool, bool]:
+    """Derive (is_ap, is_rubber) for a ranged action.
+
+    Honors model-supplied flags first; if both are absent and the action names
+    a weapon owned by an edgerunner, infers from the weapon's loaded_type.
+    Lets the model override when the engine has incomplete weapon data.
+    """
+    explicit_ap = "is_ap" in action
+    explicit_rubber = "is_rubber" in action
+    is_ap = bool(action.get("is_ap", False))
+    is_rubber = bool(action.get("is_rubber", False))
+    if explicit_ap and explicit_rubber:
+        return is_ap, is_rubber
+    char = action.get("character") or ""
+    wname = action.get("weapon_name") or ""
+    if not (char and wname and edgerunner_states):
+        return is_ap, is_rubber
+    er = _lookup_edgerunner(edgerunner_states, char)
+    if not isinstance(er, dict):
+        return is_ap, is_rubber
+    weapons = er.get("weapons") or []
+    if not isinstance(weapons, list):
+        return is_ap, is_rubber
+    wname_cf = str(wname).strip().casefold()
+    loaded = None
+    for w in weapons:
+        if isinstance(w, dict) and str(w.get("name", "")).strip().casefold() == wname_cf:
+            loaded = w.get("loaded_type")
+            break
+    if not isinstance(loaded, str):
+        return is_ap, is_rubber
+    loaded = loaded.strip().lower()
+    if not explicit_ap and loaded == "ap":
+        is_ap = True
+    if not explicit_rubber and loaded == "rubber":
+        is_rubber = True
+    return is_ap, is_rubber
+
+
 def _find_character_state(name, edgerunner_states, character_states):
     """Look up a character in edgerunner_states then character_states.
 
@@ -3943,6 +3982,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 _ra_target_key = _norm_hp_track_key(_ra_target_name)
                 if sequential and _ra_target_key in effective_hp:
                     _ra_target_hp = effective_hp[_ra_target_key]
+                _ra_is_ap, _ra_is_rubber = _resolve_ammo_flags(action, edgerunner_states)
                 result = resolve_ranged_attack(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -3952,8 +3992,8 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_sp=action.get("target_sp", 0),
                     range_bracket=action.get("range_bracket", 0),
                     hit_location=action.get("hit_location", "body"),
-                    is_ap=action.get("is_ap", False),
-                    is_rubber=action.get("is_rubber", False),
+                    is_ap=_ra_is_ap,
+                    is_rubber=_ra_is_rubber,
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=ra_rel_bonus,
@@ -4021,6 +4061,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                 # T3 RomS: +1 when fighting together with romantic partner
                 if actor_key in fighting_together_chars:
                     _af_rel_bonus += 1
+                _af_is_ap, _af_is_rubber = _resolve_ammo_flags(action, edgerunner_states)
                 result = resolve_autofire(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -4029,7 +4070,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_sp=action.get("target_sp", 0),
                     range_bracket=action.get("range_bracket", 0),
                     hit_location=action.get("hit_location", "body"),
-                    is_ap=action.get("is_ap", False),
+                    is_ap=_af_is_ap,
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
                     rel_bonus=_af_rel_bonus,
@@ -6475,6 +6516,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     if (sequential and vehicle_tracking_enabled)
                     else action.get("vehicle_sp", 0)
                 )
+                _wp_is_ap, _ = _resolve_ammo_flags(action, edgerunner_states)
                 result = resolve_vehicle_weak_point(
                     stat_value=action.get("stat_value", 0),
                     skill_value=action.get("skill_value", 0),
@@ -6486,7 +6528,7 @@ def resolve_actions(actions: list, relationships: dict = None, factions: dict = 
                     target_moving=action.get("target_moving", True),
                     seriously_wounded=action.get("seriously_wounded", False),
                     luck_spent=action.get("luck_spent", 0),
-                    is_ap=action.get("is_ap", False),
+                    is_ap=_wp_is_ap,
                     weapon_name=action.get("weapon_name", ""),
                     character_name=actor_name,
                     on_hit=action.get("on_hit", ""),

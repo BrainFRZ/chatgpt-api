@@ -1286,11 +1286,58 @@ export default function CharacterPanel({
               {er.weapons && er.weapons.length > 0 && (
                 <div style={{ marginTop: '6px' }}>
                   <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Weapons</div>
-                  {er.weapons.map((w: any, i: number) => (
-                    <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
-                      {w.name || '?'} <span style={{ color: '#888' }}>({w.damage || '?'}{w.type === 'melee' ? '' : `, ${w.current_ammo ?? '?'}/${w.max_ammo ?? '?'}`})</span>
+                  {er.weapons.map((w: any, i: number) => {
+                    const loaded = w.loaded_type;
+                    const isMelee = w.type === 'melee';
+                    const ammoStr = isMelee ? '' : `, ${w.current_ammo ?? '?'}/${w.max_ammo ?? '?'}`;
+                    const dryTag = !isMelee && (w.current_ammo === 0)
+                      ? <span style={{ color: '#ef4444', marginLeft: '4px' }}>[DRY]</span>
+                      : null;
+                    const typeTag = !isMelee && loaded && loaded !== 'basic'
+                      ? <span style={{ color: '#fbbf24', marginLeft: '4px' }}>[{String(loaded).toUpperCase()}]</span>
+                      : null;
+                    return (
+                      <div key={i} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                        {w.name || '?'} <span style={{ color: '#888' }}>({w.damage || '?'}{ammoStr})</span>{typeTag}{dryTag}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Ammo Reserves */}
+              {er.ammo_pool && Object.keys(er.ammo_pool).length > 0 && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Ammo Reserves</div>
+                  {Object.entries(er.ammo_pool).map(([caliber, types]: [string, any]) => (
+                    <div key={caliber} style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                      {caliber}: <span style={{ color: '#888' }}>
+                        {Object.entries(types || {}).map(([t, n]) => `${t}:${n}`).join(', ')}
+                      </span>
                     </div>
                   ))}
+                </div>
+              )}
+              {/* Gear */}
+              {er.gear && Object.keys(er.gear).length > 0 && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Gear</div>
+                  <div style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                    {Object.entries(er.gear).map(([item, n]) => `${n}× ${item}`).join(', ')}
+                  </div>
+                </div>
+              )}
+              {/* Outfit */}
+              {er.outfit && (er.outfit.description || er.outfit.style_rating != null) && (
+                <div style={{ marginTop: '4px' }}>
+                  <div style={{ fontSize: '0.68rem', color: '#666', marginBottom: '2px' }}>Outfit</div>
+                  <div style={{ fontSize: '0.72rem', color: '#ccc', paddingLeft: '4px' }}>
+                    {er.outfit.description || '—'}
+                    {er.outfit.style_rating != null && (
+                      <span style={{ color: '#fbbf24', marginLeft: '4px' }}>
+                        (Style {er.outfit.style_rating > 0 ? `+${er.outfit.style_rating}` : er.outfit.style_rating})
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
               {/* Cyberware */}
