@@ -161,7 +161,7 @@ function App() {
   const [error, setError] = useState('');
   const [docsRefreshed, setDocsRefreshed] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('claude-opus-4.5');
+  const [selectedModel, setSelectedModel] = useState<string>('claude-3-opus');
   const [anthropicSync, setAnthropicSync] = useState<boolean>(true);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null);
@@ -761,7 +761,8 @@ function App() {
           { id: 'gpt-5.4', name: 'GPT-5.4', pricing: { input_new: 2.50, input_cached: 0.25, output: 15, reasoning: 15 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', pricing: { input_new: 6, input_cached: 0.3, output: 15, reasoning: 15 }, context_limits: { threshold: 195000, target: 150000 } },
-          { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', pricing: { input_new: 5, input_cached: 0.5, output: 25, reasoning: 25 }, context_limits: { threshold: 80000, target: 55000 } }
+          { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', pricing: { input_new: 5, input_cached: 0.5, output: 25, reasoning: 25 }, context_limits: { threshold: 80000, target: 55000 } },
+          { id: 'claude-3-opus', name: 'Claude 3 Opus', pricing: { input_new: 15, input_cached: 1.5, output: 75, reasoning: 75 }, context_limits: { threshold: 80000, target: 55000 } }
         ]);
       });
 
@@ -879,7 +880,7 @@ function App() {
     }
 
     // Fetch project metadata to get the project's default model
-    let fetchedModel = 'claude-opus-4.5';
+    let fetchedModel = 'claude-3-opus';
     try {
       const metadataResponse = await fetch(`/api/project-metadata/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
@@ -887,7 +888,7 @@ function App() {
       if (metadataResponse.ok) {
         const metadataData = await metadataResponse.json();
         if (currentProjectRef.current !== projectName) return;
-        fetchedModel = metadataData.model || 'claude-opus-4.5';
+        fetchedModel = metadataData.model || 'claude-3-opus';
         setProjectModel(fetchedModel);
         setProjectGameSystem(metadataData.game_system || 'dnd5e');
       }
@@ -1786,7 +1787,7 @@ function App() {
 
       // Set model selection from chat data
       // Priority: chat's model > project's model > default
-      setSelectedModel(data.model || projectModel || 'claude-opus-4.5');
+      setSelectedModel(data.model || projectModel || 'claude-3-opus');
       setAnthropicSync(data.anthropic_sync !== false);
 
       // Load pipeline state, game system, hack state, and artifacts for right panel
