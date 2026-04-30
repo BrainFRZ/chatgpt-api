@@ -29,7 +29,7 @@ import threading
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider, OpenAI54Provider
-from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider, AnthropicOpus3Provider
+from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider
 from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
@@ -161,19 +161,18 @@ ProviderRegistry.register(OpenAI54Provider())
 ProviderRegistry.register(AnthropicProvider())
 ProviderRegistry.register(AnthropicOpus45Provider())
 ProviderRegistry.register(AnthropicOpusProvider())
-ProviderRegistry.register(AnthropicOpus3Provider())
 
 # Default model for new chats
-DEFAULT_MODEL = "claude-3-opus"
+DEFAULT_MODEL = "claude-opus-4.5"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
 COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return claude-3-opus if user has Anthropic key, else gpt-5.4 if OpenAI key."""
+    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
     if get_api_key(username, "anthropic"):
-        return DEFAULT_MODEL  # claude-3-opus
+        return DEFAULT_MODEL  # claude-opus-4.5
     if get_api_key(username, "openai"):
         return "gpt-5.4"
     return DEFAULT_MODEL
@@ -4916,9 +4915,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         use_sex_mode = True
 
     # Auto-switch to Opus for sex mode (regardless of current model)
-    if use_sex_mode and model_id != "claude-3-opus":
+    if use_sex_mode and model_id != "claude-opus-4.5":
         _original_model = model_id
-        model_id = "claude-3-opus"
+        model_id = "claude-opus-4.5"
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -5335,7 +5334,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             inferred_original_model = _original_model
             if not inferred_original_model:
                 current_chat_model = data.get("model")
-                if current_chat_model and current_chat_model != "claude-3-opus":
+                if current_chat_model and current_chat_model != "claude-opus-4.5":
                     inferred_original_model = current_chat_model
             if inferred_original_model:
                 sex_scene["original_model"] = inferred_original_model
