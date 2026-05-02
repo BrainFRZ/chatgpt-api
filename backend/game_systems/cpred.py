@@ -361,11 +361,14 @@ When a hack begins against a target with active/recently-archived viruses (in [V
 
 NPC MEMORIES:
 - Standard semantics (add/drop via npc_memory_ops).
-- Track NPC grudges, debts, loyalties, knowledge.
-- Most turns: 0-1 memory ops. Add only when something genuinely changes how an NPC views the party.
-- Don't default all to impact 3. Most are flavor (1-2). Reserve moderate (3) for meaningful exchanges. High (4-5) for climactic moments only.
-- Callbacks track plot threads needing resolution; memories track NPC perspective shifts. Don't log the same event in both. Scene details + exposition belong in scene_state.
-- Before adding a memory, check existing for that NPC. If one covers the same scene, drop it and add an updated version instead of stacking.
+- Track NPC grudges, debts, loyalties, knowledge — things that will color the NPC's behavior in *future* scenes.
+- **The test: "Will this likely matter in a scene that hasn't happened yet?"** If yes, log it. If it only affects how the NPC reads the current moment and then evaporates, don't.
+- Memories aren't required to fire every scene — most will sit dormant until the right situation surfaces them. But if a moment is purely in-scene texture (an affectionate beat that resolves now, a vulnerability the NPC will move past, an emotional flourish the GM is producing live), it belongs in narration, not in the memory store.
+- Examples that SHOULD log: grudge formed, debt incurred, secret learned, trust shifted, vow made, betrayal witnessed, a confidence shared that the NPC will guard going forward.
+- Examples that should NOT log: small gestures of connection that already played out, momentary vulnerabilities that resolved in the same scene, "they had a good moment together," scene atmosphere, things the model finds emotionally resonant but that won't recur.
+- Impact scale: 1-2 = flavor that durably lodges but doesn't shift major behavior (rare). 3 = meaningful exchange that shifts behavior. 4-5 = climactic, relationship-defining. The bar for impact-1 is still "this will plausibly come back," not "this felt nice."
+- Callbacks track plot threads; memories track NPC perspective shifts. Scene details + exposition belong in scene_state. Don't log the same event in both.
+- Before adding, check existing. If one covers the same scene, drop it and add an updated version. Don't stack.
 
 SCENE STATE:
 - Most fields (location, atmosphere, active_tensions, details, pending_actions, scene_trigger) are full-replacement — emit every turn to keep current; omitted fields retain prior value.
@@ -518,9 +521,9 @@ Optional arrays:
 - **relationship_ops**: RS/RomS/FR changes (see Relationship Ops).
 - **ip_ops**: IP scoring (see IP Scoring).
 
-**Restraint**: most turns have 0 callback_ops and 0 npc_memory_ops. Add a callback only when a genuine promise/hook/foreshadowing emerges; add a memory only when something genuinely changes how an NPC views the party. Tier caps are a safety net, not a target.
+**Restraint (CRITICAL)**: most turns have 0 callback_ops and 0 npc_memory_ops. The default action is to emit nothing in these arrays. Add a callback only when a genuine promise/hook/foreshadowing emerges. Add a memory only when something is *likely to meaningfully impact a future scene* — not just because the current scene felt resonant. If the moment plays out fully now and won't surface again, it's narration, not memory. Tier caps are a safety net, NOT a target — empty turns are normal and correct.
 
-**Memory impact variance**: not everything is impact 3. Most casual interactions are flavor (1-2). Reserve moderate (3) for meaningful exchanges, high (4-5) for climactic life-changing moments. Natural campaign distribution ≈ 60% flavor, 30% moderate, 10% high.
+**Memory impact variance**: not everything is impact 3. The choice is usually log-or-skip, not "log lightly." When you do log: 3 = meaningful behavior-shifting exchange, 4-5 = climactic life-changing. Impact 1-2 is rare — small things that nonetheless plausibly recur (a confidence shared, a quirk noticed, a small kindness the NPC will remember). Skip is more often right than impact 1.
 
 **No duplication**: callbacks track plot threads with a lifecycle (promise → payoff). Memories track an NPC's evolving view of the party. Don't log the same event in both. Scene/factual/expositional info goes in scene_state and pacing notes — not in callbacks or memories.
 
