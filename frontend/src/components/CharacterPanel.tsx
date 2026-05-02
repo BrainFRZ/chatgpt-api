@@ -189,6 +189,10 @@ export default function CharacterPanel({
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
   const [showNetMap, setShowNetMap] = useState(false);
+  // Toggle between rendered markdown and raw syntax-highlighted YAML source view.
+  // Works for both .md and .yaml sheets — flipping to "raw" renders the source
+  // through YamlHighlighted regardless of file extension.
+  const [sheetRawView, setSheetRawView] = useState(false);
 
   // Vital bar color by percentage
   const vitalColor = (cur: number, max: number, label?: string) => {
@@ -1499,7 +1503,10 @@ export default function CharacterPanel({
             </div>
           )}
 
-          {/* Character sheet (collapsed, rendered as markdown or styled YAML) */}
+          {/* Character sheet (collapsed, rendered as markdown or styled YAML).
+              "Raw" toggle shows the source through YamlHighlighted regardless of
+              file extension — useful when the sheet is .md and the user wants to
+              see/copy the underlying source with syntax coloring. */}
           {sheetSection && (
             <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
               <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
@@ -1511,13 +1518,32 @@ export default function CharacterPanel({
                 } else if (body.startsWith('# ===')) {
                   body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
                 }
-                if (sheetIsYaml) {
-                  return <YamlHighlighted content={body} />;
-                }
+                const showRaw = sheetRawView || sheetIsYaml;
                 return (
-                  <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>
-                    <ReactMarkdown>{body}</ReactMarkdown>
-                  </div>
+                  <>
+                    {!sheetIsYaml && (
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
+                        <button
+                          onClick={(e) => { e.preventDefault(); setSheetRawView(v => !v); }}
+                          style={{
+                            fontSize: '0.7rem', padding: '2px 8px', borderRadius: '3px',
+                            border: '1px solid #2a2a4e', backgroundColor: sheetRawView ? '#2a2a4e' : '#1e1e3a',
+                            color: sheetRawView ? '#a78bfa' : '#888', cursor: 'pointer', userSelect: 'none',
+                          }}
+                          title={sheetRawView ? 'Show rendered markdown' : 'Show raw syntax-highlighted source'}
+                        >
+                          {sheetRawView ? 'Rendered' : 'Raw'}
+                        </button>
+                      </div>
+                    )}
+                    {showRaw ? (
+                      <YamlHighlighted content={body} />
+                    ) : (
+                      <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>
+                        <ReactMarkdown>{body}</ReactMarkdown>
+                      </div>
+                    )}
+                  </>
                 );
               })()}
             </details>
