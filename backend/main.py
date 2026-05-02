@@ -54,6 +54,7 @@ from pipeline import (
     _advance_hud_clock,
     _format_duration,
     _bump_beat_response_counter,
+    _rebuild_cpred_projections,
 )
 from game_systems import get_game_system, list_game_systems, DEFAULT_GAME_SYSTEM
 from game_systems.cpred_identity import (
@@ -2429,6 +2430,18 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     if active_hack_state and not active_hack_state.get("active"):
         active_hack_state = None
 
+    # Rebuild-on-read: regenerate CPRED character_states + HUD projections from
+    # authoritative edgerunner state. Eliminates the stale-mirror class of bug
+    # when game_state is edited out-of-band (manual JSON patches, sync recovery,
+    # admin tools). Cost: small dict walk; safe and idempotent.
+    pipeline_state_out = data.get("pipeline_state")
+    if chat_game_system == "cpred" and isinstance(pipeline_state_out, dict):
+        try:
+            current_turn = int(pipeline_state_out.get("turn_counter") or 0)
+            _rebuild_cpred_projections(pipeline_state_out, current_turn)
+        except Exception as e:
+            logger.warning(f"get_chat: rebuild_cpred_projections failed for {username}/{chat_name}: {e}")
+
     return ChatResponse(
         messages=paginated_messages,
         all_messages=all_messages,  # Full tree for branch navigation
@@ -2438,7 +2451,7 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
         current_leaf_id=data.get("current_leaf_id"),
         model=data.get("model", DEFAULT_MODEL),
         anthropic_sync=data.get("anthropic_sync", True),
-        pipeline_state=data.get("pipeline_state"),
+        pipeline_state=pipeline_state_out,
         game_system=chat_game_system,
         hack_state=active_hack_state,
         artifacts=data.get("artifacts")
