@@ -96,15 +96,29 @@ def _advance_mode_hud_clock(pipeline_state: dict, seconds: Optional[int]) -> Non
     )
 
 
-def _hud_for_done_event(assistant_msg_data: dict) -> dict | None:
-    """Pull the hud_state slice out of a freshly-saved assistant message so it
-    can ride along on the SSE `done` event. Without this, the frontend builds
-    the new message from `done_data` with no `pipeline_state_after`, and the
-    per-message timestamp header (ChatView.getMessageHudLine) falls through to
-    inheriting the previous assistant message's HUD — which makes the stamp
-    diverge from the live sidebar clock until a page reload.
+def _hud_for_done_event(assistant_msg_data: dict, live_pipeline_state: dict | None = None) -> dict | None:
+    """Pull the hud_state slice for the SSE `done` event so the frontend can
+    stamp the new message's per-message timestamp header
+    (ChatView.getMessageHudLine) immediately, without waiting for a page
+    reload to fetch the saved pipeline_state_after.
+
+    Source-of-truth precedence (matches what the sidebar reads):
+    1. `live_pipeline_state["hud_state"]` if provided — this is the post-pipeline
+       state the sidebar shows. Always preferred so the message stamp matches the
+       sidebar at the moment of save.
+    2. `assistant_msg_data["pipeline_state_after"]["hud_state"]` as fallback for
+       paths that haven't wired live_pipeline_state through yet.
+
+    Without (1), there are paths (e.g., stateful turns where
+    `pipeline_state_after` hasn't been populated yet, or mode handoffs that
+    don't snapshot the full state) where the stamp falls back to walk-back in
+    `ChatView.getMessageHudLine` and shows a stale prior message's HUD.
     """
     import copy
+    if isinstance(live_pipeline_state, dict):
+        live_hud = live_pipeline_state.get("hud_state")
+        if isinstance(live_hud, dict):
+            return copy.deepcopy(live_hud)
     if not isinstance(assistant_msg_data, dict):
         return None
     psa = assistant_msg_data.get("pipeline_state_after")
@@ -6835,7 +6849,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'hack_mode': True,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7129,7 +7143,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'combat_mode': True,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7403,7 +7417,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'net_combat_mode': True,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7646,7 +7660,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     _mode_flag_key: True,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if service_tier:
                     done_data['service_tier'] = service_tier
@@ -7741,7 +7755,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'total_messages': len(branch_path_final),
                     'model': model_id,
                     'ship_combat_mode': True,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if ship_combat_started_this_turn:
                     done_data['ship_combat_started'] = True
@@ -8269,7 +8283,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     'model': model_id,
                     'service_tier': service_tier,
                     'pipeline_stages': pipeline_result.stages_run,
-                    'hud_state': _hud_for_done_event(assistant_msg_data),
+                    'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                 }
                 if not client_disconnected:
                     yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
@@ -8334,7 +8348,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'ship_combat_mode': True,
                             'ship_combat_started': True,
                             'ship_combat_system_init': True,
-                            'hud_state': _hud_for_done_event(_chain_assistant_msg_data),
+                            'hud_state': _hud_for_done_event(_chain_assistant_msg_data, data.get('pipeline_state')),
                         }
                         if _chain_hidden_init:
                             ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)
@@ -9769,7 +9783,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'current_leaf_id': parent_id if _sex_handoff_detected else assistant_msg_id,
                             'total_messages': branch_total_messages,
                             'model': model_id,
-                            'hud_state': _hud_for_done_event(assistant_msg_data),
+                            'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                         }
                         if service_tier:
                             done_data['service_tier'] = service_tier
@@ -9908,7 +9922,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     'ship_combat_mode': True,
                                     'ship_combat_started': True,
                                     'ship_combat_system_init': True,
-                                    'hud_state': _hud_for_done_event(_chain_assistant_msg_data),
+                                    'hud_state': _hud_for_done_event(_chain_assistant_msg_data, data.get('pipeline_state')),
                                 }
                                 if _chain_hidden_init:
                                     ship_combat_done_data['ship_combat_init_message'] = copy.deepcopy(_chain_hidden_init)
