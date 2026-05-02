@@ -1065,6 +1065,51 @@ export default function CharacterPanel({
       return { sheetSection: '', sheetIsYaml: false };
     })();
 
+    // Fallback: characters not present in any staged character-sheet file
+    // (often the PC, who is tracked entirely via game state) still get a
+    // "Full Character Sheet" view — synthesized from in-memory state
+    // (edgerunners + character_states). Renders the same way as a real
+    // sheet section: through YamlHighlighted, in the same collapsible.
+    const sheetFallback = (() => {
+      if (sheetSection) return '';
+      const er = (gameState.edgerunners || {})[selectedCharacter];
+      const csEntry = (state.character_states || {})[selectedCharacter];
+      const csData = (csEntry as any)?.data || csEntry || null;
+      if (!er && !csData) return '';
+      const yamlify = (obj: any, indent = 0): string => {
+        const pad = '  '.repeat(indent);
+        if (obj === null || obj === undefined) return 'null';
+        if (typeof obj === 'string') return obj.includes('\n') ? `|\n${obj.split('\n').map(l => pad + '  ' + l).join('\n')}` : obj;
+        if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+        if (Array.isArray(obj)) {
+          if (obj.length === 0) return '[]';
+          return '\n' + obj.map(item => {
+            if (item !== null && typeof item === 'object') {
+              const sub = yamlify(item, indent + 1);
+              return `${pad}-${sub.startsWith('\n') ? sub : ' ' + sub}`;
+            }
+            return `${pad}- ${yamlify(item, indent + 1)}`;
+          }).join('\n');
+        }
+        if (typeof obj === 'object') {
+          const entries = Object.entries(obj).filter(([k]) => !k.startsWith('_'));
+          if (entries.length === 0) return '{}';
+          return '\n' + entries.map(([k, v]) => {
+            if (v !== null && typeof v === 'object') {
+              const sub = yamlify(v, indent + 1);
+              return `${pad}${k}:${sub.startsWith('\n') ? sub : ' ' + sub}`;
+            }
+            return `${pad}${k}: ${yamlify(v, indent + 1)}`;
+          }).join('\n');
+        }
+        return String(obj);
+      };
+      const parts: string[] = [];
+      if (er) parts.push(`# Edgerunner state${yamlify(er, 0)}`);
+      if (csData) parts.push(`\n# Character state (HUD projection)${yamlify(csData, 0)}`);
+      return parts.join('\n').trim();
+    })();
+
     // Game-specific state sections
     const renderGameState = () => {
       const gs = chatGameSystem || 'dnd5e';
@@ -1502,21 +1547,22 @@ export default function CharacterPanel({
             </div>
           )}
 
-          {/* Character sheet (collapsed, rendered as markdown or styled YAML) */}
-          {sheetSection && (
+          {/* Character sheet (collapsed, syntax-highlighted source view).
+              Falls back to a YAML dump of in-memory state when no .md/.yaml
+              sheet section exists for this character (typically the PC). */}
+          {(sheetSection || sheetFallback) && (
             <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
               <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
               {(() => {
-                // Strip the header line(s) — ##/### heading for md, # === banner for yaml
-                let body = sheetSection;
-                if (/^#{2,3} /.test(body)) {
-                  body = body.split('\n').slice(1).join('\n').trim();
-                } else if (body.startsWith('# ===')) {
-                  body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
+                let body = sheetSection || sheetFallback;
+                if (sheetSection) {
+                  // Strip header line(s) — ##/### for md, # === banner for yaml
+                  if (/^#{2,3} /.test(body)) {
+                    body = body.split('\n').slice(1).join('\n').trim();
+                  } else if (body.startsWith('# ===')) {
+                    body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
+                  }
                 }
-                // Always render through YamlHighlighted — this is the raw
-                // syntax-highlighted source view. Works regardless of file
-                // extension (.md sheets get the same coloring as .yaml).
                 return <YamlHighlighted content={body} />;
               })()}
             </details>
