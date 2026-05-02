@@ -189,10 +189,6 @@ export default function CharacterPanel({
 
   const [showCallbacksModal, setShowCallbacksModal] = useState(false);
   const [showNetMap, setShowNetMap] = useState(false);
-  // Toggle between rendered markdown and raw syntax-highlighted YAML source view.
-  // Works for both .md and .yaml sheets — flipping to "raw" renders the source
-  // through YamlHighlighted regardless of file extension.
-  const [sheetRawView, setSheetRawView] = useState(false);
 
   // Vital bar color by percentage
   const vitalColor = (cur: number, max: number, label?: string) => {
@@ -1054,18 +1050,13 @@ export default function CharacterPanel({
         } else {
           // Markdown: split on ## or ### headers (sheets often group under
           // level-2 headers like "## Party NPCs" with each character at
-          // level 3 — `### Delphi — Fixer 4`). Match either level.
+          // level 3 — `### Delphi — Fixer 4`).
           const sections = file.content.split(/(?=^#{2,3} )/m);
           if (sections.length > 1) {
             const match = sections.find(s => {
-              const heading = s.split('\n')[0].replace(/^#{2,3} /, '').trim();
-              const headingLower = heading.toLowerCase();
-              // Heading text often includes role/title after the name —
-              // e.g. "Delphi — Fixer 4". Match the leading name token first
-              // so we don't accidentally hit a section like "Party NPCs"
-              // when the character name appears inside its body text.
-              const leadName = heading.split(/[\s—\-,(]/)[0].trim().toLowerCase();
-              return leadName === charLower || headingLower === charLower || headingLower.includes(charLower);
+              const heading = s.split('\n')[0].replace(/^#{2,3} /, '').trim().toLowerCase();
+              const leadName = heading.split(/[\s—\-,(]/)[0].trim();
+              return leadName === charLower || heading === charLower || heading.includes(charLower);
             });
             if (match) return { sheetSection: match, sheetIsYaml: false };
           }
@@ -1511,10 +1502,7 @@ export default function CharacterPanel({
             </div>
           )}
 
-          {/* Character sheet (collapsed, rendered as markdown or styled YAML).
-              "Raw" toggle shows the source through YamlHighlighted regardless of
-              file extension — useful when the sheet is .md and the user wants to
-              see/copy the underlying source with syntax coloring. */}
+          {/* Character sheet (collapsed, rendered as markdown or styled YAML) */}
           {sheetSection && (
             <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
               <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
@@ -1526,33 +1514,10 @@ export default function CharacterPanel({
                 } else if (body.startsWith('# ===')) {
                   body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
                 }
-                const showRaw = sheetRawView || sheetIsYaml;
-                return (
-                  <>
-                    {!sheetIsYaml && (
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
-                        <button
-                          onClick={(e) => { e.preventDefault(); setSheetRawView(v => !v); }}
-                          style={{
-                            fontSize: '0.7rem', padding: '2px 8px', borderRadius: '3px',
-                            border: '1px solid #2a2a4e', backgroundColor: sheetRawView ? '#2a2a4e' : '#1e1e3a',
-                            color: sheetRawView ? '#a78bfa' : '#888', cursor: 'pointer', userSelect: 'none',
-                          }}
-                          title={sheetRawView ? 'Show rendered markdown' : 'Show raw syntax-highlighted source'}
-                        >
-                          {sheetRawView ? 'Rendered' : 'Raw'}
-                        </button>
-                      </div>
-                    )}
-                    {showRaw ? (
-                      <YamlHighlighted content={body} />
-                    ) : (
-                      <div className="messageContent" style={{ fontSize: '0.78rem', color: '#ccc', lineHeight: 1.5, marginTop: '8px' }}>
-                        <ReactMarkdown>{body}</ReactMarkdown>
-                      </div>
-                    )}
-                  </>
-                );
+                // Always render through YamlHighlighted — this is the raw
+                // syntax-highlighted source view. Works regardless of file
+                // extension (.md sheets get the same coloring as .yaml).
+                return <YamlHighlighted content={body} />;
               })()}
             </details>
           )}
