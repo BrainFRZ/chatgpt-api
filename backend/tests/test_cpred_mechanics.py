@@ -9913,6 +9913,84 @@ class TestPlotEncounterOverride(unittest.TestCase):
         })
         self.assertEqual(result["ice_status"], {})
 
+    def test_load_per_session_files_when_present(self):
+        """Per-session layout: loader picks up `Plot Encounters - Session N.yaml`
+        files matching the pattern; legacy single file is ignored when split files
+        exist. Tests use no file_tokens.json so all per-session files load
+        (back-compat fallback)."""
+        import tempfile, os
+        from game_systems.cpred_plot_encounters import load_plot_encounters
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads = os.path.join(tmp, "uploads")
+            os.makedirs(uploads)
+            # Two per-session files plus a legacy file (legacy should be ignored).
+            for n, eid in [(1, "s1_enc"), (2, "s2_enc")]:
+                with open(os.path.join(uploads, f"Plot Encounters - Session {n}.yaml"), "w", encoding="utf-8") as f:
+                    f.write(f"encounters:\n  - id: {eid}\n    kind: hack\n    nodes: {{}}\n")
+            with open(os.path.join(uploads, "Plot Encounters.yaml"), "w", encoding="utf-8") as f:
+                f.write("encounters:\n  - id: legacy_enc\n    kind: hack\n    nodes: {}\n")
+            encounters = load_plot_encounters(uploads)
+            ids = sorted(e.get("id") for e in encounters)
+            # Per-session layout takes precedence; legacy file ignored.
+            assert ids == ["s1_enc", "s2_enc"], f"got {ids}"
+
+    def test_per_session_files_filtered_by_staged_flag(self):
+        """When file_tokens.json exists in the project dir (parent of uploads/),
+        only staged per-session files load. This is the spoiler-isolation
+        guarantee: unstaged session files are invisible to the engine."""
+        import tempfile, os, json
+        from game_systems.cpred_plot_encounters import load_plot_encounters
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            uploads = os.path.join(project, "uploads")
+            os.makedirs(uploads)
+            for n, eid in [(1, "s1_enc"), (2, "s2_enc"), (3, "s3_enc")]:
+                with open(os.path.join(uploads, f"Plot Encounters - Session {n}.yaml"), "w", encoding="utf-8") as f:
+                    f.write(f"encounters:\n  - id: {eid}\n    kind: hack\n    nodes: {{}}\n")
+            # Stage only S1.
+            with open(os.path.join(project, "file_tokens.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "Plot Encounters - Session 1.yaml": {"staged": True, "tokens": 100},
+                    "Plot Encounters - Session 2.yaml": {"staged": False, "tokens": 100},
+                    "Plot Encounters - Session 3.yaml": {"staged": False, "tokens": 100},
+                }, f)
+            encounters = load_plot_encounters(uploads)
+            ids = [e.get("id") for e in encounters]
+            assert ids == ["s1_enc"], f"expected only S1 to load, got {ids}"
+
+    def test_per_session_files_unstaged_returns_empty(self):
+        """If all per-session files are unstaged, NO encounters load — strict
+        opt-in via staging. Engine sees zero encounter overrides; hack RNG
+        falls back to normal generation."""
+        import tempfile, os, json
+        from game_systems.cpred_plot_encounters import load_plot_encounters
+        with tempfile.TemporaryDirectory() as tmp:
+            project = os.path.join(tmp, "project")
+            uploads = os.path.join(project, "uploads")
+            os.makedirs(uploads)
+            with open(os.path.join(uploads, "Plot Encounters - Session 1.yaml"), "w", encoding="utf-8") as f:
+                f.write("encounters:\n  - id: hidden_enc\n    kind: hack\n    nodes: {}\n")
+            with open(os.path.join(project, "file_tokens.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "Plot Encounters - Session 1.yaml": {"staged": False, "tokens": 100},
+                }, f)
+            encounters = load_plot_encounters(uploads)
+            assert encounters == [], f"expected empty, got {encounters}"
+
+    def test_legacy_single_file_still_loads_when_no_per_session_files(self):
+        """Back-compat: projects with the legacy `Plot Encounters.yaml` single
+        file (and no per-session files) still work."""
+        import tempfile, os
+        from game_systems.cpred_plot_encounters import load_plot_encounters
+        with tempfile.TemporaryDirectory() as tmp:
+            uploads = os.path.join(tmp, "uploads")
+            os.makedirs(uploads)
+            with open(os.path.join(uploads, "Plot Encounters.yaml"), "w", encoding="utf-8") as f:
+                f.write("encounters:\n  - id: legacy_enc\n    kind: hack\n    nodes: {}\n")
+            encounters = load_plot_encounters(uploads)
+            ids = [e.get("id") for e in encounters]
+            assert ids == ["legacy_enc"], f"got {ids}"
+
     def test_apply_uses_plot_encounter_when_target_matches(self):
         """End-to-end: tool_input carries _username/_project, encounter file
         on disk, apply_hack_state honors the override and skips RNG."""

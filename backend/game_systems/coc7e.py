@@ -702,7 +702,7 @@ When triggered, guide the player through CoC 7E investigator creation **one step
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
-- `summary`: 1-3 sentences summarizing what led to this moment (the emotional arc, not just "they went to the bedroom")
+- `summary`: 2-3 paragraphs in story-shaped prose — the ONLY context the intimate scene mode will have (no prior chat history). Cover (1) what's going on right now (the immediate scene + mood), (2) why we're here (the emotional arc — how they reached this moment, not just "they went to the bedroom"), (3) what the goal is (physical/environmental details, unresolved tension or vulnerability to carry forward).
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
@@ -913,7 +913,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
+                        "description": "2-3 paragraphs in story-shaped prose — the ONLY context the intimate scene mode gets (no prior chat history). Cover (1) what's going on right now (the immediate scene + mood), (2) why we're here (emotional arc, how they reached this moment), (3) what the goal is (physical/environmental details, unresolved tension or vulnerability to carry forward)."
                     }
                 }
             }
@@ -985,7 +985,7 @@ NPC VOICE:
 - The combatant roster includes "Voice:" blurbs for NPCs/enemies. Use these for dialogue consistency — full NPC personality docs are not available in combat context, so the voice blurb is your guide for speech patterns, accent, and demeanor.
 
 REPORT REQUIREMENTS (report_combat_state):
-- narrative_summary: ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight for the narrative record.
+- narrative_summary: ONLY when combat_complete=true — up to 3 paragraphs in story-shaped prose: what happened across the fight, anything unexpected (turning points, lucky breaks, costly choices), how it ended, and any unresolved tension or consequence carried forward. The receiving mode reads this as the handoff so the next scene picks up seamlessly.
 - Use vital_label: "HP" for health damage (default). vital_label: "SAN" for sanity loss. vital_label: "Luck" for Luck spent."""
 
 

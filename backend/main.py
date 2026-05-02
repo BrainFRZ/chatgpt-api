@@ -47,6 +47,7 @@ from pipeline import (
     collapse_combat_messages,
     collapse_ship_combat_messages,
     collapse_net_combat_messages,
+    collapse_chase_messages,
     collapse_sex_messages,
     SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS,
     _persist_hud_state_with_backend_clock,
@@ -4168,29 +4169,32 @@ def _generate_sex_scene_summary(
 
         system_prompt = (
             "You are a campaign record-keeper for an adult TTRPG. "
-            "Summarize the intimate scene below in **up to 1-2 paragraphs as needed** "
-            "for continuity purposes. The primary purpose of this summary is to "
-            "preserve plot-sensitive and plot-enhancing material from the scene so "
-            "the next narrative turn can build on it.\n\n"
-            "What to capture:\n"
-            "- Significant dialogue, confessions, revelations, or promises made\n"
-            "- Emotional beats and relationship shifts (who became closer, who held back, "
-            "what was said for the first time, etc.)\n"
-            "- Decisions or commitments that affect the story going forward\n"
-            "- Important context for how the scene concluded (where the characters are, "
-            "what state they're in emotionally) so the next turn can respond seamlessly\n"
-            "- That the scene happened, and at a high level *what* happened "
-            "(e.g., 'they shared a tender night', 'a passionate encounter', 'an interrupted "
-            "moment'), without going further\n\n"
+            "Write a story-shaped exit handoff for the intimate scene below — up to 3 "
+            "paragraphs as needed. This summary is the next mode's ONLY context for what "
+            "happened during the scene, so it must let the next narrative turn pick up "
+            "seamlessly.\n\n"
+            "Cover, in order:\n"
+            "(1) What happened — the emotional and narrative arc of the scene at a high "
+            "level (not a play-by-play). Significant dialogue, confessions, revelations, "
+            "promises made. Acknowledge that intimacy occurred and at the highest level "
+            "what kind ('they shared a tender night', 'a passionate encounter', 'an "
+            "interrupted moment').\n"
+            "(2) Anything unexpected — relationship shifts, things said for the first "
+            "time, vulnerabilities surfaced, walls that came down or stayed up, choices "
+            "that surprised either character.\n"
+            "(3) How it ended — where the characters are now (location, emotional state, "
+            "physical state at the level of 'dressed/undressed/tangled/asleep'), any "
+            "unresolved tension or commitment carried forward, decisions that affect the "
+            "story going forward, and any callbacks the next scene should honor.\n\n"
             "What NOT to include:\n"
             "- **No explicit content.** No graphic physical descriptions, no anatomical "
-            "detail, no description of acts in progress. This summary is a campaign record, "
-            "not erotica.\n"
-            "- No play-by-play of physical actions. Acknowledge that intimacy occurred; do "
-            "not narrate it.\n\n"
-            "Write in past tense, third person. Be specific about character names. Lean "
-            "toward shorter rather than longer — only use the second paragraph if the scene "
-            "had multiple distinct plot-relevant beats."
+            "detail, no description of acts in progress. This is a campaign record, not "
+            "erotica.\n"
+            "- No play-by-play of physical actions. Acknowledge that intimacy occurred; "
+            "do not narrate it.\n\n"
+            "Write in past tense, third person, story-shaped prose. Be specific about "
+            "character names. Use additional paragraphs only when the scene had distinct "
+            "plot-relevant beats — don't pad."
         )
 
         # Build user message with handoff context + full scene
@@ -4207,7 +4211,7 @@ def _generate_sex_scene_summary(
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=1024,
+            max_tokens=2048,  # Up to 3 paragraphs in story-shaped prose
             system=system_prompt,
             messages=[{"role": "user", "content": "\n\n".join(parts)}],
         )
@@ -4640,6 +4644,57 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             "ship_combat_hidden_init": True,
         }
 
+    def build_chase_hidden_init_message(parent_id: str, opening_override: str | None = None) -> dict:
+        """Mirror of build_ship_combat_hidden_init_message for Hot Pursuit.
+        Surfaces the chase state's handoff_summary, opening_narration, and
+        seeded vehicles/grid for the model on the first chase exchange."""
+        ch_state = (data.get("pipeline_state", {}).get("chase") or {})
+        handoff_summary = str(ch_state.get("handoff_summary") or ch_state.get("context") or "").strip()
+        opening_hint = str(opening_override if opening_override is not None else (ch_state.get("opening_narration") or "")).strip()
+        hidden_payload = {
+            "handoff_summary": handoff_summary or None,
+            "grid_length": ch_state.get("grid_length"),
+            "started_from": ch_state.get("started_from"),
+            "vehicles": {
+                vname: {
+                    "operator": v.get("operator"),
+                    "occupants": v.get("occupants"),
+                    "starting_square": v.get("square"),
+                    "combat_speed_move": v.get("combat_speed_move"),
+                    "sdp": f"{v.get('sdp_current')}/{v.get('sdp_max')}",
+                    "is_pursuer": v.get("is_pursuer"),
+                    "type": v.get("type"),
+                }
+                for vname, v in (ch_state.get("vehicles") or {}).items()
+                if isinstance(v, dict)
+            },
+        }
+        hidden_lines = [
+            "This is the current situation for Hot Pursuit chase initialization.",
+        ]
+        if handoff_summary:
+            hidden_lines.append(f"Handoff summary (canonical): {handoff_summary}")
+        hidden_lines.append(
+            "Initialize chase mode: roll Initiative for each operator, narrate the "
+            "opening beat (acceleration, environment, immediate threat), and describe "
+            "the current grid state. Wait for the player's first action before "
+            "resolving Positioning Checks."
+        )
+        if opening_hint:
+            hidden_lines.append(f"Opening narration hint (optional): {opening_hint}")
+        hidden_lines.append("")
+        hidden_lines.append(json.dumps(hidden_payload, indent=2))
+        return {
+            "id": generate_message_id(),
+            "parent_id": parent_id,
+            "role": "user",
+            "content": "\n".join(hidden_lines),
+            "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+            "chase_mode": True,
+            "chase_system_init": True,
+            "chase_hidden_init": True,
+        }
+
     # Load game system for this project
     gs = None
     if request.project:
@@ -4870,10 +4925,130 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if use_ship_combat_mode:
         user_msg_data["ship_combat_mode"] = True
 
+    # ── Hot Pursuit chase mode detection ──
+    use_chase_mode = False
+    _ps_for_chase = data.get("pipeline_state", {})
+    _chase_state = _ps_for_chase.get("chase")
+    if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and _chase_state and _chase_state.get("active") and request.project and gs and gs.get("chase_contract"):
+        use_chase_mode = True
+    elif (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and _chase_state and not _chase_state.get("active") and _chase_state.get("narrative_summary"):
+        # Chase completed — route per exit_target_mode, write back vehicle
+        # state, clear the chase slot, restore user's original model.
+        _exit_target = _chase_state.get("exit_target_mode") or "general"
+
+        # Routing per spec: hostiles alive => combat. If exit is "combat" but
+        # no combat slot exists yet (chase started fresh from /chase or
+        # general), seed a minimal combat dict so combat mode dispatches on
+        # the next exchange. We deliberately leave `initiative_order` empty:
+        # the combat injection builder reads HP/armor from edgerunners +
+        # character_states, and chase-vehicle occupants typically have neither
+        # (mooks bootstrapped only through the chase pursuer roster). Seeding
+        # them with names but no stat blocks would render "HP 0/0" in the
+        # injection. Instead, the model bootstraps initiative on first combat
+        # exchange using the chase narrative_summary (in conversation history)
+        # plus the chase->combat context note we set here.
+        # This MUST happen before apply_chase_writeback so the writeback has a
+        # combat slot to write vehicle state into.
+        if _exit_target == "combat":
+            existing_combat = _ps_for_chase.get("combat")
+            if not isinstance(existing_combat, dict):
+                # Build a hint listing hostile occupants — surfaced in the
+                # combat context so the model knows who to bootstrap. Includes
+                # disabled (but not crashed) vehicles' occupants since "vehicle
+                # disabled" doesn't mean "occupants dead" per RAW.
+                _hostile_hints = []
+                _ger = (_ps_for_chase.get("game_state") or {}).get("edgerunners") or {}
+                _pc_names = set(_ger.keys())
+                for vname, v in (_chase_state.get("vehicles") or {}).items():
+                    if not isinstance(v, dict):
+                        continue
+                    if v.get("status") == "crashed":
+                        continue  # crashed vehicles' occupants likely incapacitated
+                    if not v.get("is_pursuer"):
+                        continue
+                    veh_label = "(disabled, on foot)" if v.get("status") == "disabled" else "(in vehicle)"
+                    for occ in (v.get("occupants") or []):
+                        if isinstance(occ, str) and occ and occ not in _pc_names:
+                            _hostile_hints.append(f"{occ} {veh_label}")
+                _hostiles_summary = (
+                    "Likely hostiles: " + "; ".join(_hostile_hints) + "."
+                    if _hostile_hints else
+                    "Hostiles to be determined from chase narrative."
+                )
+                _ps_for_chase["combat"] = {
+                    "round": 1,
+                    "initiative_order": [],  # model bootstraps via set_combat_stats
+                    "current_turn": "",
+                    "vehicles": {},
+                    "context": (
+                        f"Chase ended ({_chase_state.get('end_reason') or 'unknown'}); "
+                        f"hostile combatants are still alive and engaged. {_hostiles_summary} "
+                        "Bootstrap initiative and stat-block any unstated NPCs on the first "
+                        "exchange via set_combat_stats."
+                    ),
+                }
+                logger.info(
+                    f"Chase->combat handoff: seeded combat ({len(_hostile_hints)} hostile hints) "
+                    f"for {username}"
+                )
+
+        if gs and gs.get("apply_chase_writeback"):
+            gs["apply_chase_writeback"](_chase_state, _ps_for_chase)
+
+        # Restore pre-chase HUD location (stamped on first chase seeding via
+        # stamp_chase_hud_overlay or first apply_chase_state). After
+        # init_chase_state, _pre_chase_location is None initially and gets
+        # set to the captured HUD location on first stamp; only restore if
+        # we have a captured value.
+        _hud = _ps_for_chase.get("hud_state")
+        _captured = _chase_state.get("_pre_chase_location")
+        if isinstance(_hud, dict) and _captured is not None:
+            _hud["location"] = _captured
+
+        _ps_for_chase["chase"] = None
+        if data.get("_auto_switched_from"):
+            _restored = data.pop("_auto_switched_from")
+            data["model"] = _restored
+            model_id = _restored
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            logger.info(f"Chase ended: restored model to {_restored} for {username}")
+        logger.info(
+            f"Chase: cleared completed chase state for {username}, "
+            f"exit_target={_exit_target}"
+        )
+
+    # Auto-switch to GPT-5.5 for chase mode (per spec; deterministic ruleset
+    # benefits from GPT-5.5's fast-resolution profile)
+    if use_chase_mode and not model_id.startswith("gpt"):
+        _original_model = model_id
+        model_id = "gpt-5.5"
+        provider = ProviderRegistry.get(model_id)
+        api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+        if not api_key:
+            logger.warning(
+                f"Chase-mode auto-switch reverted for {username}: no "
+                f"{ProviderRegistry.get_required_api_key(model_id)} key — "
+                f"running on {_original_model} instead of {model_id}."
+            )
+            model_id = _original_model
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            _original_model = None
+        else:
+            logger.info(
+                f"Chase-mode auto-switch: {_original_model} → {model_id} for {username}"
+            )
+            data["model"] = model_id
+            data["_auto_switched_from"] = _original_model
+
+    if use_chase_mode:
+        user_msg_data["chase_mode"] = True
+
     # ── Sex mode detection ──
     use_sex_mode = False
     _sex_scene = data.get("pipeline_state", {}).get("sex_scene")
-    if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and _sex_scene and _sex_scene.get("npcs"):
+    if (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_chase_mode) and _sex_scene and _sex_scene.get("npcs"):
         use_sex_mode = True
 
     # Auto-switch to Opus for sex mode (regardless of current model)
@@ -4901,10 +5076,107 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if use_sex_mode:
         user_msg_data["sex_mode"] = True
 
+    # ── /chase command detection — manual chase trigger from a Plot Encounter id ──
+    # Format: "/chase <encounter_id_or_alias>" pulls a kind=vehicle entry from
+    # Plot Encounters.yaml, materializes it, and seeds pipeline_state["chase"].
+    # Takes effect this turn — chase mode dispatch fires on the SAME exchange.
+    user_text_raw = request.message.strip()
+    if (
+        user_text_raw.lower().startswith("/chase ")
+        and not use_chase_mode
+        and request.project
+        and gs
+        and gs.get("chase_contract")
+    ):
+        _chase_cmd_arg = user_text_raw[7:].strip()
+        if _chase_cmd_arg:
+            try:
+                from game_systems.cpred_plot_encounters import (
+                    load_plot_encounters,
+                    find_encounter_for,
+                    materialize_vehicle_encounter,
+                )
+                _data_dir = os.environ.get("CHATGPT_DATA_DIR", "/home/chatgpt/data/users")
+                _uploads_dir = os.path.join(
+                    _data_dir, username, "projects", request.project, "uploads"
+                )
+                _all_encs = load_plot_encounters(_uploads_dir)
+                _match = find_encounter_for(_chase_cmd_arg, _all_encs, kind="vehicle")
+                if _match:
+                    _materialized = materialize_vehicle_encounter(_match)
+                    if _materialized and gs.get("init_chase_from_plot_encounter"):
+                        # init_chase_from_plot_encounter synthesizes a 2-3 paragraph
+                        # context from scene/route/legs/victory/failure when no
+                        # context is supplied. Pass None to invoke that synthesis.
+                        _ps_for_chase["chase"] = gs["init_chase_from_plot_encounter"](
+                            _materialized,
+                            context=None,
+                        )
+                        _chase_state = _ps_for_chase["chase"]
+                        use_chase_mode = True
+                        user_msg_data["chase_mode"] = True
+
+                        # Stamp HUD overlay immediately (the per-turn dispatch
+                        # builds chase_injection from chase_state right after
+                        # this; HUD must already reflect the chase route).
+                        from game_systems.cpred_chase import stamp_chase_hud_overlay
+                        stamp_chase_hud_overlay(_ps_for_chase)
+
+                        # Auto-switch to GPT-5.5 (parallel to the auto-detect path
+                        # at line 4951 — /chase is a parallel activation route
+                        # and must run the same setup).
+                        if not model_id.startswith("gpt"):
+                            _orig_chase_cmd_model = model_id
+                            _gpt_provider = ProviderRegistry.get("gpt-5.5")
+                            _gpt_api_key = get_api_key(
+                                username,
+                                ProviderRegistry.get_required_api_key("gpt-5.5"),
+                            )
+                            if _gpt_api_key:
+                                model_id = "gpt-5.5"
+                                provider = _gpt_provider
+                                api_key = _gpt_api_key
+                                data["model"] = model_id
+                                data["_auto_switched_from"] = _orig_chase_cmd_model
+                                logger.info(
+                                    f"/chase auto-switch: {_orig_chase_cmd_model} → "
+                                    f"{model_id} for {username}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"/chase auto-switch reverted for {username}: no "
+                                    f"OpenAI key — running on {_orig_chase_cmd_model}"
+                                )
+
+                        # Replace the literal "/chase encounter_id" command
+                        # text with a story-shaped trigger directive so chase
+                        # history doesn't carry a raw command line.
+                        user_msg_data["content"] = (
+                            f"[CHASE TRIGGER: {_match.get('id', _chase_cmd_arg)}]\n"
+                            f"The scene transitions into a Hot Pursuit chase. "
+                            f"Initialize the encounter using the chase state "
+                            f"context and roll Initiative for each operator."
+                        )
+
+                        logger.info(
+                            f"/chase: seeded chase from plot encounter {_match.get('id')!r} "
+                            f"for {username}"
+                        )
+                    else:
+                        logger.warning(
+                            f"/chase: encounter {_match.get('id')!r} failed to materialize for {username}"
+                        )
+                else:
+                    logger.warning(
+                        f"/chase: no matching kind=vehicle encounter for {_chase_cmd_arg!r} "
+                        f"in {username}/{request.project}"
+                    )
+            except Exception as _chase_cmd_err:
+                logger.exception(f"/chase command failed for {username}: {_chase_cmd_err}")
+
     # ── /sex command detection for handoff turn ──
     # Detect /sex NPC_LIST prefix in user message to inject handoff directive
     _sex_handoff_npcs = None
-    user_text_raw = request.message.strip()
     if user_text_raw.lower().startswith("/sex ") and not use_sex_mode:
         _sex_handoff_npcs = [n.strip() for n in user_text_raw[5:].split(",") if n.strip()]
 
@@ -4912,14 +5184,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         return (
             f"\n\n[INTIMATE SCENE TRANSITION: {npc_list}]\n"
             "Write your final narrative beat leading into the intimate scene. "
-            "At the end, generate a detailed summary for the scene that follows. This summary is the ONLY context "
+            "At the end, generate a detailed handoff summary for the scene that follows. This summary is the ONLY context "
             "the next model will have about what just happened — it won't see any chat history before this point.\n"
             "[SCENE HANDOFF]\n"
-            "Write 1-2 paragraphs covering:\n"
-            "- What happened in the recent scene (the last few exchanges — the situation, mood, tension)\n"
-            "- The emotional arc between the characters (how they got from where they were to this moment)\n"
-            "- Physical/environmental details (where they are, what they're wearing or not, lighting, atmosphere)\n"
-            "- Any unresolved tension, vulnerability, or emotional subtext the intimate scene should carry forward\n"
+            "Write 2-3 paragraphs in story-shaped prose covering, in order:\n"
+            "(1) What's going on right now — the immediate situation as the intimate scene opens "
+            "(situation, mood, tension; the last few exchanges that brought them here).\n"
+            "(2) Why we're here — the emotional arc between the characters (how they got from where "
+            "they were to this moment; what was said or unsaid; the thread of intimacy or vulnerability "
+            "that's been building).\n"
+            "(3) What the goal is — what the scene is reaching for, the unresolved emotional subtext, "
+            "what success looks like and what failure looks like, plus physical/environmental "
+            "details (where they are, what they're wearing or not, lighting, atmosphere) so the "
+            "next model can pick up seamlessly.\n"
+            "Reference any callbacks, prior beats, or tension being carried forward. Write so the "
+            "next mode can continue the scene without losing context — the receiving model has "
+            "nothing else.\n"
             "[/SCENE HANDOFF]"
         )
 
@@ -4929,7 +5209,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project and gs.get("trimming", "pair") == "pair"
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_chase_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project and gs.get("trimming", "pair") == "pair"
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     _sex_first_exchange = False
@@ -4946,6 +5226,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     # GPT-5.2 ship combat request params (non-streaming JSON call, built separately)
     ship_combat_gpt_request_params = None
     ship_combat_init_hidden_message_prebuilt = None
+    # GPT chase mode request params (non-streaming JSON call, built separately)
+    chase_gpt_request_params = None
+    chase_init_hidden_message_prebuilt = None
 
     if use_hack_mode:
         # ============================================================
@@ -5296,6 +5579,102 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 json_mode=True,
             )
 
+    elif use_chase_mode:
+        # ============================================================
+        # Hot Pursuit chase mode: stripped context with chase contract
+        # + chase roster + scene files. Mirrors ship_combat dispatch.
+        # ============================================================
+        chase_ps = data.get("pipeline_state", {})
+        chase_state = chase_ps.get("chase", {})
+
+        chase_contract = gs["chase_contract"]
+        chase_profile = gs["build_chase_profile"](
+            chase_ps.get("character_states", {}),
+            chase_state,
+            game_state=chase_ps.get("game_state"),
+        )
+        chase_injection = gs["build_chase_injection"](chase_state, chase_ps)
+
+        chase_system_content = chase_contract
+        if chase_profile:
+            chase_system_content += "\n\n" + chase_profile
+
+        if request.project:
+            uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads")
+            tokens_cache = load_file_tokens_cache(username, request.project)
+            for fname in (gs.get("chase_files") or []):
+                if not tokens_cache.get(fname, {}).get("staged", True):
+                    continue
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        chase_system_content += f"\n\n{'='*60}\nFILE: {fname}\n{'='*60}\n\n" + f.read()
+                    if fname in ("Character Sheets.md", "Character Sheets.yaml"):
+                        # Only include the first matching character-sheet variant.
+                        break
+
+        system_msg = {"role": "system", "content": chase_system_content}
+
+        chase_start_id = chase_state.get("start_message_id")
+        chase_history = []
+        for _bm in (chase_state.get("bootstrap_messages") or []):
+            if isinstance(_bm, dict) and _bm.get("role") in ("user", "assistant") and isinstance(_bm.get("content"), str):
+                chase_history.append({"role": _bm["role"], "content": _bm["content"]})
+        found_start = not chase_start_id
+        visible_chase_history_count = 0
+        for msg in branch_path[1:-1]:
+            if not found_start and msg.get("id") == chase_start_id:
+                found_start = True
+            if found_start and msg.get("chase_mode"):
+                chase_history.append({"role": msg["role"], "content": msg["content"]})
+                visible_chase_history_count += 1
+
+        user_content = build_message_content(branch_path[-1])
+        chase_dice_pool = generate_dice_pool(gs["id"]) if gs else ""
+        _chase_visible_user_content = (
+            chase_injection + "\n\n"
+            + (chase_dice_pool + "\n\n" if chase_dice_pool else "")
+            + user_content
+        )
+
+        # First-exchange detection: are there any prior chase_mode-tagged
+        # messages in branch_path? If not, this is the chase opener — use the
+        # hidden init message to surface handoff_summary + seeded vehicles.
+        _is_first_chase_exchange = not any(
+            m.get("chase_mode") for m in branch_path[1:-1]
+        )
+        if _is_first_chase_exchange:
+            chase_init_hidden_message_prebuilt = build_chase_hidden_init_message(user_msg_id)
+            user_content = chase_init_hidden_message_prebuilt["content"]
+        else:
+            user_content = _chase_visible_user_content
+        new_user_msg = {"role": "user", "content": user_content}
+
+        messages_for_api = [system_msg] + chase_history + [new_user_msg]
+        context_start_index = max(1, len(branch_path) - visible_chase_history_count - 1)
+
+        logger.info(
+            f"Chase mode: round {chase_state.get('round', 1)} for {username}, "
+            f"{len(chase_history)} prior chase exchanges, "
+            f"first_exchange={_is_first_chase_exchange}"
+        )
+
+        if model_id.startswith("gpt"):
+            gpt_chase_messages = [
+                {"role": "system", "content": chase_system_content
+                 + "\n\nYou MUST output valid JSON matching the report_chase_state schema:\n"
+                 + json.dumps(gs["chase_tool"]["input_schema"], indent=2)},
+            ] + chase_history + [new_user_msg]
+            chase_gpt_request_params = provider.build_pipeline_request(
+                messages=gpt_chase_messages,
+                username=username,
+                project=request.project or "",
+                chat_name=request.chat_name,
+                stage_name="chase",
+                reasoning_effort="medium",
+                json_mode=True,
+            )
+
     elif use_sex_mode:
         # ============================================================
         # Sex mode: isolated intimate scene context with Opus
@@ -5426,7 +5805,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # TTRPG systems: pair-based sawtooth context trimming
             trim_anchor_id = data.get("_trim_anchor_id")
             # Collapse hack and combat messages into summary pairs before context trimming
-            branch_path_for_context = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
+            branch_path_for_context = collapse_sex_messages(collapse_chase_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))))
             context_pairs, new_anchor_id, did_trim = get_context_pairs(
                 branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
             )
@@ -5545,7 +5924,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         system_msg = {"role": branch_path[0]["role"], "content": branch_path[0]["content"]}
         # Collapse hack and combat messages in non-stateful path too
-        bp_filtered = collapse_sex_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path)))))
+        bp_filtered = collapse_sex_messages(collapse_chase_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))))
         history_msgs = [{"role": msg["role"], "content": build_message_content(msg)} for msg in bp_filtered[context_start_index:-1]]
         user_content = build_message_content(branch_path[-1])
 
@@ -5629,6 +6008,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         request_params["tool_choice"] = {"type": "auto"}
     elif use_ship_combat_mode:
         request_params = {}
+    elif use_chase_mode and model_id.startswith("claude"):
+        # Claude chase mode: standard build_request with chase tool
+        request_params = provider.build_request(
+            messages=messages_for_api,
+            username=username,
+            project=request.project,
+            chat_name=request.chat_name,
+            is_free_chat=False,
+            use_cache=True
+        )
+        request_params["tools"] = [gs["chase_tool"]]
+        request_params["tool_choice"] = {"type": "auto"}
+    elif use_chase_mode:
+        # GPT chase mode: request_params not used (chase_gpt_request_params used instead)
+        request_params = {}
     elif use_sex_mode:
         # Sex mode: pure Opus streaming, no tools, cache enabled
         request_params = provider.build_request(
@@ -5678,6 +6072,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                               if use_ship_combat_mode else None)
         ship_combat_bootstrap_messages_snapshot = None
         ship_combat_init_hidden_message_data = copy.deepcopy(ship_combat_init_hidden_message_prebuilt) if ship_combat_init_hidden_message_prebuilt else None
+        # Chase mode first-exchange tracking (parallel to ship_combat above).
+        chase_started_this_turn = bool(use_chase_mode and not any(m.get("chase_mode") for m in branch_path[1:-1]))
+        chase_init_hidden_message_data = copy.deepcopy(chase_init_hidden_message_prebuilt) if chase_init_hidden_message_prebuilt else None
 
         def _ship_combat_trigger_is_strong(sc: dict) -> bool:
             if not isinstance(sc, dict):
@@ -5776,11 +6173,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         }
                         bootstrap_system = (
                             "You generate a hidden ship combat handoff bootstrap for a TTRPG app. "
-                            "Return JSON only. Produce a canonical handoff_summary in 1-3 sentences and a short player-facing opening narration. "
-                            "The handoff_summary must include the immediate lead-in to combat (what the crew was doing / what led to this encounter), "
-                            "not just a snapshot of the current battlefield. "
-                            "Example of good handoff_summary: 'The crew has decided to hunt pirates to make the shipping lane safer. It ran into two ships attacking a single freighter.' "
-                            "Example of too-thin handoff_summary: 'Two pirate ships are attacking a single freighter.' "
+                            "Return JSON only. Produce a canonical handoff_summary AND a short player-facing opening narration. "
+                            "\n\n"
+                            "HANDOFF SUMMARY (2-3 paragraphs):\n"
+                            "Cover, in order: (1) what's going on right now — the immediate situation as the scene opens, "
+                            "(2) why we're here — the chain of choices and pressures from prior scenes that brought the crew "
+                            "to this moment, and (3) what the goal is — what success looks like, what failure looks like, "
+                            "and any constraints or stakes the GM should hold. Write in flowing prose, not bullets. The "
+                            "summary should read like a story DM telling another DM 'here's where we are' so the next mode "
+                            "can pick up seamlessly without losing context. Reference the immediate prior scene's arc and "
+                            "any unresolved tension being carried forward. NOT a tactical snapshot of the battlefield; the "
+                            "engine state already covers that.\n"
+                            "\n"
+                            "OPENING NARRATION (1 short paragraph):\n"
+                            "The first beat the player sees as combat opens. Sensory, in-fiction, no rules talk.\n"
+                            "\n"
                             "Do not resolve combat. Do not generate initiative, ship stats, or outcomes."
                         )
                         bootstrap_user_payload = {
@@ -6138,7 +6545,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             # Check if this is a pipeline-eligible request (GPT-5.2 + project chat)
             # Hack mode and combat mode bypass the pipeline — use single-agent calls instead
-            use_pipeline = model_id.startswith("gpt") and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode and gs.get("use_pipeline", True)
+            use_pipeline = model_id.startswith("gpt") and request.project and not use_hack_mode and not use_combat_mode and not use_net_combat_mode and not use_ship_combat_mode and not use_chase_mode and gs.get("use_pipeline", True)
             # use_stateful, use_hack_mode, use_combat_mode, use_ship_combat_mode are computed in the outer scope (before event_generator)
             use_mode_pipeline = model_id.startswith("gpt") and (use_hack_mode or use_combat_mode or use_net_combat_mode) and gs and gs.get("deterministic_mechanics") and gs.get("use_pipeline", True)
 
@@ -7014,7 +7421,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             f"combat_complete={nc_json.get('combat_complete', False)}, "
                             f"net_complete={nc_json.get('net_complete', False)}")
 
-            elif (use_hack_mode or use_combat_mode or use_net_combat_mode) and model_id.startswith("gpt") and not use_mode_pipeline:
+            elif (use_hack_mode or use_combat_mode or use_net_combat_mode or use_chase_mode) and model_id.startswith("gpt") and not use_mode_pipeline:
                 # ============================================================
                 # GPT-5.2 mode fallback: non-deterministic game systems use single-shot JSON
                 # ============================================================
@@ -7024,6 +7431,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 elif use_combat_mode:
                     _mode_label = "combat"
                     _mode_request_params = combat_gpt_request_params
+                elif use_chase_mode:
+                    _mode_label = "chase"
+                    _mode_request_params = chase_gpt_request_params
                 else:
                     _mode_label = "net_combat"
                     _mode_request_params = net_combat_gpt_request_params
@@ -7085,6 +7495,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _apply_combat_state(gs, _cps, combat_json)
                         data["pipeline_state"] = _cps
                         yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
+                elif use_chase_mode:
+                    chase_json = _mode_json
+                    _chps = data.get("pipeline_state", {})
+                    if _mode_json_valid:
+                        gs["apply_chase_state"](_chps, chase_json, game_state=_chps.get("game_state"))
+                        _chase_secs = gs.get("chase_round_seconds") if gs else None
+                        _advance_mode_hud_clock(_chps, _chase_secs)
+                        data["pipeline_state"] = _chps
+                        chase_tool_input = chase_json
+                        yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                 else:
                     nc_json = _mode_json
                     _nps = data.get("pipeline_state", {})
@@ -7142,8 +7562,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 assistant_msg_id = generate_message_id()
                 assistant_parent_id = user_msg_id
-                _mode_flag_key = "hack_mode" if use_hack_mode else ("combat_mode" if use_combat_mode else "net_combat_mode")
-                _mode_tool_key = "hack_tool_input" if use_hack_mode else ("combat_tool_input" if use_combat_mode else "net_combat_tool_input")
+                if use_hack_mode:
+                    _mode_flag_key = "hack_mode"
+                    _mode_tool_key = "hack_tool_input"
+                elif use_combat_mode:
+                    _mode_flag_key = "combat_mode"
+                    _mode_tool_key = "combat_tool_input"
+                elif use_chase_mode:
+                    _mode_flag_key = "chase_mode"
+                    _mode_tool_key = "chase_tool_input"
+                else:
+                    _mode_flag_key = "net_combat_mode"
+                    _mode_tool_key = "net_combat_tool_input"
                 assistant_msg_data = {
                     "id": assistant_msg_id,
                     "parent_id": assistant_parent_id,
@@ -7165,8 +7595,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if data.get("pipeline_state"):
                     assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
 
+                # Chase mode: persist the hidden init message for first-exchange
+                # opening (mirrors the Claude path at line 9307).
+                if use_chase_mode and chase_started_this_turn:
+                    assistant_msg_data["chase_started"] = True
+                    if chase_init_hidden_message_data:
+                        data["messages"].append(chase_init_hidden_message_data)
+                        assistant_msg_data["parent_id"] = chase_init_hidden_message_data["id"]
+
                 _stamp_message_hud_snapshot(assistant_msg_data, data.get("pipeline_state")); data["messages"].append(assistant_msg_data)
                 data["current_leaf_id"] = assistant_msg_id
+                # Stamp chase start_message_id (mirrors Claude path).
+                _active_chase_gpt = data.get("pipeline_state", {}).get("chase")
+                if (use_chase_mode and isinstance(_active_chase_gpt, dict)
+                    and not _active_chase_gpt.get("start_message_id")):
+                    _active_chase_gpt["start_message_id"] = assistant_msg_id
                 save_chat(username, request.chat_name, data, request.project)
 
                 if pending_usage is not None:
@@ -7212,6 +7655,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _nc_done = True
                     if _nc_done:
                         done_data['net_combat_complete'] = True
+                if use_chase_mode:
+                    _chase_done = False
+                    _chase_state = data.get("pipeline_state", {}).get("chase")
+                    if isinstance(_chase_state, dict):
+                        _chase_done = not _chase_state.get("active", True)
+                    elif _mode_json.get("chase_complete"):
+                        _chase_done = True
+                    if _chase_done:
+                        done_data['chase_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
 
                 await sync_manager.broadcast_to_chat(
@@ -7640,6 +8092,55 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Pipeline hack trigger: {_evts['hack_trigger'].get('tier')} on "
                                         f"{_evts['hack_trigger'].get('target_system')} SR{_evts['hack_trigger'].get('sr')} for {username}")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Check for chase_trigger from pipeline events
+                if pipeline_result.events_json and gs and gs.get("init_chase_state"):
+                    try:
+                        _evts_chase = json.loads(pipeline_result.events_json) if isinstance(pipeline_result.events_json, str) else pipeline_result.events_json
+                        if _evts_chase.get("chase_trigger"):
+                            ct = _evts_chase["chase_trigger"]
+                            _ps = data.get("pipeline_state", {})
+                            _ct_vehicles = ct.get("vehicles") if isinstance(ct.get("vehicles"), dict) else {}
+                            _ct_pursuers = set(ct.get("pursuer_vehicles") or [])
+                            _seeded_vehicles = {}
+                            for vname, v in _ct_vehicles.items():
+                                if not isinstance(v, dict):
+                                    continue
+                                _seeded_vehicles[str(vname)] = {
+                                    "operator": v.get("operator", ""),
+                                    "occupants": list(v.get("occupants") or []),
+                                    "square": int(v.get("starting_square", 0) or 0),
+                                    "combat_speed_move": int(v.get("combat_speed_move", 20) or 20),
+                                    "sdp_max": int(v.get("sdp_max", 20) or 20),
+                                    "sdp_current": int(v.get("sdp_current", v.get("sdp_max", 20)) or 20),
+                                    "sp": int(v.get("sp", 0) or 0),
+                                    "type": str(v.get("type") or "land"),
+                                    "is_pursuer": vname in _ct_pursuers if _ct_pursuers else bool(v.get("is_pursuer", False)),
+                                    "notes": v.get("notes", ""),
+                                }
+                            _seeded_chase = gs["init_chase_state"](
+                                grid_length=int(ct.get("grid_length", 8) or 8),
+                                vehicles=_seeded_vehicles,
+                                started_from="pipeline_events",
+                                context=ct.get("context"),
+                                start_message_id=assistant_msg_id,
+                            )
+                            if ct.get("route"):
+                                _seeded_chase["route"] = ct["route"]
+                            _ps["chase"] = _seeded_chase
+                            # Stamp HUD overlay immediately so the next
+                            # exchange's HUD reflects the chase route, not
+                            # the stale pre-chase location.
+                            from game_systems.cpred_chase import stamp_chase_hud_overlay
+                            stamp_chase_hud_overlay(_ps)
+                            yield f"event: chase_mode_start\ndata: {json.dumps(_seeded_chase)}\n\n"
+                            logger.info(
+                                f"Pipeline chase trigger: {len(_seeded_vehicles)} vehicles, "
+                                f"{len(_ct_pursuers) or sum(1 for v in _seeded_vehicles.values() if v['is_pursuer'])} pursuers "
+                                f"for {username}"
+                            )
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -8388,6 +8889,52 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 except Exception as retry_err:
                                     logger.error(f"Combat mode: retry error for {username}: {retry_err}")
 
+                        # Handle chase mode tool output (Claude chase mode)
+                        chase_tool_input = None
+                        if use_chase_mode and model_id.startswith("claude"):
+                            tool_input = usage.get('tool_use_input')
+                            if tool_input and _tool_input_valid(tool_input, gs["chase_tool"]):
+                                chase_tool_input = tool_input
+                                _chase_ps = data.get("pipeline_state", {})
+                                gs["apply_chase_state"](_chase_ps, tool_input,
+                                                        game_state=_chase_ps.get("game_state"))
+                                # Chase clock: advance by chase_round_seconds (default 3 sec)
+                                _chase_secs = gs.get("chase_round_seconds") if gs else None
+                                _advance_mode_hud_clock(_chase_ps, _chase_secs)
+                                data["pipeline_state"] = _chase_ps
+                                logger.info(f"Chase mode: applied state for {username}, "
+                                            f"complete={tool_input.get('chase_complete', False)}")
+                            else:
+                                _reason = "malformed tool_use_input" if tool_input else "no tool_use_input"
+                                logger.warning(f"Chase mode: {_reason}, attempting retry for {username}")
+                                try:
+                                    retry_result, retry_usage = await asyncio.to_thread(
+                                        _stateful_tool_retry,
+                                        client, provider.MODEL_NAME,
+                                        accumulated_content,
+                                        accumulated_thinking,
+                                        gs["chase_tool"],
+                                        gs.get("chase_contract", "")
+                                    )
+                                    if retry_usage:
+                                        usage['input_tokens'] = usage.get('input_tokens', 0) + retry_usage['input_tokens']
+                                        usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + retry_usage['cache_read_tokens']
+                                        usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
+                                        usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
+                                    if retry_result:
+                                        chase_tool_input = retry_result
+                                        _chase_ps = data.get("pipeline_state", {})
+                                        gs["apply_chase_state"](_chase_ps, retry_result,
+                                                                game_state=_chase_ps.get("game_state"))
+                                        _chase_secs = gs.get("chase_round_seconds") if gs else None
+                                        _advance_mode_hud_clock(_chase_ps, _chase_secs)
+                                        data["pipeline_state"] = _chase_ps
+                                        logger.info(f"Chase mode: retry succeeded for {username}")
+                                    else:
+                                        logger.warning(f"Chase mode: retry also failed for {username}")
+                                except Exception as retry_err:
+                                    logger.error(f"Chase mode: retry error for {username}: {retry_err}")
+
                         # Handle ship combat mode tool output (Claude ship combat mode)
                         if use_ship_combat_mode and model_id.startswith("claude"):
                             tool_input = usage.get('tool_use_input')
@@ -8926,6 +9473,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if combat_tool_input:
                                 assistant_msg_data["combat_tool_input"] = combat_tool_input
 
+                        # Flag chase mode messages (Hot Pursuit, Claude + GPT paths)
+                        if use_chase_mode:
+                            assistant_msg_data["chase_mode"] = True
+                            if chase_tool_input:
+                                assistant_msg_data["chase_tool_input"] = chase_tool_input
+                            if chase_started_this_turn:
+                                assistant_msg_data["chase_started"] = True
+                                # Persist the hidden init message into the branch
+                                # so future exchanges can read the chase opener.
+                                if chase_init_hidden_message_data:
+                                    data["messages"].append(chase_init_hidden_message_data)
+                                    assistant_msg_data["parent_id"] = chase_init_hidden_message_data["id"]
+
                         # Flag sex mode messages
                         if use_sex_mode:
                             assistant_msg_data["sex_mode"] = True
@@ -8971,6 +9531,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         _active_ship_combat = data.get("pipeline_state", {}).get("ship_combat")
                         if _active_ship_combat and "start_message_id" not in _active_ship_combat:
                             _active_ship_combat["start_message_id"] = assistant_msg_id
+                        _active_chase = data.get("pipeline_state", {}).get("chase")
+                        if (_active_chase
+                            and isinstance(_active_chase, dict)
+                            and not _active_chase.get("start_message_id")):
+                            _active_chase["start_message_id"] = assistant_msg_id
 
                         # Check for hack_trigger in normal stateful tool output
                         if (stateful_tool_input
@@ -8986,6 +9551,52 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             yield f"event: hack_mode_start\ndata: {json.dumps(data['hack_state'])}\n\n"
                             logger.info(f"Hack trigger: {ht.get('tier')} on {ht.get('target_system')} "
                                         f"SR{ht.get('sr')} for {username}")
+
+                        # Check for chase_trigger in normal stateful tool output
+                        if (stateful_tool_input
+                            and stateful_tool_input.get("chase_trigger")
+                            and gs and gs.get("chase_contract")
+                            and gs.get("init_chase_state")):
+                            ct = stateful_tool_input["chase_trigger"]
+                            _ps = stateful_pipeline_state or data.get("pipeline_state", {})
+                            _ct_vehicles = ct.get("vehicles") if isinstance(ct.get("vehicles"), dict) else {}
+                            _ct_pursuers = set(ct.get("pursuer_vehicles") or [])
+                            _seeded_vehicles = {}
+                            for vname, v in _ct_vehicles.items():
+                                if not isinstance(v, dict):
+                                    continue
+                                _seeded_vehicles[str(vname)] = {
+                                    "operator": v.get("operator", ""),
+                                    "occupants": list(v.get("occupants") or []),
+                                    "square": int(v.get("starting_square", 0) or 0),
+                                    "combat_speed_move": int(v.get("combat_speed_move", 20) or 20),
+                                    "sdp_max": int(v.get("sdp_max", 20) or 20),
+                                    "sdp_current": int(v.get("sdp_current", v.get("sdp_max", 20)) or 20),
+                                    "sp": int(v.get("sp", 0) or 0),
+                                    "type": str(v.get("type") or "land"),
+                                    "is_pursuer": vname in _ct_pursuers if _ct_pursuers else bool(v.get("is_pursuer", False)),
+                                    "notes": v.get("notes", ""),
+                                }
+                            _seeded_chase = gs["init_chase_state"](
+                                grid_length=int(ct.get("grid_length", 8) or 8),
+                                vehicles=_seeded_vehicles,
+                                started_from="state_report",
+                                context=ct.get("context"),
+                                start_message_id=assistant_msg_id,
+                            )
+                            if ct.get("route"):
+                                _seeded_chase["route"] = ct["route"]
+                            _ps["chase"] = _seeded_chase
+                            # Stamp HUD overlay immediately so the next
+                            # exchange's HUD reflects the chase route.
+                            from game_systems.cpred_chase import stamp_chase_hud_overlay
+                            stamp_chase_hud_overlay(_ps)
+                            yield f"event: chase_mode_start\ndata: {json.dumps(_seeded_chase)}\n\n"
+                            logger.info(
+                                f"Chase trigger: {len(_seeded_vehicles)} vehicles, "
+                                f"{len(_ct_pursuers) or sum(1 for v in _seeded_vehicles.values() if v['is_pursuer'])} pursuers "
+                                f"for {username}"
+                            )
 
                         # Check for ship_combat_trigger in normal stateful tool output
                         if (stateful_tool_input
@@ -9031,10 +9642,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # ── Sex mode auto-exit: kick off background richer-summary generator ──
                         # When the model auto-exits with [SCENE COMPLETE], the inline [SCENE SUMMARY: ...]
-                        # tag is only 1-2 sentences. Generate a 2-4 paragraph summary in the background
-                        # using the same path /sex manual exit uses, and stamp it on the just-saved
-                        # assistant message — overwriting the inline one. This makes auto-exit and
-                        # manual-exit produce equivalent FADE TO BLACK content for the next normal turn.
+                        # tag is only 1-2 sentences. Generate an up-to-3-paragraph story-shaped summary
+                        # in the background using the same path /sex manual exit uses, and stamp it on
+                        # the just-saved assistant message — overwriting the inline one. This makes
+                        # auto-exit and manual-exit produce equivalent FADE TO BLACK content for the
+                        # next normal turn.
                         if sex_scene_complete and _sex_completed_start_id:
                             _sex_api_key = get_api_key(username, "anthropic")
                             if _sex_api_key:

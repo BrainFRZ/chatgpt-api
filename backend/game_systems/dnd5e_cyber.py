@@ -517,7 +517,7 @@ Handling ICE: **Bypass** (Hacking vs 10 + SR, free, Ghost: Advantage), **Disable
 - When you need a dN, take the next unused value from that die type's row. If a pool is exhausted, note this in your output.
 
 ### Completing the Hack
-Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, resources spent, damage taken, any real-world consequences) when:
+Set `hack_complete: true` and include `narrative_summary` (up to 3 paragraphs in story-shaped prose: what happened across the run, anything unexpected, how it ended — covering what was obtained/accomplished, final Alert level, resources spent, damage taken, real-world consequences, and any tension carried forward) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
 - Forced disconnect (Convergence, Trace complete, or 0 HP from biofeedback)
@@ -601,7 +601,14 @@ REPORT_HACK_STATE_TOOL = {
             },
             "narrative_summary": {
                 "type": ["string", "null"],
-                "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, resources spent, damage taken."
+                "description": (
+                    "When hack_complete=true: up to 3 paragraphs in story-shaped prose. "
+                    "What happened across the run, anything unexpected (lucky breaks, ICE "
+                    "encounters, costly choices), how it ended. Cover outcome, consequences, "
+                    "resources spent, damage taken, and any unresolved tension or real-world "
+                    "fallout the next scene should carry. The receiving mode reads this as "
+                    "the handoff so play picks up seamlessly."
+                ),
             }
         }
     }
@@ -1011,7 +1018,7 @@ Set `boarding_phase` to "repelled" or "secured" accordingly and include `boardin
 
 ### Completing Ship Combat
 Set `ship_combat_complete: true` and include BOTH `narrative_summary` AND `combat_outcome` when the engagement is decisively over.
-- `narrative_summary`: Free-text 2-4 sentence summary (outcome, ships disabled/destroyed, hull damage taken, crew casualties, resources expended, narrative consequences) for standard mode context.
+- `narrative_summary`: Free-text up-to-3-paragraph story-shaped summary (what happened across the engagement, anything unexpected — turning points, lucky breaks, costly choices — how it ended; cover outcome, ships disabled/destroyed, hull damage taken, crew casualties, resources expended, narrative consequences, and unresolved tension to carry forward) for standard mode context.
 - `combat_outcome`: Structured data with `outcome` (victory/defeat/escape/surrender/ceasefire/interrupted), `outcome_detail`, `rounds_fought`, `ship_final_states` (each ship's name, faction, hull_percent, status), and `notable_events` (key moments worth remembering).
 
 Valid end conditions include (not limited to):
@@ -1787,7 +1794,7 @@ SHIP COMBAT TRIGGER:
   {"environment":"<space environment>","enemy_ships":[{"name":"<ship>","faction":"<faction>"}]}
 - Treat this as the canonical Opus->GPT handoff for ship combat mode. Prefer a strong trigger when possible.
 - Include these fields when known from the fiction: `encounter_type`, `objective`, `positioning`, `immediate_complications`, `handoff_summary`, optional `opening_narration`.
-- `handoff_summary` should be a 1-3 sentence canonical summary of the immediate setup that ship combat mode can use to initialize ships, crews, and initiative.
+- `handoff_summary` should be a 2-3 paragraph story-shaped canonical summary covering (1) what's going on right now — the immediate situation as combat opens, (2) why we're here — the chain of choices and pressures from prior scenes that brought the crew to this moment, and (3) what the goal is — what success looks like, what failure looks like, and any constraints or stakes the GM should hold. Ship combat mode reads this as the only handoff to initialize ships, crews, and initiative.
 - `opening_narration` is optional player-facing prose the app may show as `BEGINNING SHIP COMBAT`.
 - `enemy_ships` entries may include optional `ship_type` and `size_class` hints to improve crew/role coverage generation.
 - Trigger for ship-to-ship weaponized engagements and boarding operations. Boarding-only scenes (pirate boarding, marine assault) DO trigger ship combat mode — the boarding sub-phase handles character-level combat within ship combat. Docking disputes or disengagement without weapons fire or boarding do not trigger ship combat mode.
@@ -2118,7 +2125,7 @@ Optional arrays (omit or leave empty when no ops occurred):
   * `{"op": "npc_rs", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "npc_roms", "target": "<NPC>", "other": "<other NPC>", "change": <signed int>, "reason": "<why>"}`
   * `{"op": "npc_set", "target": "<NPC>", "other": "<other NPC>", "fields": {"rs": <int>, "roms": <int>}}`
-- **ship_combat_trigger**: When ships engage in actual ship-to-ship combat, set a handoff object so the app can enter ship combat mode. Include `environment`, `enemy_ships`, and when available `encounter_type`, `objective`, `positioning`, `immediate_complications`, and a 1-3 sentence `handoff_summary`. Optional `opening_narration` can be used for the player-facing "BEGINNING SHIP COMBAT" intro.
+- **ship_combat_trigger**: When ships engage in actual ship-to-ship combat, set a handoff object so the app can enter ship combat mode. Include `environment`, `enemy_ships`, and when available `encounter_type`, `objective`, `positioning`, `immediate_complications`, and a 2-3 paragraph story-shaped `handoff_summary` (covering what's going on, why we're here, and what the goal is). Optional `opening_narration` can be used for the player-facing "BEGINNING SHIP COMBAT" intro.
   - Scoring guidelines: Moments +0-1, Gifts +1-3, Milestones +2-3, Major Decisions +5-8, Arc Climax +10-15; Opposition -3 to -10, Betrayals -15 to -30; FR Missions +5-12.
   - The backend detects tier boundary crossings and includes them in notifications. When the backend signals a tier transition, narratively reflect the shift and show 📊 line.
   - Alliance cascades: When an NPC has a "faction" field, the backend auto-cascades RS changes to that faction's FR at half value (rounded toward zero). Set "faction" in NPC bootstrap fields to enable.
@@ -2245,7 +2252,7 @@ Describe the moment of jacking in narratively (the character connecting, the Mat
 ### Intimate Scenes
 When the narrative clearly progresses to a sexual/intimate encounter between the PC and one or more NPCs — and both sides have shown clear interest and consent within the fiction — set `sex_scene` in your `report_state` call:
 - `npcs`: list of NPC names involved
-- `summary`: 1-2 paragraphs — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover the recent scene and mood, the emotional arc between the characters, physical/environmental details (where they are, lighting, what they're wearing or not), and any unresolved tension or vulnerability to carry forward.
+- `summary`: 2-3 paragraphs in story-shaped prose — this is the ONLY context the intimate scene mode will have (no prior chat history). Cover (1) what's going on right now (the immediate scene + mood), (2) why we're here (emotional arc between characters, how they reached this moment), (3) what the goal is (physical/environmental details — location, lighting, dress — and unresolved tension or vulnerability to carry forward).
 Set `sex_scene` to `null` on all other turns. Only trigger when the scene has unmistakably reached an intimate point — flirting, kissing, or suggestive dialogue alone is not sufficient."""
 
 SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
@@ -2479,7 +2486,7 @@ STATE_REPORT_TOOL = {
                     "objective": {"type": "string", "description": "Primary immediate objective (escape, disable, survive, seize cargo, etc.)"},
                     "positioning": {"type": "string", "description": "Brief opening tactical positioning/range summary"},
                     "immediate_complications": {"type": "array", "items": {"type": "string"}},
-                    "handoff_summary": {"type": "string", "description": "1-3 sentence canonical handoff summary for ship combat initialization"},
+                    "handoff_summary": {"type": "string", "description": "2-3 paragraph story-shaped canonical handoff summary covering (1) what's going on, (2) why we're here, (3) what the goal is. Read by ship combat mode for initialization."},
                     "opening_narration": {"type": "string", "description": "Optional player-facing opening narration for ship combat start"},
                     "enemy_ships": {
                         "type": "array",
@@ -2506,7 +2513,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
+                        "description": "2-3 paragraphs in story-shaped prose — the ONLY context the intimate scene mode gets (no prior chat history). Cover (1) what's going on right now (the immediate scene + mood), (2) why we're here (emotional arc, how they reached this moment), (3) what the goal is (physical/environmental details, unresolved tension or vulnerability to carry forward)."
                     }
                 }
             }

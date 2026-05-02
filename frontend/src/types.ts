@@ -53,6 +53,10 @@ export interface ChatMessage {
   bookmark?: string;  // User-defined bookmark annotation
   hack_mode?: boolean;  // True for messages during a hack mode encounter
   sex_mode?: boolean;  // True for messages during an intimate scene
+  ship_combat_mode?: boolean;  // True for messages during ship combat
+  combat_mode?: boolean;  // True for messages during meatspace combat
+  net_combat_mode?: boolean;  // True for messages during NET+meatspace combat
+  chase_mode?: boolean;  // True for messages during a Hot Pursuit chase
   artifact_ops?: ArtifactOp[];  // Document operations for inline cards (Novels system)
   staged?: boolean;  // False = excluded from API context (Novels manual staging)
 }

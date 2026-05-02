@@ -1858,6 +1858,109 @@ def build_game_injection(game_state, scene_state=None):
             lines.append(f"  Armor: Head SP {armor.get('head', 0)} | Body SP {armor.get('body', 0)}")
             lines.append(f"  Eurobucks: {eb:,}")
 
+            # Role + role rank + interface rank (Netrunner-specific NA/turn cue)
+            role = er.get("role")
+            role_rank = er.get("role_ability_rank")
+            iface_rank = er.get("interface_rank")
+            na_per_turn = er.get("net_actions_per_turn")
+            real_name = er.get("real_name")
+            role_parts = []
+            if role:
+                if role_rank is not None:
+                    role_parts.append(f"{role} {role_rank}")
+                else:
+                    role_parts.append(str(role))
+            if iface_rank is not None:
+                if na_per_turn is not None:
+                    role_parts.append(f"Interface {iface_rank} ({na_per_turn} NA/turn)")
+                else:
+                    role_parts.append(f"Interface {iface_rank}")
+            if real_name and real_name != name:
+                role_parts.append(f"a.k.a. {real_name}")
+            if role_parts:
+                lines.append(f"  Role: {' | '.join(role_parts)}")
+
+            # STAT block — INT/REF/DEX/TECH/COOL/WILL/LUCK/MOVE/BODY/EMP
+            stats = er.get("stats") or {}
+            if stats:
+                _stat_order = ("INT", "REF", "DEX", "TECH", "COOL", "WILL", "LUCK", "MOVE", "BODY", "EMP")
+                stat_pairs = []
+                for s in _stat_order:
+                    if s in stats:
+                        stat_pairs.append(f"{s} {stats[s]}")
+                # Show EMP_base/EMP_current if present (cyberware penalty case)
+                if "EMP_base" in stats or "EMP_current" in stats:
+                    eb_v = stats.get("EMP_base")
+                    ec_v = stats.get("EMP_current")
+                    if eb_v is not None and ec_v is not None and eb_v != ec_v:
+                        # Replace bare EMP with EMP base/current display
+                        stat_pairs = [p for p in stat_pairs if not p.startswith("EMP ")]
+                        stat_pairs.append(f"EMP {ec_v}/{eb_v} (base/current)")
+                # Any leftover non-canonical stats (rare)
+                for k, v in stats.items():
+                    if k not in _stat_order and k not in ("EMP_base", "EMP_current"):
+                        stat_pairs.append(f"{k} {v}")
+                if stat_pairs:
+                    lines.append(f"  Stats: {' | '.join(stat_pairs)}")
+
+            # Skills (only show if present — many enemies bootstrap without them)
+            skills = er.get("skills") or {}
+            if skills:
+                # Compact display — skill name + total. Sort by total desc to
+                # surface signature skills first.
+                sorted_skills = sorted(
+                    skills.items(),
+                    key=lambda kv: (-(kv[1] if isinstance(kv[1], (int, float)) else 0), kv[0]),
+                )
+                skill_strs = [f"{k} {v}" for k, v in sorted_skills if v is not None]
+                if skill_strs:
+                    lines.append(f"  Skills: {', '.join(skill_strs)}")
+
+            # Role-specific ability descriptions (Solo Combat Awareness, Fixer
+            # abilities, etc.) — strings already formatted by caller.
+            for abilities_key in ("solo_abilities", "fixer_abilities", "abilities"):
+                abil = er.get(abilities_key)
+                if abil and isinstance(abil, list):
+                    label = abilities_key.replace("_", " ").title()
+                    lines.append(f"  {label}: {'; '.join(str(a) for a in abil)}")
+
+            # Death Save base (BODY by default, but cyberware/feats may modify)
+            death_save = er.get("death_save")
+            if death_save is not None:
+                lines.append(f"  Death Save: {death_save} (roll under on d10)")
+
+            # Current outfit / wardrobe (affects Wardrobe & Style + social
+            # presentation tier). Set via `outfit_set` ops; rendered here so
+            # the model can reference current style without re-asking.
+            outfit = er.get("outfit")
+            if isinstance(outfit, dict) and outfit.get("description"):
+                style_rating = outfit.get("style_rating")
+                if style_rating is not None:
+                    lines.append(f"  Outfit: {outfit['description']} (style +{style_rating})")
+                else:
+                    lines.append(f"  Outfit: {outfit['description']}")
+
+            # Reserve ammo by caliber/type (debited via weapon_load /
+            # ammo_pool_change ops). Same shape as the combat injection's
+            # rendering — surfaced here for general/single-agent mode too.
+            ammo_pool = er.get("ammo_pool") or {}
+            if isinstance(ammo_pool, dict) and ammo_pool:
+                pool_strs = []
+                for caliber, types in ammo_pool.items():
+                    if isinstance(types, dict) and types:
+                        type_strs = ", ".join(f"{t}:{n}" for t, n in types.items())
+                        pool_strs.append(f"{caliber} [{type_strs}]")
+                    elif isinstance(types, int):
+                        pool_strs.append(f"{caliber}: {types}")
+                if pool_strs:
+                    lines.append(f"  Ammo Reserves: {'; '.join(pool_strs)}")
+
+            # Consumable gear / equipment (medikits, Agents, comms, etc.)
+            gear = er.get("gear") or {}
+            if isinstance(gear, dict) and gear:
+                gear_strs = ", ".join(f"{n}× {item}" for item, n in gear.items())
+                lines.append(f"  Gear: {gear_strs}")
+
             lifestyle = er.get("lifestyle")
             housing = er.get("housing")
             shared_with = er.get("housing_shared_with")

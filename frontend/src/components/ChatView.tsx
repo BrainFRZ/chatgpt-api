@@ -330,6 +330,9 @@ export default function ChatView({
           const isHackMode = !!(msg as any).hack_mode;
           const isShipCombatMode = !!(msg as any).ship_combat_mode;
           const isSexMode = !!(msg as any).sex_mode;
+          const isChaseMode = !!(msg as any).chase_mode;
+          const isCombatMode = !!(msg as any).combat_mode;
+          const isNetCombatMode = !!(msg as any).net_combat_mode;
           // Check if this message pair is manually unstaged (Novels)
           const isUnstaged = msg.role === 'user' ? msg.staged === false
             : (i > 0 && messages[i - 1]?.role === 'user' && messages[i - 1]?.staged === false);
@@ -337,12 +340,22 @@ export default function ChatView({
           if (!isInContext || isUnstaged) {
             // Out of context or manually unstaged: grayed out versions
             backgroundColor = msg.role === 'user' ? '#1f1f35' : '#171728';
+          } else if (isNetCombatMode) {
+            // NET+meatspace combat: violet/purple tint (mix of matrix green
+            // and combat red — visually signals "both theaters at once").
+            backgroundColor = msg.role === 'user' ? '#251a2e' : '#190f1f';
           } else if (isHackMode) {
             // Hack mode: matrix-themed green/dark tint
             backgroundColor = msg.role === 'user' ? '#1a2e1a' : '#0f1f0f';
+          } else if (isCombatMode) {
+            // Meatspace combat: crimson/red — adrenaline, gunfire, danger.
+            backgroundColor = msg.role === 'user' ? '#2e1717' : '#1f0f0f';
           } else if (isShipCombatMode) {
             // Ship combat mode: tactical amber/copper tint
             backgroundColor = msg.role === 'user' ? '#312417' : '#23190f';
+          } else if (isChaseMode) {
+            // Chase mode (Hot Pursuit): electric cyan / vehicle HUD tint
+            backgroundColor = msg.role === 'user' ? '#142838' : '#0e1e2c';
           } else if (isSexMode) {
             // Sex mode: warm rose/pink tint
             backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
@@ -360,10 +373,21 @@ export default function ChatView({
                 backgroundColor
               }}
             >
-              <div style={{...styles.messageRole, ...(isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} : isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} : isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} : {})}}>
-                {isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
-                {!isHackMode && isShipCombatMode && <span style={{color: '#f59e0b', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>SHIP</span>}
-                {!isHackMode && !isShipCombatMode && isSexMode && <span style={{color: '#e88fa5', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>XXX</span>}
+              <div style={{...styles.messageRole, ...(
+                isNetCombatMode ? {borderLeft: '3px solid #a855f7', paddingLeft: '8px'} :
+                isHackMode ? {borderLeft: '3px solid #00ff41', paddingLeft: '8px'} :
+                isCombatMode ? {borderLeft: '3px solid #dc2626', paddingLeft: '8px'} :
+                isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} :
+                isChaseMode ? {borderLeft: '3px solid #00d4ff', paddingLeft: '8px'} :
+                isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} :
+                {}
+              )}}>
+                {isNetCombatMode && <span style={{color: '#a855f7', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>NET+MEAT</span>}
+                {!isNetCombatMode && isHackMode && <span style={{color: '#00ff41', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>MATRIX</span>}
+                {!isNetCombatMode && !isHackMode && isCombatMode && <span style={{color: '#dc2626', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>COMBAT</span>}
+                {!isNetCombatMode && !isHackMode && !isCombatMode && isShipCombatMode && <span style={{color: '#f59e0b', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>SHIP</span>}
+                {!isNetCombatMode && !isHackMode && !isCombatMode && !isShipCombatMode && isChaseMode && <span style={{color: '#00d4ff', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>CHASE</span>}
+                {!isNetCombatMode && !isHackMode && !isCombatMode && !isShipCombatMode && !isChaseMode && isSexMode && <span style={{color: '#e88fa5', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>XXX</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button

@@ -264,6 +264,11 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
             deps.setHackState(null);
+          } else if (event.type === 'chase_mode_start') {
+            // Chase state lives only in pipeline_state.chase (no parallel hook).
+            // Merge the seeded chase dict into pipeline_state so the UI picks
+            // up route, vehicles, grid, etc. immediately.
+            deps.setPipelineState((prev: any) => prev ? { ...prev, chase: event.data } : { chase: event.data });
           } else if (event.type === 'artifact_update') {
             const doc = event.data as Artifact;
             if (doc.doc_id) {
@@ -282,6 +287,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             };
             if (data.ship_combat_mode) (newUserMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (newUserMessage as any).net_combat_mode = true;
+            if (data.chase_mode) (newUserMessage as any).chase_mode = true;
 
             const assistantMessage: ChatMessage = {
               id: data.assistant_message_id,
@@ -299,6 +305,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
+            if (data.chase_mode) (assistantMessage as any).chase_mode = true;
             if (data.sex_mode) (assistantMessage as any).sex_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
@@ -372,6 +379,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            if (data.chase_mode) (assistantMessage as any).chase_mode = true;
+            if (data.chase_started) (assistantMessage as any).chase_started = true;
             if (data.hud_state) (assistantMessage as any).pipeline_state_after = { hud_state: data.hud_state };
 
             deps.setMessages(prev => {
@@ -629,6 +638,11 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
             deps.setHackState(null);
+          } else if (event.type === 'chase_mode_start') {
+            // Chase state lives only in pipeline_state.chase (no parallel hook).
+            // Merge the seeded chase dict into pipeline_state so the UI picks
+            // up route, vehicles, grid, etc. immediately.
+            deps.setPipelineState((prev: any) => prev ? { ...prev, chase: event.data } : { chase: event.data });
           } else if (event.type === 'artifact_update') {
             const doc = event.data as Artifact;
             if (doc.doc_id) {
@@ -674,7 +688,9 @@ export function useMessaging(deps: UseMessagingDeps) {
             };
             if (data.ship_combat_mode) (assistantMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
+            if (data.chase_mode) (assistantMessage as any).chase_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
+            if (data.chase_started) (assistantMessage as any).chase_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') {
               (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
@@ -689,6 +705,9 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             if (data.net_combat_mode) {
               (userMsgWithId as any).net_combat_mode = true;
+            }
+            if (data.chase_mode) {
+              (userMsgWithId as any).chase_mode = true;
             }
             if (data.sex_mode) {
               (userMsgWithId as any).sex_mode = true;
@@ -760,6 +779,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
+            if (data.chase_mode) (assistantMessage as any).chase_mode = true;
+            if (data.chase_started) (assistantMessage as any).chase_started = true;
 
             deps.setMessages(prev => {
               const base = prev.slice(0, -1);  // Remove chain placeholder

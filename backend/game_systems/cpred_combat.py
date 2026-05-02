@@ -529,6 +529,15 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
         )
         return
 
+    # Snapshot vehicles BEFORE _apply_meatspace_shared — if combat_complete is
+    # set, the helper clears pipeline_state["combat"] = None, but a same-call
+    # initiate_chase below needs the existing vehicle SDP/SP/MOVE state to
+    # carry over. Without this snapshot, mid-combat damage is lost on the
+    # combat→chase transition.
+    _pre_clear_vehicles_snapshot = copy.deepcopy(
+        (pipeline_state.get("combat") or {}).get("vehicles") or {}
+    )
+
     _apply_meatspace_shared(pipeline_state, tool_input, game_state=game_state)
 
     # --- initiate_net_combat ---
@@ -543,6 +552,56 @@ def apply_cpred_combat_state(pipeline_state, tool_input, game_state=None, **_kw)
         if net_combat.get("context"):
             _nc_trigger["context"] = net_combat["context"]
         pipeline_state["net_combat"] = _nc_trigger
+
+    # --- initiate_chase (combat -> Hot Pursuit chase) ---
+    chase = tool_input.get("initiate_chase")
+    if chase and isinstance(chase, dict):
+        from .cpred_chase import init_chase_state
+        # Build vehicles dict from initiate_chase payload, with sensible
+        # fallbacks pulled from the pre-clear snapshot (so SDP/SP/MOVE carry
+        # over from in-progress combat even when combat_complete=True cleared
+        # the live combat slot just above).
+        existing_vehicles = _pre_clear_vehicles_snapshot or (
+            (pipeline_state.get("combat") or {}).get("vehicles") or {}
+        )
+        vehicles_in = chase.get("vehicles") or {}
+        if not isinstance(vehicles_in, dict):
+            vehicles_in = {}
+        pursuer_set = set(chase.get("pursuer_vehicles") or [])
+        vehicles_out = {}
+        for vname, v in vehicles_in.items():
+            if not isinstance(v, dict):
+                continue
+            existing = existing_vehicles.get(vname) or {}
+            vehicles_out[vname] = {
+                "operator": v.get("operator") or existing.get("driver") or "",
+                "occupants": list(v.get("occupants") or existing.get("occupants") or []),
+                "square": v.get("starting_square", 0),
+                "combat_speed_move": v.get("combat_speed_move",
+                                           existing.get("combat_move", 20)),
+                "sdp_max": v.get("sdp_max", existing.get("sdp_max", 20)),
+                "sdp_current": v.get("sdp_current",
+                                     existing.get("sdp_current", v.get("sdp_max", 20))),
+                "sp": v.get("sp", existing.get("sp", 0)),
+                "type": v.get("type", existing.get("type", "land")),
+                "upgrades": list(v.get("upgrades") or existing.get("upgrades") or []),
+                "status": v.get("status", existing.get("status", "active")),
+                "is_pursuer": vname in pursuer_set if pursuer_set else bool(v.get("is_pursuer", False)),
+                "notes": v.get("notes", ""),
+            }
+        if vehicles_out:
+            from .cpred_chase import stamp_chase_hud_overlay
+            pipeline_state["chase"] = init_chase_state(
+                grid_length=chase.get("grid_length", 8),
+                vehicles=vehicles_out,
+                started_from="combat",
+                context=chase.get("context"),
+            )
+            if chase.get("route"):
+                pipeline_state["chase"]["route"] = chase["route"]
+            if chase.get("scene"):
+                pipeline_state["chase"]["scene"] = chase["scene"]
+            stamp_chase_hud_overlay(pipeline_state)
 
 
 # ---------------------------------------------------------------------------

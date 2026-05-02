@@ -1129,6 +1129,65 @@ def collapse_net_combat_messages(branch_path: list[dict]) -> list[dict]:
     return result
 
 
+def collapse_chase_messages(branch_path: list[dict]) -> list[dict]:
+    """Collapse chase_mode (Hot Pursuit) messages into synthetic summary pairs.
+
+    Same pattern as collapse_combat_messages / collapse_net_combat_messages —
+    scans for runs of chase_mode=true messages and replaces each run with a
+    single user/assistant pair containing the chase result summary.
+    """
+    if len(branch_path) < 3:
+        return branch_path
+
+    history = branch_path[1:-1]
+    if not any(isinstance(msg, dict) and msg.get("chase_mode") for msg in history):
+        return branch_path
+
+    result = [branch_path[0]]
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if not isinstance(msg, dict) or not msg.get("chase_mode"):
+            result.append(msg)
+            i += 1
+            continue
+
+        chase_summary = None
+        end_reason = None
+        j = i
+        while j < len(history):
+            hmsg = history[j]
+            if not isinstance(hmsg, dict) or not hmsg.get("chase_mode"):
+                break
+            tool_input = hmsg.get("chase_tool_input", {})
+            if isinstance(tool_input, dict) and tool_input.get("narrative_summary"):
+                chase_summary = tool_input["narrative_summary"]
+            if isinstance(tool_input, dict) and tool_input.get("end_reason"):
+                end_reason = tool_input["end_reason"]
+            j += 1
+
+        if chase_summary:
+            collapsed_parts = ["[CHASE RESULT]"]
+            collapsed_parts.append(chase_summary)
+            if end_reason:
+                collapsed_parts.append(f"End: {end_reason}")
+            collapsed_parts.append("[/CHASE RESULT]")
+            result.append({
+                "role": "user",
+                "content": "[A vehicle chase took place.]"
+            })
+            result.append({
+                "role": "assistant",
+                "content": "\n".join(collapsed_parts)
+            })
+        # else: incomplete chase with no summary — drop silently
+
+        i = j
+
+    result.append(branch_path[-1])
+    return result
+
+
 def collapse_sex_messages(branch_path: list[dict]) -> list[dict]:
     """Collapse sex_mode messages into a discreet summary pair for normal context.
 
@@ -1281,7 +1340,10 @@ def _fresh_pipeline_state() -> dict:
         "hud_state": {},
         "decision_flags": {},
         "combat": None,
+        "net_combat": None,
         "ship_combat": None,
+        "chase": None,
+        "sex_scene": None,
         "turn_counter": 0,
         "_clock_seconds_buffer": 0
     }
@@ -1307,6 +1369,7 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
             "combat": None,
             "net_combat": None,
             "ship_combat": None,
+            "chase": None,
             "sex_scene": None,
             "turn_counter": 0,
             "_clock_seconds_buffer": 0
@@ -1392,6 +1455,9 @@ def migrate_pipeline_state(state: Optional[dict]) -> dict:
     state.setdefault("combat", None)
     state.setdefault("net_combat", None)
     state.setdefault("ship_combat", None)
+    state.setdefault("chase", None)
+    if state.get("chase") is not None and not isinstance(state.get("chase"), dict):
+        state["chase"] = None
     if state.get("ship_combat") is not None and not isinstance(state.get("ship_combat"), dict):
         state["ship_combat"] = None
     if isinstance(state.get("ship_combat"), dict):

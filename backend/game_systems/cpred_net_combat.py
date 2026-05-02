@@ -214,6 +214,13 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
                        type(tool_input).__name__)
         return
 
+    # Snapshot vehicles BEFORE _apply_meatspace_shared (same reason as
+    # apply_cpred_combat_state — same-call initiate_chase below needs the
+    # existing vehicle state when combat_complete clears the combat slot).
+    _pre_clear_vehicles_snapshot = copy.deepcopy(
+        (pipeline_state.get("combat") or {}).get("vehicles") or {}
+    )
+
     # --- Meatspace: character_updates, cover, vehicles, combat initiative ---
     _apply_meatspace_shared(pipeline_state, tool_input, game_state=game_state)
 
@@ -287,6 +294,52 @@ def apply_net_combat_state(pipeline_state, tool_input, game_state=None, resolver
         nc["narrative_summary"] = tool_input.get("narrative_summary", "Combined engagement concluded.")
 
     pipeline_state["net_combat"] = nc
+
+    # --- initiate_chase (net_combat -> Hot Pursuit chase) ---
+    chase = tool_input.get("initiate_chase")
+    if chase and isinstance(chase, dict):
+        from .cpred_chase import init_chase_state
+        existing_vehicles = _pre_clear_vehicles_snapshot or (
+            (pipeline_state.get("combat") or {}).get("vehicles") or {}
+        )
+        vehicles_in = chase.get("vehicles") or {}
+        if not isinstance(vehicles_in, dict):
+            vehicles_in = {}
+        pursuer_set = set(chase.get("pursuer_vehicles") or [])
+        vehicles_out = {}
+        for vname, v in vehicles_in.items():
+            if not isinstance(v, dict):
+                continue
+            existing = existing_vehicles.get(vname) or {}
+            vehicles_out[vname] = {
+                "operator": v.get("operator") or existing.get("driver") or "",
+                "occupants": list(v.get("occupants") or existing.get("occupants") or []),
+                "square": v.get("starting_square", 0),
+                "combat_speed_move": v.get("combat_speed_move",
+                                           existing.get("combat_move", 20)),
+                "sdp_max": v.get("sdp_max", existing.get("sdp_max", 20)),
+                "sdp_current": v.get("sdp_current",
+                                     existing.get("sdp_current", v.get("sdp_max", 20))),
+                "sp": v.get("sp", existing.get("sp", 0)),
+                "type": v.get("type", existing.get("type", "land")),
+                "upgrades": list(v.get("upgrades") or existing.get("upgrades") or []),
+                "status": v.get("status", existing.get("status", "active")),
+                "is_pursuer": vname in pursuer_set if pursuer_set else bool(v.get("is_pursuer", False)),
+                "notes": v.get("notes", ""),
+            }
+        if vehicles_out:
+            from .cpred_chase import stamp_chase_hud_overlay
+            pipeline_state["chase"] = init_chase_state(
+                grid_length=chase.get("grid_length", 8),
+                vehicles=vehicles_out,
+                started_from="net_combat",
+                context=chase.get("context"),
+            )
+            if chase.get("route"):
+                pipeline_state["chase"]["route"] = chase["route"]
+            if chase.get("scene"):
+                pipeline_state["chase"]["scene"] = chase["scene"]
+            stamp_chase_hud_overlay(pipeline_state)
 
 
 def build_net_combat_injection(combat, net_combat, pipeline_state):

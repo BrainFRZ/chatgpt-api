@@ -15,6 +15,7 @@ from . import cpred_core as _cpred_core
 from . import cpred_combat as _cpred_combat
 from . import cpred_hack as _cpred_hack
 from . import cpred_net_combat as _cpred_net_combat
+from . import cpred_chase as _cpred_chase
 
 # Re-export core functions used by pipeline.py and other external callers
 from .cpred_core import (  # noqa: F401
@@ -59,6 +60,20 @@ from .cpred_net_combat import (  # noqa: F401
     apply_net_combat_writeback,
 )
 
+from .cpred_chase import (  # noqa: F401
+    HOT_PURSUIT_CONTRACT,
+    CHASE_BOOTSTRAP_SYSTEM,
+    REPORT_CHASE_STATE_TOOL,
+    init_chase_state,
+    init_chase_from_combat,
+    init_chase_from_plot_encounter,
+    synthesize_chase_handoff_from_encounter,
+    apply_chase_state,
+    build_chase_injection,
+    build_chase_profile,
+    apply_chase_writeback,
+)
+
 from .plot_contract import PLOT_TRIGGER_CONTRACT
 
 
@@ -69,7 +84,7 @@ def __getattr__(name):
     After module-splitting, keep those imports working by forwarding missing
     symbols to the split implementation modules.
     """
-    for mod in (_cpred_core, _cpred_combat, _cpred_hack, _cpred_net_combat):
+    for mod in (_cpred_core, _cpred_combat, _cpred_hack, _cpred_net_combat, _cpred_chase):
         if hasattr(mod, name):
             return getattr(mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -491,7 +506,7 @@ Required:
 - **pacing**: episode/beat tracking.
 - **scene_state**: current scene. `npcs_present` controls memory injection; `pcs_present` + `npcs_present` control which per-character funds appear in HUD.
 - **character_states**: map of name → {type (pc/npc/enemy), class (e.g. Solo, Netrunner), level (null — CPRED has no levels), vitals [{label,current,max} for HP, Humanity], resources [{label,current,max} for Luck], conditions [strings — "Seriously Wounded", "Critical Injury: Broken Arm"]}. Equipment is rendered from edgerunner state — do NOT include weapons/armor/cyberware here. Full replacement each turn.
-- **combat**: `{round, initiative_order, current_turn}` during combat; `null` otherwise. On the FIRST combat report, include `context`: 1-2 paragraphs covering present characters + state (injuries/conditions/tension), location (cover/lighting/environment), the trigger and stakes, and unresolved threads — combat mode sees no prior chat history.
+- **combat**: `{round, initiative_order, current_turn}` during combat; `null` otherwise. On the FIRST combat report, include `context`: 2-3 paragraphs in story-shaped prose covering (1) what's going on right now — the immediate situation as combat opens (present characters + state, location, cover/lighting/environment), (2) why we're here — the chain of choices and pressures from prior scenes that led to the fight, and (3) what the goal is — the trigger, stakes, and any unresolved narrative threads. Combat mode sees no prior chat history; this is the only handoff.
 - **is_ooc**: true ONLY for pure OOC turns.
 
 Optional arrays:
@@ -707,7 +722,7 @@ When a Netrunner jacks into a system for a standalone hack (outside combat — Q
 - `sr`: System Rating 1-5 (1=personal device, 3=corporate, 5=black site)
 - `interface_rank`: from sheet.
 - `cycles_max`: total Cycles for boosted actions (from Cyberdeck quality).
-- `context`: 1-2 paragraphs — hack mode sees no prior chat history. Cover who's present + what they're doing, why jacking in (objective, stakes if fail), narrative tension to carry forward.
+- `context`: 2-3 paragraphs in story-shaped prose — hack mode sees no prior chat history. Cover (1) what's going on right now — who's present, what they're doing, where they are; (2) why we're here — the chain of choices/pressures that led to the runner jacking in; (3) what the goal is — objective, stakes if fail, and any narrative tension to carry forward.
 
 Simple Checks (single Interface + d10) resolve normally — no hack_trigger. Only trigger for Quick Hacks / Full Runs. Describe the moment of jacking in narratively (trodes, NET materializing), then set the trigger. App switches to dedicated hack encounter mode.
 
@@ -798,7 +813,7 @@ Distinguish from in-fiction failures: `success: false` with NO `error` field is 
 ### Intimate Scenes
 When narrative clearly progresses to a sexual/intimate encounter between PC and NPC(s) — and both sides have shown clear interest and consent within fiction — set `sex_scene` in report_state:
 - `npcs`: list of NPC names involved.
-- `summary`: 1-2 paragraphs — the ONLY context the intimate scene mode will have (no prior chat history). Cover recent scene + mood, emotional arc, physical/environmental details (location, lighting, dress), unresolved tension or vulnerability to carry forward.
+- `summary`: 2-3 paragraphs in story-shaped prose — the ONLY context the intimate scene mode will have (no prior chat history). Cover (1) what's going on right now — the immediate scene + mood that opens this beat; (2) why we're here — the emotional arc between characters, how they got from where they were to this moment, what was said or unsaid; (3) what the goal is — physical/environmental details (location, lighting, dress), unresolved tension or vulnerability the next scene should carry.
 Set to `null` on all other turns. Trigger ONLY when the scene unmistakably reaches an intimate point — flirting, kissing, or suggestive dialogue alone is insufficient.
 
 ### Beat Texture & Subplots
@@ -898,7 +913,7 @@ STATE_REPORT_TOOL = {
                 }
             },
             "combat": {
-                "description": "Initiative tracker. null when not in combat. When active: {round, initiative_order, current_turn, context}. context (string, first report only): 1-2 paragraphs — the ONLY context combat mode gets (no prior chat history). Cover who is present and their state, where the fight is, why it erupted, and any narrative threads to carry forward.",
+                "description": "Initiative tracker. null when not in combat. When active: {round, initiative_order, current_turn, context}. context (string, first report only): 2-3 paragraphs in story-shaped prose — the ONLY context combat mode gets (no prior chat history). Cover (1) what's going on right now (who is present + their state, where the fight is), (2) why we're here (why it erupted, the chain that led here), (3) what the goal is (stakes, narrative threads to carry forward).",
                 "type": ["object", "null"]
             },
             "callback_ops": {
@@ -1095,8 +1110,46 @@ STATE_REPORT_TOOL = {
                     "sr": {"type": "integer", "minimum": 1, "maximum": 5, "description": "System Rating"},
                     "interface_rank": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Netrunner's Interface ability rank"},
                     "cycles_max": {"type": "integer", "minimum": 0, "description": "Total Cycles available for boosted actions"},
-                    "context": {"type": "string", "description": "1-2 paragraphs — the ONLY context hack mode gets (no prior chat history). Cover who is present, why they're jacking in, what's at stake, and any narrative tension to carry forward."}
+                    "context": {"type": "string", "description": "2-3 paragraphs in story-shaped prose — the ONLY context hack mode gets (no prior chat history). Cover (1) what's going on right now (who is present + what they're doing), (2) why we're here (why they're jacking in, the lead-up), (3) what the goal is (objective, stakes, narrative tension to carry forward)."}
                 }
+            },
+            "chase_trigger": {
+                "type": ["object", "null"],
+                "description": (
+                    "Set when a Hot Pursuit chase opens organically in the narrative "
+                    "(crew flees a heist, NCPD pursues, gang punks chase the crew on "
+                    "bikes, etc.). null on normal turns. Switches the app to chase mode "
+                    "on the next exchange."
+                ),
+                "properties": {
+                    "vehicles": {
+                        "type": "object",
+                        "description": (
+                            "Dict keyed by vehicle name. Each entry: operator, "
+                            "occupants[], starting_square (0-indexed on 8-square grid), "
+                            "combat_speed_move (vehicle MOVE), sdp_max, sp, type, "
+                            "is_pursuer."
+                        ),
+                    },
+                    "grid_length": {"type": "integer", "description": "Default 8. Override only for unusual scenes."},
+                    "pursuer_vehicles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of vehicles pursuing the quarry (rest are quarry).",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "2-3 paragraphs in story-shaped prose covering what's "
+                            "going on, why the chase is happening, and what the goal "
+                            "is. The receiving chase mode reads this as the handoff."
+                        ),
+                    },
+                    "route": {
+                        "type": "string",
+                        "description": "Chase route (e.g. 'Lower Kabuki -> Watson border -> safehouse'). Surfaces in HUD.",
+                    },
+                },
             },
             "sex_scene": {
                 "type": ["object", "null"],
@@ -1109,7 +1162,7 @@ STATE_REPORT_TOOL = {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "1-2 paragraphs — the ONLY context the intimate scene mode gets (no prior chat history). Cover the recent scene, emotional arc between characters, physical/environmental details, and any unresolved tension to carry forward."
+                        "description": "2-3 paragraphs in story-shaped prose — the ONLY context the intimate scene mode gets (no prior chat history). Cover (1) what's going on right now (the immediate scene + mood), (2) why we're here (emotional arc between characters, how they reached this moment), (3) what the goal is (physical/environmental details, unresolved tension or vulnerability to carry forward)."
                     }
                 }
             }
@@ -1286,7 +1339,13 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
             },
             "narrative_summary": {
                 "type": "string",
-                "description": "ONLY include when combat_complete=true. 1–3 sentence summary of the ENTIRE fight."
+                "description": (
+                    "ONLY include when combat_complete=true. Up to 3 paragraphs in story-shaped prose: "
+                    "(1) what happened across the encounter, (2) anything unexpected — turning points, "
+                    "lucky breaks, costly choices, (3) how it ended and any unresolved tension or "
+                    "consequence carried forward. The receiving mode reads this as the handoff "
+                    "summary; write it so the next scene picks up seamlessly."
+                ),
             },
             "initiate_net_combat": {
                 "type": ["object", "null"],
@@ -1294,9 +1353,51 @@ REPORT_CPRED_COMBAT_STATE_TOOL = {
                 "properties": {
                     "netrunner": {"type": "string", "description": "Name of the netrunner going into the NET"},
                     "target": {"type": "string", "description": "What they're jacking into (architecture name, device, etc.)"},
-                    "context": {"type": "string", "description": "1-2 paragraphs — the ONLY additional context net combat mode gets. Cover current tactical situation, why they're jacking in, and narrative tension to carry forward."}
+                    "context": {"type": "string", "description": "2-3 paragraphs in story-shaped prose — the ONLY additional context net combat mode gets. Cover (1) what's going on right now (current tactical situation), (2) why we're here (why they're jacking in mid-combat, the lead-up), (3) what the goal is (objective, stakes, narrative tension to carry forward)."}
                 }
-            }
+            },
+            "initiate_chase": {
+                "type": ["object", "null"],
+                "description": (
+                    "Set when combat transitions into a Hot Pursuit chase (someone "
+                    "fleeing in a vehicle, pursuers giving chase). Triggers chase mode "
+                    "on next exchange. Carries vehicle/operator/starting-square data so "
+                    "the chase grid can be seeded immediately."
+                ),
+                "properties": {
+                    "vehicles": {
+                        "type": "object",
+                        "description": (
+                            "Dict keyed by vehicle name. Each entry: operator (PC/NPC), "
+                            "occupants[], starting_square (0-indexed on 8-square grid), "
+                            "combat_speed_move (vehicle MOVE), sdp_max, sp, type "
+                            "(land/air/sea), is_pursuer (true if pursuing the quarry)."
+                        ),
+                    },
+                    "grid_length": {
+                        "type": "integer",
+                        "description": "Default 8 (Hot Pursuit standard). Override only for unusual scenes.",
+                    },
+                    "pursuer_vehicles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "List of vehicle names that are pursuing (the rest are quarry). "
+                            "Used for chase-end logic to decide whether the chase is over "
+                            "when one side has no active vehicles left."
+                        ),
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "2-3 paragraphs in story-shaped prose covering what's going on, "
+                            "why the chase is happening, what the goal is. The receiving "
+                            "chase mode reads this as the handoff so play picks up "
+                            "seamlessly."
+                        ),
+                    },
+                },
+            },
         }
     }
 }
@@ -1391,7 +1492,7 @@ Enemies act according to their type and motivation — do not apply a single tem
 
 NET-IN-MEATSPACE:
 When a netrunner declares NET actions during combat initiative:
-- Set initiate_net_combat with the netrunner's name, target architecture/device, and context (1-2 paragraphs — this is the ONLY context net combat mode gets beyond the combat state. Cover the current tactical situation, why they're jacking in, and any narrative tension to carry forward).
+- Set initiate_net_combat with the netrunner's name, target architecture/device, and context (2-3 paragraphs in story-shaped prose — the ONLY context net combat mode gets beyond the combat state. Cover (1) what's going on right now (current tactical situation), (2) why we're here (why they're jacking in mid-combat, the lead-up), (3) what the goal is (objective, stakes, narrative tension to carry forward)).
 - Do NOT resolve their NET actions — end the exchange. NET-in-meatspace mode handles the interleaved resolution.
 - Until NET-in-meatspace mode is available, resolve basic NET actions inline instead: netrunner's Action becomes N NET actions per turn (N = 2/3/4/5 by Interface rank 1-3/4-6/7-9/10). They still get a Move Action alongside — movement is not a Meat Action and does NOT cost NET actions.
 
@@ -1461,7 +1562,7 @@ NARRATIVE STYLE:
 REPORT REQUIREMENTS:
 - character_updates for every combatant affected this exchange.
 - cover_state for ALL combatants every exchange (not just those who changed).
-- narrative_summary ONLY when combat_complete=true — 1–3 sentence summary of the ENTIRE fight."""
+- narrative_summary ONLY when combat_complete=true — up to 3 paragraphs in story-shaped prose: what happened across the encounter, anything unexpected (turning points, lucky breaks, costly choices), how it ended, and any unresolved tension or consequence carried forward. The receiving mode reads this as the handoff so the next scene picks up seamlessly."""
 
 
 
@@ -1726,7 +1827,7 @@ Two paths to net_combat from a hack:
 In both cases: do NOT set `hack_complete` — the hack continues in `net_combat` mode. Do NOT resolve the combat in this exchange; end after setting/seeing the trigger.
 
 ### Completing the Hack
-Set `hack_complete: true` and include `narrative_summary` (1-3 sentences: what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, any real-world consequences) when:
+Set `hack_complete: true` and include `narrative_summary` (up to 3 paragraphs in story-shaped prose: what happened across the run, anything unexpected, how it ended — covering what was obtained/accomplished, final Alert level, Cycles spent, brain damage taken, real-world consequences, and any tension carried forward) when:
 - Target objective achieved
 - Netrunner voluntarily jacks out (partial success possible)
 - Forced disconnect: only on flatline (failed Death Save) — backend auto-cascades rezzed ICE and sets hack_complete. Neither 0 HP nor Unconscious ends the hack automatically. For an ally-rescue or voluntary plug-yank Unsafe Jack Out, emit `initiate_unsafe_jack_out: {cause, actor, reason}` — backend cascades the rezzed ICE and sets hack_complete for you.
@@ -1876,7 +1977,14 @@ REPORT_HACK_STATE_TOOL = {
             },
             "narrative_summary": {
                 "type": ["string", "null"],
-                "description": "When hack_complete=true: 1-3 sentence summary of outcome, consequences, Cycles spent, brain damage taken."
+                "description": (
+                    "When hack_complete=true: up to 3 paragraphs in story-shaped prose. "
+                    "What happened across the run, anything unexpected (lucky breaks, ICE "
+                    "encounters, costly choices), how it ended. Cover outcome, consequences, "
+                    "Cycles spent, brain damage taken, and any unresolved tension or "
+                    "real-world fallout the next scene should carry. The receiving mode reads "
+                    "this as the handoff so play picks up seamlessly."
+                ),
             },
             "initiate_combat": {
                 "type": ["object", "null"],
@@ -2013,7 +2121,7 @@ Either way: never narrate the failure as fiction. Error codes surfaced: `slide_p
 ### Completion
 - `combat_complete` and `net_complete` are independent booleans.
 - When one theater resolves, continue the other. Injection shows "resolved" for the done theater.
-- When BOTH are true: set narrative_summary (1-3 sentences covering the whole engagement).
+- When BOTH are true: set narrative_summary (up to 3 paragraphs in story-shaped prose: what happened across both theaters, anything unexpected, how it ended, any unresolved tension carried forward).
 - Mode ends when both theaters complete.
 
 ### Enemy/NPC Bootstrap
@@ -2226,13 +2334,46 @@ REPORT_NET_COMBAT_STATE_TOOL = {
             },
             "narrative_summary": {
                 "type": "string",
-                "description": "ONLY when BOTH combat_complete AND net_complete are true. 1-3 sentence summary of the entire engagement."
+                "description": (
+                    "ONLY when BOTH combat_complete AND net_complete are true. Up to 3 paragraphs in "
+                    "story-shaped prose covering the entire combined engagement: what happened across "
+                    "both theaters, anything unexpected (lucky breaks, costly choices, NET-vs-meat "
+                    "trade-offs), how it ended, and any unresolved tension or consequence the next "
+                    "scene should carry. The receiving mode reads this as the handoff so play picks "
+                    "up seamlessly."
+                ),
             },
             "available_actions": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Available NET actions for next exchange (optional)."
-            }
+            },
+            "initiate_chase": {
+                "type": ["object", "null"],
+                "description": (
+                    "Set when net_combat transitions into a Hot Pursuit chase "
+                    "(meatspace crew flees in vehicles). Carries vehicle/operator/"
+                    "grid data so chase mode seeds immediately."
+                ),
+                "properties": {
+                    "vehicles": {
+                        "type": "object",
+                        "description": (
+                            "Dict keyed by vehicle name; each entry: operator, occupants[], "
+                            "starting_square, combat_speed_move, sdp_max, sp, type, is_pursuer."
+                        ),
+                    },
+                    "grid_length": {"type": "integer"},
+                    "pursuer_vehicles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "2-3 paragraphs story-shaped handoff prose.",
+                    },
+                },
+            },
         }
     }
 }
@@ -2296,7 +2437,7 @@ OUTPUT: JSON with these fields:
 - cover_state: cover status for ALL combatants
 - combat: initiative tracker update (round, initiative_order, current_turn) or null if ending
 - combat_complete: boolean
-- narrative_summary: 1-3 sentence fight summary ONLY when combat_complete=true
+- narrative_summary: up to 3 paragraphs in story-shaped prose ONLY when combat_complete=true (what happened, anything unexpected, how it ended, tension carried forward)
 - scene_notes: 1-2 sentences describing what happened for the narrator
 - initiate_net_combat: set when a netrunner declares NET actions during combat"""
 
@@ -2397,7 +2538,7 @@ OUTPUT: JSON with these fields:
 - hack_state_updates: judgment-based state changes (alert_level, nodes_visited, programs_used, cycles_remaining, system_map changes, ice_status, net_actions_used)
 - scene_notes: what happened this exchange for the narrator (INCLUDING subvocal dialogue intent — see above)
 - hack_complete: boolean
-- narrative_summary: 1-3 sentence summary ONLY when hack_complete=true
+- narrative_summary: up to 3 paragraphs in story-shaped prose ONLY when hack_complete=true (what happened across the run, anything unexpected, how it ended, real-world consequences and unresolved tension)
 - meatspace_round: boolean — true if meatspace crew round should be narrated"""
 
 HACK_PLANNING_SCHEMA = {
@@ -2521,7 +2662,7 @@ OUTPUT: JSON with these fields:
 - hack_state_updates: NET state changes (alert_level, ice_status, programs, cycles, net_actions_used)
 - net_complete: boolean
 - scene_notes: what happened for the narrator
-- narrative_summary: summary ONLY when both combat_complete and net_complete"""
+- narrative_summary: ONLY when both combat_complete and net_complete — up to 3 paragraphs in story-shaped prose covering what happened across both theaters, anything unexpected (lucky breaks, NET-vs-meat trade-offs, costly choices), how it ended, and any unresolved tension carried forward"""
 
 NET_COMBAT_PLANNING_SCHEMA = {
     "type": "object",
@@ -2624,4 +2765,16 @@ GAME_SYSTEM = {
     "net_combat_planning_contract": NET_COMBAT_PLANNING_CONTRACT,
     "net_combat_planning_schema": NET_COMBAT_PLANNING_SCHEMA,
     "net_combat_narration_contract": NET_COMBAT_NARRATION_CONTRACT,
+    # Hot Pursuit chase mode (vehicle chase using May 2024 supplement rules)
+    "chase_contract": HOT_PURSUIT_CONTRACT,
+    "chase_tool": REPORT_CHASE_STATE_TOOL,
+    "init_chase_state": init_chase_state,
+    "init_chase_from_combat": init_chase_from_combat,
+    "init_chase_from_plot_encounter": init_chase_from_plot_encounter,
+    "apply_chase_state": apply_chase_state,
+    "build_chase_injection": build_chase_injection,
+    "build_chase_profile": build_chase_profile,
+    "apply_chase_writeback": apply_chase_writeback,
+    "chase_files": ["Combat Ruleset.md", "Character Sheets.md", "Character Sheets.yaml"],
+    "chase_round_seconds": 3,  # CPRED RAW: 1 chase round = 3 seconds (same as combat)
 }
