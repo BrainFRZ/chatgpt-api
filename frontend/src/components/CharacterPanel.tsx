@@ -1052,12 +1052,20 @@ export default function CharacterPanel({
             }
           }
         } else {
-          // Markdown: split on ## headers
-          const sections = file.content.split(/(?=^## )/m);
+          // Markdown: split on ## or ### headers (sheets often group under
+          // level-2 headers like "## Party NPCs" with each character at
+          // level 3 — `### Delphi — Fixer 4`). Match either level.
+          const sections = file.content.split(/(?=^#{2,3} )/m);
           if (sections.length > 1) {
             const match = sections.find(s => {
-              const heading = s.split('\n')[0].replace(/^## /, '').trim();
-              return heading.toLowerCase() === charLower || heading.toLowerCase().includes(charLower);
+              const heading = s.split('\n')[0].replace(/^#{2,3} /, '').trim();
+              const headingLower = heading.toLowerCase();
+              // Heading text often includes role/title after the name —
+              // e.g. "Delphi — Fixer 4". Match the leading name token first
+              // so we don't accidentally hit a section like "Party NPCs"
+              // when the character name appears inside its body text.
+              const leadName = heading.split(/[\s—\-,(]/)[0].trim().toLowerCase();
+              return leadName === charLower || headingLower === charLower || headingLower.includes(charLower);
             });
             if (match) return { sheetSection: match, sheetIsYaml: false };
           }
@@ -1511,9 +1519,9 @@ export default function CharacterPanel({
             <details style={{ marginTop: '16px', borderTop: '1px solid #2a2a4e', paddingTop: '8px' }}>
               <summary style={{ fontSize: '0.78rem', color: '#888', cursor: 'pointer', padding: '4px 0', userSelect: 'none' }}>Full Character Sheet</summary>
               {(() => {
-                // Strip the header line(s) — ## heading for md, # === banner for yaml
+                // Strip the header line(s) — ##/### heading for md, # === banner for yaml
                 let body = sheetSection;
-                if (body.startsWith('## ')) {
+                if (/^#{2,3} /.test(body)) {
                   body = body.split('\n').slice(1).join('\n').trim();
                 } else if (body.startsWith('# ===')) {
                   body = body.replace(/^# ={3,}\n#\s+.+\n# ={3,}\n*/, '').trim();
