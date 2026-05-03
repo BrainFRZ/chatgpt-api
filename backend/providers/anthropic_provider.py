@@ -258,7 +258,11 @@ class AnthropicProvider(ModelProvider):
             for event in stream:
                 if event.type == "content_block_start":
                     block = getattr(event, "content_block", None)
-                    if getattr(block, "type", None) == "tool_use":
+                    # Only activate narration streaming for the report_state tool.
+                    # Other tools (resolve_mechanics, etc.) don't carry narration and
+                    # could spuriously match the "narration" substring inside their inputs.
+                    if (getattr(block, "type", None) == "tool_use"
+                            and getattr(block, "name", None) == "report_state"):
                         narration_streamers[event.index] = _NarrationFieldStreamer()
                 elif event.type == "content_block_delta":
                     if hasattr(event.delta, 'text'):

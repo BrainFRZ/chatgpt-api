@@ -6158,11 +6158,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # model-rolled dice (anti-pattern).
             request_params.pop("thinking", None)
             request_params.pop("output_config", None)
-            # Force report_state every turn. Without thinking, forced tool_choice is legal,
-            # and the contract's "MUST also narrate" rule pulls prose through alongside the
-            # tool call. Eliminates the _stateful_tool_retry path; narration recovery
-            # remains as a safety net if forced tool_choice ends up suppressing text.
-            request_params["tool_choice"] = {"type": "tool", "name": gs["state_report_tool"]["name"]}
+            # Force the model to use SOME tool every turn (any), letting it pick between
+            # resolve_mechanics (when crunch is needed) and report_state (the wrap-up).
+            # Forcing report_state specifically would suppress resolve_mechanics calls and
+            # break the deterministic dice loop. Under `any`, the resolve_mechanics loop
+            # iterates as before; the model naturally moves to report_state once mechanics
+            # are resolved (only tool left + contract demands it as the turn's wrap-up).
+            # Narration is now a required field on report_state, so emitting it is
+            # schema-enforced rather than contract-trusted.
+            request_params["tool_choice"] = {"type": "any"}
         elif gs.get("doc_tools") and model_id.startswith("claude"):
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
