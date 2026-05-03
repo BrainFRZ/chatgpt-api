@@ -481,7 +481,10 @@ export default function Sidebar(props: SidebarProps) {
             <div style={styles.statsBox}>
               <p style={styles.statsText}>{pipelineState.pacing.episode}</p>
               <p style={styles.statsText}>Beat: {pipelineState.pacing.beat}</p>
-              <p style={styles.statsText}>Responses: {pipelineState.pacing.responses}</p>
+              <p style={styles.statsText}>
+                Responses: {pipelineState.pacing.responses}
+                {stats?.total_prompts != null && ` (${stats.total_prompts} total)`}
+              </p>
               {dateLine && <p style={styles.statsText}>Date: {dateLine}</p>}
               {hud.location && <p style={styles.statsText}>Loc: {hud.location}</p>}
             </div>
