@@ -6105,8 +6105,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
                 tools.insert(0, RESOLVE_MECHANICS_TOOL)
             request_params["tools"] = tools
-            # Cannot use forced tool_choice (type: "tool") — incompatible with extended thinking.
-            # Auto + strong contract instructions achieves the same result.
+            # Disable extended thinking on stateful path. Modes (combat, hack, chase, sex,
+            # ship combat) handle crunch elsewhere; here Claude's job is narration + state.
+            # Reasoning audit showed ~half the thinking was shadow-doing what report_state
+            # and build_current_beat_injection already do deterministically, plus occasional
+            # model-rolled dice (anti-pattern). Thinking-off also makes the model follow tool
+            # requirements more reliably, so report_state should fire on the first call.
+            request_params.pop("thinking", None)
+            request_params.pop("output_config", None)
             request_params["tool_choice"] = {"type": "auto"}
         elif gs.get("doc_tools") and model_id.startswith("claude"):
             request_params["tools"] = gs["doc_tools"]
