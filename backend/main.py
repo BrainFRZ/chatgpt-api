@@ -2444,6 +2444,33 @@ def get_chat(username: str, chat_name: str, project: str = None, leaf_id: str = 
     if active_hack_state and not active_hack_state.get("active"):
         active_hack_state = None
 
+    # Slim down per-message state metadata in the response. Frontend only reads
+    # `msg.pipeline_state_after.hud_state` for the per-message timestamp header.
+    # Everything else in `pipeline_state_after` (~10-50 KB/msg) and ALL of
+    # `pipeline_state_injected` (~25-50 KB/msg as JSON string) is dead payload —
+    # used only for debug-transcript replay, never by the live UI. Stripping
+    # cuts response size by ~1.5-2 MB on long chats and removes the per-load
+    # parse/render hang. Make a SHALLOW copy of each msg so we don't mutate
+    # the on-disk data.
+    def _slim_msg(msg: dict) -> dict:
+        if not isinstance(msg, dict):
+            return msg
+        if "pipeline_state_after" not in msg and "pipeline_state_injected" not in msg:
+            return msg
+        slim = {k: v for k, v in msg.items() if k != "pipeline_state_injected"}
+        psa = slim.get("pipeline_state_after")
+        if isinstance(psa, dict):
+            hud = psa.get("hud_state")
+            slim["pipeline_state_after"] = {"hud_state": hud} if isinstance(hud, dict) else None
+        elif isinstance(psa, str):
+            # String form (older path) — drop it entirely; hud lives elsewhere or in next msg
+            slim["pipeline_state_after"] = None
+        return slim
+
+    paginated_messages = [_slim_msg(m) for m in paginated_messages]
+    # all_messages is used for branch-tree navigation; same slim treatment.
+    all_messages = [_slim_msg(m) for m in all_messages]
+
     # Rebuild-on-read: regenerate CPRED character_states + HUD projections from
     # authoritative edgerunner state. Eliminates the stale-mirror class of bug
     # when game_state is edited out-of-band (manual JSON patches, sync recovery,
