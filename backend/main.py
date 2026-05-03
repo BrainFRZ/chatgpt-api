@@ -9108,6 +9108,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             }
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["state_report_tool"]):
+                                # Narration field carries the player-facing prose (streamed live
+                                # during the tool call via partial_json parsing). Pull it into
+                                # accumulated_content for storage, then strip from tool_input so the
+                                # state record doesn't double-store the narrative text.
+                                if isinstance(tool_input, dict) and "narration" in tool_input:
+                                    narration_text = tool_input.pop("narration") or ""
+                                    if narration_text and not (accumulated_content or "").strip():
+                                        accumulated_content = narration_text
                                 _inject_resolver_ops_stateful(tool_input, accumulated_rm_state_ops, stateful_pipeline_state, gs)
                                 is_ooc = tool_input.get("is_ooc", False)
                                 if not is_ooc:
@@ -9144,6 +9152,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + retry_usage['cache_creation_tokens']
                                         usage['output_tokens'] = usage.get('output_tokens', 0) + retry_usage['output_tokens']
                                     if retry_result:
+                                        # Same narration extraction as the success path: pull
+                                        # narration into accumulated_content, strip from tool_input.
+                                        if isinstance(retry_result, dict) and "narration" in retry_result:
+                                            narration_text = retry_result.pop("narration") or ""
+                                            if narration_text and not (accumulated_content or "").strip():
+                                                accumulated_content = narration_text
+                                                yield f"event: content\ndata: {json.dumps({'delta': narration_text})}\n\n"
                                         _inject_resolver_ops_stateful(retry_result, accumulated_rm_state_ops, stateful_pipeline_state, gs)
                                         is_ooc = retry_result.get("is_ooc", False)
                                         if not is_ooc:

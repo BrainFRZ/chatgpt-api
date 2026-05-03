@@ -9,6 +9,75 @@ import anthropic
 from . import ModelProvider, ParsedResponse, Pricing, ContextLimits, StreamEvent
 
 
+class _NarrationFieldStreamer:
+    """Streams the value of a top-level `narration` string field out of a
+    JSON object as the JSON is fed in incrementally (partial_json deltas).
+
+    Yields characters as they arrive so the frontend can render prose live
+    while the tool input is still being built. Handles JSON string escapes
+    (\\n, \\t, \\\", \\\\, \\/, \\b, \\f, \\uXXXX).
+
+    States:
+      before_field: scanning for the literal `"narration"` key
+      seeking_quote: found the key; skipping `:` and whitespace until opening `"`
+      in_value: emitting characters of the value
+      escape: just saw `\\`, the next char determines the escape
+      unicode: just saw `\\u`, accumulating 4 hex digits
+      done: closing `"` reached; ignore further input
+    """
+    KEY_TOKEN = '"narration"'
+    ESCAPE_MAP = {'n': '\n', 't': '\t', 'r': '\r', '"': '"', '\\': '\\',
+                  '/': '/', 'b': '\b', 'f': '\f'}
+
+    def __init__(self):
+        self.buffer = ""
+        self.state = "before_field"
+        self.unicode_hex = ""
+
+    def feed(self, partial_json: str) -> str:
+        out = []
+        for ch in partial_json:
+            if self.state == "before_field":
+                self.buffer += ch
+                idx = self.buffer.find(self.KEY_TOKEN)
+                if idx >= 0:
+                    self.buffer = ""
+                    self.state = "seeking_quote"
+                elif len(self.buffer) > 4096:
+                    # Cap buffer to avoid unbounded growth if narration never arrives
+                    self.buffer = self.buffer[-1024:]
+            elif self.state == "seeking_quote":
+                if ch == '"':
+                    self.state = "in_value"
+                # otherwise it's `:` or whitespace; skip
+            elif self.state == "in_value":
+                if ch == '\\':
+                    self.state = "escape"
+                elif ch == '"':
+                    self.state = "done"
+                    break
+                else:
+                    out.append(ch)
+            elif self.state == "escape":
+                if ch == 'u':
+                    self.state = "unicode"
+                    self.unicode_hex = ""
+                else:
+                    out.append(self.ESCAPE_MAP.get(ch, ch))
+                    self.state = "in_value"
+            elif self.state == "unicode":
+                self.unicode_hex += ch
+                if len(self.unicode_hex) == 4:
+                    try:
+                        out.append(chr(int(self.unicode_hex, 16)))
+                    except ValueError:
+                        out.append("?")
+                    self.unicode_hex = ""
+                    self.state = "in_value"
+            # done: drop remaining chars in this delta
+        return "".join(out)
+
+
 class AnthropicProvider(ModelProvider):
     """Provider for Claude Sonnet 4.5 with extended thinking."""
 
@@ -177,14 +246,33 @@ class AnthropicProvider(ModelProvider):
         return client.beta.messages.create(**request_params, betas=self.BETA_HEADERS)
 
     def send_request_stream(self, client: Any, request_params: dict) -> Iterator[StreamEvent]:
-        """Stream response events from Anthropic API."""
+        """Stream response events from Anthropic API.
+
+        Tool calls that include a `narration` field (e.g., report_state) have
+        their narration value streamed live as content_delta events by parsing
+        the partial JSON as it arrives. This lets the player see prose render
+        in real time even though the prose is technically inside a tool input.
+        """
+        narration_streamers = {}
         with client.beta.messages.stream(**request_params, betas=self.BETA_HEADERS) as stream:
             for event in stream:
-                if event.type == "content_block_delta":
+                if event.type == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    if getattr(block, "type", None) == "tool_use":
+                        narration_streamers[event.index] = _NarrationFieldStreamer()
+                elif event.type == "content_block_delta":
                     if hasattr(event.delta, 'text'):
                         yield StreamEvent('content_delta', content=event.delta.text)
                     elif hasattr(event.delta, 'thinking'):
                         yield StreamEvent('thinking_delta', content=event.delta.thinking)
+                    elif hasattr(event.delta, 'partial_json'):
+                        streamer = narration_streamers.get(event.index)
+                        if streamer is not None:
+                            new_text = streamer.feed(event.delta.partial_json)
+                            if new_text:
+                                yield StreamEvent('content_delta', content=new_text)
+                elif event.type == "content_block_stop":
+                    narration_streamers.pop(event.index, None)
                 elif event.type == "message_stop":
                     message = stream.get_final_message()
                     yield StreamEvent('done', usage=self._extract_usage(message))

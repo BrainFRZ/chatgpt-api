@@ -531,9 +531,13 @@ Optional arrays:
 - **relationship_ops**: RS/RomS/FR changes (see Relationship Ops).
 - **ip_ops**: IP scoring (see IP Scoring).
 
-**You MUST call `report_state` every turn**, even when nothing notable happened. Required fields (pacing, scene_state, character_states, combat, is_ooc) are emitted every turn. The "restraint" guidance below is about the OPTIONAL arrays *inside* the call (callback_ops, npc_memory_ops) — leave those empty when nothing notable happened. Do NOT interpret "empty turns are normal" as "skip the tool entirely" — the tool still fires; the arrays inside are just empty.
+**`report_state` is the entire turn.** Tool_choice is forced to `report_state` every turn — you don't have a choice about whether to call it; you have to fill out the whole tool. The `narration` field IS the player-facing turn prose — write the in-fiction text there. The other fields (pacing, scene_state, character_states, combat, is_ooc, plus optional arrays) capture the state changes that the narration describes.
 
-**You MUST also write narration text on every non-OOC turn.** A tool-only response (just `report_state` with no prose) is NEVER valid for an in-fiction turn — the player sees an empty message bubble and the scene stalls. Always emit prose narration FIRST, THEN call `report_state`. The narration carries the turn; the tool only records state. If `is_ooc: true`, brief OOC clarification text is fine; for any in-fiction turn, full narration is mandatory.
+Order of work each turn: write the `narration` first, then derive the structured state from what you just wrote. Don't write state and then "fill in" narration as an afterthought — narration is the substance, state is the accounting.
+
+**Narration must be non-empty on every in-fiction turn.** Empty narration leaves the player with a blank message bubble and the scene stalls. If `is_ooc: true`, brief OOC clarification text is fine (or empty string); for any in-fiction turn, full prose narration is mandatory.
+
+**Restraint applies to the OPTIONAL arrays only** (callback_ops, npc_memory_ops). Most turns have those empty. Required fields fire every turn no matter what.
 
 **Restraint on optional arrays**: most turns have 0 callback_ops and 0 npc_memory_ops. The default for *those arrays* is empty. Add a callback only when a genuine promise/hook/foreshadowing emerges. Add a memory only when something is *likely to meaningfully impact a future scene* — not just because the current scene felt resonant. If the moment plays out fully now and won't surface again, it's narration, not memory.
 
@@ -848,11 +852,15 @@ SINGLE_AGENT_STATE_CONTRACT += "\n\n" + PLOT_TRIGGER_CONTRACT
 
 STATE_REPORT_TOOL = {
     "name": "report_state",
-    "description": "Report all state updates after your narrative. Call every turn. Review your narrative and capture all changes.",
+    "description": "Emit the full turn — narration AND state — in one call. The `narration` field IS the player-facing prose for this turn; everything else captures the state changes that prose describes. Called every turn (forced via tool_choice).",
     "input_schema": {
         "type": "object",
-        "required": ["is_ooc", "pacing", "scene_state", "character_states"],
+        "required": ["narration", "is_ooc", "pacing", "scene_state", "character_states"],
         "properties": {
+            "narration": {
+                "type": "string",
+                "description": "The in-fiction prose the player sees this turn — what happens, NPC reactions, scene texture, dialogue. This is the player-facing turn output; it must always be non-empty for in-fiction turns. For OOC turns (is_ooc: true) this may be a brief OOC clarification or empty string. Write the prose first, then derive the rest of the state fields from the prose. Newlines, dialogue, and emphasis (*italics*) are all fine; the frontend renders this as Markdown."
+            },
             "is_ooc": {
                 "type": "boolean",
                 "description": "True ONLY for pure OOC responses. False for all narrative responses."
