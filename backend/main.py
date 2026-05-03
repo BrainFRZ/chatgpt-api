@@ -6155,11 +6155,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # ship combat) handle crunch elsewhere; here Claude's job is narration + state.
             # Reasoning audit showed ~half the thinking was shadow-doing what report_state
             # and build_current_beat_injection already do deterministically, plus occasional
-            # model-rolled dice (anti-pattern). Thinking-off also makes the model follow tool
-            # requirements more reliably, so report_state should fire on the first call.
+            # model-rolled dice (anti-pattern).
             request_params.pop("thinking", None)
             request_params.pop("output_config", None)
-            request_params["tool_choice"] = {"type": "auto"}
+            # Force report_state every turn. Without thinking, forced tool_choice is legal,
+            # and the contract's "MUST also narrate" rule pulls prose through alongside the
+            # tool call. Eliminates the _stateful_tool_retry path; narration recovery
+            # remains as a safety net if forced tool_choice ends up suppressing text.
+            request_params["tool_choice"] = {"type": "tool", "name": gs["state_report_tool"]["name"]}
         elif gs.get("doc_tools") and model_id.startswith("claude"):
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
