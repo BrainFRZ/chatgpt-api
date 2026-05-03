@@ -3029,6 +3029,52 @@ def _stateful_tool_retry(client, model_name: str, narrative: str, thinking: str,
     return tool_input, retry_usage
 
 
+def _stateful_narration_recovery(client, model_name: str, contract_system: str,
+                                  last_user_text: str, state_tool_input: dict,
+                                  tool_use_id: str, tool_name: str):
+    """Emergency fallback: model emitted report_state but no narration text.
+    Generate the narration based on the state it just produced.
+    Returns (narration_text_or_None, recovery_usage_dict).
+
+    Triggered when extended thinking is off and the model elects a tool-only
+    response. The contract forbids this on in-fiction turns, but we defend
+    against it anyway so the player never sees an empty bubble.
+    """
+    fallback_id = tool_use_id or "tool_use_recovery"
+    fallback_name = tool_name or "report_state"
+    messages = [
+        {"role": "user", "content": last_user_text or "(continue)"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": fallback_id, "name": fallback_name, "input": state_tool_input},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": fallback_id, "content": "ok"},
+            {"type": "text", "text": "You produced the state update above but no narration prose, leaving the player with an empty message. Write the in-fiction narration for this turn now — what the player sees, NPC reactions, scene texture. The narration must be consistent with the state you just emitted. Do NOT call any tools. Output narration prose only."},
+        ]},
+    ]
+    params = {
+        "model": model_name,
+        "max_tokens": 4096,
+        "messages": messages,
+    }
+    if contract_system:
+        params["system"] = contract_system
+    response = client.messages.create(**params)
+    text = None
+    for block in response.content:
+        if block.type == "text":
+            text = block.text
+            break
+    ru = response.usage
+    recovery_usage = {
+        "input_tokens": ru.input_tokens + (getattr(ru, 'cache_read_input_tokens', 0) or 0) + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
+        "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
+        "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
+        "output_tokens": ru.output_tokens,
+    }
+    return text, recovery_usage
+
+
 def _apply_hack_state_compat(apply_fn, hack_state, tool_input, resolver_state_ops=None,
                               game_state=None, pipeline_state=None,
                               username=None, project=None):
@@ -9118,6 +9164,39 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         logger.warning(f"Stateful: retry also failed for user {username}")
                                 except Exception as retry_err:
                                     logger.error(f"Stateful: retry error for user {username}: {retry_err}")
+
+                        # Narration recovery: if model emitted state but no prose on a non-OOC
+                        # turn, the player sees an empty message bubble. Generate narration from
+                        # the state so the turn always renders. Defends against tool-only responses
+                        # which can occur when extended thinking is disabled and the model elects
+                        # to skip text output even though the contract forbids it.
+                        if (use_stateful and stateful_tool_input is not None
+                                and not (accumulated_content or "").strip()
+                                and not bool(stateful_tool_input.get("is_ooc"))):
+                            logger.warning(f"Stateful: empty narration with state present, attempting narration recovery for {username}")
+                            try:
+                                recovery_text, recovery_usage = await asyncio.to_thread(
+                                    _stateful_narration_recovery,
+                                    client, provider.MODEL_NAME,
+                                    gs.get("single_agent_contract", ""),
+                                    request.message or "",
+                                    stateful_tool_input,
+                                    usage.get('tool_use_id') or "",
+                                    usage.get('tool_use_name') or "report_state",
+                                )
+                                if recovery_usage:
+                                    usage['input_tokens'] = usage.get('input_tokens', 0) + recovery_usage['input_tokens']
+                                    usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + recovery_usage['cache_read_tokens']
+                                    usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + recovery_usage['cache_creation_tokens']
+                                    usage['output_tokens'] = usage.get('output_tokens', 0) + recovery_usage['output_tokens']
+                                if recovery_text:
+                                    accumulated_content = recovery_text
+                                    yield f"event: content\ndata: {json.dumps({'delta': recovery_text})}\n\n"
+                                    logger.info(f"Stateful: narration recovery succeeded for {username}, {len(recovery_text)} chars")
+                                else:
+                                    logger.warning(f"Stateful: narration recovery returned no text for {username}")
+                            except Exception as recov_err:
+                                logger.error(f"Stateful: narration recovery error for {username}: {recov_err}")
 
                         # Snapshot state after ops applied (for debug transcript delta)
                         stateful_after_snapshot = None
