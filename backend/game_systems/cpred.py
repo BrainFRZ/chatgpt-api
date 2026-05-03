@@ -531,7 +531,9 @@ Optional arrays:
 - **relationship_ops**: RS/RomS/FR changes (see Relationship Ops).
 - **ip_ops**: IP scoring (see IP Scoring).
 
-**`report_state` is the entire turn.** Tool_choice is forced to `report_state` every turn — you don't have a choice about whether to call it; you have to fill out the whole tool. The `narration` field IS the player-facing turn prose — write the in-fiction text there. The other fields (pacing, scene_state, character_states, combat, is_ooc, plus optional arrays) capture the state changes that the narration describes.
+**`report_state` is the entire turn.** Tool_choice forces some tool every turn (you can also call `resolve_mechanics` first when crunch is needed, then `report_state` to wrap up). The `narration` field IS the player-facing turn prose — write the in-fiction text there. The other fields (pacing, scene_state, character_states, combat, is_ooc, plus optional arrays) capture the state changes that the narration describes.
+
+**Treat `narration` as if you were producing it as direct chat output.** Every rule, doc, contract, and instruction that governs how you write to the player still applies in full force — texture and dimensionalization, character voice, plot-doc adherence, canonical character names, no-spoilers, dice-always-backend, RAW costs, beat-body offerings, NPC reactions, scene atmosphere, all of it. The narration field is not a summary, log entry, or report — it is the player-facing turn. Same quality bar, same length budget, same depth, same prose register. Fill it as if there were no tool wrapper around it. The JSON container is an implementation detail; the writing inside is the actual work.
 
 Order of work each turn: write the `narration` first, then derive the structured state from what you just wrote. Don't write state and then "fill in" narration as an afterthought — narration is the substance, state is the accounting.
 
