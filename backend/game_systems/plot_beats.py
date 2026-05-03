@@ -316,6 +316,12 @@ def init_beat_state() -> dict:
         # `pacing.responses` emit drifted because it was counting "total
         # responses since session start" inconsistently).
         "beat_responses": 0,
+        # Session-cumulative counter for beat-progressing turns. Bumps
+        # alongside beat_responses but only resets on session rollover
+        # (not on advance_beat within a session). Lets the sidebar show
+        # "Responses: X (Y total)" where X is beat-scoped and Y is
+        # session-scoped.
+        "session_responses": 0,
     }
 
 
@@ -346,6 +352,10 @@ def normalize_beat_state(bs: Optional[dict]) -> dict:
             out["beat_responses"] = max(0, int(bs.get("beat_responses", 0) or 0))
         except (TypeError, ValueError):
             pass
+        try:
+            out["session_responses"] = max(0, int(bs.get("session_responses", 0) or 0))
+        except (TypeError, ValueError):
+            pass
     return out
 
 
@@ -374,6 +384,7 @@ def advance_beat(bs: dict, uploads_dir: Optional[str] = None) -> dict:
         bs["current_session"] += 1
         bs["current_beat"] = 1
         bs["completed_beats"] = []
+        bs["session_responses"] = 0  # New session → reset session-cumulative counter
     else:
         bs["current_beat"] = cur + 1
     bs["beat_responses"] = 0  # New beat → reset per-beat turn counter

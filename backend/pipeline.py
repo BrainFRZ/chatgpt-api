@@ -4630,6 +4630,9 @@ def _bump_beat_response_counter(pipeline_state: dict) -> None:
     from game_systems.plot_beats import normalize_beat_state
     bs = normalize_beat_state(pipeline_state.get("beat_state"))
     bs["beat_responses"] = int(bs.get("beat_responses", 0) or 0) + 1
+    # session_responses bumps alongside but doesn't reset on beat advance —
+    # only on session rollover. Sidebar reads this for "(Y total)".
+    bs["session_responses"] = int(bs.get("session_responses", 0) or 0) + 1
     pipeline_state["beat_state"] = bs
 
 

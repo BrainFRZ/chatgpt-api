@@ -483,7 +483,8 @@ export default function Sidebar(props: SidebarProps) {
               <p style={styles.statsText}>Beat: {pipelineState.pacing.beat}</p>
               <p style={styles.statsText}>
                 Responses: {pipelineState.pacing.responses}
-                {stats?.total_prompts != null && ` (${stats.total_prompts} total)`}
+                {pipelineState.beat_state?.session_responses != null &&
+                  ` (${pipelineState.beat_state.session_responses} total)`}
               </p>
               {dateLine && <p style={styles.statsText}>Date: {dateLine}</p>}
               {hud.location && <p style={styles.statsText}>Loc: {hud.location}</p>}
