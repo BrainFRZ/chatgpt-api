@@ -521,7 +521,9 @@ Optional arrays:
 - **relationship_ops**: RS/RomS/FR changes (see Relationship Ops).
 - **ip_ops**: IP scoring (see IP Scoring).
 
-**Restraint (CRITICAL)**: most turns have 0 callback_ops and 0 npc_memory_ops. The default action is to emit nothing in these arrays. Add a callback only when a genuine promise/hook/foreshadowing emerges. Add a memory only when something is *likely to meaningfully impact a future scene* — not just because the current scene felt resonant. If the moment plays out fully now and won't surface again, it's narration, not memory. Tier caps are a safety net, NOT a target — empty turns are normal and correct.
+**You MUST call `report_state` every turn**, even when nothing notable happened. Required fields (pacing, scene_state, character_states, combat, is_ooc) are emitted every turn. The "restraint" guidance below is about the OPTIONAL arrays *inside* the call (callback_ops, npc_memory_ops) — leave those empty when nothing notable happened. Do NOT interpret "empty turns are normal" as "skip the tool entirely" — the tool still fires; the arrays inside are just empty.
+
+**Restraint on optional arrays**: most turns have 0 callback_ops and 0 npc_memory_ops. The default for *those arrays* is empty. Add a callback only when a genuine promise/hook/foreshadowing emerges. Add a memory only when something is *likely to meaningfully impact a future scene* — not just because the current scene felt resonant. If the moment plays out fully now and won't surface again, it's narration, not memory.
 
 **Memory impact variance**: not everything is impact 3. The choice is usually log-or-skip, not "log lightly." When you do log: 3 = meaningful behavior-shifting exchange, 4-5 = climactic life-changing. Impact 1-2 is rare — small things that nonetheless plausibly recur (a confidence shared, a quirk noticed, a small kindness the NPC will remember). Skip is more often right than impact 1.
 
