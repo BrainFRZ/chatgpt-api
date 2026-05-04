@@ -6146,7 +6146,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             use_cache=_else_use_cache
         )
         if use_stateful and gs.get("use_game_state", True) and gs.get("state_report_tool"):
-            tools = [gs["state_report_tool"]]
+            # Build a per-project variant of the state_report tool with plot_ops.key
+            # constrained to the project's canonical flag enum (decision_flags.md).
+            # This stops the model from inventing flag names mid-session.
+            from pipeline import parse_canonical_flags, build_state_report_tool_with_flag_enum
+            _project_uploads = (
+                os.path.join(get_project_dir(username, request.project), "uploads")
+                if request.project else ""
+            )
+            _canonical_flags = parse_canonical_flags(_project_uploads)
+            state_report_tool = build_state_report_tool_with_flag_enum(
+                gs["state_report_tool"], _canonical_flags
+            )
+            tools = [state_report_tool]
             if gs.get("id") == "cpred":
                 from game_systems.cpred_mechanics import RESOLVE_MECHANICS_TOOL
                 tools.insert(0, RESOLVE_MECHANICS_TOOL)

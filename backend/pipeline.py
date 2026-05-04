@@ -1931,7 +1931,84 @@ def apply_scene_state(new_scene: dict, existing_scene: dict = None) -> dict:
     return base
 
 
-def apply_decision_flags(existing_flags: dict, plot_ops: list) -> dict:
+_CANONICAL_FLAG_LINE_RE = re.compile(
+    r'^\s*[-*]\s+\*{0,2}([A-Z][A-Z0-9_]*)\*{0,2}\s*[:\-]', re.MULTILINE
+)
+
+
+def parse_canonical_flags(uploads_dir: str) -> list[str]:
+    """Read decision_flags.md from a project's uploads dir.
+
+    Returns the ordered list of canonical flag keys declared in the doc.
+    Empty list if the file is missing — caller should treat this as "no
+    enum constraint, accept any key" for backward compatibility.
+
+    Format: each canonical flag appears as a bullet line beginning with
+    `- **FLAG_NAME**:` or `- FLAG_NAME:` (uppercase letters, digits,
+    underscores). Bold markers and a trailing colon or dash terminator
+    are recognized.
+    """
+    if not uploads_dir:
+        return []
+    path = os.path.join(uploads_dir, "decision_flags.md")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except OSError:
+        return []
+    seen = []
+    for match in _CANONICAL_FLAG_LINE_RE.finditer(content):
+        key = match.group(1)
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+def build_state_report_tool_with_flag_enum(base_tool: dict, canonical_flags: list[str]) -> dict:
+    """Return a deep copy of `base_tool` with `plot_ops[].key` constrained
+    to the project's canonical flag enum. If the input schema lacks the
+    expected nested path or canonical_flags is empty, returns the input
+    unchanged.
+    """
+    if not canonical_flags:
+        return base_tool
+    try:
+        plot_ops_props = (base_tool["input_schema"]["properties"]["plot_ops"]
+                          ["items"]["properties"])
+    except (KeyError, TypeError):
+        return base_tool
+    if "key" not in plot_ops_props:
+        return base_tool
+    new_tool = copy.deepcopy(base_tool)
+    key_schema = new_tool["input_schema"]["properties"]["plot_ops"]["items"]["properties"]["key"]
+    # Allow null (for divergences with no matching plot variable) plus the canonical set.
+    key_schema["enum"] = [None] + list(canonical_flags)
+    return new_tool
+
+
+def _normalize_flag_key(raw: str, canonical: list[str]) -> str:
+    """Normalize an incoming flag key against the canonical list.
+
+    Steps:
+    - Strip whitespace, uppercase, replace internal whitespace with underscores
+    - If the normalized form matches a canonical key (case-insensitive), use canonical
+    - Otherwise return the normalized form (still stored, just unmatched)
+    """
+    if not isinstance(raw, str):
+        return raw
+    cleaned = raw.strip().upper().replace(" ", "_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if not canonical:
+        return cleaned
+    canonical_upper = {c.upper(): c for c in canonical}
+    if cleaned in canonical_upper:
+        return canonical_upper[cleaned]
+    return cleaned
+
+
+def apply_decision_flags(existing_flags: dict, plot_ops: list, canonical_flags: list[str] | None = None) -> dict:
     """Apply plot_ops to the persistent decision_flags dict.
 
     Each plot op with a 'key' stores its value (and metadata) as a persistent flag.
@@ -1946,7 +2023,12 @@ def apply_decision_flags(existing_flags: dict, plot_ops: list) -> dict:
     - Pending cannot overwrite resolved (idempotent re-registration).
     - Pending cannot overwrite pending (preserves original description).
     - Resolved "branch" flags cannot be overwritten once set (permanent decisions).
+
+    If `canonical_flags` is provided, incoming keys are normalized
+    (uppercase, whitespace-to-underscore) and case-insensitively matched
+    to the canonical form to absorb minor spelling drift from the model.
     """
+    canonical = canonical_flags or []
     flags = existing_flags if isinstance(existing_flags, dict) else {}
     if not plot_ops:
         return flags
@@ -1954,6 +2036,10 @@ def apply_decision_flags(existing_flags: dict, plot_ops: list) -> dict:
         key = op.get("key")
         if not key:
             continue
+        # Normalize incoming key against the canonical list to absorb
+        # minor spelling drift (case, spaces, double underscores). If
+        # canonical_flags is empty, this just upper-cases + cleans.
+        key = _normalize_flag_key(key, canonical)
         value = op.get("value")
         # Normalize common values
         if isinstance(value, str):
@@ -2899,7 +2985,8 @@ def run_pipeline(
     if events_data.get("plot_ops"):
         pipeline_state["decision_flags"] = apply_decision_flags(
             pipeline_state.get("decision_flags", {}),
-            events_data["plot_ops"]
+            events_data["plot_ops"],
+            canonical_flags=parse_canonical_flags(uploads_dir),
         )
 
     # Apply game-specific state ops (relationship_ops already filtered by scene scope)
@@ -4711,7 +4798,8 @@ def apply_single_agent_state_updates(pipeline_state: dict, parsed: dict, current
     if parsed.get("plot_ops"):
         pipeline_state["decision_flags"] = apply_decision_flags(
             pipeline_state.get("decision_flags", {}),
-            parsed["plot_ops"]
+            parsed["plot_ops"],
+            canonical_flags=parse_canonical_flags(uploads_dir),
         )
     pipeline_state["character_states"] = apply_character_states(
         pipeline_state["character_states"],
