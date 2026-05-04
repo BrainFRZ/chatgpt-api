@@ -31,6 +31,7 @@ SYSTEM_PROMPT = """You are a decision-flag tracker for a tabletop RPG campaign. 
 You receive:
 - The canonical flag manifest (the only flag keys you may emit; descriptions tell you what each flag tracks)
 - The current state of all flags
+- Scene state (active_tensions captures multi-turn dynamics like "Red has been pressing Delphi" — load-bearing for gradient flags)
 - The user's latest input
 - The narration the GM just produced
 
@@ -74,6 +75,43 @@ def _build_state_text(decision_flags: dict) -> str:
         else:
             lines.append(f"- {key}: {entry}")
     return "\n".join(lines)
+
+
+def _build_scene_text(scene_state: dict) -> str:
+    """Render the relevant slice of scene_state for flag judgment.
+
+    Includes only fields useful for evaluating multi-turn dynamics:
+    active_tensions (the multi-turn pattern capture), atmosphere,
+    location, details, pending_actions. Strips presence lists and
+    other noise that doesn't inform flag decisions.
+    """
+    if not isinstance(scene_state, dict) or not scene_state:
+        return "(no scene state)"
+    parts = []
+    location = scene_state.get("location")
+    if location:
+        parts.append(f"Location: {location}")
+    atmosphere = scene_state.get("atmosphere")
+    if atmosphere:
+        parts.append(f"Atmosphere: {atmosphere}")
+    tensions = scene_state.get("active_tensions") or []
+    if isinstance(tensions, list) and tensions:
+        parts.append("Active tensions (multi-turn dynamics in this scene):")
+        for t in tensions:
+            parts.append(f"  - {t}")
+    details = scene_state.get("details") or []
+    if isinstance(details, list) and details:
+        parts.append("Scene details:")
+        for d in details[:8]:  # cap to keep it tight
+            parts.append(f"  - {d}")
+    pending = scene_state.get("pending_actions") or []
+    if isinstance(pending, list) and pending:
+        parts.append("Pending actions:")
+        for p in pending[:6]:
+            parts.append(f"  - {p}")
+    if not parts:
+        return "(no scene state)"
+    return "\n".join(parts)
 
 
 def _read_canonical_flags_md(uploads_dir: str) -> str:
@@ -141,12 +179,18 @@ def determine_flag_ops(
     current_decision_flags: dict,
     user_input: str,
     narration: str,
+    scene_state: Optional[dict] = None,
 ) -> tuple[list[dict], dict]:
     """Run the side agent. Returns (plot_ops_list, usage_dict).
 
     On any failure (no canonical flags, API error, timeout, malformed output)
     returns ([], {}) — caller treats as "no flag changes this turn." This is
     a soft fallback rather than failing the whole turn.
+
+    scene_state captures multi-turn dynamics (active_tensions, atmosphere)
+    that single-turn narration misses. Pass it for gradient flags like
+    MORI_TRUST and COMPARTMENT_STRAIN where the relevant signal is "is
+    this dynamic active in the scene?" rather than "did it just happen?"
     """
     if not canonical_flags:
         return [], {}
@@ -163,6 +207,9 @@ def determine_flag_ops(
 
 [CURRENT FLAG STATE]
 {_build_state_text(current_decision_flags or {})}
+
+[SCENE STATE]
+{_build_scene_text(scene_state or {})}
 
 [USER INPUT THIS TURN]
 {(user_input or '').strip()}

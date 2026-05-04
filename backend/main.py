@@ -9259,6 +9259,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         stateful_pipeline_state.get("decision_flags", {}),
                                         request.message or "",
                                         accumulated_content,
+                                        stateful_pipeline_state.get("scene_state", {}),
                                     )
                                     if flag_usage:
                                         # Surface side-agent cost separately on the response so
