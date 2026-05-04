@@ -26,6 +26,35 @@ FLAG_AGENT_MODEL = "claude-haiku-4-5-20251001"
 FLAG_AGENT_MAX_TOKENS = 1024
 FLAG_AGENT_TIMEOUT_S = 15
 
+# Haiku 4.5 pricing per MTok ($/1M tokens). Update if Anthropic changes.
+HAIKU_INPUT_RATE = 1.00          # uncached input
+HAIKU_CACHE_READ_RATE = 0.10     # cached input read
+HAIKU_CACHE_WRITE_RATE = 1.25    # 5min cache write (1hr is 2.00 — flag agent doesn't use cache_control today)
+HAIKU_OUTPUT_RATE = 5.00         # output
+
+
+def compute_flag_agent_cost(usage: dict) -> float:
+    """Dollar cost of a flag-agent call given its usage dict (same shape
+    other usage dicts in this codebase use). Returns 0.0 on empty input.
+    """
+    if not isinstance(usage, dict) or not usage:
+        return 0.0
+    raw_input = usage.get("input_tokens", 0) or 0
+    cache_read = usage.get("cache_read_tokens", 0) or 0
+    cache_write = usage.get("cache_creation_tokens", 0) or 0
+    output = usage.get("output_tokens", 0) or 0
+    # `input_tokens` here is the codebase's normalized total (raw + cache_read + cache_write);
+    # subtract the cached portions to get the uncached input.
+    uncached_input = max(0, raw_input - cache_read - cache_write)
+    cost = (
+        (uncached_input * HAIKU_INPUT_RATE
+         + cache_read * HAIKU_CACHE_READ_RATE
+         + cache_write * HAIKU_CACHE_WRITE_RATE
+         + output * HAIKU_OUTPUT_RATE)
+        / 1_000_000.0
+    )
+    return cost
+
 SYSTEM_PROMPT = """You are a decision-flag tracker for a tabletop RPG campaign. After each turn, you read what just happened and determine which campaign decision flags should be set, updated, or pre-registered.
 
 You receive:

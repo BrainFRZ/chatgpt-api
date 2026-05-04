@@ -649,6 +649,13 @@ export default function ChatView({
                         {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model}`}
                       </span>
                     )}
+                    {(msg as any).flag_agent_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        Flags: I:{(msg as any).flag_agent_usage.input_tokens || 0} O:{(msg as any).flag_agent_usage.output_tokens || 0}
+                        {typeof (msg as any).flag_agent_cost === 'number' && ` | $${(msg as any).flag_agent_cost.toFixed(6)}`}
+                        {' '}(Haiku)
+                      </span>
+                    )}
                     {/* Branch navigation - show only for user messages with siblings */}
                     {msg.role === 'user' && (() => {
                       if (!msg.id) return null;

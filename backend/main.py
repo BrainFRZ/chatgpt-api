@@ -9262,9 +9262,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         stateful_pipeline_state.get("scene_state", {}),
                                     )
                                     if flag_usage:
-                                        # Surface side-agent cost separately on the response so
-                                        # users can see what flag-tracking is costing them.
-                                        data.setdefault("flag_agent_usage", flag_usage)
+                                        # Surface side-agent usage AND its computed Haiku cost
+                                        # separately on the response so the frontend can show
+                                        # what flag-tracking is costing per turn. The cost is
+                                        # also folded into the message's total cost below
+                                        # (with Haiku pricing, not main-model pricing).
+                                        from flag_agent import compute_flag_agent_cost
+                                        data["flag_agent_usage"] = flag_usage
+                                        data["flag_agent_cost"] = compute_flag_agent_cost(flag_usage)
+                                        data["flag_agent_model"] = "claude-haiku-4-5"
                                     if flag_ops:
                                         stateful_pipeline_state["decision_flags"] = apply_decision_flags(
                                             stateful_pipeline_state.get("decision_flags", {}),
@@ -9605,6 +9611,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             total_cost = provider.calculate_cost(parsed)
                         tokens_str = provider.format_token_string(parsed)
 
+                        # Fold the flag-agent's Haiku cost into total cost. Haiku has its own
+                        # pricing ($1/$5/MTok) which differs from the main model's, so it's
+                        # computed separately and added rather than mixed into `parsed`.
+                        flag_agent_cost = float(data.get("flag_agent_cost", 0.0) or 0.0)
+                        total_cost += flag_agent_cost
+
                         # Apply free tokens
                         if model_id.startswith('gpt'):
                             actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
@@ -9659,6 +9671,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["state_tool_input"] = stateful_tool_input
                             if stateful_tool_retried:
                                 assistant_msg_data["state_tool_retried"] = True
+                        # Per-message visibility into the flag side agent: usage + cost
+                        # so the frontend can render a separate line item.
+                        if data.get("flag_agent_usage"):
+                            assistant_msg_data["flag_agent_usage"] = data["flag_agent_usage"]
+                            assistant_msg_data["flag_agent_cost"] = float(data.get("flag_agent_cost", 0.0) or 0.0)
+                            assistant_msg_data["flag_agent_model"] = data.get("flag_agent_model", "claude-haiku-4-5")
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 
