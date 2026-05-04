@@ -32,6 +32,7 @@
 !backend/fix_total_tokens.py
 !backend/main.py
 !backend/sync_manager.py
+!backend/flag_agent.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_e2e.py

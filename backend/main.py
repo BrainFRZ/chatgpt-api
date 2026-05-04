@@ -9232,6 +9232,48 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             except Exception as recov_err:
                                 logger.error(f"Stateful: narration recovery error for {username}: {recov_err}")
 
+                        # Decision-flag side agent (Haiku 4.5). Sole owner of plot_ops on the
+                        # stateful path — main report_state schema no longer carries plot_ops.
+                        # Runs after narration is finalized; reads narration + user input +
+                        # canonical flag manifest + current flag state, emits plot_ops, and
+                        # those are applied via apply_decision_flags (with normalization).
+                        # Soft-fails: any error returns ([], {}) and the turn proceeds with
+                        # no flag updates. Logged as a warning when that happens.
+                        if (use_stateful and stateful_tool_input is not None
+                                and stateful_pipeline_state is not None
+                                and not bool(stateful_tool_input.get("is_ooc"))
+                                and (accumulated_content or "").strip()):
+                            try:
+                                from flag_agent import determine_flag_ops
+                                from pipeline import apply_decision_flags
+                                _flag_uploads = (
+                                    os.path.join(get_project_dir(username, request.project), "uploads")
+                                    if request.project else ""
+                                )
+                                if _canonical_flags:
+                                    flag_ops, flag_usage = await asyncio.to_thread(
+                                        determine_flag_ops,
+                                        client,
+                                        _flag_uploads,
+                                        _canonical_flags,
+                                        stateful_pipeline_state.get("decision_flags", {}),
+                                        request.message or "",
+                                        accumulated_content,
+                                    )
+                                    if flag_usage:
+                                        # Surface side-agent cost separately on the response so
+                                        # users can see what flag-tracking is costing them.
+                                        data.setdefault("flag_agent_usage", flag_usage)
+                                    if flag_ops:
+                                        stateful_pipeline_state["decision_flags"] = apply_decision_flags(
+                                            stateful_pipeline_state.get("decision_flags", {}),
+                                            flag_ops,
+                                            canonical_flags=_canonical_flags,
+                                        )
+                                        data["pipeline_state"] = stateful_pipeline_state
+                            except Exception as fa_err:
+                                logger.error(f"flag_agent: error for {username}: {fa_err}")
+
                         # Snapshot state after ops applied (for debug transcript delta)
                         stateful_after_snapshot = None
                         if use_stateful and stateful_tool_input is not None and stateful_pipeline_state is not None:

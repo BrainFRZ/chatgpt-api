@@ -302,15 +302,9 @@ PACING:
 ARC LABEL:
 - Set to a short label when starting a new gig or subplot. null otherwise.
 
-PLOT OPS (persistent decision flags):
-- Fire when player resolves a branch / sets a flag-or-variable / triggers a plot-doc decision — or when they diverge recoverable.
-- Plot ops persist as [DECISION FLAGS], injected every turn — track decisions affecting downstream beats. Do NOT use callbacks for plot-level decisions; use plot_ops.
-- Pre-registration: on first turn of a session, register all expected decision flags from the plot doc's "Expected Decision Flags" block by firing plot_ops with `value="pending"`. They appear "(pending)" in injection every turn. Once set, cannot be overwritten back to pending.
-- Always fire when a decision matches plot-doc structure. Use the EXACT variable/flag/decision-table label from plot doc as `key`. Use plot doc's defined values where applicable.
-- `branch`: defined fork — report path taken.
-- `flag`: named variable/flag — report new value.
-- `divergence`: player went off-script but can be steered back — report departure, continue normally. Do NOT route to output or halt.
-- Do NOT fire plot_ops for general narrative importance. Tense moments, emotional scenes, creative choices do NOT qualify unless plot doc specifically tracks them.
+PLOT OPS / DECISION FLAGS — handled entirely by a Haiku side agent that runs after your turn. You do NOT emit plot_ops, do NOT set or update decision flags, and do NOT pre-register pending flags. Just narrate what happens; the side agent reads your narration + the user input and decides flag changes deterministically against the canonical flag manifest.
+
+[DECISION FLAGS] still appears in your context every turn so you can read current state and let it inform your narration choices (e.g., "MAINLINE_HEAT is at 3 — mainline TC should feel closer now"). But you no longer touch the flags themselves.
 
 IP SCORING (§7):
 Maintain running scores via `ip_ops`. [IP TRACKER] persists across context trims — your authoritative session memory.
@@ -526,7 +520,7 @@ Optional arrays:
 - **callback_ops**: add/resolve Fixer deals, gig intel, debts. On `add` include `resolutions`: up to 3 trigger conditions (200 char each) that close it. Each turn, scan `[resolves if: ...]` on open callbacks; resolve any whose conditions are met.
 - **virus_ops**: see Virus Ops section below.
 - **npc_memory_ops**: significant NPC moments only.
-- **plot_ops**: plot-doc trigger met. See **Plot Triggers** section at end of this contract for shape, pre-registration, severities, and `decision` field rules.
+- ~~**plot_ops**~~: REMOVED from this tool. Decision flags are now owned by a dedicated side agent that runs after each turn — you no longer emit plot_ops, set decision_flags, or pre-register pending flags. Just narrate what happens; the side agent reads your narration and updates flags. Do NOT mention "decision flags" or "MAINLINE_HEAT" etc. in narration as if YOU were tracking them.
 - **edgerunner_ops**: HP/Humanity/Luck/Armor/EB/injury/cyberware/weapons changes.
 - **relationship_ops**: RS/RomS/FR changes (see Relationship Ops).
 - **ip_ops**: IP scoring (see IP Scoring).
@@ -755,7 +749,7 @@ Simple Checks (single Interface + d10) resolve normally — no hack_trigger. Onl
 - Call `resolve_mechanics` BEFORE narrative when mechanical actions are needed; `report_state` AFTER narrative.
 - Call `report_state` every turn (even when no mechanics).
 - Do NOT reference the state system in narrative.
-- If the player resolves a branch / sets a flag / triggers a plot-doc decision, fire plot_ops (key, value, severity). Recoverable off-script = severity "divergence", continue normally. Irreconcilable break (no defined branch fits, e.g. killing a central NPC) = stop and tell them OOC the plot doc needs updating.
+- If the player resolves a branch / sets a flag / triggers a plot-doc decision, just narrate the event clearly — the flag-tracking side agent reads your narration and updates the canonical flags. Irreconcilable break (no defined branch fits, e.g. killing a central NPC) = stop and tell them OOC the plot doc needs updating.
 - High-octane cyberpunk tone: style over substance, Night City as character.
 - Violence is consequential — armor breaks, people die ugly.
 - Tech is invasive — cyberware costs humanity.
@@ -1063,37 +1057,6 @@ STATE_REPORT_TOOL = {
                         "properties": {
                             "minutes": {"type": "number", "description": "Duration in minutes. For multi-hour or multi-day skips (sleep, travel, downtime) make this large enough to land the clock where the narrative ENDS — e.g. ~510 for 'sleep through until ~07:00 next morning', 1440 for 'next day same time'."},
                             "reason": {"type": "string", "description": "Why this turn took longer (e.g. 'Travel to Night City docks', 'Sleep through to morning')"}
-                        }
-                    }
-                }
-            },
-            "plot_ops": {
-                "type": "array",
-                "description": "Plot-relevant decisions from this turn. Always fire when a choice resolves a branch point, sets a variable/flag, or triggers a decision table entry from the plot documents. Also fire with severity 'divergence' when the player goes off-script but can be steered back. Do NOT fire for general narrative importance.",
-                "items": {
-                    "type": "object",
-                    "required": ["decision"],
-                    "properties": {
-                        "key": {
-                            "type": ["string", "null"],
-                            "description": "Variable, flag, or decision name from the plot documents (e.g. 'TIDEHOLLOW', 'FLAG_SPIRIT_SAVED_EP1', 'Echo\\'s Presence'). null for divergences with no matching plot variable."
-                        },
-                        "value": {
-                            "type": ["string", "null"],
-                            "description": "The value or outcome chosen (e.g. 'true', 'killed', 'Masked presence'). Use 'pending' to pre-register an expected flag without resolving it. null if not applicable."
-                        },
-                        "decision": {
-                            "type": "string",
-                            "description": "What the player chose, stated concisely."
-                        },
-                        "severity": {
-                            "type": "string",
-                            "enum": ["branch", "flag", "divergence"],
-                            "description": "branch=defined fork in plot docs, flag=named variable/flag changed, divergence=player broke from planned path."
-                        },
-                        "episode": {
-                            "type": "string",
-                            "description": "Current episode/session from pacing context."
                         }
                     }
                 }
