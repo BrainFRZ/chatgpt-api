@@ -202,15 +202,15 @@ ProviderRegistry.register(AnthropicOpusProvider())
 DEFAULT_MODEL = "claude-opus-4.5"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
-COMBAT_AUTO_SWITCH_MODEL = "gpt-5.5"
+COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.5 if OpenAI key."""
+    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
     if get_api_key(username, "anthropic"):
         return DEFAULT_MODEL  # claude-opus-4.5
     if get_api_key(username, "openai"):
-        return "gpt-5.5"
+        return "gpt-5.4"
     return DEFAULT_MODEL
 
 # ============================================================
@@ -236,7 +236,7 @@ def get_claude_provider():
 
 def get_gpt_provider():
     """Get any GPT provider for token counting (they use the same tokenizer)."""
-    return ProviderRegistry.get("gpt-5.5") or ProviderRegistry.get("gpt-5.4") or ProviderRegistry.get("gpt-5.2")
+    return ProviderRegistry.get("gpt-5.4") or ProviderRegistry.get("gpt-5.5") or ProviderRegistry.get("gpt-5.2")
 
 
 @contextmanager
@@ -5118,11 +5118,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             f"exit_target={_exit_target}"
         )
 
-    # Auto-switch to GPT-5.5 for chase mode (per spec; deterministic ruleset
-    # benefits from GPT-5.5's fast-resolution profile)
+    # Auto-switch to GPT-5.4 for chase mode (per spec; deterministic ruleset
+    # benefits from GPT-5.4's fast-resolution profile)
     if use_chase_mode and not model_id.startswith("gpt"):
         _original_model = model_id
-        model_id = "gpt-5.5"
+        model_id = "gpt-5.4"
         provider = ProviderRegistry.get(model_id)
         api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
         if not api_key:
@@ -5222,18 +5222,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         from game_systems.cpred_chase import stamp_chase_hud_overlay
                         stamp_chase_hud_overlay(_ps_for_chase)
 
-                        # Auto-switch to GPT-5.5 (parallel to the auto-detect path
+                        # Auto-switch to GPT-5.4 (parallel to the auto-detect path
                         # at line 4951 — /chase is a parallel activation route
                         # and must run the same setup).
                         if not model_id.startswith("gpt"):
                             _orig_chase_cmd_model = model_id
-                            _gpt_provider = ProviderRegistry.get("gpt-5.5")
+                            _gpt_provider = ProviderRegistry.get("gpt-5.4")
                             _gpt_api_key = get_api_key(
                                 username,
-                                ProviderRegistry.get_required_api_key("gpt-5.5"),
+                                ProviderRegistry.get_required_api_key("gpt-5.4"),
                             )
                             if _gpt_api_key:
-                                model_id = "gpt-5.5"
+                                model_id = "gpt-5.4"
                                 provider = _gpt_provider
                                 api_key = _gpt_api_key
                                 data["model"] = model_id
