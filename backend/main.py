@@ -204,6 +204,14 @@ DEFAULT_MODEL = "claude-opus-4.5"
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
 COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 
+# Per-stage models for both pipelines.
+# Reasoning stages (Events / Mechanics-as-model / Planning) are JSON-only with
+# heavy rules reasoning — 5.2's strength. Narration is streaming prose with
+# light reasoning — 5.4's strength. These override the caller-picked model
+# inside the pipelines but only when both stage providers are registered.
+PIPELINE_PLANNING_MODEL = "gpt-5.2"
+PIPELINE_NARRATION_MODEL = "gpt-5.4"
+
 
 def get_default_model_for_user(username: str) -> str:
     """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
@@ -6703,8 +6711,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     except StopIteration:
                         return _PIPELINE_STOP
 
+                _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
+                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                logger.info(
+                    f"Hack mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
+                    f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
+                )
                 mode_gen = run_mode_pipeline(
                     provider=provider, client=client,
+                    planning_provider=_planning_prov,
+                    narration_provider=_narration_prov,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="hack",
                     planning_system=hack_planning_system,
@@ -7015,8 +7031,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     except StopIteration:
                         return _PIPELINE_STOP
 
+                _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
+                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                logger.info(
+                    f"Combat mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
+                    f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
+                )
                 mode_gen = run_mode_pipeline(
                     provider=provider, client=client,
+                    planning_provider=_planning_prov,
+                    narration_provider=_narration_prov,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="combat",
                     planning_system=combat_planning_system,
@@ -7310,8 +7334,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     except StopIteration:
                         return _PIPELINE_STOP
 
+                _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
+                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                logger.info(
+                    f"Net combat mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
+                    f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
+                )
                 mode_gen = run_mode_pipeline(
                     provider=provider, client=client,
+                    planning_provider=_planning_prov,
+                    narration_provider=_narration_prov,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="net_combat",
                     planning_system=nc_planning_system,
@@ -7962,6 +7994,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 doc_stems = extract_project_file_stems(agent_files.get("narration", ""))
                 pipeline_uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads") if request.project else None
                 pipeline_name_dice = generate_name_dice(pipeline_uploads_dir or "")
+                _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
+                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                logger.info(
+                    f"Pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
+                    f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
+                )
                 pipeline_gen = run_pipeline(
                     provider=provider,
                     client=client,
@@ -7977,6 +8015,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     doc_file_stems=doc_stems,
                     name_dice=pipeline_name_dice,
                     uploads_dir=pipeline_uploads_dir,
+                    planning_provider=_planning_prov,
+                    narration_provider=_narration_prov,
                 )
 
                 client_disconnected = False

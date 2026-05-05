@@ -304,6 +304,7 @@ class PipelineStageResult:
     parsed_json: Optional[dict]  # Parsed JSON (None for Narration)
     usage: dict  # Token usage dict from provider
     service_tier: str  # Actual tier used
+    provider: Optional["OpenAIProvider"] = None  # Provider that produced this stage; None = use the aggregator's default
 
 
 @dataclass
@@ -2897,6 +2898,8 @@ def run_pipeline(
     doc_file_stems: set = None,
     name_dice: str = "",
     uploads_dir: Optional[str] = None,
+    planning_provider: OpenAIProvider = None,
+    narration_provider: OpenAIProvider = None,
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -2909,8 +2912,16 @@ def run_pipeline(
     - ("content", {"delta": "..."})  -- for streaming Narration or short-circuit content
     - ("pipeline_done", {PipelineResult fields})
 
+    `provider` is the legacy single-provider arg (used for usage aggregation
+    fallbacks and as the default when planning_provider/narration_provider
+    are not supplied). Pass `planning_provider` to run Events / model-driven
+    Mechanics on a reasoning-strong model and `narration_provider` to run
+    Narration on a prose-strong model.
+
     This is a generator that the event_generator in send_message_stream iterates over.
     """
+    _planning_provider = planning_provider or provider
+    _narration_provider = narration_provider or provider
 
     # Resolve game system contracts and state functions
     from game_systems import get_game_system
@@ -2938,9 +2949,10 @@ def run_pipeline(
     events_messages = build_events_messages(events_system, recent_events_pairs, user_msg, pipeline_state, game_system=gs, name_dice=name_dice)
 
     events_result = run_pipeline_stage(
-        provider, client, STAGE_CONFIGS["events"],
+        _planning_provider, client, STAGE_CONFIGS["events"],
         events_messages, username, project, chat_name
     )
+    events_result.provider = _planning_provider
 
     yield ("pipeline_stage", {"stage": "events", "status": "complete"})
 
@@ -3213,9 +3225,10 @@ def run_pipeline(
         mechanics_messages = build_mechanics_messages(mechanics_system, events_data, dice_pool=dice_pool, game_injection=mechanics_game_injection)
 
         mechanics_result = run_pipeline_stage(
-            provider, client, STAGE_CONFIGS["mechanics"],
+            _planning_provider, client, STAGE_CONFIGS["mechanics"],
             mechanics_messages, username, project, chat_name
         )
+        mechanics_result.provider = _planning_provider
 
         yield ("pipeline_stage", {"stage": "mechanics", "status": "complete"})
 
@@ -3285,7 +3298,7 @@ def run_pipeline(
         doc_file_stems)
     narration_messages = build_narration_messages(narration_system, recent_events_pairs, mechanics_data, npc_voices=npc_voices)
 
-    narration_params = provider.build_pipeline_request(
+    narration_params = _narration_provider.build_pipeline_request(
         messages=narration_messages,
         username=username,
         project=project,
@@ -3301,7 +3314,7 @@ def run_pipeline(
     narration_usage = None
     first_content = True
 
-    for stream_event in provider.send_request_stream(client, narration_params):
+    for stream_event in _narration_provider.send_request_stream(client, narration_params):
         if stream_event.event_type == 'content_delta':
             if first_content:
                 yield ("pipeline_stage", {"stage": "narration", "status": "streaming"})
@@ -3321,7 +3334,8 @@ def run_pipeline(
         content=narration_content,
         parsed_json=None,
         usage=narration_usage or {},
-        service_tier="standard"
+        service_tier="standard",
+        provider=_narration_provider,
     )
     stage_results.append(narration_stage_result)
     if narration_usage and narration_usage.get('reasoning'):
@@ -3388,6 +3402,8 @@ def run_mode_pipeline(
     quiet_jack_in_used: bool = False,
     stealth_broken_round=None,
     net_round: int = 1,
+    planning_provider: OpenAIProvider = None,
+    narration_provider: OpenAIProvider = None,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -3395,8 +3411,16 @@ def run_mode_pipeline(
     Backend Resolution: resolve_actions() on the actions array.
     Stage 2 (Narration): Streaming call — model writes prose from resolved actions.
 
+    `provider` is the legacy single-provider arg (used for usage aggregation and
+    as the default when planning_provider/narration_provider are not supplied).
+    Pass `planning_provider` and/or `narration_provider` to run the two stages
+    on different OpenAI models — typically a reasoning-strong model for Stage 1
+    and a prose-strong model for Stage 2.
+
     Yields same event types as run_pipeline(): pipeline_stage, content, pipeline_done.
     """
+    _planning_provider = planning_provider or provider
+    _narration_provider = narration_provider or provider
     from game_systems.cpred_mechanics import resolve_actions
 
     # ---- STAGE 1: Planning ----
@@ -3418,9 +3442,10 @@ def run_mode_pipeline(
     )
 
     planning_result = run_pipeline_stage(
-        provider, client, planning_config,
+        _planning_provider, client, planning_config,
         planning_messages, username, project, chat_name
     )
+    planning_result.provider = _planning_provider
 
     yield ("pipeline_stage", {"stage": "planning", "status": "complete"})
 
@@ -3613,7 +3638,7 @@ def run_mode_pipeline(
         json_mode=False,
     )
 
-    narration_params = provider.build_pipeline_request(
+    narration_params = _narration_provider.build_pipeline_request(
         messages=narration_messages,
         username=username,
         project=project,
@@ -3628,7 +3653,7 @@ def run_mode_pipeline(
     narration_usage = None
     first_content = True
 
-    for stream_event in provider.send_request_stream(client, narration_params):
+    for stream_event in _narration_provider.send_request_stream(client, narration_params):
         if stream_event.event_type == 'content_delta':
             if first_content:
                 yield ("pipeline_stage", {"stage": "narration", "status": "streaming"})
@@ -3648,7 +3673,8 @@ def run_mode_pipeline(
         content=narration_content,
         parsed_json=None,
         usage=narration_usage or {},
-        service_tier="standard"
+        service_tier="standard",
+        provider=_narration_provider,
     )
     stage_results.append(narration_stage_result)
     if narration_usage and narration_usage.get('reasoning'):
@@ -3682,14 +3708,16 @@ def _build_stage_usage(stage_results: list[PipelineStageResult], provider: OpenA
             output_tokens=u.get('output_tokens', 0),
             reasoning_tokens=u.get('reasoning_tokens', 0)
         )
+        _stage_provider = sr.provider or provider
         result[sr.stage] = {
             "input_tokens": u.get('input_tokens', 0),
             "cache_read_tokens": u.get('cache_read_tokens', 0),
             "cache_creation_tokens": u.get('cache_creation_tokens', 0),
             "output_tokens": u.get('output_tokens', 0),
             "reasoning_tokens": u.get('reasoning_tokens', 0),
-            "cost": provider.calculate_cost_with_tier(parsed, sr.service_tier),
-            "service_tier": sr.service_tier
+            "cost": _stage_provider.calculate_cost_with_tier(parsed, sr.service_tier),
+            "service_tier": sr.service_tier,
+            "model": getattr(_stage_provider, "MODEL_NAME", None) or getattr(_stage_provider, "model_id", None),
         }
     return result
 
@@ -3721,7 +3749,10 @@ def _aggregate_usage(stage_results: list[PipelineStageResult], provider: OpenAIP
         total_output += output_tokens
         total_reasoning += reasoning_tokens
 
-        # Calculate per-stage cost with tier-specific pricing
+        # Calculate per-stage cost with tier-specific pricing.
+        # Use the stage's own provider if set (mode pipeline runs Stage 1 on
+        # one model and Stage 2 on another), else fall back to the aggregator's
+        # default provider.
         parsed = ParsedResponse(
             content="",
             reasoning=None,
@@ -3731,7 +3762,8 @@ def _aggregate_usage(stage_results: list[PipelineStageResult], provider: OpenAIP
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens
         )
-        stage_cost = provider.calculate_cost_with_tier(parsed, result.service_tier)
+        _stage_provider = result.provider or provider
+        stage_cost = _stage_provider.calculate_cost_with_tier(parsed, result.service_tier)
         total_cost += stage_cost
 
     return {
