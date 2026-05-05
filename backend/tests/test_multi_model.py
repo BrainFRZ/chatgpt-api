@@ -98,6 +98,7 @@ class TestGetModels:
         assert "claude-sonnet-4.5" in model_ids
         assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
+        assert "claude-3-opus" in model_ids
 
     def test_gpt52_metadata(self, client):
         """Verify GPT-5.2 has correct pricing and context limits."""
@@ -889,12 +890,12 @@ class TestProviderRegistry:
         assert gpt is not None
         assert claude is not None
 
-    def test_get_default_returns_opus45(self):
-        """Default provider should be Claude Opus 4.5."""
+    def test_get_default_returns_opus3(self):
+        """Default provider should be Claude 3 Opus."""
         from providers import ProviderRegistry
 
         default = ProviderRegistry.get_default()
-        assert default.model_id == "claude-opus-4.5"
+        assert default.model_id == "claude-3-opus"
 
     def test_list_models_returns_metadata(self):
         """list_models should return metadata for all providers."""
@@ -910,6 +911,7 @@ class TestProviderRegistry:
         assert "claude-sonnet-4.5" in model_ids
         assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
+        assert "claude-3-opus" in model_ids
 
     def test_get_required_api_key(self):
         """get_required_api_key should return correct provider."""

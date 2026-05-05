@@ -205,7 +205,7 @@ class ProviderRegistry:
     """Registry for managing available model providers."""
 
     _providers: dict[str, ModelProvider] = {}
-    _default_model: str = "claude-opus-4.5"
+    _default_model: str = "claude-3-opus"
 
     @classmethod
     def register(cls, provider: ModelProvider) -> None:

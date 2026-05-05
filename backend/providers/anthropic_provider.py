@@ -598,6 +598,99 @@ class AnthropicOpusProvider(AnthropicProvider):
         return params
 
 
+class AnthropicOpus3Provider(AnthropicProvider):
+    """Provider for Claude 3 Opus (2024).
+
+    Older model preferred by some users for narrative/writing quality.
+    Notable differences from 4.x Opus:
+      - No extended thinking support
+      - 200k context only (no 1M beta)
+      - 4096 max output tokens
+      - 1hr cache TTL via extended-cache-ttl beta (2x base for cache writes)
+    """
+
+    MODEL_NAME = "claude-3-opus-20240229"
+    MAX_TOKENS = 4096
+
+    BETA_HEADERS = [
+        "extended-cache-ttl-2025-04-11"
+    ]
+
+    @property
+    def model_id(self) -> str:
+        return "claude-3-opus"
+
+    @property
+    def display_name(self) -> str:
+        return "Claude 3 Opus"
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing(
+            input_base=15.00,
+            cache_write=30.00,    # 1hr cache write: 2x base
+            cache_read=1.50,      # 0.1x base
+            output=75.0,
+            reasoning=75.0
+        )
+
+    @property
+    def context_limits(self) -> ContextLimits:
+        return ContextLimits(
+            threshold=80_000,
+            target=55_000
+        )
+
+    def build_request(
+        self,
+        messages: list[dict],
+        username: str,
+        project: Optional[str],
+        chat_name: str,
+        is_free_chat: bool,
+        use_cache: bool = True
+    ) -> dict:
+        """Build request for Claude 3 Opus.
+
+        Strips extended thinking (not supported by Claude 3 Opus). Keeps
+        the parent's 1hr cache_control breakpoints since the
+        extended-cache-ttl beta is enabled.
+        """
+        params = super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
+        params.pop("thinking", None)
+        return params
+
+    def calculate_cost(self, parsed: ParsedResponse) -> float:
+        """Claude 3 Opus has flat pricing — no extended-context tier."""
+        p = self.pricing
+        non_cached = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
+        return (
+            non_cached * p.input_base / 1_000_000 +
+            parsed.cache_creation_tokens * p.cache_write / 1_000_000 +
+            parsed.cache_read_tokens * p.cache_read / 1_000_000 +
+            parsed.output_tokens * p.output / 1_000_000 +
+            parsed.reasoning_tokens * p.reasoning / 1_000_000
+        )
+
+    def count_tokens_api(self, text: str, api_key: str) -> int:
+        """Count tokens using Claude's count_tokens endpoint.
+
+        Override: Claude 3 Opus's canonical model name is the dated form
+        (claude-3-opus-20240229) and the count_tokens endpoint accepts it.
+        The parent's regex strip would yield a non-existent 'claude-3-opus'.
+        """
+        if not text or not text.strip():
+            return 0
+
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.count_tokens(
+            model=self.MODEL_NAME,
+            messages=[{"role": "user", "content": text}]
+        )
+        return response.input_tokens
+
+
 def add_updates_to_messages(messages: list[dict], updates_text: str) -> list[dict]:
     """
     Add context updates to the message list for Claude.
