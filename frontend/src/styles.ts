@@ -1254,6 +1254,19 @@ export const styles: { [key: string]: React.CSSProperties } = {
     color: '#ccc',
     borderLeft: '3px solid #9c27b0',
   },
+  searchNotification: {
+    padding: '4px 10px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    fontFamily: 'monospace',
+    background: 'rgba(255,255,255,0.03)',
+    color: '#ccc',
+    borderLeft: '3px solid #2196f3',
+  },
+  searchNotificationError: {
+    borderLeft: '3px solid #f44336',
+    color: '#ef9a9a',
+  },
   shipCombatStartBanner: {
     marginBottom: '8px',
     padding: '6px 10px',

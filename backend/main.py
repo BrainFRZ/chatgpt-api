@@ -1621,11 +1621,13 @@ class ApiKeysRequest(BaseModel):
     username: str
     openai_key: str | None = None
     anthropic_key: str | None = None
+    perplexity_key: str | None = None
 
 class ApiKeysResponse(BaseModel):
     """Response showing which API keys are configured."""
     has_openai: bool
     has_anthropic: bool
+    has_perplexity: bool = False
 
 class SetChatModelRequest(BaseModel):
     """Request to change a chat's model."""
@@ -1921,12 +1923,15 @@ def set_api_keys(request: ApiKeysRequest):
         keys["openai"] = request.openai_key
     if request.anthropic_key is not None:
         keys["anthropic"] = request.anthropic_key
+    if request.perplexity_key is not None:
+        keys["perplexity"] = request.perplexity_key
 
     save_api_keys(username, keys)
 
     return ApiKeysResponse(
         has_openai=bool(keys.get("openai")),
-        has_anthropic=bool(keys.get("anthropic"))
+        has_anthropic=bool(keys.get("anthropic")),
+        has_perplexity=bool(keys.get("perplexity")),
     )
 
 @app.get("/api/api-keys/{username}", response_model=ApiKeysResponse)
@@ -1940,7 +1945,8 @@ def get_api_keys_status(username: str):
     keys = load_api_keys(username)
     return ApiKeysResponse(
         has_openai=bool(keys.get("openai")),
-        has_anthropic=bool(keys.get("anthropic"))
+        has_anthropic=bool(keys.get("anthropic")),
+        has_perplexity=bool(keys.get("perplexity")),
     )
 
 @app.get("/api/models", response_model=list[ModelInfo])
@@ -2305,17 +2311,26 @@ async def create_chat(request: CreateChatRequest):
         "stats": create_empty_stats()
     }
 
-    # Set model: priority is request.model > project.model > user-default
+    # Set model: priority is request.model > project.model > gamesystem default > user-default
     if request.model:
         data["model"] = request.model
     elif request.project:
         # Inherit from project's default model if set (proj_meta loaded above)
         if proj_meta.get("model"):
             data["model"] = proj_meta["model"]
+        elif gs.get("default_model"):
+            data["model"] = gs["default_model"]
         else:
             data["model"] = get_default_model_for_user(username)
     else:
         data["model"] = get_default_model_for_user(username)
+
+    # Characters gamesystem: enter interview mode if no profile exists yet
+    if request.project and gs.get("is_characters"):
+        from characters_runtime import has_character_profile
+        project_dir = get_project_dir(username, request.project)
+        if not has_character_profile(project_dir):
+            data["_characters_interview_mode"] = True
 
     save_chat(username, chat_name, data, request.project)
 
@@ -4812,6 +4827,61 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     else:
         gs = get_game_system(DEFAULT_GAME_SYSTEM)
 
+    # Characters gamesystem preflight ────────────────────────────────────
+    # Hard-fail on missing character_profile.di, route slash commands,
+    # detect interview mode, detect /finalize.
+    use_characters = False
+    use_characters_interview = False
+    characters_finalize_pending = False
+    characters_slash_feedback: Optional[str] = None
+    if gs.get("is_characters") and request.project:
+        from characters_runtime import preflight as _characters_preflight
+        _characters_project_dir = get_project_dir(username, request.project)
+        _pf = _characters_preflight(gs, data, _characters_project_dir, request.message or "")
+        if _pf.is_hard_fail():
+            # Roll back the appended user message; nothing was saved yet.
+            if data["messages"] and data["messages"][-1].get("id") == user_msg_id:
+                data["messages"].pop()
+            raise HTTPException(
+                status_code=412,
+                detail={
+                    "kind": "characters_profile_missing",
+                    "banner": _pf.hard_fail,
+                },
+            )
+        if _pf.local_slash is not None:
+            # Channel/resolve/dismiss/reinterview applied state. Prepend OOC feedback
+            # to the user message so the character can acknowledge naturally.
+            characters_slash_feedback = _pf.local_slash.get("feedback") or ""
+            if characters_slash_feedback:
+                _existing = branch_path[-1].get("content") or ""
+                ooc_line = f"[OOC: {characters_slash_feedback}]"
+                branch_path[-1]["content"] = (
+                    ooc_line + ("\n\n" + _existing if isinstance(_existing, str) and _existing.strip() else "")
+                )
+            # Reinterview slash flips us into interview mode for the rest of this turn
+            if _pf.local_slash.get("kind") == "reinterview_started":
+                use_characters_interview = True
+                use_characters = False
+                # Mark this message as the start of a fresh interview session so
+                # the interview-mode context filter scopes to "since this point."
+                branch_path[-1]["_characters_reinterview_boundary"] = True
+            else:
+                use_characters = True
+        elif _pf.finalize:
+            characters_finalize_pending = True
+            use_characters_interview = True  # we're still in interview mode until finalize succeeds
+        elif _pf.interview_mode:
+            use_characters_interview = True
+        else:
+            use_characters = True
+
+        # Tag the user message with interview mode so context-trimming for correspondence
+        # turns can filter out interview Q&A. Without this, prior interview content would
+        # leak into the correspondence model's context and confuse it.
+        if use_characters_interview:
+            branch_path[-1]["_characters_interview_mode"] = True
+
     # Check if hack mode (matrix encounter) is active or just completed
     use_hack_mode = False
     _hack_to_net_combat = False
@@ -5315,6 +5385,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     # Refresh client if model was auto-switched
     if _original_model:
         client = provider.get_client(api_key)
+
+    # Characters interview mode: force model to Opus 4.5 regardless of user's selection
+    if use_characters_interview:
+        from character_interview import INTERVIEW_MODEL
+        if model_id != INTERVIEW_MODEL:
+            model_id = INTERVIEW_MODEL
+            provider = ProviderRegistry.get(model_id)
+            api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
+            if api_key:
+                client = provider.get_client(api_key)
+                logger.info(f"Characters interview mode: forced model to {INTERVIEW_MODEL} for {username}")
+            else:
+                logger.warning(f"Characters interview mode: no API key for {INTERVIEW_MODEL}; falling back to {request.model or data.get('model')}")
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
@@ -5915,8 +5998,46 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             trim_anchor_id = data.get("_trim_anchor_id")
             # Collapse hack and combat messages into summary pairs before context trimming
             branch_path_for_context = collapse_sex_messages(collapse_chase_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))))
+            # Characters: each mode gets its own fresh context view of the chat —
+            # correspondence sees only correspondence turns; the interviewer sees only
+            # the current interview session (since the most recent /reinterview, or
+            # since chat start if never re-interviewed). System message and the current
+            # user message are always preserved.
+            if use_characters and not use_characters_interview:
+                branch_path_for_context = (
+                    [branch_path_for_context[0]]
+                    + [
+                        m for m in branch_path_for_context[1:-1]
+                        if not m.get("_characters_interview_mode") and not m.get("characters_finalize")
+                    ]
+                    + [branch_path_for_context[-1]]
+                )
+            elif use_characters_interview:
+                # Scope interview context to the latest /reinterview boundary onward —
+                # so a re-interview starts fresh rather than seeing the prior interview
+                # session or any correspondence that happened in between.
+                boundary_idx = 1  # default: start of history
+                for _i, _m in enumerate(branch_path_for_context):
+                    if _m.get("_characters_reinterview_boundary"):
+                        boundary_idx = _i
+                _history_slice = (
+                    branch_path_for_context[boundary_idx:-1]
+                    if boundary_idx < len(branch_path_for_context) - 1
+                    else []
+                )
+                branch_path_for_context = (
+                    [branch_path_for_context[0]]
+                    + [
+                        m for m in _history_slice
+                        if m.get("_characters_interview_mode") and not m.get("characters_finalize")
+                    ]
+                    + [branch_path_for_context[-1]]
+                )
+            # Per-gamesystem sawtooth thresholds (Characters: 60/40)
+            _threshold_pairs = gs.get("characters_threshold_pairs", SINGLE_AGENT_THRESHOLD_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_THRESHOLD_PAIRS
+            _target_pairs = gs.get("characters_target_pairs", SINGLE_AGENT_TARGET_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_TARGET_PAIRS
             context_pairs, new_anchor_id, did_trim = get_context_pairs(
-                branch_path_for_context, SINGLE_AGENT_THRESHOLD_PAIRS, SINGLE_AGENT_TARGET_PAIRS, trim_anchor_id
+                branch_path_for_context, _threshold_pairs, _target_pairs, trim_anchor_id
             )
             data["_trim_anchor_id"] = new_anchor_id
             data.pop("_stateful_trimming", None)  # clean up legacy flag
@@ -5941,7 +6062,69 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             else:
                 context_start_index = 1
 
-        if _has_game_state:
+        if _has_game_state and (use_characters or use_characters_interview):
+            # ── Characters gamesystem path ──────────────────────────────
+            from characters_runtime import (
+                get_characters_state,
+                prepare_state_for_turn,
+                maybe_generate_off_screen,
+                build_system_content as _characters_build_system,
+                build_user_message_content as _characters_build_user,
+            )
+            _project_dir = get_project_dir(username, request.project)
+
+            characters_state = get_characters_state(data)
+            # Note: pipeline_state was deepcopied above into stateful_pipeline_state.
+            # Mirror the characters_state into it so injections see the same view
+            # and any post-stream updates land back via stateful_pipeline_state.
+            stateful_pipeline_state.setdefault("characters_state", characters_state)
+
+            if use_characters_interview:
+                # Interview mode: no injections, no off-screen, no daily rolls.
+                injections_str = ""
+                _interview_system = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=True)
+                system_msg = {"role": branch_path[0]["role"], "content": _interview_system}
+                user_content = build_message_content(branch_path[-1])
+                new_user_msg = {"role": "user", "content": user_content}
+            else:
+                # Off-screen generation FIRST — uses the *pre-turn* last_user_message_at
+                # to compute the gap. Runs in a worker thread so the sync Anthropic SDK
+                # call doesn't block the asyncio event loop (10-30s on Opus 4.5).
+                try:
+                    _osc_meta = await asyncio.to_thread(
+                        maybe_generate_off_screen, client, characters_state, _project_dir
+                    )
+                    if isinstance(_osc_meta, dict) and _osc_meta.get("usage"):
+                        from character_off_screen import compute_off_screen_cost
+                        data["off_screen_usage"] = _osc_meta["usage"]
+                        data["off_screen_cost"] = compute_off_screen_cost(_osc_meta["usage"])
+                        data["off_screen_model"] = "claude-opus-4-5"
+                except Exception as _osc_err:
+                    logger.warning(f"Characters off-screen generation failed: {_osc_err}")
+
+                # Daily rolls (does NOT touch wall_clock — see stamp_user_turn below)
+                prepare_state_for_turn(data, _project_dir)
+                characters_state = get_characters_state(data)
+                stateful_pipeline_state["characters_state"] = characters_state
+
+                _system_full = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=False)
+                system_msg = {"role": branch_path[0]["role"], "content": _system_full}
+
+                user_content = build_message_content(branch_path[-1])
+                # Build injection BEFORE stamping wall_clock — otherwise the silence-streak
+                # calculation reads the just-overwritten timestamp and reports ~0 instead
+                # of the real gap.
+                user_content = _characters_build_user(characters_state, user_content)
+                new_user_msg = {"role": "user", "content": user_content}
+
+                # Now stamp the wall_clock for this user message. Next turn's silence
+                # streak will measure from this timestamp.
+                from characters_runtime import stamp_user_turn as _characters_stamp
+                _characters_stamp(characters_state)
+                injections_str = ""  # building handled inline above
+
+            # messages_for_api is built unconditionally below; we just populated system_msg + new_user_msg.
+        elif _has_game_state:
             # Build injections for user message (game systems only)
             if gs and gs.get("id") == "cpred":
                 sa_dice_pool = ""  # No pool needed — resolve_mechanics tool uses direct RNG
@@ -6191,6 +6374,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         elif gs.get("doc_tools") and model_id.startswith("claude"):
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
+        elif use_characters and not use_characters_interview and gs.get("search_tool_enabled"):
+            # Characters correspondence: expose the Sonar search tool. Auto choice — the
+            # model decides per turn. Interview mode does not get the tool (interview is
+            # about defining the character, not pulling external info).
+            from character_search import SONAR_SEARCH_TOOL
+            request_params["tools"] = [SONAR_SEARCH_TOOL]
+            request_params["tool_choice"] = {"type": "auto"}
+            # Opus 3 doesn't support extended thinking; explicit pop is harmless on other models.
+            request_params.pop("thinking", None)
+            request_params.pop("output_config", None)
 
     # Store for use inside event_generator (assignments there make it local)
     _outer_context_start_index = context_start_index
@@ -6200,6 +6393,107 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_start_index = _outer_context_start_index
         accumulated_content = ""
         accumulated_thinking = ""
+
+        # Characters /finalize: write character_profile.di from interview transcript,
+        # exit interview mode, and yield a synthetic assistant message. Bypasses the
+        # streaming model entirely.
+        if characters_finalize_pending:
+            from characters_runtime import finalize_interview as _characters_finalize
+            _characters_dir = (
+                get_project_dir(username, request.project)
+                if request.project else None
+            )
+            # Build transcript scoped to the CURRENT interview session only — same
+            # boundary logic as the interview-mode context filter. Without this, prior
+            # finalized interviews and any correspondence in between would be sent to
+            # the finalize agent as if they were part of this re-interview.
+            _boundary_idx = 1
+            for _i, _m in enumerate(branch_path):
+                if _m.get("_characters_reinterview_boundary"):
+                    _boundary_idx = _i
+            _transcript_slice = branch_path[_boundary_idx:-1] if _boundary_idx < len(branch_path) - 1 else []
+            _transcript = []
+            for _m in _transcript_slice:
+                _role = _m.get("role")
+                _content = _m.get("content") or ""
+                if (_role in ("user", "assistant")
+                        and _content
+                        and _m.get("_characters_interview_mode")
+                        and not _m.get("characters_finalize")):
+                    _transcript.append({"role": _role, "content": _content})
+
+            yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
+
+            _result = await asyncio.to_thread(_characters_finalize, client, data, _characters_dir, _transcript)
+            _feedback = _result.get("feedback") or "Finalization completed."
+            _ok = bool(_result.get("ok"))
+            _usage = _result.get("usage") or {}
+            _input_t = _usage.get("input_tokens", 0) or 0
+            _output_t = _usage.get("output_tokens", 0) or 0
+            _cost_value = float(_result.get("cost", 0.0) or 0.0)
+            _cost_str = f"${_cost_value:.6f}"
+            _tokens_str = f"{_input_t}↑ {_output_t}↓"
+            _finalize_model = "claude-opus-4-5"
+
+            # Synthesize an assistant message containing the feedback. Mirrors the field
+            # shape of normal assistant messages so the frontend's done-event handler and
+            # branch-switching logic don't break on missing keys.
+            _assistant_msg_id = generate_message_id()
+            _assistant_msg = {
+                "id": _assistant_msg_id,
+                "parent_id": user_msg_id,
+                "role": "assistant",
+                "content": _feedback,
+                "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                "tokens": _tokens_str,
+                "cost": _cost_str,
+                "model": _finalize_model,
+                "total_tokens": _input_t + _output_t,
+                "total_claude_tokens": _input_t + _output_t,
+                "characters_finalize": True,
+                "characters_finalize_ok": _ok,
+                # Interview-mode tag: keep this message + the user's /finalize msg out of
+                # the correspondence model's context window on subsequent turns.
+                "_characters_interview_mode": True,
+            }
+            if _ok and _result.get("path"):
+                _assistant_msg["characters_profile_path"] = _result["path"]
+            data["messages"].append(_assistant_msg)
+            data["current_leaf_id"] = _assistant_msg_id
+
+            # Update stats so the cost is reflected in the chat totals
+            try:
+                _stats = data.setdefault("stats", create_empty_stats())
+                _stats["total_cost"] = float(_stats.get("total_cost", 0.0) or 0.0) + _cost_value
+                _stats["total_input_tokens"] = int(_stats.get("total_input_tokens", 0) or 0) + _input_t
+                _stats["total_output_tokens"] = int(_stats.get("total_output_tokens", 0) or 0) + _output_t
+            except Exception:
+                pass
+
+            save_chat(username, request.chat_name, data, request.project)
+
+            yield f"event: content\ndata: {json.dumps({'delta': _feedback})}\n\n"
+
+            _branch_path_final = get_path_to_root(data["messages"], _assistant_msg_id)
+            _done_data = {
+                "assistant_message": _feedback,
+                "tokens": _tokens_str,
+                "cost": _cost_str,
+                "stats": data.get("stats", create_empty_stats()),
+                "context_start_index": 1,
+                "reasoning": None,
+                "user_message_id": user_msg_id,
+                "assistant_message_id": _assistant_msg_id,
+                "current_leaf_id": _assistant_msg_id,
+                "total_messages": len(_branch_path_final),
+                "model": _finalize_model,
+                "hud_state": None,
+                "characters_finalize_ok": _ok,
+                "profile_path": _result.get("path"),
+            }
+            yield f"event: done\ndata: {json.dumps(_done_data)}\n\n"
+            return
+
         ship_combat_triggered_this_turn = False
         ship_combat_started_this_turn = bool(use_ship_combat_mode and not any(m.get("ship_combat_mode") for m in branch_path[1:-1]))
         ship_combat_opening_narration_hint = (((data.get("pipeline_state") or {}).get("ship_combat") or {}).get("opening_narration")
@@ -9153,11 +9447,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 except Exception as retry_err:
                                     logger.error(f"Ship combat mode: retry error for {username}: {retry_err}")
 
-                        # Extract tool_use input for stateful state updates
+                        # Extract tool_use input for stateful state updates.
+                        # Gated on state_report_tool being defined: gamesystems without one
+                        # (Characters, future search-only systems) skip this entire block,
+                        # which prevents a non-state tool_input (e.g., Tavily query) from
+                        # being misinterpreted as a state report.
                         stateful_tool_input = None
                         stateful_tool_retried = False
                         old_voice_snapshot = None
-                        if use_stateful and stateful_pipeline_state is not None and gs.get("use_game_state", True):
+                        if (use_stateful and stateful_pipeline_state is not None
+                                and gs.get("use_game_state", True)
+                                and gs.get("state_report_tool")):
                             # Snapshot old voice values for voice_update notifications
                             old_voice_snapshot = {
                                 name: entry.get("data", entry).get("voice")
@@ -9322,9 +9622,52 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             except Exception as fa_err:
                                 logger.error(f"flag_agent: error for {username}: {fa_err}")
 
-                        # Snapshot state after ops applied (for debug transcript delta)
+                        # Characters gamesystem: post-stream Haiku side agent
+                        # Extracts memory_ops, callback_ops, profile_ops, wb_mod_ops from the
+                        # stream that just completed. Runs when (a) Characters mode active,
+                        # (b) NOT in interview mode (interview produces no state), and
+                        # (c) we got actual content out of the model.
+                        if (use_characters and not use_characters_interview
+                                and stateful_pipeline_state is not None
+                                and (accumulated_content or "").strip()):
+                            try:
+                                from characters_runtime import run_post_stream_extraction
+                                _characters_dir = (
+                                    get_project_dir(username, request.project)
+                                    if request.project else None
+                                )
+                                _characters_state = stateful_pipeline_state.setdefault(
+                                    "characters_state",
+                                    stateful_pipeline_state.get("characters_state") or {},
+                                )
+                                _ca_meta = await asyncio.to_thread(
+                                    run_post_stream_extraction,
+                                    client,
+                                    _characters_dir,
+                                    _characters_state,
+                                    request.message or "",
+                                    accumulated_content,
+                                    len(branch_path),  # turn counter
+                                )
+                                if _ca_meta.get("character_agent_usage"):
+                                    data["character_agent_usage"] = _ca_meta["character_agent_usage"]
+                                    data["character_agent_cost"] = _ca_meta["character_agent_cost"]
+                                    data["character_agent_model"] = _ca_meta["character_agent_model"]
+                                    data["character_agent_ops"] = _ca_meta["character_agent_ops"]
+                                # State was mutated in place; persist back
+                                stateful_pipeline_state["characters_state"] = _characters_state
+                                data["pipeline_state"] = stateful_pipeline_state
+                            except Exception as _ca_err:
+                                logger.error(f"character_agent: error for {username}: {_ca_err}")
+
+                        # Snapshot state after ops applied (for debug transcript delta).
+                        # For TTRPG: snapshot when the model emitted state via tool.
+                        # For Characters: always snapshot when state exists — Haiku side
+                        # agent may have mutated state without a tool call from Opus.
                         stateful_after_snapshot = None
-                        if use_stateful and stateful_tool_input is not None and stateful_pipeline_state is not None:
+                        if use_stateful and stateful_pipeline_state is not None and (
+                            stateful_tool_input is not None or use_characters
+                        ):
                             stateful_after_snapshot = copy.deepcopy(stateful_pipeline_state)
 
                         # Send state_update SSE event for right panel (single-agent path)
@@ -9406,6 +9749,158 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 yield f"event: state_notifications\ndata: {json.dumps(time_notifs)}\n\n"
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
+
+                        # ── Characters: Sonar search tool follow-up loop (Claude only) ──
+                        # When the model fires search_web mid-stream, run Sonar, append a
+                        # tool_result, and re-stream so the model can continue its reply
+                        # with the answer in context. Bounded loop in case the model fires
+                        # multiple searches (we cap at 2 hops per turn).
+                        if (use_characters and not use_characters_interview
+                                and model_id.startswith("claude")
+                                and usage.get('tool_uses')):
+                            from character_search import (
+                                SONAR_SEARCH_TOOL,
+                                run_sonar_search,
+                                format_tool_result_text,
+                            )
+                            _search_tool_name = SONAR_SEARCH_TOOL["name"]
+                            _search_calls_total = 0
+                            _search_cost_total = 0.0
+                            _search_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "num_search_queries": 0}
+                            _search_log: list = []  # [{query, reason, ok, sources_count}] per call — surfaced to UI + persisted
+                            _max_search_hops = 2
+                            _hop = 0
+                            _current_tool_uses = usage.get('tool_uses') or []
+                            _current_content_blocks = usage.get('content_blocks') or []
+                            _followup_messages_base = list(messages_for_api)
+                            _perplexity_key = get_api_key(username, "perplexity")
+
+                            while _hop < _max_search_hops:
+                                _search_calls = [t for t in _current_tool_uses if t.get("name") == _search_tool_name]
+                                if not _search_calls:
+                                    break
+                                _hop += 1
+                                # Run each search call (sequentially — Opus 3 typically issues one)
+                                _tool_results = []
+                                for _call in _search_calls:
+                                    _query = ""
+                                    _reason = ""
+                                    _input = _call.get("input")
+                                    if isinstance(_input, dict):
+                                        _query = str(_input.get("query") or "").strip()
+                                        _reason = str(_input.get("reason") or "").strip()[:80]
+                                    _result = await asyncio.to_thread(run_sonar_search, _perplexity_key, _query)
+                                    _search_calls_total += 1
+                                    _search_cost_total += float(_result.get("cost", 0.0) or 0.0)
+                                    _u = _result.get("usage") or {}
+                                    for _k in ("prompt_tokens", "completion_tokens", "total_tokens", "num_search_queries"):
+                                        _search_usage_total[_k] = _search_usage_total.get(_k, 0) + (_u.get(_k, 0) or 0)
+                                    _search_log.append({
+                                        "query": _query,
+                                        "reason": _reason,
+                                        "ok": bool(_result.get("ok")),
+                                        "sources_count": len(_result.get("sources") or []),
+                                        "error": _result.get("error") if not _result.get("ok") else None,
+                                    })
+                                    # Stream a per-search banner notification immediately so the user
+                                    # sees "🔍 Nora is checking Roxy hours" while the character types.
+                                    _notif = {
+                                        "type": "character_search",
+                                        "query": _query,
+                                        "reason": _reason,
+                                        "ok": bool(_result.get("ok")),
+                                    }
+                                    if not _result.get("ok") and _result.get("error"):
+                                        _notif["error"] = str(_result.get("error"))[:200]
+                                    if not client_disconnected:
+                                        yield f"event: state_notifications\ndata: {json.dumps([_notif])}\n\n"
+                                        await sync_manager.broadcast_to_chat(
+                                            chat_key,
+                                            SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": [_notif]})
+                                        )
+                                    _tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": _call.get("id"),
+                                        "content": format_tool_result_text(_result),
+                                        **({"is_error": True} if not _result.get("ok") else {}),
+                                    })
+
+                                # Build follow-up: assistant turn (with tool_use blocks) + user tool_results.
+                                _followup_assistant_content = []
+                                for _block in _current_content_blocks:
+                                    _btype = getattr(_block, 'type', None)
+                                    if _btype == 'text':
+                                        _followup_assistant_content.append({"type": "text", "text": _block.text})
+                                    elif _btype == 'tool_use':
+                                        _followup_assistant_content.append({
+                                            "type": "tool_use",
+                                            "id": _block.id,
+                                            "name": _block.name,
+                                            "input": _block.input,
+                                        })
+                                    elif _btype == 'thinking':
+                                        _followup_assistant_content.append({
+                                            "type": "thinking",
+                                            "thinking": _block.thinking,
+                                            "signature": getattr(_block, 'signature', ''),
+                                        })
+                                    elif _btype == 'redacted_thinking':
+                                        _followup_assistant_content.append({
+                                            "type": "redacted_thinking",
+                                            "data": getattr(_block, 'data', ''),
+                                        })
+                                _followup_messages = _followup_messages_base + [
+                                    {"role": "assistant", "content": _followup_assistant_content},
+                                    {"role": "user", "content": _tool_results},
+                                ]
+                                _followup_messages_base = _followup_messages
+
+                                try:
+                                    _followup_params = provider.build_request(
+                                        messages=_followup_messages,
+                                        username=username,
+                                        project=request.project,
+                                        chat_name=request.chat_name,
+                                        is_free_chat=is_free_chat,
+                                        use_cache=False,
+                                    )
+                                    _followup_params["tools"] = [SONAR_SEARCH_TOOL]
+                                    _followup_params["tool_choice"] = {"type": "auto"}
+                                    _followup_params.pop("thinking", None)
+                                    _followup_params.pop("output_config", None)
+                                    _followup_stream = provider.send_request_stream(client, _followup_params)
+                                    _next_tool_uses: list = []
+                                    _next_content_blocks: list = []
+                                    for _ev in _followup_stream:
+                                        if _ev.event_type == 'content_delta' and not client_disconnected:
+                                            accumulated_content += _ev.content
+                                            yield f"event: content\ndata: {json.dumps({'delta': _ev.content})}\n\n"
+                                        elif _ev.event_type == 'thinking_delta' and not client_disconnected:
+                                            accumulated_thinking += _ev.content
+                                            yield f"event: thinking\ndata: {json.dumps({'delta': _ev.content})}\n\n"
+                                        elif _ev.event_type == 'done':
+                                            _fu_usage = _ev.usage
+                                            usage['input_tokens'] = usage.get('input_tokens', 0) + _fu_usage.get('input_tokens', 0)
+                                            usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + _fu_usage.get('cache_read_tokens', 0)
+                                            usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + _fu_usage.get('cache_creation_tokens', 0)
+                                            usage['output_tokens'] = usage.get('output_tokens', 0) + _fu_usage.get('output_tokens', 0)
+                                            _next_tool_uses = _fu_usage.get('tool_uses') or []
+                                            _next_content_blocks = _fu_usage.get('content_blocks') or []
+                                    _current_tool_uses = _next_tool_uses
+                                    _current_content_blocks = _next_content_blocks
+                                except Exception as _search_followup_err:
+                                    logger.error(f"sonar search follow-up error for {username}: {_search_followup_err}")
+                                    break
+
+                            if _search_calls_total > 0:
+                                data["search_usage"] = _search_usage_total
+                                data["search_cost"] = _search_cost_total
+                                data["search_calls"] = _search_calls_total
+                                data["search_model"] = "sonar"
+                                # Persist the per-call log so the assistant message can render
+                                # "Nora looked up X" badges after the turn streams (matching how
+                                # state_notifications fired live during streaming).
+                                data["search_log"] = _search_log
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
@@ -9657,6 +10152,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # computed separately and added rather than mixed into `parsed`.
                         flag_agent_cost = float(data.get("flag_agent_cost", 0.0) or 0.0)
                         total_cost += flag_agent_cost
+                        # Same fold-in for Characters' side agents (Haiku extraction + Opus 4.5 off-screen).
+                        total_cost += float(data.get("character_agent_cost", 0.0) or 0.0)
+                        total_cost += float(data.get("off_screen_cost", 0.0) or 0.0)
+                        # Sonar search cost (Perplexity returns dollars directly via usage.cost.total_cost).
+                        total_cost += float(data.get("search_cost", 0.0) or 0.0)
 
                         # Apply free tokens
                         if model_id.startswith('gpt'):
@@ -9706,6 +10206,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["reasoning"] = reasoning_summary
                         if service_tier:
                             assistant_msg_data["service_tier"] = service_tier
+                        # Tag interview-mode assistant messages so subsequent correspondence
+                        # turns filter them out of context (parallels the user-message tag).
+                        if use_characters_interview:
+                            assistant_msg_data["_characters_interview_mode"] = True
                         if use_stateful and stateful_injected_snapshot is not None:
                             assistant_msg_data["pipeline_state_injected"] = stateful_injected_snapshot
                         if use_stateful and stateful_tool_input is not None:
@@ -9718,6 +10222,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["flag_agent_usage"] = data["flag_agent_usage"]
                             assistant_msg_data["flag_agent_cost"] = float(data.get("flag_agent_cost", 0.0) or 0.0)
                             assistant_msg_data["flag_agent_model"] = data.get("flag_agent_model", "claude-haiku-4-5")
+                        # Same per-message visibility for Characters' Haiku side agent
+                        # and Opus 4.5 off-screen generator.
+                        if data.get("character_agent_usage"):
+                            assistant_msg_data["character_agent_usage"] = data["character_agent_usage"]
+                            assistant_msg_data["character_agent_cost"] = float(data.get("character_agent_cost", 0.0) or 0.0)
+                            assistant_msg_data["character_agent_model"] = data.get("character_agent_model", "claude-haiku-4-5")
+                            if data.get("character_agent_ops"):
+                                assistant_msg_data["character_agent_ops"] = data["character_agent_ops"]
+                        if data.get("off_screen_usage"):
+                            assistant_msg_data["off_screen_usage"] = data["off_screen_usage"]
+                            assistant_msg_data["off_screen_cost"] = float(data.get("off_screen_cost", 0.0) or 0.0)
+                            assistant_msg_data["off_screen_model"] = data.get("off_screen_model", "claude-opus-4-5")
+                        if data.get("search_calls"):
+                            assistant_msg_data["search_usage"] = data.get("search_usage", {})
+                            assistant_msg_data["search_cost"] = float(data.get("search_cost", 0.0) or 0.0)
+                            assistant_msg_data["search_calls"] = int(data.get("search_calls", 0) or 0)
+                            assistant_msg_data["search_model"] = data.get("search_model", "sonar")
+                            if data.get("search_log"):
+                                assistant_msg_data["search_log"] = data["search_log"]
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 

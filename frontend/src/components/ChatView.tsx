@@ -808,6 +808,28 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_search') {
+                const failed = n.ok === false;
+                return (
+                  <div key={i} style={{
+                    ...styles.searchNotification,
+                    ...(failed ? styles.searchNotificationError : {}),
+                  }}>
+                    <span style={styles.notificationLabel}>
+                      {failed ? '🔍 search failed' : '🔍 looked up'}
+                    </span>
+                    {n.reason && <>: {n.reason}</>}
+                    {n.query && (
+                      <span style={styles.notificationReason}> — "{n.query}"</span>
+                    )}
+                    {failed && n.error && (
+                      <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                        {n.error}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
               if (n.type === 'voice_update') {
                 return (
                   <div key={i} style={styles.voiceNotification}>

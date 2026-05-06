@@ -1,0 +1,268 @@
+"""Off-screen life generator — Claude Opus 4.5.
+
+Fires at session resume after a real-time gap > OFF_SCREEN_GAP_THRESHOLD_HOURS.
+Produces 1-3 events per real day in the gap, day-by-day, drawing on (but not
+exclusive to) the character's memories and current life threads.
+
+Output is stored as a transient `off_screen_log` on the resume turn's
+characters_state. Persists per-branch. Is replaced on the next gap.
+
+Why Opus 4.5 (not Haiku): voice texture matters here. These events surface
+later in the conversation as things the character casually shares — the
+specifics of "Tuesday I read a book" → "Nora began reading LotR on Tuesday"
+need to land in the character's voice. Haiku is too generic. The cost is one
+call per session-resume — small budget, high leverage.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timedelta
+from typing import Optional
+
+from game_systems.characters import (
+    OFF_SCREEN_EVENTS_PER_DAY,
+    OFF_SCREEN_MAX_DAYS,
+    TZ,
+    parse_iso_dt,
+    now_et,
+)
+
+logger = logging.getLogger(__name__)
+
+OFF_SCREEN_MODEL = "claude-opus-4-5"
+OFF_SCREEN_MAX_TOKENS = 2048
+OFF_SCREEN_TIMEOUT_S = 30
+
+OPUS_45_INPUT_RATE = 15.00
+OPUS_45_CACHE_READ_RATE = 1.50
+OPUS_45_CACHE_WRITE_RATE = 18.75
+OPUS_45_OUTPUT_RATE = 75.00
+
+
+def compute_off_screen_cost(usage: dict) -> float:
+    if not isinstance(usage, dict) or not usage:
+        return 0.0
+    raw_input = usage.get("input_tokens", 0) or 0
+    cache_read = usage.get("cache_read_tokens", 0) or 0
+    cache_write = usage.get("cache_creation_tokens", 0) or 0
+    output = usage.get("output_tokens", 0) or 0
+    uncached_input = max(0, raw_input - cache_read - cache_write)
+    return (
+        uncached_input * OPUS_45_INPUT_RATE
+        + cache_read * OPUS_45_CACHE_READ_RATE
+        + cache_write * OPUS_45_CACHE_WRITE_RATE
+        + output * OPUS_45_OUTPUT_RATE
+    ) / 1_000_000.0
+
+
+SYSTEM_PROMPT = """You generate "what the character did during the gap" — the off-screen life of a specific person between conversations with the user.
+
+You receive:
+- The character profile (voice, life, current threads)
+- Optional user_life context (so you don't generate things that contradict what the user is doing)
+- Memory + callback context (for inspiration, not constraint)
+- The list of real-life days in the gap (with weekdays)
+
+You produce: 1-3 events per day, in this character's voice, that feel lived-in and ordinary or quietly notable. Some days will be mundane (groceries, work). Some will have a small specific thing (saw an old friend; finished a book; had a weird dream). Most days are NOT plot — they're texture. The character is a person with a life; this is that life happening.
+
+PRINCIPLES:
+- SPECIFIC over generic. "Read a book" is weak. "Started LotR finally — only made it to the Council of Elrond" is what we want.
+- ORDINARY most of the time. Most days have ordinary content. A grand event every day flattens reality.
+- CONSISTENT with the character's life. If they live in Portland, don't have them at a beach in California. If they hate cats, don't add a cat.
+- DON'T resolve open callbacks here. Those resolve in conversation, not behind the scenes.
+- DON'T spoil. Don't pre-commit to information the user hasn't asked for in a way that pre-empts conversation.
+- 1-3 events per day. Not 5. Not 0 unless the day is genuinely "nothing — just worked."
+- CALL OUT WEEKDAY rhythms. If the character has yoga Wednesdays, Wednesday should reflect that.
+- VARY texture. If yesterday had a specific food, today shouldn't also be food-themed. Mix sensory details, social, work, internal.
+
+You will be asked to call `report_off_screen_life` once with the structured day list."""
+
+
+def build_off_screen_tool(day_list: list) -> dict:
+    """The day_list is the calendar of dates we're filling in (we tell the model which days to populate)."""
+    return {
+        "name": "report_off_screen_life",
+        "description": "Emit the character's off-screen life for the gap days, in order.",
+        "input_schema": {
+            "type": "object",
+            "required": ["days"],
+            "properties": {
+                "days": {
+                    "type": "array",
+                    "description": f"One entry per day in the gap, in chronological order ({len(day_list)} day(s) expected: {[d['date'] for d in day_list]}).",
+                    "items": {
+                        "type": "object",
+                        "required": ["date", "weekday", "events"],
+                        "properties": {
+                            "date": {"type": "string", "description": "ISO date (YYYY-MM-DD). MUST match one of the requested days."},
+                            "weekday": {"type": "string", "description": "Day of week (Monday, Tuesday, ...)."},
+                            "events": {
+                                "type": "array",
+                                "description": f"1-{OFF_SCREEN_EVENTS_PER_DAY} short specific things that happened. In the character's voice, but not first-person — e.g. 'Started LotR — only made it to the Council of Elrond.'",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def _read_file(path: str) -> str:
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _build_day_list(last_user_message_at_iso: Optional[str], now_dt: Optional[datetime] = None) -> list:
+    """Build the list of full real-Eastern days in the gap.
+
+    "Full days" means complete days strictly between the last-user-message day
+    and today. If the user messaged Monday afternoon and is back Wednesday
+    morning, only Tuesday is filled in — Monday is partial (already had a
+    conversation), and today is happening now.
+
+    Capped at OFF_SCREEN_MAX_DAYS.
+    """
+    if not last_user_message_at_iso:
+        return []
+    last = parse_iso_dt(last_user_message_at_iso)
+    if not last:
+        return []
+    now = now_dt or now_et()
+    last_date = last.date()
+    today = now.date()
+
+    # Full days strictly between last and today
+    days = []
+    cursor = last_date + timedelta(days=1)
+    while cursor < today and len(days) < OFF_SCREEN_MAX_DAYS:
+        days.append(cursor)
+        cursor += timedelta(days=1)
+    return [
+        {"date": d.isoformat(), "weekday": d.strftime("%A")}
+        for d in days
+    ]
+
+
+def should_generate_off_screen(wall_clock: dict, now_dt: Optional[datetime] = None) -> bool:
+    """Returns True if there's at least one full intermediate ET day to fill in."""
+    return len(_build_day_list((wall_clock or {}).get("last_user_message_at"), now_dt)) > 0
+
+
+def generate_off_screen_log(
+    client,
+    project_dir: Optional[str],
+    characters_state: dict,
+    now_dt: Optional[datetime] = None,
+) -> tuple[Optional[dict], dict]:
+    """Generate the off_screen_log for the current gap. Returns (log_dict, usage_dict).
+
+    Returns (None, {}) when no full days to fill or on error.
+    """
+    wc = (characters_state or {}).get("wall_clock") or {}
+    day_list = _build_day_list(wc.get("last_user_message_at"), now_dt)
+    if not day_list:
+        return None, {}
+
+    profile_doc = _read_file(os.path.join(project_dir or "", "character_profile.di"))
+    user_life_doc = _read_file(os.path.join(project_dir or "", "user_life.di"))
+
+    # Lightweight context for inspiration — memories + arc + current threads
+    parts = ["[CHARACTER PROFILE]", profile_doc or "(missing)", ""]
+    if user_life_doc:
+        parts += ["[USER LIFE — for consistency, do not contradict]", user_life_doc, ""]
+
+    arc = (characters_state or {}).get("arc_state") or ""
+    if arc:
+        parts += [f"[CURRENT ARC] {arc}", ""]
+
+    mems = (characters_state or {}).get("character_memories") or []
+    if mems:
+        parts.append("[RECENT MEMORIES — for inspiration, not direct reuse]")
+        for m in mems[:8]:
+            if isinstance(m, dict):
+                parts.append(f"  - ({m.get('impact', '?')}★) {m.get('text', '')[:160]}")
+        parts.append("")
+
+    parts += [
+        f"[GAP] {len(day_list)} full day(s) to fill in:",
+        *(f"  - {d['weekday']}, {d['date']}" for d in day_list),
+        "",
+        "Generate 1-3 events for each day, ordered chronologically. Most events should be ordinary; specific details matter more than 'big' content. Call report_off_screen_life with one entry per day.",
+    ]
+
+    user_msg = "\n".join(parts)
+    tool = build_off_screen_tool(day_list)
+
+    try:
+        response = client.messages.create(
+            model=OFF_SCREEN_MODEL,
+            max_tokens=OFF_SCREEN_MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "report_off_screen_life"},
+            timeout=OFF_SCREEN_TIMEOUT_S,
+        )
+    except Exception as e:
+        logger.warning(f"off_screen_agent: API call failed: {type(e).__name__}: {e}")
+        return None, {}
+
+    days_payload = []
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "report_off_screen_life":
+            inp = block.input
+            if isinstance(inp, dict):
+                raw_days = inp.get("days")
+                if isinstance(raw_days, list):
+                    days_payload = raw_days
+            break
+
+    # Validate / clamp
+    valid_dates = {d["date"] for d in day_list}
+    cleaned = []
+    for entry in days_payload:
+        if not isinstance(entry, dict):
+            continue
+        date = entry.get("date")
+        if date not in valid_dates:
+            continue
+        events = entry.get("events") or []
+        if not isinstance(events, list):
+            continue
+        events = [str(e)[:240] for e in events if isinstance(e, str) and e.strip()][:OFF_SCREEN_EVENTS_PER_DAY]
+        if not events:
+            continue
+        cleaned.append({
+            "date": date,
+            "weekday": entry.get("weekday") or "",
+            "events": events,
+        })
+
+    ru = response.usage
+    usage = {
+        "input_tokens": ru.input_tokens
+        + (getattr(ru, 'cache_read_input_tokens', 0) or 0)
+        + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
+        "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
+        "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
+        "output_tokens": ru.output_tokens,
+    }
+
+    if not cleaned:
+        return None, usage
+
+    log = {
+        "generated_at_iso": (now_dt or now_et()).isoformat(),
+        "days": cleaned,
+    }
+    logger.info(f"off_screen_agent: generated {len(cleaned)} day(s) of off-screen life")
+    return log, usage

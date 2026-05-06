@@ -156,7 +156,8 @@ function App() {
   const [user, setUser] = useState<LoginResponse | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
-  const [apiKeysStatus, setApiKeysStatus] = useState<ApiKeysStatus>({ has_openai: false, has_anthropic: false });
+  const [perplexityKey, setPerplexityKey] = useState('');
+  const [apiKeysStatus, setApiKeysStatus] = useState<ApiKeysStatus>({ has_openai: false, has_anthropic: false, has_perplexity: false });
   const [needsApiKey, setNeedsApiKey] = useState(false);
   const [error, setError] = useState('');
   const [docsRefreshed, setDocsRefreshed] = useState(false);
@@ -773,6 +774,9 @@ function App() {
       .then(data => setAvailableGameSystems(data))
       .catch(() => {
         setAvailableGameSystems([
+          { id: 'novels', name: 'Novels' },
+          { id: 'chats', name: 'Chats' },
+          { id: 'characters', name: 'Characters' },
           { id: 'dnd5e', name: 'D&D 5E' },
           { id: 'dnd5e_cyber', name: 'D&D 5E (Cyberpunk)' },
           { id: 'coc7e', name: 'Call of Cthulhu 7E' },
@@ -1044,8 +1048,8 @@ function App() {
 
   const handleSaveApiKey = async () => {
     if (!user) return;
-    // Allow saving if at least one key is provided
-    if (!apiKey.trim() && !anthropicKey.trim()) return;
+    // Allow saving if at least one key is provided (perplexity alone isn't enough — there's no model to chat with)
+    if (!apiKey.trim() && !anthropicKey.trim() && !perplexityKey.trim()) return;
 
     try {
       const response = await fetch('/api/set-api-keys', {
@@ -1054,14 +1058,16 @@ function App() {
         body: JSON.stringify({
           username: user.username,
           openai_key: apiKey.trim() || null,
-          anthropic_key: anthropicKey.trim() || null
+          anthropic_key: anthropicKey.trim() || null,
+          perplexity_key: perplexityKey.trim() || null
         })
       });
 
       if (response.ok) {
         const data = await response.json();
         setApiKeysStatus(data);
-        // Consider API key set if at least one key is configured
+        // Consider API key set if at least one model-provider key is configured
+        // (perplexity is search-only; not sufficient on its own to chat).
         if (data.has_openai || data.has_anthropic) {
           setNeedsApiKey(false);
           setUser({ ...user, has_api_key: true });
@@ -1069,6 +1075,7 @@ function App() {
         // Clear the input fields after saving
         setApiKey('');
         setAnthropicKey('');
+        setPerplexityKey('');
       }
     } catch (err) {
       setError('Could not save API keys');
@@ -2458,7 +2465,7 @@ function App() {
             />
           </div>
 
-          <div style={{ marginBottom: '16px' }}>
+          <div style={{ marginBottom: '12px' }}>
             <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
               Anthropic API Key {apiKeysStatus.has_anthropic && <span style={{ color: '#4ade80' }}>(configured)</span>}
             </label>
@@ -2467,6 +2474,20 @@ function App() {
               placeholder="sk-ant-..."
               value={anthropicKey}
               onChange={(e) => setAnthropicKey(e.target.value)}
+              style={styles.input}
+            />
+          </div>
+
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '14px', color: '#aaa' }}>
+              Perplexity API Key {apiKeysStatus.has_perplexity && <span style={{ color: '#4ade80' }}>(configured)</span>}
+              <span style={{ color: '#777', fontSize: '11px', marginLeft: '6px' }}>(optional — enables web search in Characters)</span>
+            </label>
+            <input
+              type="password"
+              placeholder="pplx-..."
+              value={perplexityKey}
+              onChange={(e) => setPerplexityKey(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSaveApiKey()}
               style={styles.input}
             />
@@ -2790,8 +2811,8 @@ function App() {
           )}
         </div>
 
-        {/* Right Panel -- Character State (only in active chat view, hidden for novels/chats) */}
-        {viewMode === 'chat' && currentChat && chatGameSystem !== 'novels' && chatGameSystem !== 'chats' && <CharacterPanel
+        {/* Right Panel -- Character State (only in active chat view, hidden for novels/chats/characters) */}
+        {viewMode === 'chat' && currentChat && chatGameSystem !== 'novels' && chatGameSystem !== 'chats' && chatGameSystem !== 'characters' && <CharacterPanel
           isMobile={isMobile}
           pipelineState={pipelineState}
           chatGameSystem={chatGameSystem}

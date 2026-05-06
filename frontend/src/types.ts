@@ -207,6 +207,7 @@ export interface ModelInfo {
 export interface ApiKeysStatus {
   has_openai: boolean;
   has_anthropic: boolean;
+  has_perplexity?: boolean;
 }
 
 export interface FreeTokens {

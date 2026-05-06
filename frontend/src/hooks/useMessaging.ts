@@ -182,7 +182,18 @@ export function useMessaging(deps: UseMessagingDeps) {
 
       if (!response.ok) {
         const data = await response.json();
-        deps.setError(data.detail || 'Failed to regenerate response');
+        if (
+          response.status === 412 &&
+          data.detail &&
+          typeof data.detail === 'object' &&
+          data.detail.kind === 'characters_profile_missing'
+        ) {
+          deps.setError(data.detail.banner || 'character_profile.di is missing.');
+        } else if (data.detail && typeof data.detail === 'object') {
+          deps.setError(data.detail.banner || data.detail.message || JSON.stringify(data.detail));
+        } else {
+          deps.setError(data.detail || 'Failed to regenerate response');
+        }
         if (!ctx.isStale()) {
           deps.setMessages(originalMessages);
           deps.setAllMessages(originalAllMessages);
@@ -543,7 +554,19 @@ export function useMessaging(deps: UseMessagingDeps) {
 
       if (!response.ok) {
         const data = await response.json();
-        deps.setError(data.detail || 'Failed to send message');
+        // Characters gamesystem hard-fail: surface as banner modal instead of generic error
+        if (
+          response.status === 412 &&
+          data.detail &&
+          typeof data.detail === 'object' &&
+          data.detail.kind === 'characters_profile_missing'
+        ) {
+          deps.setError(data.detail.banner || 'character_profile.di is missing.');
+        } else if (data.detail && typeof data.detail === 'object') {
+          deps.setError(data.detail.banner || data.detail.message || JSON.stringify(data.detail));
+        } else {
+          deps.setError(data.detail || 'Failed to send message');
+        }
         if (!ctx.isStale()) {
           // Remove both optimistic messages
           deps.setMessages(prev => prev.slice(0, -2));

@@ -9,10 +9,12 @@ from .sr6e import GAME_SYSTEM as SR6E
 from .cpred import GAME_SYSTEM as CPRED
 from .novels import GAME_SYSTEM as NOVELS
 from .chats import GAME_SYSTEM as CHATS
+from .characters import GAME_SYSTEM as CHARACTERS
 
 GAME_SYSTEMS = {
     "novels": NOVELS,
     "chats": CHATS,
+    "characters": CHARACTERS,
     "dnd5e": DND5E,
     "dnd5e_cyber": DND5E_CYBER,
     "coc7e": COC7E,

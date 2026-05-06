@@ -33,6 +33,11 @@
 !backend/main.py
 !backend/sync_manager.py
 !backend/flag_agent.py
+!backend/character_agent.py
+!backend/character_off_screen.py
+!backend/character_interview.py
+!backend/character_search.py
+!backend/characters_runtime.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_e2e.py
@@ -65,6 +70,7 @@
 !backend/game_systems/dnd5e_cyber.py
 !backend/game_systems/novels.py
 !backend/game_systems/chats.py
+!backend/game_systems/characters.py
 !backend/tests/
 !backend/tests/test_multi_model.py
 !backend/tests/test_cpred_mechanics.py
@@ -102,6 +108,7 @@
 !data/rulebooks/cp_red/
 !PIPELINE_PLAN.md
 !RAG_PLAN.md
+!CHARACTERS_INTERVIEW.md
 !android/
 !android/.gitignore
 !android/**
