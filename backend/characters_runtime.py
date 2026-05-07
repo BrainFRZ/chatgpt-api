@@ -461,13 +461,20 @@ def prepare_state_for_turn(
         # no callback_ops are emitted today, otherwise old resolved entries can linger
         # indefinitely on quiet days.
         cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [], 0, today_et_iso())
-        # Weekly life-event roll. The function self-gates on:
-        #   (a) first_seen_date set (bootstraps on first call, no roll)
-        #   (b) >= LIFE_EVENT_GRACE_DAYS since first_seen_date
-        #   (c) ISO week different from last_rolled_year_week
-        #   (d) no still-pending seed
-        # so calling it on every first-message-of-day is safe — it'll only fire once a week.
+        # Weekly life-event roll. Self-gates internally to fire once per ISO week
+        # past the grace period.
         cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_et_iso(), rng=rng)
+        # Hygiene: archive stale low-impact memories. Cheap (file rewrite, no
+        # model calls). Memories with impact >= 3 are permanent; impact 1-2
+        # memories untouched for 12+ months get soft-archived.
+        if project_dir:
+            try:
+                from character_storage import CharacterStore, prune_stale_memories
+                report = prune_stale_memories(CharacterStore(project_dir), today_et_iso())
+                if report.get("archived"):
+                    logger.info(f"prepare_state_for_turn: archived {report['archived']} stale memories")
+            except Exception as e:
+                logger.warning(f"prepare_state_for_turn: hygiene failed: {e}")
     else:
         # Mid-day: keep wellbeing as is; clear ripe_callbacks so they don't surface every turn
         cs.setdefault("ripe_callbacks", [])

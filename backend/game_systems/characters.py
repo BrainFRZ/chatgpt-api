@@ -32,8 +32,20 @@ logger = logging.getLogger(__name__)
 
 # ── Tunables ────────────────────────────────────────────────────────
 
-CHARACTER_MEMORY_TIER_LIMITS = {"high": 15, "moderate": 10, "flavor": 25}
-CHARACTER_MEMORY_MAX_TOTAL = 50  # safety net across tiers
+# Memory tiers are still used to TAG entries by impact (informative for sorting,
+# display, and recall ranking). They are NOT enforcement caps anymore — file
+# storage is unbounded. The character keeps everything; hygiene archives
+# low-impact stale entries silently (see CHARACTER_MEMORY_HYGIENE_*).
+CHARACTER_MEMORY_TIER_LIMITS = {"high": None, "moderate": None, "flavor": None}  # informational; no longer enforced
+CHARACTER_MEMORY_MAX_TOTAL = None  # no cap — files grow as needed
+
+# Hygiene: archive low-impact memories (impact < threshold) that haven't been
+# referenced in this many real days. Archived entries stay on disk (for forensics)
+# but are excluded from reads, recall indices, and rendering. High-impact memories
+# (impact >= threshold) NEVER auto-archive — they survive forever unless the user
+# explicitly drops them.
+CHARACTER_MEMORY_HYGIENE_DAYS = 365            # 12 months
+CHARACTER_MEMORY_HYGIENE_MIN_IMPACT = 3        # impact >= 3 is permanent
 
 CALLBACK_RESOLVED_RETENTION_DAYS = 30  # real days, not turns
 CALLBACK_DISMISSED_RETENTION_DAYS = 30
@@ -297,8 +309,12 @@ def apply_memory_ops(memories: list, ops: list, current_turn: int, today_iso: Op
             continue
         memories.append(entry)
 
-    # Enforce per-tier caps (drop oldest-and-lowest-impact within the offending tier)
+    # NOTE: legacy in-state path. Tier caps are now disabled (file storage is
+    # unbounded; hygiene archives stale low-impact entries instead). This branch
+    # is dead — callers use apply_memory_ops_to_store in character_storage.py.
     for tier_name, tier_cap in CHARACTER_MEMORY_TIER_LIMITS.items():
+        if tier_cap is None:
+            continue
         tier_entries = [(i, m) for i, m in enumerate(memories) if m.get("tier") == tier_name]
         if len(tier_entries) > tier_cap:
             excess = len(tier_entries) - tier_cap
@@ -306,8 +322,8 @@ def apply_memory_ops(memories: list, ops: list, current_turn: int, today_iso: Op
             remove = {i for i, _ in tier_entries[:excess]}
             memories = [m for j, m in enumerate(memories) if j not in remove]
 
-    # Total cap (safety net across tiers)
-    if len(memories) > CHARACTER_MEMORY_MAX_TOTAL:
+    # Total cap also disabled — see file-storage path for current behavior
+    if CHARACTER_MEMORY_MAX_TOTAL is not None and len(memories) > CHARACTER_MEMORY_MAX_TOTAL:
         memories = sorted(memories, key=_memory_sort_key, reverse=True)[:CHARACTER_MEMORY_MAX_TOTAL]
 
     # Final sort for stable injection ordering

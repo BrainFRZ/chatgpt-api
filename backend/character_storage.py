@@ -89,28 +89,67 @@ class CharacterStore:
             logger.error(f"character_storage: failed to read {path}: {e}")
         return out
 
-    def read_filtered(self, kind: str, branch_msg_ids: Optional[set] = None) -> list[dict]:
-        """Read entries scoped to the current branch.
+    def read_filtered(
+        self,
+        kind: str,
+        branch_msg_ids: Optional[set] = None,
+        *,
+        include_archived: bool = False,
+    ) -> list[dict]:
+        """Read entries scoped to the current branch, excluding archived by default.
 
         branch_msg_ids: set of message_ids in the current branch's path-to-root.
-        If None, no filtering. Entries with branch_id=None are always included
-        (legacy / migrated entries).
-        """
-        all_entries = self.read_all(kind)
-        if branch_msg_ids is None:
-            return all_entries
-        return [
-            e for e in all_entries
-            if not e.get("branch_id") or e.get("branch_id") in branch_msg_ids
-        ]
+        If None, no branch filtering. Entries with branch_id=None are always
+        included (legacy / migrated entries).
 
-    def fetch_by_ids(self, kind: str, ids: list[int], branch_msg_ids: Optional[set] = None) -> list[dict]:
-        """Read entries matching the given ids, optionally branch-filtered."""
+        include_archived: when False (default), entries with archived=True are
+        skipped. Hygiene-archived memories are excluded from normal reads, recall
+        indices, and rendering — they stay on disk for forensics only.
+        """
+        out = []
+        for e in self.read_all(kind):
+            if not include_archived and e.get("archived"):
+                continue
+            if branch_msg_ids is not None:
+                if e.get("branch_id") and e.get("branch_id") not in branch_msg_ids:
+                    continue
+            out.append(e)
+        return out
+
+    def fetch_by_ids(
+        self,
+        kind: str,
+        ids: list[int],
+        branch_msg_ids: Optional[set] = None,
+        *,
+        include_archived: bool = False,
+    ) -> list[dict]:
+        """Read entries matching the given ids, optionally branch-filtered. Skips archived by default."""
         if not ids:
             return []
         ids_set = set(ids)
-        candidates = self.read_filtered(kind, branch_msg_ids) if branch_msg_ids is not None else self.read_all(kind)
+        if branch_msg_ids is not None:
+            candidates = self.read_filtered(kind, branch_msg_ids, include_archived=include_archived)
+        else:
+            candidates = [e for e in self.read_all(kind) if include_archived or not e.get("archived")]
         return [e for e in candidates if e.get("id") in ids_set]
+
+    def bump_last_referenced(self, kind: str, ids: list[int], today_iso: str) -> int:
+        """Update last_referenced_date on the given ids. Used by the recall agent
+        whenever it surfaces a memory — keeps frequently-recalled memories alive
+        through the hygiene pass even if their impact is low."""
+        if not ids:
+            return 0
+        ids_set = set(ids)
+        entries = self.read_all(kind)
+        bumped = 0
+        for e in entries:
+            if e.get("id") in ids_set:
+                e["last_referenced_date"] = today_iso
+                bumped += 1
+        if bumped:
+            self.rewrite(kind, entries)
+        return bumped
 
     def next_id(self, kind: str) -> int:
         """Next available id (max existing id + 1, starting at 1)."""
@@ -221,6 +260,64 @@ class CharacterStore:
         return actives
 
 
+# ── Hygiene: archive stale low-impact memories ─────────────────────
+
+def prune_stale_memories(store: CharacterStore, today_iso: str) -> dict:
+    """Soft-archive memories that are old, low-impact, and unreferenced.
+
+    Run daily from prepare_state_for_turn (first-message-of-ET-day). Uses a
+    no-cost file rewrite — no model calls. Cheap.
+
+    Rules (see CHARACTER_MEMORY_HYGIENE_DAYS / CHARACTER_MEMORY_HYGIENE_MIN_IMPACT
+    in game_systems/characters.py):
+    - Memory impact >= MIN_IMPACT (default 3): never archived. Permanent.
+    - Memory impact < MIN_IMPACT AND age >= HYGIENE_DAYS: archived.
+      "Age" measured from last_referenced_date (or `date` if never referenced).
+    - Already-archived entries: skipped (don't re-process).
+
+    Archived entries get archived=True + archived_date set, but stay on disk.
+    They're excluded from default reads, recall indices, and rendering. Could
+    theoretically be unarchived manually by editing the jsonl.
+    """
+    from game_systems.characters import (
+        CHARACTER_MEMORY_HYGIENE_DAYS,
+        CHARACTER_MEMORY_HYGIENE_MIN_IMPACT,
+        days_between_dates,
+    )
+
+    entries = store.read_all(KIND_MEMORIES)
+    if not entries:
+        return {"archived": 0, "scanned": 0}
+
+    archived_count = 0
+    changed = False
+    for e in entries:
+        if e.get("archived"):
+            continue
+        try:
+            impact = int(e.get("impact", 0))
+        except (TypeError, ValueError):
+            impact = 0
+        if impact >= CHARACTER_MEMORY_HYGIENE_MIN_IMPACT:
+            continue
+        ref_date = e.get("last_referenced_date") or e.get("date")
+        if not ref_date:
+            continue
+        age = days_between_dates(ref_date, today_iso)
+        if age >= CHARACTER_MEMORY_HYGIENE_DAYS:
+            e["archived"] = True
+            e["archived_date"] = today_iso
+            e["archived_reason"] = f"hygiene: impact {impact}, last referenced {age} days ago"
+            archived_count += 1
+            changed = True
+
+    if changed:
+        store.rewrite(KIND_MEMORIES, entries)
+        logger.info(f"prune_stale_memories: archived {archived_count} of {len(entries)} memories")
+
+    return {"archived": archived_count, "scanned": len(entries)}
+
+
 # ── Migration: state → files ────────────────────────────────────────
 
 def migrate_state_to_files(characters_state: dict, store: CharacterStore) -> dict:
@@ -307,18 +404,18 @@ def apply_memory_ops_to_store(
 
     Op shapes:
       {action: "add", text, impact: 1-5, quote?, date?, focus?}
-      {action: "drop", id: int}            # NOTE: changed from index → id
+      {action: "drop", id: int}
 
     Returns the count of mutating ops applied.
+
+    NOTE: file storage is unbounded — no tier caps, no total cap. Memories
+    accumulate over time. Old, low-impact, never-referenced memories get
+    soft-archived by the hygiene pass (see prune_stale_memories) instead.
     """
     if not ops:
         return 0
 
-    from game_systems.characters import (
-        _memory_tier,
-        CHARACTER_MEMORY_TIER_LIMITS,
-        CHARACTER_MEMORY_MAX_TOTAL,
-    )
+    from game_systems.characters import _memory_tier
 
     mutated = 0
 
@@ -345,50 +442,27 @@ def apply_memory_ops_to_store(
         except (TypeError, ValueError):
             impact = 1
         impact = max(1, min(5, impact))
-        text = str(op.get("text") or "")[:1500]  # widened cap — file storage allows more depth
+        text = str(op.get("text") or "")[:1500]
         if not text:
             continue
+        date = op.get("date") or today_iso
         entry = {
             "id": next_id,
             "branch_id": branch_msg_id,
             "text": text,
             "quote": str(op.get("quote") or "")[:300] or None,
-            "date": op.get("date") or today_iso,
+            "date": date,
             "impact": impact,
             "tier": _memory_tier(impact),
             "turn_created": current_turn,
             "focus": str(op.get("focus") or "")[:60] or None,
+            "last_referenced_date": date,  # bumped by recall agent on each surface
         }
         new_entries.append(entry)
         next_id += 1
     if new_entries:
         store.append_many(KIND_MEMORIES, new_entries)
         mutated += len(new_entries)
-
-    # Enforce caps: per-tier, per-total. Drop oldest+lowest-impact within offending tier first.
-    # Branch-aware caps would be very expensive; instead apply globally.
-    if new_entries:
-        all_entries = store.read_all(KIND_MEMORIES)
-        # Per-tier caps
-        for tier_name, cap in CHARACTER_MEMORY_TIER_LIMITS.items():
-            tier_subset = [e for e in all_entries if e.get("tier") == tier_name]
-            if len(tier_subset) > cap:
-                excess = len(tier_subset) - cap
-                tier_subset.sort(key=lambda e: (e.get("turn_created", 0), e.get("impact", 0)))
-                drop_ids2 = [e.get("id") for e in tier_subset[:excess] if isinstance(e.get("id"), int)]
-                if drop_ids2:
-                    store.delete_many(KIND_MEMORIES, drop_ids2)
-                    all_entries = store.read_all(KIND_MEMORIES)
-        # Total cap (safety net)
-        if len(all_entries) > CHARACTER_MEMORY_MAX_TOTAL:
-            all_entries.sort(
-                key=lambda e: (e.get("impact", 0), e.get("turn_created", 0)),
-                reverse=True,
-            )
-            keep_ids = {e.get("id") for e in all_entries[:CHARACTER_MEMORY_MAX_TOTAL]}
-            drop_ids2 = [e.get("id") for e in all_entries[CHARACTER_MEMORY_MAX_TOTAL:] if isinstance(e.get("id"), int)]
-            if drop_ids2:
-                store.delete_many(KIND_MEMORIES, drop_ids2)
 
     return mutated
 

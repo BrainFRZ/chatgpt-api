@@ -276,6 +276,18 @@ def run_recall(
     recalled_profile = store.fetch_by_ids(KIND_USER_PROFILE, profile_ids, branch_msg_ids)
     recalled_growth = store.fetch_by_ids(KIND_GROWTH, growth_ids, branch_msg_ids)
 
+    # Bump last_referenced_date on surfaced memories. Keeps frequently-recalled
+    # entries alive through the hygiene pass — even a 1★ memory that the
+    # character keeps revisiting won't get archived because each recall renews it.
+    if memory_ids:
+        from datetime import datetime
+        from game_systems.characters import TZ
+        today_iso = datetime.now(TZ).date().isoformat()
+        try:
+            store.bump_last_referenced(KIND_MEMORIES, memory_ids, today_iso)
+        except Exception as e:
+            logger.warning(f"character_recall: bump_last_referenced failed: {e}")
+
     ru = response.usage
     usage = {
         "input_tokens": ru.input_tokens
