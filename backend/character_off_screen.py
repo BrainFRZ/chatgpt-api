@@ -66,14 +66,14 @@ You receive:
 - Memory + callback context (for inspiration, not constraint)
 - The list of real-life days in the gap (with weekdays)
 
-You produce: 1-3 events per day-window, in this character's voice, that feel lived-in and ordinary or quietly notable. Some windows will be mundane (groceries, work). Some will have a small specific thing (saw an old friend; finished a book; had a weird dream). Most windows are NOT plot — they're texture. The character is a person with a life; this is that life happening.
+You produce: **1-3 events per day-window**, in this character's voice, that feel lived-in and ordinary or quietly notable. Some windows will be mundane (groceries, work). Some will have a small specific thing (saw an old friend; finished a book; had a weird dream). Most windows are NOT plot — they're texture. The character is a person with a life; this is that life happening.
 
 The day-windows you receive may be FULL DAYS (no contact for a 24h+ stretch) or PARTIAL WINDOWS:
-- "earlier today (~N hours since you last talked)" — same-day return, just a few hours of activity
+- "earlier today (~N hours since you last talked)" — same-day return; the activity in those hours
 - "after we talked" — the rest of the day after a previous chat ended (evening, bedtime, late thoughts)
 - "today before now" — daytime activity before the user opened the chat tonight (work, lunch, errands)
 
-Calibrate event count to window size: partial windows get 1-2 events; full days get 1-3. A 3-hour window shouldn't have 3 separate events — that's too dense for that span.
+**Every window — full or partial — gets 1-3 events.** Don't skim partial windows; the character's life happens in those hours too. A "today before now" with 1 entry shortchanges the day. A 6-hour window can easily produce 2-3 events (a meeting, lunch, a walk, an errand, a conversation, a thought). Calibrate the *content* to the window (don't put bedtime stuff in a "today before now" window), but the *count* is the same standard: 1-3.
 
 PRINCIPLES:
 - SPECIFIC over generic. "Read a book" is weak. "Started LotR finally — only made it to the Council of Elrond" is what we want.
@@ -81,7 +81,7 @@ PRINCIPLES:
 - CONSISTENT with the character's life. If they live in Portland, don't have them at a beach in California. If they hate cats, don't add a cat.
 - DON'T resolve open callbacks here. Those resolve in conversation, not behind the scenes.
 - DON'T spoil. Don't pre-commit to information the user hasn't asked for in a way that pre-empts conversation.
-- CALIBRATE TO WINDOW. "earlier today" gets bedtime-adjacent or workday content depending on time of day; "after we talked" gets evening-into-night content; "today before now" gets daytime content.
+- TIME-OF-DAY APPROPRIATE. "after we talked" gets evening-into-night content; "today before now" gets daytime content; "earlier today" gets whatever fits the hours that elapsed; full days span morning to night.
 - CALL OUT WEEKDAY rhythms. If the character has yoga Wednesdays, Wednesday should reflect that.
 - VARY texture. If one window had a specific food, the next shouldn't also be food-themed. Mix sensory details, social, work, internal.
 
@@ -254,20 +254,20 @@ def generate_off_screen_log(
         ]
         seed_consumed = True  # we'll mark it consumed in state if generation succeeds
 
-    # Render the gap as portion-aware day-windows. Partial windows get fewer
-    # events than full days — the model should calibrate event count to how
-    # much time the window actually covers.
+    # Render the gap as portion-aware day-windows. Every window gets 1-3 events
+    # regardless of whether it's a full day or a partial; the portion only tells
+    # the model what time-of-day content fits.
     portion_lines = []
     for d in day_list:
         portion = d.get("portion", "full")
         if portion == "full":
-            portion_lines.append(f"  - {d['weekday']}, {d['date']} — full day (1-3 events)")
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — full day")
         elif portion.startswith("earlier today"):
-            portion_lines.append(f"  - {d['weekday']}, {d['date']} — {portion} (1-2 events; just what they did in those hours)")
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — {portion}")
         elif portion == "after we talked":
-            portion_lines.append(f"  - {d['weekday']}, {d['date']} — after the previous chat ended (1-2 events; rest of that day)")
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — after the previous chat ended (evening / bedtime)")
         elif portion == "today before now":
-            portion_lines.append(f"  - {d['weekday']}, {d['date']} — today up to now (1-2 events; what they did today before you opened the chat)")
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — today up to now (daytime)")
         else:
             portion_lines.append(f"  - {d['weekday']}, {d['date']} — {portion}")
 
@@ -276,14 +276,13 @@ def generate_off_screen_log(
         *portion_lines,
         "",
         (
-            "Generate events for each window, ordered chronologically. Calibrate the count to "
-            "the window size — partial windows (\"earlier today\", \"after we talked\", \"today before now\") "
-            "get 1-2 events; full days get 1-3. Most events should be ordinary — groceries, work, a "
-            "small annoyance, a song stuck in their head. Specific details matter more than 'big' "
-            "content. Call report_off_screen_life with one entry per window. The `date` field MUST be "
-            "the ISO date string from the list above (multiple windows on the same date — e.g. "
-            "\"earlier today\" and \"today before now\" on the same calendar day — never happen since "
-            "those are mutually exclusive cases)."
+            "Generate 1-3 events for EACH window — full or partial — ordered chronologically. "
+            "The portion tells you what time-of-day content fits, not how many events to make. "
+            "Most events should be ordinary — groceries, work, a small annoyance, a song stuck in their head. "
+            "Specific details matter more than 'big' content. "
+            "Call report_off_screen_life with one entry per window. The `date` field MUST be the ISO "
+            "date string from the list above. Multiple windows on the same date never happen — the "
+            "same-day case has only one window labeled \"earlier today\"."
         ),
     ]
 
