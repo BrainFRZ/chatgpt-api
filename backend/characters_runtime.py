@@ -499,7 +499,7 @@ def run_post_stream_extraction(
         "character_agent_ops": ops,
         "character_agent_usage": usage,
         "character_agent_cost": cost,
-        "character_agent_model": "claude-haiku-4-5",
+        "character_agent_model": "claude-sonnet-4-6",
     }
 
 

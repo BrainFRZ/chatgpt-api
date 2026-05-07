@@ -10304,7 +10304,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if data.get("character_agent_usage"):
                             assistant_msg_data["character_agent_usage"] = data["character_agent_usage"]
                             assistant_msg_data["character_agent_cost"] = float(data.get("character_agent_cost", 0.0) or 0.0)
-                            assistant_msg_data["character_agent_model"] = data.get("character_agent_model", "claude-haiku-4-5")
+                            assistant_msg_data["character_agent_model"] = data.get("character_agent_model", "claude-sonnet-4-6")
                             if data.get("character_agent_ops"):
                                 assistant_msg_data["character_agent_ops"] = data["character_agent_ops"]
                         if data.get("off_screen_usage"):

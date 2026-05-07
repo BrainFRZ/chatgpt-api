@@ -1,9 +1,9 @@
-"""Character state-extraction side agent — Claude Haiku 4.5.
+"""Character state-extraction side agent — Claude Sonnet 4.6.
 
 After each correspondence turn (Opus 3 streaming reply), this side agent reads:
 - The character profile (canonical voice / personality)
 - The user's life facts (so it can spot new ones)
-- The current state (memories, callbacks, arc, wellbeing)
+- The current state (memories, callbacks, arc, wellbeing, growth)
 - The user message and the character's reply
 
 …and emits state ops:
@@ -12,6 +12,13 @@ After each correspondence turn (Opus 3 streaming reply), this side agent reads:
 - profile_ops:    add / edit / delete user_profile entries
 - wb_mod_ops:     ±2 modifier for tomorrow's wellbeing roll
 - arc_state_op:   set a new arc-state string when the relationship shifts
+- growth_ops:     add / update / obsolete entries in the character_growth ledger
+
+Why Sonnet 4.6 (not Haiku): growth_ops require multi-turn synthesis and
+durability judgments — "is this thing they said part of who they are now, or
+just a moment?" — that Haiku is materially weaker on. The other ops also
+benefit from Sonnet's better calibration on restraint guidance ("most turns:
+no ops"). Cost difference is negligible against the use case (~$0.003/turn).
 
 Design parallels flag_agent.py: single forced tool call, soft-fail on errors,
 returns (ops_dict, usage_dict).
@@ -25,15 +32,15 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-CHARACTER_AGENT_MODEL = "claude-haiku-4-5-20251001"
+CHARACTER_AGENT_MODEL = "claude-sonnet-4-6"
 CHARACTER_AGENT_MAX_TOKENS = 2048
-CHARACTER_AGENT_TIMEOUT_S = 20
+CHARACTER_AGENT_TIMEOUT_S = 25  # slightly higher than Haiku — Sonnet calls take a beat longer
 
-# Haiku 4.5 pricing per MTok ($/1M tokens). Mirrors flag_agent.
-HAIKU_INPUT_RATE = 1.00
-HAIKU_CACHE_READ_RATE = 0.10
-HAIKU_CACHE_WRITE_RATE = 1.25
-HAIKU_OUTPUT_RATE = 5.00
+# Sonnet 4.6 pricing per MTok ($/1M tokens).
+SONNET_INPUT_RATE = 3.00
+SONNET_CACHE_READ_RATE = 0.30
+SONNET_CACHE_WRITE_RATE = 3.75    # 5min cache write
+SONNET_OUTPUT_RATE = 15.00
 
 
 def compute_character_agent_cost(usage: dict) -> float:
@@ -45,10 +52,10 @@ def compute_character_agent_cost(usage: dict) -> float:
     output = usage.get("output_tokens", 0) or 0
     uncached_input = max(0, raw_input - cache_read - cache_write)
     return (
-        uncached_input * HAIKU_INPUT_RATE
-        + cache_read * HAIKU_CACHE_READ_RATE
-        + cache_write * HAIKU_CACHE_WRITE_RATE
-        + output * HAIKU_OUTPUT_RATE
+        uncached_input * SONNET_INPUT_RATE
+        + cache_read * SONNET_CACHE_READ_RATE
+        + cache_write * SONNET_CACHE_WRITE_RATE
+        + output * SONNET_OUTPUT_RATE
     ) / 1_000_000.0
 
 
