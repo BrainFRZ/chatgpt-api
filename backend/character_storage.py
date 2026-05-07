@@ -9,16 +9,25 @@ Why files instead of in-state lists:
 - Inspectable: jsonl files in the project dir can be read/edited directly.
 
 Branching:
-- Each entry tags itself with the message_id where it was created (`branch_id`).
-- Readers filter to entries whose branch_id is in the current branch's path-to-root.
-- Migrated entries (from pre-file state) get branch_id=None which means "always
-  in scope" — they don't get hidden when switching branches.
+- Each entry tags itself with the message_id where it was created (`branch_id`)
+  for audit/debugging purposes. As of the cross-chat fix, branch_id is NOT used
+  for filtering reads — the character is a project-level entity, and memories
+  should be shared across all chats with that character regardless of which
+  branch within any chat created them. Within-chat branching is a rare power-
+  user feature and accepts memory leakage between sibling branches as a tradeoff
+  for the much more common cross-chat use case.
+- Migrated entries (from pre-file state) get branch_id=None.
 - New entries written by the side agent get branch_id=current user_msg_id.
 
 Storage shape: one jsonl file per kind, lines are full entry JSON.
 - character_memories.jsonl
 - user_profile.jsonl
 - character_growth.jsonl
+
+Atomicity: rewrite() uses write-to-temp + os.replace() to avoid partial reads
+during concurrent updates (multi-tab usage). append() is OS-atomic for entries
+under PIPE_BUF (typically 4KB) — well above any individual entry's serialized
+size — so concurrent appends from different tabs are safe.
 
 There's no separate index file — entries are small enough that the recall
 agent can scan the full file each turn at low cost. If files grow past a few
@@ -29,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -96,11 +106,12 @@ class CharacterStore:
         *,
         include_archived: bool = False,
     ) -> list[dict]:
-        """Read entries scoped to the current branch, excluding archived by default.
+        """Read entries excluding archived by default.
 
-        branch_msg_ids: set of message_ids in the current branch's path-to-root.
-        If None, no branch filtering. Entries with branch_id=None are always
-        included (legacy / migrated entries).
+        branch_msg_ids parameter is preserved for API compatibility but no
+        longer applies a filter — character memories/profile/growth are project-
+        global so they're shared across all chats and branches with that character.
+        See module docstring for rationale.
 
         include_archived: when False (default), entries with archived=True are
         skipped. Hygiene-archived memories are excluded from normal reads, recall
@@ -110,9 +121,6 @@ class CharacterStore:
         for e in self.read_all(kind):
             if not include_archived and e.get("archived"):
                 continue
-            if branch_msg_ids is not None:
-                if e.get("branch_id") and e.get("branch_id") not in branch_msg_ids:
-                    continue
             out.append(e)
         return out
 
@@ -180,13 +188,29 @@ class CharacterStore:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
     def rewrite(self, kind: str, entries: list[dict]) -> None:
-        """Replace the entire file with the given entries."""
+        """Replace the entire file with the given entries — atomically.
+
+        Writes to a uniquely-named temp file then uses os.replace() to swap.
+        Avoids partial-read hazards if a concurrent reader runs during the
+        rewrite (matters for multi-tab usage where multiple requests could
+        be writing simultaneously).
+        """
         path = self._path(kind)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            for e in entries:
-                if isinstance(e, dict):
-                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        temp_path = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                for e in entries:
+                    if isinstance(e, dict):
+                        f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            os.replace(temp_path, path)  # atomic on POSIX
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
 
     def update(self, kind: str, id: int, fields: dict) -> bool:
         """Update fields on the entry with the given id. Returns True if found."""
