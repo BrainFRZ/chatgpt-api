@@ -24,6 +24,7 @@ from typing import Optional
 from game_systems.characters import (
     OFF_SCREEN_EVENTS_PER_DAY,
     OFF_SCREEN_MAX_DAYS,
+    OFF_SCREEN_GAP_THRESHOLD_HOURS,
     TZ,
     parse_iso_dt,
     now_et,
@@ -65,17 +66,24 @@ You receive:
 - Memory + callback context (for inspiration, not constraint)
 - The list of real-life days in the gap (with weekdays)
 
-You produce: 1-3 events per day, in this character's voice, that feel lived-in and ordinary or quietly notable. Some days will be mundane (groceries, work). Some will have a small specific thing (saw an old friend; finished a book; had a weird dream). Most days are NOT plot — they're texture. The character is a person with a life; this is that life happening.
+You produce: 1-3 events per day-window, in this character's voice, that feel lived-in and ordinary or quietly notable. Some windows will be mundane (groceries, work). Some will have a small specific thing (saw an old friend; finished a book; had a weird dream). Most windows are NOT plot — they're texture. The character is a person with a life; this is that life happening.
+
+The day-windows you receive may be FULL DAYS (no contact for a 24h+ stretch) or PARTIAL WINDOWS:
+- "earlier today (~N hours since you last talked)" — same-day return, just a few hours of activity
+- "after we talked" — the rest of the day after a previous chat ended (evening, bedtime, late thoughts)
+- "today before now" — daytime activity before the user opened the chat tonight (work, lunch, errands)
+
+Calibrate event count to window size: partial windows get 1-2 events; full days get 1-3. A 3-hour window shouldn't have 3 separate events — that's too dense for that span.
 
 PRINCIPLES:
 - SPECIFIC over generic. "Read a book" is weak. "Started LotR finally — only made it to the Council of Elrond" is what we want.
-- ORDINARY most of the time. Most days have ordinary content. A grand event every day flattens reality.
+- ORDINARY most of the time. Most windows have ordinary content. A grand event every day flattens reality.
 - CONSISTENT with the character's life. If they live in Portland, don't have them at a beach in California. If they hate cats, don't add a cat.
 - DON'T resolve open callbacks here. Those resolve in conversation, not behind the scenes.
 - DON'T spoil. Don't pre-commit to information the user hasn't asked for in a way that pre-empts conversation.
-- 1-3 events per day. Not 5. Not 0 unless the day is genuinely "nothing — just worked."
+- CALIBRATE TO WINDOW. "earlier today" gets bedtime-adjacent or workday content depending on time of day; "after we talked" gets evening-into-night content; "today before now" gets daytime content.
 - CALL OUT WEEKDAY rhythms. If the character has yoga Wednesdays, Wednesday should reflect that.
-- VARY texture. If yesterday had a specific food, today shouldn't also be food-themed. Mix sensory details, social, work, internal.
+- VARY texture. If one window had a specific food, the next shouldn't also be food-themed. Mix sensory details, social, work, internal.
 
 You will be asked to call `report_off_screen_life` once with the structured day list."""
 
@@ -122,14 +130,16 @@ def _read_file(path: str) -> str:
 
 
 def _build_day_list(last_user_message_at_iso: Optional[str], now_dt: Optional[datetime] = None) -> list:
-    """Build the list of full real-Eastern days in the gap.
+    """Build the list of day-windows for off-screen generation.
 
-    "Full days" means complete days strictly between the last-user-message day
-    and today. If the user messaged Monday afternoon and is back Wednesday
-    morning, only Tuesday is filled in — Monday is partial (already had a
-    conversation), and today is happening now.
+    Returns a list of {date, weekday, portion} entries. The "portion" field
+    tells the agent what slice of that day to cover:
+    - "earlier today" — same-day gap (last message and now are the same date)
+    - "after we talked" — last_date's remainder after the prior chat ended
+    - "full" — a full intermediate day with no contact
+    - "today before now" — current day up to the current moment
 
-    Capped at OFF_SCREEN_MAX_DAYS.
+    Returns empty if the gap is below threshold.
     """
     if not last_user_message_at_iso:
         return []
@@ -137,23 +147,50 @@ def _build_day_list(last_user_message_at_iso: Optional[str], now_dt: Optional[da
     if not last:
         return []
     now = now_dt or now_et()
+
+    gap_hours = (now - last).total_seconds() / 3600.0
+    if gap_hours < OFF_SCREEN_GAP_THRESHOLD_HOURS:
+        return []
+
     last_date = last.date()
     today = now.date()
+    days: list = []
 
-    # Full days strictly between last and today
-    days = []
+    if last_date == today:
+        # Intra-day gap: a single partial entry for the hours since last contact
+        approx_hours = max(1, int(round(gap_hours)))
+        days.append({
+            "date": today.isoformat(),
+            "weekday": today.strftime("%A"),
+            "portion": f"earlier today (~{approx_hours} hours since you last talked)",
+        })
+        return days
+
+    # Cross-day gap: rest-of-last-date + full intermediate days + today-up-to-now
+    days.append({
+        "date": last_date.isoformat(),
+        "weekday": last_date.strftime("%A"),
+        "portion": "after we talked",
+    })
     cursor = last_date + timedelta(days=1)
     while cursor < today and len(days) < OFF_SCREEN_MAX_DAYS:
-        days.append(cursor)
+        days.append({
+            "date": cursor.isoformat(),
+            "weekday": cursor.strftime("%A"),
+            "portion": "full",
+        })
         cursor += timedelta(days=1)
-    return [
-        {"date": d.isoformat(), "weekday": d.strftime("%A")}
-        for d in days
-    ]
+    if len(days) < OFF_SCREEN_MAX_DAYS:
+        days.append({
+            "date": today.isoformat(),
+            "weekday": today.strftime("%A"),
+            "portion": "today before now",
+        })
+    return days
 
 
 def should_generate_off_screen(wall_clock: dict, now_dt: Optional[datetime] = None) -> bool:
-    """Returns True if there's at least one full intermediate ET day to fill in."""
+    """Returns True if the gap warrants off-screen generation (>= threshold)."""
     return len(_build_day_list((wall_clock or {}).get("last_user_message_at"), now_dt)) > 0
 
 
@@ -217,11 +254,37 @@ def generate_off_screen_log(
         ]
         seed_consumed = True  # we'll mark it consumed in state if generation succeeds
 
+    # Render the gap as portion-aware day-windows. Partial windows get fewer
+    # events than full days — the model should calibrate event count to how
+    # much time the window actually covers.
+    portion_lines = []
+    for d in day_list:
+        portion = d.get("portion", "full")
+        if portion == "full":
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — full day (1-3 events)")
+        elif portion.startswith("earlier today"):
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — {portion} (1-2 events; just what they did in those hours)")
+        elif portion == "after we talked":
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — after the previous chat ended (1-2 events; rest of that day)")
+        elif portion == "today before now":
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — today up to now (1-2 events; what they did today before you opened the chat)")
+        else:
+            portion_lines.append(f"  - {d['weekday']}, {d['date']} — {portion}")
+
     parts += [
-        f"[GAP] {len(day_list)} full day(s) to fill in:",
-        *(f"  - {d['weekday']}, {d['date']}" for d in day_list),
+        f"[GAP] {len(day_list)} day-window(s) to fill in:",
+        *portion_lines,
         "",
-        "Generate 1-3 events for each day, ordered chronologically. Most events should be ordinary; specific details matter more than 'big' content. Call report_off_screen_life with one entry per day.",
+        (
+            "Generate events for each window, ordered chronologically. Calibrate the count to "
+            "the window size — partial windows (\"earlier today\", \"after we talked\", \"today before now\") "
+            "get 1-2 events; full days get 1-3. Most events should be ordinary — groceries, work, a "
+            "small annoyance, a song stuck in their head. Specific details matter more than 'big' "
+            "content. Call report_off_screen_life with one entry per window. The `date` field MUST be "
+            "the ISO date string from the list above (multiple windows on the same date — e.g. "
+            "\"earlier today\" and \"today before now\" on the same calendar day — never happen since "
+            "those are mutually exclusive cases)."
+        ),
     ]
 
     user_msg = "\n".join(parts)
@@ -251,14 +314,16 @@ def generate_off_screen_log(
                     days_payload = raw_days
             break
 
-    # Validate / clamp
-    valid_dates = {d["date"] for d in day_list}
+    # Validate / clamp. Map portions from day_list (date-keyed) onto cleaned entries
+    # so the correspondence model's [YOUR LIFE SINCE WE LAST TALKED] injection can
+    # show "Tuesday — after we talked" vs "Tuesday — full day" vs "today before now."
+    portion_by_date = {d["date"]: d.get("portion", "") for d in day_list}
     cleaned = []
     for entry in days_payload:
         if not isinstance(entry, dict):
             continue
         date = entry.get("date")
-        if date not in valid_dates:
+        if date not in portion_by_date:
             continue
         events = entry.get("events") or []
         if not isinstance(events, list):
@@ -269,6 +334,7 @@ def generate_off_screen_log(
         cleaned.append({
             "date": date,
             "weekday": entry.get("weekday") or "",
+            "portion": portion_by_date.get(date, ""),
             "events": events,
         })
 

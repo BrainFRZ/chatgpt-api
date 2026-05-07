@@ -109,8 +109,8 @@ LIFE_EVENT_TABLE = {
     ],
 }
 
-OFF_SCREEN_GAP_THRESHOLD_HOURS = 12
-OFF_SCREEN_EVENTS_PER_DAY = 3        # max per real day in the gap
+OFF_SCREEN_GAP_THRESHOLD_HOURS = 6   # min gap before any off-screen fires; tuned so daily-evening users get content but mid-day quick check-ins don't
+OFF_SCREEN_EVENTS_PER_DAY = 3        # max per real day in the gap (partials get fewer)
 OFF_SCREEN_MAX_DAYS = 14             # don't generate more than 2 weeks of life
 
 WELLBEING_BANDS = ("Rough", "Frayed", "Even", "Buoyant", "Excellent")
@@ -1059,10 +1059,16 @@ def build_off_screen_injection(state: dict) -> str:
             continue
         weekday = day.get("weekday") or ""
         date = day.get("date") or ""
+        portion = day.get("portion") or ""
         events = day.get("events") or []
         if not events:
             continue
-        header = f"  {weekday} ({date}):" if weekday else f"  {date}:"
+        # Header carries the portion so the model knows whether this is a full day,
+        # an after-we-talked tail, a today-before-now, or a same-day "earlier today".
+        if portion in ("", "full"):
+            header = f"  {weekday} ({date}):" if weekday else f"  {date}:"
+        else:
+            header = f"  {weekday} ({date}) — {portion}:" if weekday else f"  {date} — {portion}:"
         lines.append(header)
         for ev in events:
             lines.append(f"    - {ev}")
