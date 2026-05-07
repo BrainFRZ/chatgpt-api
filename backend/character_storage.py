@@ -466,7 +466,7 @@ def apply_memory_ops_to_store(
         except (TypeError, ValueError):
             impact = 1
         impact = max(1, min(5, impact))
-        text = str(op.get("text") or "")[:1500]
+        text = str(op.get("text") or "")[:1500].strip()
         if not text:
             continue
         date = op.get("date") or today_iso
@@ -511,7 +511,7 @@ def apply_user_profile_ops_to_store(
         new_entries = []
         next_id = store.next_id(KIND_USER_PROFILE)
         for op in add_ops:
-            text = str(op.get("text") or "")[:800]
+            text = str(op.get("text") or "")[:800].strip()
             if not text:
                 continue
             new_entries.append({
@@ -573,7 +573,7 @@ def apply_growth_ops_to_store(
         new_entries = []
         next_id = store.next_id(KIND_GROWTH)
         for op in add_ops:
-            text = str(op.get("text") or "")[:800]
+            text = str(op.get("text") or "")[:800].strip()
             if not text:
                 continue
             cat = str(op.get("category") or "").lower().strip()
