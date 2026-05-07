@@ -26,6 +26,8 @@ from game_systems.characters import (
     apply_arc_state_op,
     apply_user_profile_ops,
     maybe_roll_wellbeing,
+    maybe_roll_life_event,
+    set_manual_event_seed,
     roll_callback_ripeness,
     update_wall_clock,
     is_first_message_of_et_day,
@@ -77,6 +79,12 @@ def get_characters_state(data: dict) -> dict:
     cs.setdefault("channel", DEFAULT_CHANNEL)
     cs.setdefault("user_profile", {"next_id": 1, "entries": []})
     cs.setdefault("character_growth", {"next_id": 1, "entries": []})
+    cs.setdefault("life_events", {
+        "first_seen_date": None,
+        "last_rolled_year_week": None,
+        "pending_seed": None,
+        "history": [],
+    })
     cs.setdefault("off_screen_log", None)
     cs.setdefault("wall_clock", {"first_message_at": None, "last_user_message_at": None, "last_message_at": None})
     cs.setdefault("ripe_callbacks", [])
@@ -229,6 +237,26 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
             "feedback": "Consolidation discarded. Profile unchanged; growth entries kept.",
         }
 
+    # Manual event seed: lets the user plant a specific life event for the
+    # off-screen agent to weave into the next session-resume's days. Bypasses
+    # the auto-roll's grace period and table — whatever the user types is the seed.
+    if cmd == "/seed-event":
+        hint = arg.strip()
+        if not hint:
+            return {
+                "kind": "error",
+                "feedback": "Usage: /seed-event <what happened to the character>. Example: /seed-event her cat ran away",
+            }
+        cs["life_events"] = set_manual_event_seed(cs.get("life_events") or {}, hint, today)
+        return {
+            "kind": "event_seeded",
+            "feedback": (
+                f"Event seeded: \"{hint[:120]}\". The character will incorporate this into their "
+                "off-screen life on the next session-resume (i.e. when you come back after a >12h gap "
+                "or in their next \"what's been going on\" mention)."
+            ),
+        }
+
     # Reinterview
     if cmd == "/reinterview":
         data["_characters_interview_mode"] = True
@@ -343,6 +371,13 @@ def prepare_state_for_turn(
         # no callback_ops are emitted today, otherwise old resolved entries can linger
         # indefinitely on quiet days.
         cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [], 0, today_et_iso())
+        # Weekly life-event roll. The function self-gates on:
+        #   (a) first_seen_date set (bootstraps on first call, no roll)
+        #   (b) >= LIFE_EVENT_GRACE_DAYS since first_seen_date
+        #   (c) ISO week different from last_rolled_year_week
+        #   (d) no still-pending seed
+        # so calling it on every first-message-of-day is safe — it'll only fire once a week.
+        cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_et_iso(), rng=rng)
     else:
         # Mid-day: keep wellbeing as is; clear ripe_callbacks so they don't surface every turn
         cs.setdefault("ripe_callbacks", [])

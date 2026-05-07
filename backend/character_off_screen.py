@@ -192,6 +192,31 @@ def generate_off_screen_log(
                 parts.append(f"  - ({m.get('impact', '?')}★) {m.get('text', '')[:160]}")
         parts.append("")
 
+    # Life-event seed: a weekly auto-roll (or manual /seed-event) may have planted
+    # a directive about something happening to the character this week. Weave it
+    # into ONE of the days naturally — don't make every day about it. The seed is
+    # a hint about kind+magnitude, not a script; generate the specific event in
+    # character.
+    pending_seed = ((characters_state or {}).get("life_events") or {}).get("pending_seed")
+    seed_consumed = False
+    if isinstance(pending_seed, dict) and pending_seed.get("hint"):
+        magnitude = pending_seed.get("magnitude") or "moderate"
+        category = pending_seed.get("category") or "?"
+        hint = pending_seed.get("hint")
+        source = pending_seed.get("source") or "auto"
+        parts += [
+            f"[LIFE EVENT SEED — magnitude={magnitude}, category={category}, source={source}]",
+            f"Hint: {hint}",
+            (
+                "Weave this into ONE of the gap days as ONE of that day's events — not all days, not all events on that day. "
+                "Generate the specific event from this hint using the character profile (so it's plausibly something that happens to THIS person — calibrate to their life, relationships, occupation). "
+                "Other days remain ordinary. The character will reference the event naturally in conversation when the user opens up the chat."
+                + (" This is a USER-AUTHORED seed — the user wants this specific event to happen, so honor it directly." if source == "manual" else "")
+            ),
+            "",
+        ]
+        seed_consumed = True  # we'll mark it consumed in state if generation succeeds
+
     parts += [
         f"[GAP] {len(day_list)} full day(s) to fill in:",
         *(f"  - {d['weekday']}, {d['date']}" for d in day_list),
@@ -264,5 +289,19 @@ def generate_off_screen_log(
         "generated_at_iso": (now_dt or now_et()).isoformat(),
         "days": cleaned,
     }
+    # If a seed was injected into the prompt and generation succeeded, mark it
+    # consumed so it doesn't get woven in again on the next session-resume.
+    if seed_consumed:
+        from game_systems.characters import consume_pending_event_seed
+        try:
+            consumed = consume_pending_event_seed(
+                (characters_state or {}).get("life_events") or {},
+                (now_dt or now_et()).date().isoformat(),
+            )
+            if consumed:
+                log["consumed_seed"] = consumed
+                logger.info(f"off_screen_agent: consumed seed {consumed.get('magnitude')}/{consumed.get('category')}")
+        except Exception as e:
+            logger.warning(f"off_screen_agent: seed consume failed: {e}")
     logger.info(f"off_screen_agent: generated {len(cleaned)} day(s) of off-screen life")
     return log, usage

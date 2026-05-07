@@ -50,6 +50,65 @@ CHARACTER_GROWTH_CATEGORIES = (
     "preference", "milestone", "voice", "other",
 )
 
+# Life events: weekly roll that gives the character a life that ticks forward
+# at human pace. Without this the character either stagnates (model is
+# restrained) or soap-operas (model invents drama every turn). Calibrated to
+# real-life rates — most weeks, nothing happens.
+#
+# Roll cadence: once per real ISO week (year + week tuple), gated on first
+# message of an ET day. Gated also on a grace period so freshly-interviewed
+# characters don't have a major event in their first week.
+LIFE_EVENT_GRACE_DAYS = 14            # no auto rolls until this many days after first_seen_date
+LIFE_EVENT_PENDING_SEED_TTL_DAYS = 14 # if a seed sits unused for this long, expire it
+LIFE_EVENT_HISTORY_CAP = 30           # keep this many rolled events for diagnostics
+
+# Weighted d100 — most rolls produce no event. Real-life-ish rates:
+#   1-65   → no event       (65%)
+#   66-90  → small           (25%)  ≈ 1/month
+#   91-98  → moderate         (8%)  ≈ 1/3 months
+#   99-100 → major            (2%)  ≈ 1/year
+LIFE_EVENT_MAGNITUDE_BANDS = (
+    (65, None),
+    (90, "small"),
+    (98, "moderate"),
+    (100, "major"),
+)
+
+# Within a magnitude band, equal-weight pick from the bucket. Hints are
+# intentionally vague — the off-screen agent generates the specific event
+# from this seed using the character profile, so the result is always
+# in-character (won't fire "parent visiting" if their parents are dead, etc.).
+LIFE_EVENT_TABLE = {
+    "small": [
+        {"category": "work_friction", "hint": "a frustrating thing at work or in their daily occupation that they'll vent about briefly"},
+        {"category": "social_minor", "hint": "a small situation with a friend or acquaintance — a slight, a misread, something to mention"},
+        {"category": "physical_minor", "hint": "a low-grade physical thing — a cold, a sore back, sleeping badly this week"},
+        {"category": "domestic", "hint": "an annoying domestic situation — a leak, a delivery problem, a neighbor"},
+        {"category": "media_taste", "hint": "got really into something or fell out of love with something — a band, a show, a book"},
+        {"category": "weather_mood", "hint": "weather hit them weirdly — a heat wave, the first cold day, something seasonal"},
+        {"category": "creative_spark", "hint": "started a tiny creative thing — a doodle, a recipe, a half-baked plan"},
+        {"category": "memory_surfaces", "hint": "an old memory got triggered by something — a smell, a song, a place they passed"},
+    ],
+    "moderate": [
+        {"category": "friend_deepens", "hint": "an existing friendship got measurably closer this week"},
+        {"category": "family_orbit", "hint": "a family member is suddenly in their orbit — a call, a visit, an obligation surfacing"},
+        {"category": "work_shift", "hint": "a work situation is shifting — a new project, friction with a manager, an opportunity"},
+        {"category": "creative_project", "hint": "started or got serious about a creative project — committed to it in some way"},
+        {"category": "minor_health", "hint": "a small health concern they're going to look into — appointment booked, mild worry"},
+        {"category": "dating_minor", "hint": "a dating thing — a date, a ghosting, a flirty exchange. Calibrate carefully to whether the character's relationship status makes this plausible"},
+        {"category": "old_contact", "hint": "an old contact resurfaced — text from someone they hadn't heard from in a long time"},
+        {"category": "small_decision", "hint": "facing a small fork in the road — a choice they're going to make soon, weighing it"},
+    ],
+    "major": [
+        {"category": "loss", "hint": "a loss in their orbit — death, severe illness, a relationship ending. Calibrate carefully; don't pile on if there's been recent loss already"},
+        {"category": "job_change", "hint": "a job change is happening or being decided — laid off, quit, considering a move, offered something"},
+        {"category": "relationship_shift", "hint": "major shift in a close relationship — escalation, rupture, repair, something seismic"},
+        {"category": "move_consideration", "hint": "seriously considering a move — to a new city, in with someone, out from somewhere"},
+        {"category": "health_real", "hint": "a real health thing — diagnosis, recovery, scare. Calibrate carefully and stay realistic"},
+        {"category": "personal_revelation", "hint": "a self-realization that's actually shifting how they see their life — not a small insight, a real one"},
+    ],
+}
+
 OFF_SCREEN_GAP_THRESHOLD_HOURS = 12
 OFF_SCREEN_EVENTS_PER_DAY = 3        # max per real day in the gap
 OFF_SCREEN_MAX_DAYS = 14             # don't generate more than 2 weeks of life
@@ -142,6 +201,12 @@ def init_characters_state() -> dict:
         "character_growth": {               # second profile layer: emergent facts about the character
             "next_id": 1,
             "entries": [],                  # [{id, date, text, category, source, obsolete?, obsolete_date?, obsolete_reason?}]
+        },
+        "life_events": {                    # weekly auto-roll for major life events; gives character life forward momentum
+            "first_seen_date": None,        # ET date of first message; anchors the 2-week grace period
+            "last_rolled_year_week": None,  # [iso_year, iso_week] when we last rolled; one roll per ISO week
+            "pending_seed": None,           # {magnitude, category, hint, planted_date, source} — consumed by off-screen agent
+            "history": [],                  # rolled events for diagnostics + future "don't pile on" heuristics
         },
         "off_screen_log": None,             # set by off-screen agent on resume
         "wall_clock": {
@@ -496,6 +561,170 @@ def apply_growth_ops(growth: dict, ops: list, today_iso: str) -> dict:
         "next_id": next_id,
         "entries": sorted(by_id.values(), key=lambda e: e.get("id", 0)),
     }
+
+
+# ── Life events ─────────────────────────────────────────────────────
+
+def _pick_event_magnitude(rng: random.Random) -> Optional[str]:
+    """Roll d100 against the magnitude bands. Returns None for "no event" rolls."""
+    roll = rng.randint(1, 100)
+    for cap, magnitude in LIFE_EVENT_MAGNITUDE_BANDS:
+        if roll <= cap:
+            return magnitude
+    return None
+
+
+def _roll_event_seed(rng: random.Random) -> Optional[dict]:
+    """Roll for an event. Returns the seed dict, or None for no-event."""
+    magnitude = _pick_event_magnitude(rng)
+    if not magnitude:
+        return None
+    bucket = LIFE_EVENT_TABLE.get(magnitude) or []
+    if not bucket:
+        return None
+    chosen = rng.choice(bucket)
+    return {
+        "magnitude": magnitude,
+        "category": chosen["category"],
+        "hint": chosen["hint"],
+    }
+
+
+def _isocalendar_year_week(iso_date: str) -> Optional[tuple]:
+    """Return (iso_year, iso_week) for an ISO date string, or None on parse failure."""
+    if not iso_date:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_date).date()
+    except (ValueError, TypeError):
+        return None
+    cal = dt.isocalendar()
+    return (cal[0], cal[1])
+
+
+def maybe_roll_life_event(life_events: dict, today_iso: str, rng: Optional[random.Random] = None) -> dict:
+    """Weekly life-event roll. Mutates and returns life_events.
+
+    Rules:
+      - On the first call ever, just stamp first_seen_date and skip the roll.
+      - Skip the roll until LIFE_EVENT_GRACE_DAYS days after first_seen_date.
+      - At most one roll per ISO week (year + week).
+      - If a pending seed already exists, do not re-roll — but still advance
+        last_rolled_year_week so we don't keep retrying.
+      - If a pending seed is older than LIFE_EVENT_PENDING_SEED_TTL_DAYS, expire it
+        before considering a new roll.
+    """
+    if not isinstance(life_events, dict):
+        life_events = {
+            "first_seen_date": None,
+            "last_rolled_year_week": None,
+            "pending_seed": None,
+            "history": [],
+        }
+
+    # Bootstrap: first-ever turn — anchor first_seen_date and skip
+    if not life_events.get("first_seen_date"):
+        life_events["first_seen_date"] = today_iso
+        return life_events
+
+    # Expire stale pending seeds (off-screen never had a chance to consume them)
+    pending = life_events.get("pending_seed")
+    if isinstance(pending, dict):
+        age = days_between_dates(pending.get("planted_date"), today_iso)
+        if age > LIFE_EVENT_PENDING_SEED_TTL_DAYS:
+            logger.info(f"life_event: expiring stale pending seed (age {age}d): {pending}")
+            life_events["pending_seed"] = None
+            pending = None
+
+    # Grace period
+    if days_between_dates(life_events.get("first_seen_date"), today_iso) < LIFE_EVENT_GRACE_DAYS:
+        return life_events
+
+    # Once per ISO week
+    today_yw = _isocalendar_year_week(today_iso)
+    if today_yw is None:
+        return life_events
+    last_yw_raw = life_events.get("last_rolled_year_week")
+    last_yw = tuple(last_yw_raw) if isinstance(last_yw_raw, (list, tuple)) and len(last_yw_raw) == 2 else None
+    if last_yw == today_yw:
+        return life_events
+
+    # If a seed is still pending, mark this week as rolled but don't overwrite
+    if pending:
+        life_events["last_rolled_year_week"] = list(today_yw)
+        return life_events
+
+    # Roll
+    rng = rng or random.Random()
+    seed = _roll_event_seed(rng)
+    life_events["last_rolled_year_week"] = list(today_yw)
+    if seed:
+        seed["planted_date"] = today_iso
+        seed["source"] = "auto"
+        life_events["pending_seed"] = seed
+        history = life_events.setdefault("history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append({**seed, "consumed": False})
+        if len(history) > LIFE_EVENT_HISTORY_CAP:
+            history = history[-LIFE_EVENT_HISTORY_CAP:]
+        life_events["history"] = history
+        logger.info(f"life_event: rolled {seed['magnitude']}/{seed['category']} seed for {today_iso}")
+    else:
+        logger.debug(f"life_event: weekly roll produced no event for {today_iso}")
+    return life_events
+
+
+def set_manual_event_seed(life_events: dict, hint: str, today_iso: str) -> dict:
+    """Set a manually-authored event seed. Replaces any pending auto seed."""
+    if not isinstance(life_events, dict):
+        life_events = {"first_seen_date": today_iso, "last_rolled_year_week": None, "pending_seed": None, "history": []}
+    if not life_events.get("first_seen_date"):
+        life_events["first_seen_date"] = today_iso
+    seed = {
+        "magnitude": "manual",
+        "category": "manual",
+        "hint": str(hint or "")[:600],
+        "planted_date": today_iso,
+        "source": "manual",
+    }
+    life_events["pending_seed"] = seed
+    history = life_events.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append({**seed, "consumed": False})
+    if len(history) > LIFE_EVENT_HISTORY_CAP:
+        history = history[-LIFE_EVENT_HISTORY_CAP:]
+    life_events["history"] = history
+    return life_events
+
+
+def consume_pending_event_seed(life_events: dict, today_iso: str) -> Optional[dict]:
+    """Pop the pending seed (called by the off-screen agent after successful generation).
+
+    Marks the matching history entry as consumed for diagnostics.
+    Returns the seed (or None if there was nothing to consume).
+    """
+    if not isinstance(life_events, dict):
+        return None
+    seed = life_events.get("pending_seed")
+    if not isinstance(seed, dict):
+        return None
+    life_events["pending_seed"] = None
+    history = life_events.get("history") or []
+    if isinstance(history, list):
+        # Find the most recent matching unconsumed entry and mark it
+        for h in reversed(history):
+            if (
+                isinstance(h, dict)
+                and not h.get("consumed")
+                and h.get("planted_date") == seed.get("planted_date")
+                and h.get("source") == seed.get("source")
+            ):
+                h["consumed"] = True
+                h["consumed_date"] = today_iso
+                break
+    return seed
 
 
 # ── Wellbeing ───────────────────────────────────────────────────────
