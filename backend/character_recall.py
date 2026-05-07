@@ -1,24 +1,36 @@
 """Character recall pre-fetcher — Claude Haiku 4.5.
 
-Runs BEFORE the correspondence model (Opus 3) streams its reply. Reads:
-- The user's current message
-- Branch-filtered indices of memories, user_profile, character_growth from the file store
-- A short tail of recent dialogue for context
+Runs BEFORE the correspondence model (Opus 3) streams its reply. Sees the
+SAME dialogue context Opus sees (sawtooth-trimmed branch path, 40-120
+messages depending on where in the cycle), plus branch-filtered indices of
+memories, user_profile, and character_growth from the file store.
 
-Decides which entries (by id) are relevant to surface this turn, on top of the
-always-loaded "core" set. Returns full entries; the runtime stuffs them into
-characters_state._render_payload before injection-build time.
+Decides which entries (by id) are relevant to surface this turn, on top of
+the always-loaded "core" set. Returns full entries; the runtime stuffs them
+into characters_state._render_payload before injection-build time.
 
-Why Haiku (not Sonnet, not Opus): this is pattern-matching ("does this turn
-touch on any of these topics?"), which Haiku excels at. Sonnet would be overkill;
-Opus 3 is busy streaming. Per-turn cost is ~$0.001 cached.
+Context-parity with Opus matters: if the user's current message references
+something from 30 turns back ("did you ever finish that book you mentioned?"),
+recall has to see those 30 turns to know what to retrieve. Just the current
+message + last few exchanges isn't enough.
 
-Why pre-pass (not tool the correspondence model uses): keeps Opus 3 in pure prose
-mode — no extra tool burden — and lets us batch-fetch, so the latency is one
-short pause before streaming starts rather than 1-3 mid-stream tool-call pauses.
+Cost control is via prompt caching. The dialogue history and entry indices
+are the bulk of input and they're mostly stable from turn to turn (new turn
+adds a couple messages, occasionally adds an index entry). cache_control on
+the stable preamble means after the first call we mostly pay cache-read rates
+($0.10/MTok instead of $1/MTok). Per-turn cost: ~$0.001-0.004.
 
-The tool is `report_recalls` with three id arrays. Empty arrays are correct most
-turns — most exchanges are about whatever's currently in core, not deep recall.
+Why Haiku (not Sonnet, not Opus): this is pattern-matching across an index,
+which Haiku excels at. Sonnet would be overkill; Opus 3 is busy streaming.
+
+Why pre-pass (not tool the correspondence model uses): keeps Opus 3 in pure
+prose mode — no extra tool burden — and lets us batch-fetch, so the latency
+is one short pause before streaming starts rather than 1-3 mid-stream
+tool-call pauses.
+
+The tool is `report_recalls` with three id arrays. Empty arrays are correct
+most turns — most exchanges are about whatever's currently in core, not deep
+recall.
 """
 from __future__ import annotations
 
@@ -150,6 +162,31 @@ def _build_index_text(entries: list, kind: str, exclude_ids: Optional[set] = Non
     return "\n".join(lines) if lines else "(none)"
 
 
+def _render_dialogue(dialogue: list, max_messages: int = 120, char_per_msg: int = 220) -> str:
+    """Render dialogue for the recall prompt. Caps message count and per-message
+    length to keep tokens bounded even for long sawtooth windows.
+
+    `dialogue` is a list of {role, content} dicts (matching what gets sent to Opus).
+    """
+    if not dialogue:
+        return ""
+    msgs = dialogue[-max_messages:]
+    lines = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            # Anthropic content blocks — pull text out
+            content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        text = str(content)
+        if len(text) > char_per_msg:
+            text = text[:char_per_msg] + "…"
+        lines.append(f"  {role}: {text}")
+    return "\n".join(lines)
+
+
 def run_recall(
     client,
     project_dir: Optional[str],
@@ -175,8 +212,16 @@ def run_recall(
     re-recall what's already loaded. Pass them in as the ids the runtime will
     include from store.core() regardless.
 
-    recent_dialogue: optional list of recent exchanges to give the agent context.
-    If None, the agent decides based on the current user input alone.
+    recent_dialogue: the FULL sawtooth-trimmed dialogue context Opus sees this
+    turn — pass context_pairs from main.py (typically 40-120 messages). Recall
+    needs this to judge relevance for cross-turn references ("did you ever
+    finish that book you mentioned?"). Capped internally at 120 to keep token
+    count bounded.
+
+    Cache control: the dialogue + indices preamble is marked cache_control=ephemeral
+    so subsequent turns within the 5-minute cache TTL pay $0.10/MTok cache-read
+    rates instead of $1/MTok input rates. Active sessions get most of their
+    recall calls cached.
     """
     empty: dict = {"recalled_memories": [], "recalled_profile": [], "recalled_growth": []}
     if not user_input or not user_input.strip():
@@ -201,37 +246,33 @@ def run_recall(
         # Nothing to recall — fresh chat
         return empty, {}
 
-    # Build the user message for Haiku
-    parts = [
-        "[USER MESSAGE THIS TURN]",
-        user_input.strip()[:2000],
-        "",
-    ]
+    # ── Build the prompt as TWO blocks: cached preamble + volatile tail ──
+    # Preamble: dialogue history + indices. Stable from turn to turn (mostly —
+    # adds 1-2 messages, occasionally adds an index entry). Cache hit on most
+    # turns within a session.
+    preamble_parts = []
     if recent_dialogue:
-        # Render last few exchanges briefly for context
-        parts.append("[RECENT DIALOGUE — last few exchanges]")
-        for m in recent_dialogue[-6:]:
-            if not isinstance(m, dict):
-                continue
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
-            parts.append(f"  {role}: {str(content)[:200]}")
-        parts.append("")
+        preamble_parts.append("[DIALOGUE CONTEXT — same window the correspondence model sees, sawtooth-trimmed]")
+        preamble_parts.append(_render_dialogue(recent_dialogue))
+        preamble_parts.append("")
+    preamble_parts.append("[MEMORY INDEX — entries already in CORE are excluded; pick from these for additional recall]")
+    preamble_parts.append(_build_index_text(memories, "memories", exclude_ids=core_memory_ids or set()))
+    preamble_parts.append("")
+    preamble_parts.append("[USER PROFILE INDEX — same: core excluded]")
+    preamble_parts.append(_build_index_text(profile, "user_profile", exclude_ids=core_profile_ids or set()))
+    preamble_parts.append("")
+    preamble_parts.append("[GROWTH INDEX — core excluded; obsolete excluded]")
+    preamble_parts.append(_build_index_text(growth, "growth", exclude_ids=core_growth_ids or set()))
+    preamble_text = "\n".join(preamble_parts)
 
-    parts.append("[MEMORY INDEX — entries already in CORE are excluded; pick from these for additional recall]")
-    parts.append(_build_index_text(memories, "memories", exclude_ids=core_memory_ids or set()))
-    parts.append("")
-    parts.append("[USER PROFILE INDEX — same: core excluded]")
-    parts.append(_build_index_text(profile, "user_profile", exclude_ids=core_profile_ids or set()))
-    parts.append("")
-    parts.append("[GROWTH INDEX — core excluded; obsolete excluded]")
-    parts.append(_build_index_text(growth, "growth", exclude_ids=core_growth_ids or set()))
-    parts.append("")
-    parts.append("Now decide which ids to recall. Empty arrays are correct most turns. Call report_recalls.")
+    # Volatile: the current user message + the decision instruction. Changes
+    # every turn so it sits after the cache breakpoint.
+    volatile_text = (
+        "\n[USER MESSAGE THIS TURN]\n"
+        + user_input.strip()[:2000]
+        + "\n\nNow decide which ids to recall. Empty arrays are correct most turns. Call report_recalls."
+    )
 
-    user_msg = "\n".join(parts)
     tool = build_recall_tool()
 
     try:
@@ -239,7 +280,20 @@ def run_recall(
             model=CHARACTER_RECALL_MODEL,
             max_tokens=CHARACTER_RECALL_MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": preamble_text,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": volatile_text,
+                    },
+                ],
+            }],
             tools=[tool],
             tool_choice={"type": "tool", "name": "report_recalls"},
             timeout=CHARACTER_RECALL_TIMEOUT_S,
