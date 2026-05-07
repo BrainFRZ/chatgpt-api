@@ -124,11 +124,11 @@ def build_character_agent_tool() -> dict:
                         "required": ["action"],
                         "properties": {
                             "action": {"type": "string", "enum": ["add", "drop"]},
-                            "text": {"type": "string", "description": "What happened, in 1-2 sentences. Required for add."},
+                            "text": {"type": "string", "description": "What happened, in 1-2 sentences (or longer for high-impact, file-backed entries). Required for add."},
                             "impact": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1=small but durable, 5=defining. Required for add."},
-                            "quote": {"type": "string", "description": "Optional pithy quote (≤160 chars) that captures the moment."},
+                            "quote": {"type": "string", "description": "Optional pithy quote (≤300 chars) that captures the moment."},
                             "focus": {"type": "string", "description": "Optional 1-3 word topic tag."},
-                            "index": {"type": "integer", "description": "For drop: index in the [MEMORIES] list shown to the model."},
+                            "id": {"type": "integer", "description": "For drop: the memory id (NOT index — entries now live in jsonl with stable ids)."},
                         },
                     },
                 },
@@ -232,17 +232,51 @@ def _read_file(path: str) -> str:
         return ""
 
 
-def _summarize_state(characters_state: dict) -> str:
+def _summarize_state(
+    characters_state: dict,
+    *,
+    project_dir: Optional[str] = None,
+    branch_msg_ids: Optional[set] = None,
+) -> str:
+    """Render the side agent's view of current state.
+
+    File-backed kinds (memories, user_profile, growth) read from the store and
+    are branch-filtered. State-backed kinds (callbacks, wellbeing, arc, life_events)
+    come from characters_state directly.
+    """
     if not isinstance(characters_state, dict):
         return ""
     parts = []
-    mems = characters_state.get("character_memories") or []
-    if mems:
-        parts.append("[MEMORIES] (current — index in brackets):")
-        for i, m in enumerate(mems):
-            if not isinstance(m, dict):
-                continue
-            parts.append(f"  [{i}] ({m.get('impact', '?')}★ {m.get('date', '?')}) {m.get('text', '')[:160]}")
+
+    # File-backed: memories / user_profile / growth
+    if project_dir:
+        from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
+        store = CharacterStore(project_dir)
+        mems = store.read_filtered(KIND_MEMORIES, branch_msg_ids)
+        if mems:
+            parts.append("[MEMORIES] (active set — emit drop with id to remove):")
+            for m in sorted(mems, key=lambda e: (e.get("impact", 0), e.get("date") or ""), reverse=True):
+                if not isinstance(m, dict):
+                    continue
+                parts.append(f"  #{m.get('id')} ({m.get('impact', '?')}★ {m.get('date', '?')}) {m.get('text', '')[:200]}")
+        profile = store.read_filtered(KIND_USER_PROFILE, branch_msg_ids)
+        if profile:
+            parts.append("[USER LIFE]:")
+            for e in profile:
+                if not isinstance(e, dict):
+                    continue
+                cat = f"[{e.get('category')}] " if e.get('category') else ""
+                core_tag = " (core)" if e.get("core") else ""
+                parts.append(f"  #{e.get('id')}{core_tag} {cat}{e.get('text', '')[:200]}")
+        growth = store.read_filtered(KIND_GROWTH, branch_msg_ids)
+        growth_active = [g for g in growth if isinstance(g, dict) and not g.get("obsolete")]
+        if growth_active:
+            parts.append("[GROWTH] (current — only emit add for things NOT already here; emit update/obsolete by id when these change):")
+            for g in growth_active:
+                cat = f"[{g.get('category')}] " if g.get('category') else ""
+                parts.append(f"  #{g.get('id')} {cat}{g.get('text', '')[:200]}")
+
+    # State-backed: callbacks / wellbeing / arc / life events
     cbs = (characters_state.get("callbacks") or {}).get("open") or []
     if cbs:
         parts.append("[CALLBACKS — OPEN]:")
@@ -250,21 +284,7 @@ def _summarize_state(characters_state: dict) -> str:
             if not isinstance(cb, dict):
                 continue
             parts.append(f"  #{cb.get('id')} ({cb.get('source', '?')}, since {cb.get('created_date', '?')}): {cb.get('original_text', '')[:160]}")
-    profile = (characters_state.get("user_profile") or {}).get("entries") or []
-    if profile:
-        parts.append("[USER LIFE]:")
-        for e in profile:
-            if not isinstance(e, dict):
-                continue
-            cat = f"[{e.get('category')}] " if e.get('category') else ""
-            parts.append(f"  #{e.get('id')} {cat}{e.get('text', '')[:160]}")
-    growth = (characters_state.get("character_growth") or {}).get("entries") or []
-    growth_active = [g for g in growth if isinstance(g, dict) and not g.get("obsolete")]
-    if growth_active:
-        parts.append("[GROWTH] (current — only emit add for things NOT already here; emit update/obsolete by id when these change):")
-        for g in growth_active:
-            cat = f"[{g.get('category')}] " if g.get('category') else ""
-            parts.append(f"  #{g.get('id')} {cat}{g.get('text', '')[:160]}")
+
     pending_seed = ((characters_state.get("life_events") or {}).get("pending_seed") or {})
     if isinstance(pending_seed, dict) and pending_seed.get("hint"):
         parts.append(
@@ -273,6 +293,7 @@ def _summarize_state(characters_state: dict) -> str:
             f"source={pending_seed.get('source', 'auto')}]: {pending_seed.get('hint', '')[:200]}"
         )
         parts.append("  → If the character surfaced this in their reply (or the user addressed it and was answered), emit consume_event_seed_op AND a memory_op/growth_op so the event lives on.")
+
     wb = characters_state.get("wellbeing") or {}
     parts.append(f"[WELLBEING] {wb.get('state', 'Even')}; current wb_mod for tomorrow: {wb.get('wb_mod', 0)}")
     arc = characters_state.get("arc_state") or ""
@@ -287,11 +308,16 @@ def determine_character_ops(
     characters_state: dict,
     user_input: str,
     character_reply: str,
+    *,
+    branch_msg_ids: Optional[set] = None,
 ) -> tuple[dict, dict]:
     """Run the side agent. Returns (ops_dict, usage_dict).
 
-    ops_dict shape: {memory_ops, callback_ops, profile_ops, wb_mod_ops, arc_state_op}
+    ops_dict shape: {memory_ops, callback_ops, profile_ops, wb_mod_ops, arc_state_op, growth_ops, consume_event_seed_op}
     On error or empty narration: returns ({}, {}) — turn proceeds with no state changes.
+
+    branch_msg_ids: set of message ids in the current branch's path-to-root, used
+    to filter file-backed entries the agent sees. None = unfiltered.
     """
     if not character_reply or not character_reply.strip():
         return {}, {}
@@ -299,7 +325,11 @@ def determine_character_ops(
     profile_doc = _read_file(os.path.join(project_dir or "", "character_profile.di"))
     user_life_doc = _read_file(os.path.join(project_dir or "", "user_life.di"))
 
-    state_summary = _summarize_state(characters_state or {})
+    state_summary = _summarize_state(
+        characters_state or {},
+        project_dir=project_dir,
+        branch_msg_ids=branch_msg_ids,
+    )
 
     user_msg_parts = ["[CHARACTER PROFILE]", profile_doc or "(missing)", ""]
     if user_life_doc:
@@ -359,19 +389,26 @@ def determine_character_ops(
     return ops, usage
 
 
-def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn: int, today_iso: str) -> dict:
-    """Apply the side agent's ops to characters_state in-place (returns the same dict).
+def apply_character_ops_to_state(
+    characters_state: dict,
+    ops: dict,
+    current_turn: int,
+    today_iso: str,
+    *,
+    project_dir: Optional[str] = None,
+    branch_msg_id: Optional[str] = None,
+) -> dict:
+    """Apply the side agent's ops. Memory / user_profile / growth ops go to file
+    storage; everything else (callbacks, wellbeing, arc, life-event consume) stays
+    on characters_state.
 
-    Wraps the per-op application functions in characters.py so the calling code
-    has one entry point.
+    project_dir + branch_msg_id are required for the file-backed ops. If
+    project_dir is None they're skipped (not failing — for test/dry-run).
     """
     from game_systems.characters import (
-        apply_memory_ops,
         apply_callback_ops,
-        apply_user_profile_ops,
         apply_wb_mod_ops,
         apply_arc_state_op,
-        apply_growth_ops,
         consume_pending_event_seed,
     )
 
@@ -380,24 +417,37 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
     if not isinstance(ops, dict):
         return characters_state
 
-    if ops.get("memory_ops"):
-        characters_state["character_memories"] = apply_memory_ops(
-            characters_state.get("character_memories") or [],
-            ops["memory_ops"],
-            current_turn,
-            today_iso,
+    # File-backed ops (require project_dir)
+    if project_dir:
+        from character_storage import (
+            CharacterStore,
+            apply_memory_ops_to_store,
+            apply_user_profile_ops_to_store,
+            apply_growth_ops_to_store,
         )
+        store = CharacterStore(project_dir)
+        if ops.get("memory_ops"):
+            apply_memory_ops_to_store(
+                store, ops["memory_ops"],
+                current_turn=current_turn, today_iso=today_iso, branch_msg_id=branch_msg_id,
+            )
+        if ops.get("profile_ops"):
+            apply_user_profile_ops_to_store(
+                store, ops["profile_ops"],
+                today_iso=today_iso, branch_msg_id=branch_msg_id,
+            )
+        if ops.get("growth_ops"):
+            apply_growth_ops_to_store(
+                store, ops["growth_ops"],
+                today_iso=today_iso, branch_msg_id=branch_msg_id,
+            )
+
+    # State-backed ops
     if ops.get("callback_ops"):
         characters_state["callbacks"] = apply_callback_ops(
             characters_state.get("callbacks") or {"next_id": 1, "open": [], "resolved": [], "dismissed": []},
             ops["callback_ops"],
             current_turn,
-            today_iso,
-        )
-    if ops.get("profile_ops"):
-        characters_state["user_profile"] = apply_user_profile_ops(
-            characters_state.get("user_profile") or {"next_id": 1, "entries": []},
-            ops["profile_ops"],
             today_iso,
         )
     if ops.get("wb_mod_ops"):
@@ -408,12 +458,6 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
     arc_op = ops.get("arc_state_op")
     if isinstance(arc_op, dict) and arc_op.get("action") == "set":
         characters_state["arc_state"] = apply_arc_state_op(characters_state.get("arc_state", ""), arc_op)
-    if ops.get("growth_ops"):
-        characters_state["character_growth"] = apply_growth_ops(
-            characters_state.get("character_growth") or {"next_id": 1, "entries": []},
-            ops["growth_ops"],
-            today_iso,
-        )
     consume_op = ops.get("consume_event_seed_op")
     if isinstance(consume_op, dict) and consume_op.get("action") == "consume":
         life_events = characters_state.get("life_events") or {}

@@ -936,20 +936,14 @@ def build_life_event_injection(state: dict) -> str:
 
 
 def build_character_growth_injection(state: dict) -> str:
-    """Render the model-writable second profile layer.
+    """Render the model-writable second profile layer from _render_payload.
 
-    These are durable additions/updates to the character's identity that have
-    accrued since the last /consolidate pass. The character TREATS THEM AS
-    CANONICAL (same weight as character_profile.di), they just live separately
-    so the user-authored profile stays clean. /consolidate periodically merges
-    them in.
+    All active growth entries are loaded (small dataset, identity-level material).
+    Obsolete entries also rendered as historical context.
     """
-    growth = (state.get("character_growth") or {}).get("entries", [])
-    if not growth:
-        return ""
-
-    active = [g for g in growth if isinstance(g, dict) and not g.get("obsolete")]
-    obsolete = [g for g in growth if isinstance(g, dict) and g.get("obsolete")]
+    payload = (state.get("_render_payload") or {})
+    active = payload.get("growth_active") or []
+    obsolete = payload.get("growth_obsolete") or []
     if not active and not obsolete:
         return ""
 
@@ -957,6 +951,8 @@ def build_character_growth_injection(state: dict) -> str:
     if active:
         by_cat: dict = {}
         for g in active:
+            if not isinstance(g, dict):
+                continue
             by_cat.setdefault(g.get("category") or "other", []).append(g)
         for cat in sorted(by_cat.keys()):
             lines.append(f"  {cat}:")
@@ -968,6 +964,8 @@ def build_character_growth_injection(state: dict) -> str:
     if obsolete:
         lines.append("\n  no longer true (don't bring up as current, but you remember being this way):")
         for g in obsolete[-6:]:  # cap historical clutter
+            if not isinstance(g, dict):
+                continue
             gid = g.get("id")
             text = g.get("text") or ""
             obs_date = g.get("obsolete_date") or "?"
@@ -980,38 +978,93 @@ def build_character_growth_injection(state: dict) -> str:
 
 
 def build_memories_injection(state: dict) -> str:
-    mems = state.get("character_memories") or []
-    if not mems:
+    """Render memories from the runtime-populated _render_payload.
+
+    The payload has two slices:
+    - memories_core: always-loaded top-N (high-impact + recent)
+    - memories_recalled: surfaced this turn by the recall agent (Haiku 4.5)
+
+    Both are full entries (id, text, impact, date, quote, etc.) loaded from the
+    file store, branch-filtered. characters_runtime populates the payload before
+    injection-build time.
+    """
+    payload = (state.get("_render_payload") or {})
+    core = payload.get("memories_core") or []
+    recalled = payload.get("memories_recalled") or []
+    if not core and not recalled:
         return ""
-    lines = ["[MEMORIES] What you remember about your life with the user (most important first):"]
-    for i, m in enumerate(mems):
+
+    seen_ids = set()
+    lines = ["[MEMORIES] What you remember about your life with the user:"]
+
+    def _line(m: dict, prefix: str = ""):
         if not isinstance(m, dict):
-            continue
+            return None
+        mid = m.get("id")
+        if mid in seen_ids:
+            return None
+        seen_ids.add(mid)
         impact = m.get("impact", "?")
         date = m.get("date") or "?"
         text = m.get("text") or ""
         quote = m.get("quote")
-        line = f"  [{i}] ({impact}★ {date}) {text}"
+        focus = f" [{m.get('focus')}]" if m.get("focus") else ""
+        line = f"  {prefix}#{mid} ({impact}★ {date}){focus} {text}"
         if quote:
             line += f' — "{quote}"'
-        lines.append(line)
-    return "\n".join(lines)
+        return line
+
+    if core:
+        for m in core:
+            ln = _line(m)
+            if ln:
+                lines.append(ln)
+    if recalled:
+        # De-dupe against core; only show extras
+        extras = [m for m in recalled if isinstance(m, dict) and m.get("id") not in seen_ids]
+        if extras:
+            lines.append("  ── surfaced this turn (relevant to what the user said) ──")
+            for m in extras:
+                ln = _line(m, prefix="")
+                if ln:
+                    lines.append(ln)
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def build_user_profile_injection(state: dict) -> str:
-    profile = (state.get("user_profile") or {}).get("entries", [])
-    if not profile:
+    """Render user_profile from _render_payload (core + recalled, file-backed)."""
+    payload = (state.get("_render_payload") or {})
+    core = payload.get("profile_core") or []
+    recalled = payload.get("profile_recalled") or []
+    if not core and not recalled:
         return ""
-    lines = ["[USER LIFE] Stable facts about the user that you know:"]
+
+    seen_ids = set()
     by_cat: dict = {}
-    for e in profile:
+
+    def _add(e: dict):
         if not isinstance(e, dict):
-            continue
+            return
+        eid = e.get("id")
+        if eid in seen_ids:
+            return
+        seen_ids.add(eid)
         by_cat.setdefault(e.get("category") or "general", []).append(e)
+
+    for e in core:
+        _add(e)
+    for e in recalled:
+        _add(e)
+
+    if not by_cat:
+        return ""
+
+    lines = ["[USER LIFE] Stable facts about the user that you know:"]
     for cat, items in sorted(by_cat.items()):
         lines.append(f"  {cat}:")
         for e in items:
-            lines.append(f"    [{e.get('id')}] {e.get('text', '')}")
+            tag = " (core)" if e.get("core") else ""
+            lines.append(f"    [{e.get('id')}]{tag} {e.get('text', '')}")
     return "\n".join(lines)
 
 

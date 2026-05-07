@@ -38,6 +38,8 @@
 !backend/character_interview.py
 !backend/character_search.py
 !backend/character_consolidate.py
+!backend/character_storage.py
+!backend/character_recall.py
 !backend/characters_runtime.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py

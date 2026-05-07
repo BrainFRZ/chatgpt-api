@@ -6073,60 +6073,114 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 get_characters_state,
                 prepare_state_for_turn,
                 maybe_generate_off_screen,
+                maybe_migrate_storage,
+                populate_render_payload,
+                clear_render_payload,
+                branch_msg_ids_from_branch_path,
                 build_system_content as _characters_build_system,
                 build_user_message_content as _characters_build_user,
             )
             _project_dir = get_project_dir(username, request.project)
 
+            # Phase 3 migration: if this chat has legacy in-state memory/profile/growth
+            # entries, copy them to jsonl files. Idempotent — runs once per chat.
+            try:
+                _migration_report = maybe_migrate_storage(data, _project_dir)
+                if any((_migration_report or {}).values()):
+                    logger.info(f"Characters: migrated state→files for {username}/{request.project}: {_migration_report}")
+            except Exception as _mig_err:
+                logger.warning(f"Characters storage migration failed: {_mig_err}")
+
             characters_state = get_characters_state(data)
-            # Note: pipeline_state was deepcopied above into stateful_pipeline_state.
-            # Mirror the characters_state into it so injections see the same view
-            # and any post-stream updates land back via stateful_pipeline_state.
             stateful_pipeline_state.setdefault("characters_state", characters_state)
+            _branch_msg_ids = branch_msg_ids_from_branch_path(branch_path)
 
             if use_characters_interview:
-                # Interview mode: no injections, no off-screen, no daily rolls.
+                # Interview mode: no injections, no off-screen, no daily rolls, no recall.
                 injections_str = ""
                 _interview_system = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=True)
                 system_msg = {"role": branch_path[0]["role"], "content": _interview_system}
                 user_content = build_message_content(branch_path[-1])
                 new_user_msg = {"role": "user", "content": user_content}
             else:
-                # Off-screen generation FIRST — uses the *pre-turn* last_user_message_at
-                # to compute the gap. Runs in a worker thread so the sync Anthropic SDK
-                # call doesn't block the asyncio event loop (10-30s on Opus 4.5).
-                try:
-                    _osc_meta = await asyncio.to_thread(
-                        maybe_generate_off_screen, client, characters_state, _project_dir
-                    )
-                    if isinstance(_osc_meta, dict) and _osc_meta.get("usage"):
-                        from character_off_screen import compute_off_screen_cost
-                        data["off_screen_usage"] = _osc_meta["usage"]
-                        data["off_screen_cost"] = compute_off_screen_cost(_osc_meta["usage"])
-                        data["off_screen_model"] = "claude-opus-4-5"
-                except Exception as _osc_err:
-                    logger.warning(f"Characters off-screen generation failed: {_osc_err}")
+                # Concurrent pre-pass: off-screen generation + recall agent. Both
+                # use the *pre-turn* state, so we can run them in parallel.
+                from character_recall import run_recall, compute_recall_cost
+                from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
+                _store = CharacterStore(_project_dir)
+                _core_memory_ids = {m.get("id") for m in _store.core(KIND_MEMORIES, branch_msg_ids=_branch_msg_ids, n=8) if isinstance(m.get("id"), int)}
+                _core_profile_ids = {m.get("id") for m in _store.core(KIND_USER_PROFILE, branch_msg_ids=_branch_msg_ids, n=12) if isinstance(m.get("id"), int)}
+                _core_growth_ids = {m.get("id") for m in _store.core(KIND_GROWTH, branch_msg_ids=_branch_msg_ids) if isinstance(m.get("id"), int)}
 
-                # Daily rolls (does NOT touch wall_clock — see stamp_user_turn below)
+                _user_input_text = build_message_content(branch_path[-1])
+                _recent_dialogue = [{"role": m.get("role"), "content": m.get("content", "")} for m in branch_path[-7:-1] if isinstance(m, dict)]
+
+                async def _run_off_screen():
+                    try:
+                        return await asyncio.to_thread(
+                            maybe_generate_off_screen, client, characters_state, _project_dir
+                        )
+                    except Exception as e:
+                        logger.warning(f"Characters off-screen failed: {e}")
+                        return None
+
+                async def _run_recall():
+                    try:
+                        return await asyncio.to_thread(
+                            run_recall,
+                            client, _project_dir, _user_input_text, _branch_msg_ids,
+                            core_memory_ids=_core_memory_ids,
+                            core_profile_ids=_core_profile_ids,
+                            core_growth_ids=_core_growth_ids,
+                            recent_dialogue=_recent_dialogue,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Characters recall failed: {e}")
+                        return ({}, {})
+
+                _osc_meta, _recall_result = await asyncio.gather(_run_off_screen(), _run_recall())
+
+                # Off-screen telemetry
+                if isinstance(_osc_meta, dict) and _osc_meta.get("usage"):
+                    from character_off_screen import compute_off_screen_cost
+                    data["off_screen_usage"] = _osc_meta["usage"]
+                    data["off_screen_cost"] = compute_off_screen_cost(_osc_meta["usage"])
+                    data["off_screen_model"] = "claude-opus-4-5"
+
+                # Recall telemetry
+                _recall_payload, _recall_usage = _recall_result if isinstance(_recall_result, tuple) else ({}, {})
+                if _recall_usage:
+                    data["recall_usage"] = _recall_usage
+                    data["recall_cost"] = compute_recall_cost(_recall_usage)
+                    data["recall_model"] = "claude-haiku-4-5"
+                    if isinstance(_recall_payload, dict) and _recall_payload.get("ids_recalled"):
+                        data["recall_ids"] = _recall_payload["ids_recalled"]
+
+                # Daily rolls (does NOT touch wall_clock — stamp_user_turn after injection build)
                 prepare_state_for_turn(data, _project_dir)
                 characters_state = get_characters_state(data)
                 stateful_pipeline_state["characters_state"] = characters_state
+
+                # Populate the render payload from file storage + recall results.
+                # build_*_injection functions read from characters_state["_render_payload"].
+                populate_render_payload(
+                    characters_state, _project_dir,
+                    branch_msg_ids=_branch_msg_ids,
+                    recall=_recall_payload if isinstance(_recall_payload, dict) else None,
+                )
 
                 _system_full = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=False)
                 system_msg = {"role": branch_path[0]["role"], "content": _system_full}
 
                 user_content = build_message_content(branch_path[-1])
-                # Build injection BEFORE stamping wall_clock — otherwise the silence-streak
-                # calculation reads the just-overwritten timestamp and reports ~0 instead
-                # of the real gap.
                 user_content = _characters_build_user(characters_state, user_content)
                 new_user_msg = {"role": "user", "content": user_content}
 
-                # Now stamp the wall_clock for this user message. Next turn's silence
-                # streak will measure from this timestamp.
+                # Stamp wall_clock and clear the render payload (transient, don't persist)
                 from characters_runtime import stamp_user_turn as _characters_stamp
                 _characters_stamp(characters_state)
-                injections_str = ""  # building handled inline above
+                clear_render_payload(characters_state)
+                injections_str = ""
 
             # messages_for_api is built unconditionally below; we just populated system_msg + new_user_msg.
         elif _has_game_state:
@@ -9708,7 +9762,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 and stateful_pipeline_state is not None
                                 and (accumulated_content or "").strip()):
                             try:
-                                from characters_runtime import run_post_stream_extraction
+                                from characters_runtime import run_post_stream_extraction, branch_msg_ids_from_branch_path
                                 _characters_dir = (
                                     get_project_dir(username, request.project)
                                     if request.project else None
@@ -9717,6 +9771,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     "characters_state",
                                     stateful_pipeline_state.get("characters_state") or {},
                                 )
+                                _branch_msg_ids_post = branch_msg_ids_from_branch_path(branch_path)
                                 _ca_meta = await asyncio.to_thread(
                                     run_post_stream_extraction,
                                     client,
@@ -9725,6 +9780,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     request.message or "",
                                     accumulated_content,
                                     len(branch_path),  # turn counter
+                                    branch_msg_id=user_msg_id,
+                                    branch_msg_ids=_branch_msg_ids_post,
                                 )
                                 if _ca_meta.get("character_agent_usage"):
                                     data["character_agent_usage"] = _ca_meta["character_agent_usage"]
@@ -10229,9 +10286,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # computed separately and added rather than mixed into `parsed`.
                         flag_agent_cost = float(data.get("flag_agent_cost", 0.0) or 0.0)
                         total_cost += flag_agent_cost
-                        # Same fold-in for Characters' side agents (Haiku extraction + Opus 4.5 off-screen).
+                        # Same fold-in for Characters' side agents (Sonnet extraction + Opus 4.5 off-screen + Haiku recall).
                         total_cost += float(data.get("character_agent_cost", 0.0) or 0.0)
                         total_cost += float(data.get("off_screen_cost", 0.0) or 0.0)
+                        total_cost += float(data.get("recall_cost", 0.0) or 0.0)
                         # Sonar search cost (Perplexity returns dollars directly via usage.cost.total_cost).
                         total_cost += float(data.get("search_cost", 0.0) or 0.0)
 
@@ -10311,6 +10369,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["off_screen_usage"] = data["off_screen_usage"]
                             assistant_msg_data["off_screen_cost"] = float(data.get("off_screen_cost", 0.0) or 0.0)
                             assistant_msg_data["off_screen_model"] = data.get("off_screen_model", "claude-opus-4-5")
+                        if data.get("recall_usage"):
+                            assistant_msg_data["recall_usage"] = data["recall_usage"]
+                            assistant_msg_data["recall_cost"] = float(data.get("recall_cost", 0.0) or 0.0)
+                            assistant_msg_data["recall_model"] = data.get("recall_model", "claude-haiku-4-5")
+                            if data.get("recall_ids"):
+                                assistant_msg_data["recall_ids"] = data["recall_ids"]
                         if data.get("search_calls"):
                             assistant_msg_data["search_usage"] = data.get("search_usage", {})
                             assistant_msg_data["search_cost"] = float(data.get("search_cost", 0.0) or 0.0)

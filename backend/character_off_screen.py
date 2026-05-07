@@ -221,12 +221,20 @@ def generate_off_screen_log(
     if arc:
         parts += [f"[CURRENT ARC] {arc}", ""]
 
-    mems = (characters_state or {}).get("character_memories") or []
+    # Read memories from file storage (file-backed since the storage migration)
+    mems: list = []
+    if project_dir:
+        try:
+            from character_storage import CharacterStore, KIND_MEMORIES
+            store = CharacterStore(project_dir)
+            mems = store.core(KIND_MEMORIES, n=8)
+        except Exception as e:
+            logger.warning(f"off_screen: memory read failed: {e}")
     if mems:
         parts.append("[RECENT MEMORIES — for inspiration, not direct reuse]")
-        for m in mems[:8]:
+        for m in mems:
             if isinstance(m, dict):
-                parts.append(f"  - ({m.get('impact', '?')}★) {m.get('text', '')[:160]}")
+                parts.append(f"  - ({m.get('impact', '?')}★) {m.get('text', '')[:200]}")
         parts.append("")
 
     # Life-event seed: a weekly auto-roll (or manual /seed-event) may have planted

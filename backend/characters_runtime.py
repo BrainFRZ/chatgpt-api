@@ -62,7 +62,13 @@ def has_character_profile(project_dir: Optional[str]) -> bool:
 
 
 def get_characters_state(data: dict) -> dict:
-    """Reach into pipeline_state for characters_state, initializing if needed."""
+    """Reach into pipeline_state for characters_state, initializing if needed.
+
+    NOTE: character_memories / user_profile / character_growth used to live here as
+    in-state lists. They're now file-backed (see character_storage.py). The fields
+    are retained as empty placeholders for migration purposes — when migrate happens,
+    legacy entries get copied to files and the fields get cleared.
+    """
     ps = data.setdefault("pipeline_state", {})
     if not isinstance(ps, dict):
         ps = {}
@@ -89,6 +95,89 @@ def get_characters_state(data: dict) -> dict:
     cs.setdefault("wall_clock", {"first_message_at": None, "last_user_message_at": None, "last_message_at": None})
     cs.setdefault("ripe_callbacks", [])
     return cs
+
+
+def populate_render_payload(
+    characters_state: dict,
+    project_dir: Optional[str],
+    *,
+    branch_msg_ids: Optional[set] = None,
+    recall: Optional[dict] = None,
+) -> None:
+    """Stuff a transient _render_payload field into characters_state with file-loaded
+    entries that the injection builders read.
+
+    `recall` is the output of the recall agent (dict with memory_ids/profile_ids/
+    growth_ids → full entries, branch-filtered). May be None on the very first
+    request before recall has run.
+    """
+    if not isinstance(characters_state, dict):
+        return
+    payload = {
+        "memories_core": [],
+        "memories_recalled": [],
+        "profile_core": [],
+        "profile_recalled": [],
+        "growth_active": [],
+        "growth_obsolete": [],
+    }
+    if project_dir:
+        try:
+            from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
+            store = CharacterStore(project_dir)
+            payload["memories_core"] = store.core(KIND_MEMORIES, branch_msg_ids=branch_msg_ids, n=8)
+            payload["profile_core"] = store.core(KIND_USER_PROFILE, branch_msg_ids=branch_msg_ids, n=12)
+            growth_all = store.read_filtered(KIND_GROWTH, branch_msg_ids)
+            payload["growth_active"] = [g for g in growth_all if not g.get("obsolete")]
+            payload["growth_obsolete"] = [g for g in growth_all if g.get("obsolete")]
+        except Exception as e:
+            logger.warning(f"populate_render_payload: store read failed: {e}")
+    if isinstance(recall, dict):
+        payload["memories_recalled"] = recall.get("recalled_memories") or []
+        payload["profile_recalled"] = recall.get("recalled_profile") or []
+        # Growth: recall may add to active set (Haiku might surface obsolete entries
+        # that are still narratively relevant — but in practice the recall agent
+        # avoids these per its prompt; safe to ignore here).
+    characters_state["_render_payload"] = payload
+
+
+def clear_render_payload(characters_state: dict) -> None:
+    """Strip the transient render payload before persisting state to disk."""
+    if isinstance(characters_state, dict):
+        characters_state.pop("_render_payload", None)
+
+
+def maybe_migrate_storage(data: dict, project_dir: Optional[str]) -> dict:
+    """One-shot migrate of legacy in-state memory/profile/growth → jsonl files.
+
+    Idempotent — does nothing if files already exist with content. Returns the
+    migration report (counts) for logging.
+    """
+    if not project_dir:
+        return {}
+    try:
+        from character_storage import CharacterStore, migrate_state_to_files
+        store = CharacterStore(project_dir)
+        cs = get_characters_state(data)
+        return migrate_state_to_files(cs, store)
+    except Exception as e:
+        logger.warning(f"maybe_migrate_storage: failed: {e}")
+        return {}
+
+
+def branch_msg_ids_from_branch_path(branch_path: list) -> set:
+    """Extract message ids from a branch_path list. Used to build the branch-scope
+    set for filtering file-backed entries.
+    """
+    out: set = set()
+    if not isinstance(branch_path, list):
+        return out
+    for m in branch_path:
+        if isinstance(m, dict):
+            mid = m.get("id")
+            if mid is not None:
+                out.add(mid)
+    return out
 
 
 # ── Slash commands (no model call) ─────────────────────────────────
@@ -204,22 +293,23 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
         except OSError as e:
             return {"kind": "error", "feedback": f"Failed to write profile: {e}"}
 
-        # Drop merged growth entries from state
-        merged_ids = set(proposal.get("merged_growth_ids") or [])
+        # Drop merged growth entries from file storage (file-backed since storage migration)
+        merged_ids = list(proposal.get("merged_growth_ids") or [])
+        deleted_count = 0
         if merged_ids:
-            growth = cs.get("character_growth") or {"next_id": 1, "entries": []}
-            growth["entries"] = [
-                g for g in growth.get("entries", [])
-                if isinstance(g, dict) and g.get("id") not in merged_ids
-            ]
-            cs["character_growth"] = growth
+            try:
+                from character_storage import CharacterStore, KIND_GROWTH
+                store = CharacterStore(project_dir)
+                deleted_count = store.delete_many(KIND_GROWTH, [int(i) for i in merged_ids if isinstance(i, (int, str))])
+            except Exception as e:
+                logger.warning(f"/accept-consolidation: growth delete failed: {e}")
 
         data.pop("_consolidation_proposal", None)
         return {
             "kind": "consolidation_accepted",
             "feedback": (
                 f"Consolidation accepted. character_profile.di updated; "
-                f"{len(merged_ids)} growth entries merged in and cleared. "
+                f"{deleted_count} growth entries merged in and cleared. "
                 f"Backup saved alongside the original."
             ),
         }
@@ -506,8 +596,17 @@ def run_post_stream_extraction(
     user_input: str,
     character_reply: str,
     current_turn: int,
+    *,
+    branch_msg_id: Optional[str] = None,
+    branch_msg_ids: Optional[set] = None,
 ) -> dict:
-    """Run Haiku 4.5 character_agent + apply ops. Returns metadata dict for telemetry."""
+    """Run the character_agent (Sonnet 4.6) post-pass + apply ops.
+
+    branch_msg_id: tags newly-created file-backed entries (memories/profile/growth)
+      so they're scoped to this branch. Use the user_msg_id of this turn.
+    branch_msg_ids: scope set the agent uses when reading existing entries to
+      decide what to drop / update (avoid touching out-of-branch entries).
+    """
     from character_agent import (
         determine_character_ops,
         apply_character_ops_to_state,
@@ -520,9 +619,13 @@ def run_post_stream_extraction(
         characters_state,
         user_input,
         character_reply,
+        branch_msg_ids=branch_msg_ids,
     )
     if ops:
-        apply_character_ops_to_state(characters_state, ops, current_turn, today_et_iso())
+        apply_character_ops_to_state(
+            characters_state, ops, current_turn, today_et_iso(),
+            project_dir=project_dir, branch_msg_id=branch_msg_id,
+        )
 
     # Stamp the wall_clock with assistant message timestamp
     characters_state["wall_clock"] = update_wall_clock(
@@ -555,11 +658,19 @@ def run_consolidate(client, data: dict, project_dir: Optional[str]) -> dict:
         return {"ok": False, "feedback": "Cannot consolidate: character_profile.di not found."}
 
     cs = get_characters_state(data)
-    growth_state = cs.get("character_growth") or {"next_id": 1, "entries": []}
-    memories = cs.get("character_memories") or []
+
+    # Read growth + memories from file storage (post-migration)
+    from character_storage import CharacterStore, KIND_MEMORIES, KIND_GROWTH
+    store = CharacterStore(project_dir)
+    growth_entries = store.read_all(KIND_GROWTH)
+    memories = store.read_all(KIND_MEMORIES)
+
+    # Reshape growth_entries into the legacy {next_id, entries} dict the
+    # consolidate agent expects (since its prompt was written against that shape).
+    growth_state = {"next_id": (max([g.get("id", 0) for g in growth_entries], default=0) + 1), "entries": growth_entries}
 
     # Bail early if there's literally nothing to consolidate
-    growth_active = [g for g in growth_state.get("entries", []) if isinstance(g, dict) and not g.get("obsolete")]
+    growth_active = [g for g in growth_entries if isinstance(g, dict) and not g.get("obsolete")]
     if not growth_active and not memories:
         return {
             "ok": False,
