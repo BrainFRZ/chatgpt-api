@@ -7,15 +7,24 @@ Architecture:
 - Off-screen life: Opus 4.5 (`character_off_screen.py`) — fires at session resume (>12h gap).
 - Interview: Opus 4.5 (`character_interview.py`) — produces character_profile.di on first run.
 
-State (lives in pipeline_state["characters_state"]):
-- character_memories: tier-capped (flavor=25, moderate=10, high=15) memory list. NOT NPC-keyed — single character.
+State split:
+
+State-backed (in pipeline_state["characters_state"], deepcopied per branch):
 - callbacks: open / resolved / dismissed. d10-vs-days check-in cadence. No quiet drops.
 - wellbeing: 2d10+mod rolled once per real ET day; 5 bands (Rough/Frayed/Even/Buoyant/Excellent).
 - arc_state: free-form short string describing relationship phase.
 - channel: text / phone / inperson / video.
-- user_profile: stable user facts; player-seeded, model-mutated via ops.
 - off_screen_log: transient per-day events generated at session resume.
 - wall_clock: first_message_at, last_user_message_at, last_message_at (ISO-8601 with offset).
+- life_events: weekly auto-roll seed + history.
+
+File-backed (jsonl per project, branch-isolated via `branch_id` field on each entry,
+see character_storage.py):
+- character_memories.jsonl: unbounded growth. Hygiene archives 1-2★ memories
+  unreferenced for 365+ days; impact ≥3 is permanent.
+- user_profile.jsonl: stable user facts. Soft-cap 40 (informational, not enforced).
+- character_growth.jsonl: emergent character identity facts. /consolidate merges
+  durable additions into character_profile.di.
 
 Hard-fails (banner modal, no API request) when character_profile.di is missing.
 """

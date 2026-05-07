@@ -24,7 +24,6 @@ from game_systems.characters import (
     apply_callback_ops,
     apply_channel_op,
     apply_arc_state_op,
-    apply_user_profile_ops,
     maybe_roll_wellbeing,
     maybe_roll_life_event,
     set_manual_event_seed,
@@ -650,10 +649,21 @@ def run_post_stream_extraction(
 
 # ── Interview finalization ─────────────────────────────────────────
 
-def run_consolidate(client, data: dict, project_dir: Optional[str]) -> dict:
+def run_consolidate(
+    client,
+    data: dict,
+    project_dir: Optional[str],
+    *,
+    branch_msg_ids: Optional[set] = None,
+) -> dict:
     """Run the consolidate Opus 4.5 call. Stores the proposal on data for /accept-consolidation
     or /reject-consolidation to act on later. Returns a dict for the synthetic message:
       {ok: bool, feedback: str, commentary: str, proposed_profile: str, merged_growth_ids: list, elevated_memory_ids: list, usage: dict, cost: float}
+
+    branch_msg_ids: scope the consolidation to entries visible from the user's current
+    branch. Excludes archived memories by default (those are explicitly faded from
+    canon by the hygiene pass — they shouldn't graduate). If None, uses unfiltered
+    reads (legacy / test path).
     """
     from character_consolidate import run_consolidation, compute_consolidate_cost
 
@@ -666,11 +676,18 @@ def run_consolidate(client, data: dict, project_dir: Optional[str]) -> dict:
 
     cs = get_characters_state(data)
 
-    # Read growth + memories from file storage (post-migration)
+    # Read growth + memories from file storage. Branch-filtered (so abandoned
+    # experimental branches don't pollute canon) and excluding archived (those
+    # are explicitly faded — we don't want them graduated back).
     from character_storage import CharacterStore, KIND_MEMORIES, KIND_GROWTH
     store = CharacterStore(project_dir)
-    growth_entries = store.read_all(KIND_GROWTH)
-    memories = store.read_all(KIND_MEMORIES)
+    if branch_msg_ids is not None:
+        growth_entries = store.read_filtered(KIND_GROWTH, branch_msg_ids)
+        memories = store.read_filtered(KIND_MEMORIES, branch_msg_ids)
+    else:
+        # No branch context provided — still exclude archived
+        growth_entries = [e for e in store.read_all(KIND_GROWTH) if not e.get("archived")]
+        memories = [e for e in store.read_all(KIND_MEMORIES) if not e.get("archived")]
 
     # Reshape growth_entries into the legacy {next_id, entries} dict the
     # consolidate agent expects (since its prompt was written against that shape).

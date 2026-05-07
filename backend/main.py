@@ -6567,15 +6567,19 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         # proposes a merged profile. Stored on data for /accept-consolidation
         # or /reject-consolidation. Bypasses streaming entirely (mirrors /finalize).
         if characters_consolidate_pending:
-            from characters_runtime import run_consolidate as _characters_consolidate
+            from characters_runtime import run_consolidate as _characters_consolidate, branch_msg_ids_from_branch_path
             _characters_dir = (
                 get_project_dir(username, request.project)
                 if request.project else None
             )
+            _consolidate_branch_ids = branch_msg_ids_from_branch_path(branch_path)
 
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
 
-            _result = await asyncio.to_thread(_characters_consolidate, client, data, _characters_dir)
+            _result = await asyncio.to_thread(
+                _characters_consolidate, client, data, _characters_dir,
+                branch_msg_ids=_consolidate_branch_ids,
+            )
             _feedback = _result.get("feedback") or "Consolidation completed."
             _ok = bool(_result.get("ok"))
             _usage = _result.get("usage") or {}
