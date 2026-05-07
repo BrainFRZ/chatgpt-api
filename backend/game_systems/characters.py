@@ -900,6 +900,41 @@ def build_arc_state_injection(state: dict) -> str:
     return f"[ARC] Where this relationship is right now: {arc}"
 
 
+def build_life_event_injection(state: dict) -> str:
+    """Render the pending life-event seed.
+
+    The seed represents something that's happening to the character right now.
+    It needs to surface in conversation — the character introduces or references
+    it naturally when there's an opening. The side agent (Sonnet 4.6) emits a
+    consume op once the event has been delivered to the user, so the seed
+    doesn't keep prompting the model after it's been addressed.
+
+    The seed lives in characters_state.life_events.pending_seed and is set by:
+    - The weekly auto-roll (post-grace-period; the off-screen agent will also
+      weave it into gap days if a gap occurs).
+    - /seed-event manual override.
+    """
+    seed = ((state.get("life_events") or {}).get("pending_seed") or {})
+    if not isinstance(seed, dict) or not seed.get("hint"):
+        return ""
+    magnitude = seed.get("magnitude") or "?"
+    category = seed.get("category") or "?"
+    hint = seed.get("hint")
+    source = seed.get("source") or "auto"
+    planted = seed.get("planted_date") or "?"
+    source_note = (
+        " (USER-AUTHORED — the user wants this specific event to happen, honor it directly)"
+        if source == "manual" else ""
+    )
+    return (
+        f"[LIFE EVENT — currently happening to you, planted {planted}, magnitude={magnitude}/{category}]{source_note}\n"
+        f"  Hint: {hint}\n"
+        f"  Generate the specific event from this hint using your own profile (so it lands plausibly for who you are). "
+        f"Surface it in conversation when there's a natural opening — not as an announcement, just as the thing on your mind. "
+        f"Once you've introduced it (or the user asks about it and you've answered), don't keep harping on it; the side agent will clear the prompt and the event lives on as a memory or growth entry."
+    )
+
+
 def build_character_growth_injection(state: dict) -> str:
     """Render the model-writable second profile layer.
 
@@ -1037,9 +1072,12 @@ def build_off_screen_injection(state: dict) -> str:
 def build_characters_injections(state: dict) -> str:
     """Compose the full Characters injection block. Order matters — most-load-bearing first.
 
-    Character growth is placed near the top (right after wellbeing/arc and before
-    softer context like off-screen/memories) because it's identity-level material
-    and should weight close to the canonical profile.
+    [LIFE EVENT] is placed near the top (right after wellbeing/arc) because it's
+    a current-day load-bearing thing the character should be carrying into every
+    interaction until it's been surfaced.
+
+    Character growth follows because it's identity-level material and should weight
+    close to the canonical profile.
     """
     parts = []
     for builder in (
@@ -1047,6 +1085,7 @@ def build_characters_injections(state: dict) -> str:
         build_channel_injection,
         build_wellbeing_injection,
         build_arc_state_injection,
+        build_life_event_injection,
         build_character_growth_injection,
         build_off_screen_injection,
         build_user_profile_injection,
@@ -1068,6 +1107,7 @@ The system will provide:
 - [CHANNEL] — text / phone / inperson / video. Style accordingly.
 - [WELLBEING] — your mood band today. Don't announce it; let it shape voice.
 - [ARC] — where the relationship currently sits.
+- [LIFE EVENT] — when present, something specific is happening to you right now (a job thing, a friend thing, a health thing — at varying magnitudes). The hint tells you the kind/magnitude; you generate the specific event from your own profile. Surface it in conversation when there's a natural opening — not as an announcement, just as the thing on your mind. After you've delivered it once or twice, don't keep bringing it up unprompted.
 - [GROWTH] — additions to your identity since the canonical profile was written. Treat these as canonical, same weight as character_profile.di. Things you've picked up, opinions you've formed, people who've entered your life. The "no longer true" section is history — you remember being that way but don't claim it as current.
 - [YOUR LIFE SINCE WE LAST TALKED] — things you did during the gap. Don't info-dump; let them surface naturally.
 - [USER LIFE] — durable facts about the user. You know these.

@@ -92,6 +92,12 @@ You are NOT writing the character. You are reading what was written and updating
    Do NOT add: ephemeral moods, single-conversation jokes, things already in character_profile.di or [GROWTH], speculation about what they MIGHT do. The bar is "this would make sense to merge into character_profile.di in 2 weeks."
    Use **obsolete** when something that was in [GROWTH] stops being true (finished the book, broke up with the person, dropped the hobby). Use **update** to refine existing entries (e.g. "still reading LotR" → "finished LotR"). Most turns: no growth_ops. The signal of a good extractor is restraint.
 
+7) **consume_event_seed_op** — clear the [LIFE EVENT] from the model's context once it has been delivered. Emit `{action: "consume"}` (single op) when EITHER:
+   - The character clearly surfaced the event in their reply this turn (introduced it, mentioned it specifically, or answered the user's question about it), OR
+   - The user's input addresses or asks about the event and the character has now responded.
+   Do NOT emit consume on the same turn the seed was first injected unless the character actually surfaced it. Do NOT emit consume if the event hasn't been touched at all yet — let it stay in context for the next turn so the model has another chance.
+   Once consumed, you may also emit a corresponding memory_op or growth_op so the event lives on as a memory or a durable change (e.g. "Nora's cat ran away" → memory at impact 4; "Nora started a new job" → growth entry under "milestone").
+
 HARD RULES:
 - Restraint. Most turns will have empty arrays. The signal of a good extractor is *not* logging too much.
 - Memories must be SPECIFIC and FUTURE-USEFUL. "They had a nice chat" is not a memory. "The user said her mom called drunk again" is.
@@ -204,6 +210,13 @@ def build_character_agent_tool() -> dict:
                         },
                     },
                 },
+                "consume_event_seed_op": {
+                    "type": "object",
+                    "description": "Optional. Emit {action: 'consume'} when the [LIFE EVENT] seed has been delivered to the user (character surfaced it OR user addressed it and was answered). Pair with a memory_op or growth_op so the event lives on after consumption.",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["consume"]},
+                    },
+                },
             },
         },
     }
@@ -252,6 +265,14 @@ def _summarize_state(characters_state: dict) -> str:
         for g in growth_active:
             cat = f"[{g.get('category')}] " if g.get('category') else ""
             parts.append(f"  #{g.get('id')} {cat}{g.get('text', '')[:160]}")
+    pending_seed = ((characters_state.get("life_events") or {}).get("pending_seed") or {})
+    if isinstance(pending_seed, dict) and pending_seed.get("hint"):
+        parts.append(
+            f"[LIFE EVENT — pending, planted {pending_seed.get('planted_date', '?')}, "
+            f"{pending_seed.get('magnitude', '?')}/{pending_seed.get('category', '?')}, "
+            f"source={pending_seed.get('source', 'auto')}]: {pending_seed.get('hint', '')[:200]}"
+        )
+        parts.append("  → If the character surfaced this in their reply (or the user addressed it and was answered), emit consume_event_seed_op AND a memory_op/growth_op so the event lives on.")
     wb = characters_state.get("wellbeing") or {}
     parts.append(f"[WELLBEING] {wb.get('state', 'Even')}; current wb_mod for tomorrow: {wb.get('wb_mod', 0)}")
     arc = characters_state.get("arc_state") or ""
@@ -351,6 +372,7 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
         apply_wb_mod_ops,
         apply_arc_state_op,
         apply_growth_ops,
+        consume_pending_event_seed,
     )
 
     if not isinstance(characters_state, dict):
@@ -392,5 +414,12 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
             ops["growth_ops"],
             today_iso,
         )
+    consume_op = ops.get("consume_event_seed_op")
+    if isinstance(consume_op, dict) and consume_op.get("action") == "consume":
+        life_events = characters_state.get("life_events") or {}
+        consumed = consume_pending_event_seed(life_events, today_iso)
+        if consumed:
+            characters_state["life_events"] = life_events
+            logger.info(f"character_agent: consumed life-event seed {consumed.get('magnitude')}/{consumed.get('category')} via in-conversation delivery")
 
     return characters_state
