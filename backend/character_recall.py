@@ -1,26 +1,34 @@
 """Character recall pre-fetcher — Claude Haiku 4.5.
 
-Runs BEFORE the correspondence model (Opus 3) streams its reply. Sees the
-SAME dialogue context Opus sees (sawtooth-trimmed branch path, 40-120
-messages depending on where in the cycle), plus branch-filtered indices of
-memories, user_profile, and character_growth from the file store.
+Runs BEFORE the correspondence model (Opus 3) streams its reply. Sees:
+- A small dialogue window (last ~6 messages = ~3 exchanges) — just enough
+  to understand the immediate topic the user is on.
+- Branch-filtered indices of memories, user_profile, character_growth from
+  the file store.
 
 Decides which entries (by id) are relevant to surface this turn, on top of
 the always-loaded "core" set. Returns full entries; the runtime stuffs them
 into characters_state._render_payload before injection-build time.
 
-Context-parity with Opus matters: if the user's current message references
-something from 30 turns back ("did you ever finish that book you mentioned?"),
-recall has to see those 30 turns to know what to retrieve. Just the current
-message + last few exchanges isn't enough.
+WHY a small dialogue window, not Opus's full sawtooth context:
+- The whole POINT of memories is they're the distilled summary of "what's
+  worth retrieving later." When the user references something from 30 turns
+  back, the memory index ENTRY for that thing is what bridges the gap —
+  recall doesn't need the raw conversation history.
+- Bigger dialogue → more for Haiku to scan → more potential distraction
+  from the actual recall task.
+- The dialogue window's job is just topic continuity: "what subject is
+  the user on right now," "what just got asked." That's a few exchanges,
+  not a full sawtooth window.
 
-Cost control is via prompt caching. The dialogue history and entry indices
-are the bulk of input and they're mostly stable from turn to turn (new turn
-adds a couple messages, occasionally adds an index entry). cache_control on
-the stable preamble means after the first call we mostly pay cache-read rates
-($0.10/MTok instead of $1/MTok). Per-turn cost: ~$0.001-0.004.
+Cost control is via prompt caching. The dialogue + entry indices are marked
+cache_control=ephemeral. The indices dominate the preamble size (often
+5-30K tokens for a chat with ~100 memories), so even with the small dialogue
+window we're well above the Haiku cache minimum. cache_control means within
+a 5-minute session most turns pay cache-read rates ($0.10/MTok) instead of
+input rates ($1/MTok). Per-turn cost: ~$0.001-0.003.
 
-Why Haiku (not Sonnet, not Opus): this is pattern-matching across an index,
+Why Haiku (not Sonnet, not Opus): this is pattern-matching against an index,
 which Haiku excels at. Sonnet would be overkill; Opus 3 is busy streaming.
 
 Why pre-pass (not tool the correspondence model uses): keeps Opus 3 in pure
@@ -162,9 +170,12 @@ def _build_index_text(entries: list, kind: str, exclude_ids: Optional[set] = Non
     return "\n".join(lines) if lines else "(none)"
 
 
-def _render_dialogue(dialogue: list, max_messages: int = 120, char_per_msg: int = 220) -> str:
-    """Render dialogue for the recall prompt. Caps message count and per-message
-    length to keep tokens bounded even for long sawtooth windows.
+def _render_dialogue(dialogue: list, max_messages: int = 8, char_per_msg: int = 240) -> str:
+    """Render the small dialogue window for the recall prompt.
+
+    Default cap is 8 messages (~4 exchanges) — enough for immediate topic
+    continuity. Cross-turn references are handled by the memory index, not
+    by reconstructing the full conversation here.
 
     `dialogue` is a list of {role, content} dicts (matching what gets sent to Opus).
     """
@@ -212,16 +223,17 @@ def run_recall(
     re-recall what's already loaded. Pass them in as the ids the runtime will
     include from store.core() regardless.
 
-    recent_dialogue: the FULL sawtooth-trimmed dialogue context Opus sees this
-    turn — pass context_pairs from main.py (typically 40-120 messages). Recall
-    needs this to judge relevance for cross-turn references ("did you ever
-    finish that book you mentioned?"). Capped internally at 120 to keep token
-    count bounded.
+    recent_dialogue: a SMALL window (last ~6-8 messages = 3-4 exchanges) of
+    immediately recent conversation. Just enough for topic continuity.
+    Cross-turn references ("did you finish that book you mentioned?") are
+    handled by the memory index, not by reconstructing 30 turns of dialogue
+    — the memory index ENTRY for that reference is what bridges the gap.
 
-    Cache control: the dialogue + indices preamble is marked cache_control=ephemeral
-    so subsequent turns within the 5-minute cache TTL pay $0.10/MTok cache-read
-    rates instead of $1/MTok input rates. Active sessions get most of their
-    recall calls cached.
+    Cache control: dialogue + indices preamble is marked cache_control=ephemeral.
+    The indices dominate the preamble size (often 5-30K tokens for a chat with
+    ~100 memories), so caching kicks in well above the Haiku cache minimum even
+    with the small dialogue window. Within a 5-min session, most turns pay
+    cache-read rates ($0.10/MTok) instead of input rates ($1/MTok).
     """
     empty: dict = {"recalled_memories": [], "recalled_profile": [], "recalled_growth": []}
     if not user_input or not user_input.strip():

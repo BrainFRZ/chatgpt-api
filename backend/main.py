@@ -6113,12 +6113,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _core_growth_ids = {m.get("id") for m in _store.core(KIND_GROWTH, branch_msg_ids=_branch_msg_ids) if isinstance(m.get("id"), int)}
 
                 _user_input_text = build_message_content(branch_path[-1])
-                # Recall sees the SAME dialogue window Opus sees (sawtooth-trimmed
-                # context_pairs). Lets recall judge cross-turn references ("did you
-                # ever finish that book you mentioned 30 turns ago?"). Cached on
-                # the recall side via cache_control so the cost stays low even
-                # though the window can be 40-120 messages.
-                _recent_dialogue = list(context_pairs)
+                # Recall sees a SMALL dialogue window (last few exchanges) — just
+                # enough to understand the immediate topic. Cross-turn references
+                # ("did you finish that book you mentioned?") are handled by the
+                # memory index, not by reconstructing 30 turns of conversation.
+                # The whole point of a memory is "this is the distilled summary
+                # of what's worth retrieving"; recall picks from that, with the
+                # current dialogue chunk just for topic continuity.
+                _recent_dialogue = [
+                    {"role": m.get("role"), "content": m.get("content", "")}
+                    for m in branch_path[-7:-1] if isinstance(m, dict)
+                ]
 
                 async def _run_off_screen():
                     try:
