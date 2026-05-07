@@ -76,6 +76,15 @@ You are NOT writing the character. You are reading what was written and updating
 
 5) **arc_state_op** — set a short string (≤80 chars) describing where the relationship currently sits. Only emit when there's a clear shift. Examples: "tentative reconnection after long silence", "post-fight cooling-off", "established daily rhythm". Most turns: no arc_state_op.
 
+6) **growth_ops** (character_growth) — durable additions to the CHARACTER'S identity that emerge through dialogue. This is the second profile layer; the canonical character_profile.di is frozen, and growth accumulates here until the user runs /consolidate. Add when the character:
+   - Picks up a new hobby that's likely to stick ("started knitting again, finished a scarf")
+   - Forms an opinion they'll defend ("hates the new Beach House album, calls it elevator music")
+   - Has a new person enter their life recurringly (a co-worker mentioned three times, a new partner, a new neighbor)
+   - Reveals a trait the original profile didn't capture ("turns out she journals every morning")
+   - Acquires a skill or fact that's now stable ("she's been learning Python for the bot project")
+   Do NOT add: ephemeral moods, single-conversation jokes, things already in character_profile.di or [GROWTH], speculation about what they MIGHT do. The bar is "this would make sense to merge into character_profile.di in 2 weeks."
+   Use **obsolete** when something that was in [GROWTH] stops being true (finished the book, broke up with the person, dropped the hobby). Use **update** to refine existing entries (e.g. "still reading LotR" → "finished LotR"). Most turns: no growth_ops. The signal of a good extractor is restraint.
+
 HARD RULES:
 - Restraint. Most turns will have empty arrays. The signal of a good extractor is *not* logging too much.
 - Memories must be SPECIFIC and FUTURE-USEFUL. "They had a nice chat" is not a memory. "The user said her mom called drunk again" is.
@@ -164,6 +173,30 @@ def build_character_agent_tool() -> dict:
                         "value": {"type": "string", "description": "≤80 chars. Free-form."},
                     },
                 },
+                "growth_ops": {
+                    "type": "array",
+                    "description": "Character-growth operations. Durable additions to the character's identity emerging through dialogue. Most turns: empty.",
+                    "items": {
+                        "type": "object",
+                        "required": ["action"],
+                        "properties": {
+                            "action": {"type": "string", "enum": ["add", "update", "obsolete", "delete"]},
+                            "text": {"type": "string", "description": "The fact. Required for add; optional for update."},
+                            "category": {
+                                "type": "string",
+                                "enum": ["hobby", "opinion", "fact", "relationship", "skill", "preference", "milestone", "voice", "other"],
+                                "description": "Required for add. Tag the kind of growth this is.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "enum": ["dialogue", "reflection", "user"],
+                                "description": "Optional. dialogue=emerged in conversation; reflection=character reflecting on themselves; user=user explicitly told the character about themselves.",
+                            },
+                            "id": {"type": "integer", "description": "For update/obsolete/delete: id from [GROWTH]."},
+                            "reason": {"type": "string", "description": "For obsolete: 1-line why this is no longer true."},
+                        },
+                    },
+                },
             },
         },
     }
@@ -205,6 +238,13 @@ def _summarize_state(characters_state: dict) -> str:
                 continue
             cat = f"[{e.get('category')}] " if e.get('category') else ""
             parts.append(f"  #{e.get('id')} {cat}{e.get('text', '')[:160]}")
+    growth = (characters_state.get("character_growth") or {}).get("entries") or []
+    growth_active = [g for g in growth if isinstance(g, dict) and not g.get("obsolete")]
+    if growth_active:
+        parts.append("[GROWTH] (current — only emit add for things NOT already here; emit update/obsolete by id when these change):")
+        for g in growth_active:
+            cat = f"[{g.get('category')}] " if g.get('category') else ""
+            parts.append(f"  #{g.get('id')} {cat}{g.get('text', '')[:160]}")
     wb = characters_state.get("wellbeing") or {}
     parts.append(f"[WELLBEING] {wb.get('state', 'Even')}; current wb_mod for tomorrow: {wb.get('wb_mod', 0)}")
     arc = characters_state.get("arc_state") or ""
@@ -303,6 +343,7 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
         apply_user_profile_ops,
         apply_wb_mod_ops,
         apply_arc_state_op,
+        apply_growth_ops,
     )
 
     if not isinstance(characters_state, dict):
@@ -338,5 +379,11 @@ def apply_character_ops_to_state(characters_state: dict, ops: dict, current_turn
     arc_op = ops.get("arc_state_op")
     if isinstance(arc_op, dict) and arc_op.get("action") == "set":
         characters_state["arc_state"] = apply_arc_state_op(characters_state.get("arc_state", ""), arc_op)
+    if ops.get("growth_ops"):
+        characters_state["character_growth"] = apply_growth_ops(
+            characters_state.get("character_growth") or {"next_id": 1, "entries": []},
+            ops["growth_ops"],
+            today_iso,
+        )
 
     return characters_state

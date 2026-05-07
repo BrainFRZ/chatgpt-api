@@ -76,6 +76,7 @@ def get_characters_state(data: dict) -> dict:
     cs.setdefault("arc_state", "")
     cs.setdefault("channel", DEFAULT_CHANNEL)
     cs.setdefault("user_profile", {"next_id": 1, "entries": []})
+    cs.setdefault("character_growth", {"next_id": 1, "entries": []})
     cs.setdefault("off_screen_log", None)
     cs.setdefault("wall_clock", {"first_message_at": None, "last_user_message_at": None, "last_message_at": None})
     cs.setdefault("ripe_callbacks", [])
@@ -167,6 +168,67 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
             "feedback": f"Callback #{cb_id} {action}d.",
         }
 
+    # Accept / reject a pending consolidation proposal — these are state-only,
+    # no model call needed. The /consolidate command itself is short-circuited
+    # by preflight.finalize-style routing in main.py since it requires an Opus call.
+    if cmd == "/accept-consolidation":
+        proposal = data.get("_consolidation_proposal")
+        if not isinstance(proposal, dict) or not proposal.get("proposed_profile"):
+            return {
+                "kind": "error",
+                "feedback": "No pending consolidation. Run /consolidate first.",
+            }
+        if not project_dir:
+            return {"kind": "error", "feedback": "No project directory; cannot write profile."}
+        profile_path = os.path.join(project_dir, "character_profile.di")
+        # Back up the current profile before overwrite
+        try:
+            if os.path.isfile(profile_path):
+                from datetime import datetime as _dt
+                stamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = os.path.join(project_dir, f"character_profile.di.bak.{stamp}")
+                with open(profile_path, "r", encoding="utf-8") as fp_old:
+                    old = fp_old.read()
+                with open(backup_path, "w", encoding="utf-8") as fp_bak:
+                    fp_bak.write(old)
+            with open(profile_path, "w", encoding="utf-8") as fp_new:
+                fp_new.write(proposal["proposed_profile"])
+        except OSError as e:
+            return {"kind": "error", "feedback": f"Failed to write profile: {e}"}
+
+        # Drop merged growth entries from state
+        merged_ids = set(proposal.get("merged_growth_ids") or [])
+        if merged_ids:
+            growth = cs.get("character_growth") or {"next_id": 1, "entries": []}
+            growth["entries"] = [
+                g for g in growth.get("entries", [])
+                if isinstance(g, dict) and g.get("id") not in merged_ids
+            ]
+            cs["character_growth"] = growth
+
+        data.pop("_consolidation_proposal", None)
+        return {
+            "kind": "consolidation_accepted",
+            "feedback": (
+                f"Consolidation accepted. character_profile.di updated; "
+                f"{len(merged_ids)} growth entries merged in and cleared. "
+                f"Backup saved alongside the original."
+            ),
+        }
+
+    if cmd == "/reject-consolidation":
+        proposal = data.get("_consolidation_proposal")
+        if not isinstance(proposal, dict):
+            return {
+                "kind": "error",
+                "feedback": "No pending consolidation to reject.",
+            }
+        data.pop("_consolidation_proposal", None)
+        return {
+            "kind": "consolidation_rejected",
+            "feedback": "Consolidation discarded. Profile unchanged; growth entries kept.",
+        }
+
     # Reinterview
     if cmd == "/reinterview":
         data["_characters_interview_mode"] = True
@@ -189,12 +251,13 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
 
 class CharactersPreflightResult:
     """Encapsulates the preflight decision."""
-    __slots__ = ("hard_fail", "interview_mode", "finalize", "local_slash", "_message")
+    __slots__ = ("hard_fail", "interview_mode", "finalize", "consolidate", "local_slash", "_message")
 
     def __init__(self):
         self.hard_fail: Optional[str] = None         # banner text if hard-failing
         self.interview_mode: bool = False             # route to interview agent
         self.finalize: bool = False                   # /finalize triggered
+        self.consolidate: bool = False                # /consolidate triggered (Opus 4.5 call)
         self.local_slash: Optional[dict] = None       # slash result if handled locally
         self._message: str = ""
 
@@ -203,7 +266,7 @@ class CharactersPreflightResult:
 
     def is_short_circuit(self) -> bool:
         """Either we're hard-failing or a local slash handled the message."""
-        return self.is_hard_fail() or self.local_slash is not None or self.finalize
+        return self.is_hard_fail() or self.local_slash is not None or self.finalize or self.consolidate
 
 
 def preflight(gs: dict, data: dict, project_dir: Optional[str], message: str) -> CharactersPreflightResult:
@@ -222,6 +285,11 @@ def preflight(gs: dict, data: dict, project_dir: Optional[str], message: str) ->
     # /finalize during interview
     if is_in_interview_mode(data) and message.strip().lower().startswith("/finalize"):
         result.finalize = True
+        return result
+
+    # /consolidate (correspondence mode only — meaningless in interview)
+    if not is_in_interview_mode(data) and message.strip().lower().startswith("/consolidate"):
+        result.consolidate = True
         return result
 
     profile_exists = has_character_profile(project_dir)
@@ -436,6 +504,79 @@ def run_post_stream_extraction(
 
 
 # ── Interview finalization ─────────────────────────────────────────
+
+def run_consolidate(client, data: dict, project_dir: Optional[str]) -> dict:
+    """Run the consolidate Opus 4.5 call. Stores the proposal on data for /accept-consolidation
+    or /reject-consolidation to act on later. Returns a dict for the synthetic message:
+      {ok: bool, feedback: str, commentary: str, proposed_profile: str, merged_growth_ids: list, elevated_memory_ids: list, usage: dict, cost: float}
+    """
+    from character_consolidate import run_consolidation, compute_consolidate_cost
+
+    if not project_dir:
+        return {"ok": False, "feedback": "Cannot consolidate: no project directory."}
+    profile_path = os.path.join(project_dir, "character_profile.di")
+    profile_doc = _read_file(profile_path)
+    if not profile_doc:
+        return {"ok": False, "feedback": "Cannot consolidate: character_profile.di not found."}
+
+    cs = get_characters_state(data)
+    growth_state = cs.get("character_growth") or {"next_id": 1, "entries": []}
+    memories = cs.get("character_memories") or []
+
+    # Bail early if there's literally nothing to consolidate
+    growth_active = [g for g in growth_state.get("entries", []) if isinstance(g, dict) and not g.get("obsolete")]
+    if not growth_active and not memories:
+        return {
+            "ok": False,
+            "feedback": (
+                "Nothing to consolidate yet — no growth entries and no memories. "
+                "Have a few correspondence turns first; the side agent will start logging."
+            ),
+        }
+
+    result, usage = run_consolidation(client, profile_doc, growth_state, memories)
+    cost = compute_consolidate_cost(usage) if usage else 0.0
+    if not result:
+        return {
+            "ok": False,
+            "usage": usage or {},
+            "cost": cost,
+            "feedback": "Consolidation call failed or returned no usable proposal. Try again later.",
+        }
+
+    proposal = {
+        "proposed_profile": result["proposed_profile"],
+        "merged_growth_ids": result.get("merged_growth_ids") or [],
+        "elevated_memory_ids": result.get("elevated_memory_ids") or [],
+        "commentary": result.get("commentary") or "",
+        "created_at": now_et().isoformat(),
+    }
+    data["_consolidation_proposal"] = proposal
+
+    feedback_parts = ["## Consolidation proposal\n"]
+    if proposal["commentary"]:
+        feedback_parts.append(proposal["commentary"].strip())
+        feedback_parts.append("")
+    feedback_parts.append("---\n")
+    feedback_parts.append(proposal["proposed_profile"])
+    feedback_parts.append("\n---\n")
+    feedback_parts.append(
+        "Type **/accept-consolidation** to commit (writes character_profile.di, backs up the old one, "
+        "clears merged growth entries) or **/reject-consolidation** to discard."
+    )
+    feedback = "\n".join(feedback_parts)
+
+    return {
+        "ok": True,
+        "feedback": feedback,
+        "commentary": proposal["commentary"],
+        "proposed_profile": proposal["proposed_profile"],
+        "merged_growth_ids": proposal["merged_growth_ids"],
+        "elevated_memory_ids": proposal["elevated_memory_ids"],
+        "usage": usage or {},
+        "cost": cost,
+    }
+
 
 def finalize_interview(client, data: dict, project_dir: Optional[str], transcript: list) -> dict:
     """Run finalize_profile, write character_profile.di, flip out of interview mode.

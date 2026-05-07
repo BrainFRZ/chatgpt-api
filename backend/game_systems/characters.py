@@ -41,6 +41,15 @@ CALLBACK_AGING_DIE = 10              # d10 vs days-since-last-checkin
 
 USER_PROFILE_SOFT_CAP = 40
 
+# Character growth: the model-writable second profile layer that accumulates
+# durable emergent facts about the character (new hobbies, evolved opinions,
+# new people in their life, etc.) between formal /consolidate passes.
+CHARACTER_GROWTH_SOFT_CAP = 80
+CHARACTER_GROWTH_CATEGORIES = (
+    "hobby", "opinion", "fact", "relationship", "skill",
+    "preference", "milestone", "voice", "other",
+)
+
 OFF_SCREEN_GAP_THRESHOLD_HOURS = 12
 OFF_SCREEN_EVENTS_PER_DAY = 3        # max per real day in the gap
 OFF_SCREEN_MAX_DAYS = 14             # don't generate more than 2 weeks of life
@@ -129,6 +138,10 @@ def init_characters_state() -> dict:
         "user_profile": {                   # stable user facts
             "next_id": 1,
             "entries": [],
+        },
+        "character_growth": {               # second profile layer: emergent facts about the character
+            "next_id": 1,
+            "entries": [],                  # [{id, date, text, category, source, obsolete?, obsolete_date?, obsolete_reason?}]
         },
         "off_screen_log": None,             # set by off-screen agent on resume
         "wall_clock": {
@@ -406,6 +419,85 @@ def apply_user_profile_ops(profile: dict, ops: list, today_iso: str) -> dict:
     }
 
 
+# ── Character growth ops ────────────────────────────────────────────
+
+def apply_growth_ops(growth: dict, ops: list, today_iso: str) -> dict:
+    """Operations:
+      {action: "add", text, category?, source?: "dialogue"|"reflection"|"user"}
+        — append a new emergent fact about the character.
+      {action: "update", id: int, text?, category?}
+        — refine an existing entry (e.g. "still reading LotR" → "finished LotR").
+      {action: "obsolete", id: int, reason?}
+        — mark as no-longer-true. Stays in the file (with an obsolete marker)
+          until /consolidate prunes it; gives the model historical context
+          ("she USED to be obsessed with X") without claiming it as current.
+      {action: "delete", id: int}
+        — hard delete (rare; for ops emitted in error).
+    """
+    if not isinstance(growth, dict):
+        growth = {"next_id": 1, "entries": []}
+    entries = growth.setdefault("entries", [])
+    next_id = growth.get("next_id", 1)
+    if not isinstance(next_id, int):
+        next_id = 1
+    by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
+
+    for op in (ops if isinstance(ops, (list, tuple)) else []):
+        if not isinstance(op, dict):
+            continue
+        action = op.get("action")
+
+        if action == "add":
+            text = str(op.get("text") or "")[:400]
+            if not text:
+                continue
+            category = str(op.get("category") or "").lower().strip()
+            if category not in CHARACTER_GROWTH_CATEGORIES:
+                category = "other"
+            source = str(op.get("source") or "").lower().strip()
+            if source not in ("dialogue", "reflection", "user"):
+                source = "dialogue"
+            entry = {
+                "id": next_id,
+                "date": today_iso,
+                "text": text,
+                "category": category,
+                "source": source,
+            }
+            by_id[next_id] = entry
+            next_id += 1
+
+        elif action == "update":
+            target = op.get("id")
+            if target in by_id:
+                if "text" in op:
+                    by_id[target]["text"] = str(op.get("text") or "")[:400]
+                if "category" in op:
+                    cat = str(op.get("category") or "").lower().strip()
+                    if cat in CHARACTER_GROWTH_CATEGORIES:
+                        by_id[target]["category"] = cat
+                by_id[target]["last_updated"] = today_iso
+
+        elif action == "obsolete":
+            target = op.get("id")
+            if target in by_id:
+                by_id[target]["obsolete"] = True
+                by_id[target]["obsolete_date"] = today_iso
+                by_id[target]["obsolete_reason"] = str(op.get("reason") or "")[:200] or None
+
+        elif action == "delete":
+            target = op.get("id")
+            by_id.pop(target, None)
+
+    if len(by_id) > CHARACTER_GROWTH_SOFT_CAP:
+        logger.info(f"character_growth soft cap exceeded: {len(by_id)} > {CHARACTER_GROWTH_SOFT_CAP}")
+
+    return {
+        "next_id": next_id,
+        "entries": sorted(by_id.values(), key=lambda e: e.get("id", 0)),
+    }
+
+
 # ── Wellbeing ───────────────────────────────────────────────────────
 
 def _wb_state_from_total(total: int) -> str:
@@ -579,6 +671,50 @@ def build_arc_state_injection(state: dict) -> str:
     return f"[ARC] Where this relationship is right now: {arc}"
 
 
+def build_character_growth_injection(state: dict) -> str:
+    """Render the model-writable second profile layer.
+
+    These are durable additions/updates to the character's identity that have
+    accrued since the last /consolidate pass. The character TREATS THEM AS
+    CANONICAL (same weight as character_profile.di), they just live separately
+    so the user-authored profile stays clean. /consolidate periodically merges
+    them in.
+    """
+    growth = (state.get("character_growth") or {}).get("entries", [])
+    if not growth:
+        return ""
+
+    active = [g for g in growth if isinstance(g, dict) and not g.get("obsolete")]
+    obsolete = [g for g in growth if isinstance(g, dict) and g.get("obsolete")]
+    if not active and not obsolete:
+        return ""
+
+    lines = ["[GROWTH — additions to your identity since the last consolidation. Treat these as canonical, same weight as character_profile.di.]"]
+    if active:
+        by_cat: dict = {}
+        for g in active:
+            by_cat.setdefault(g.get("category") or "other", []).append(g)
+        for cat in sorted(by_cat.keys()):
+            lines.append(f"  {cat}:")
+            for g in by_cat[cat]:
+                gid = g.get("id")
+                date = g.get("date") or "?"
+                text = g.get("text") or ""
+                lines.append(f"    [{gid}] ({date}) {text}")
+    if obsolete:
+        lines.append("\n  no longer true (don't bring up as current, but you remember being this way):")
+        for g in obsolete[-6:]:  # cap historical clutter
+            gid = g.get("id")
+            text = g.get("text") or ""
+            obs_date = g.get("obsolete_date") or "?"
+            reason = g.get("obsolete_reason")
+            line = f"    [{gid}] {text} — ended {obs_date}"
+            if reason:
+                line += f" ({reason})"
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def build_memories_injection(state: dict) -> str:
     mems = state.get("character_memories") or []
     if not mems:
@@ -670,13 +806,19 @@ def build_off_screen_injection(state: dict) -> str:
 
 
 def build_characters_injections(state: dict) -> str:
-    """Compose the full Characters injection block. Order matters — most-load-bearing first."""
+    """Compose the full Characters injection block. Order matters — most-load-bearing first.
+
+    Character growth is placed near the top (right after wellbeing/arc and before
+    softer context like off-screen/memories) because it's identity-level material
+    and should weight close to the canonical profile.
+    """
     parts = []
     for builder in (
         build_wall_clock_injection,
         build_channel_injection,
         build_wellbeing_injection,
         build_arc_state_injection,
+        build_character_growth_injection,
         build_off_screen_injection,
         build_user_profile_injection,
         build_memories_injection,
@@ -697,6 +839,7 @@ The system will provide:
 - [CHANNEL] — text / phone / inperson / video. Style accordingly.
 - [WELLBEING] — your mood band today. Don't announce it; let it shape voice.
 - [ARC] — where the relationship currently sits.
+- [GROWTH] — additions to your identity since the canonical profile was written. Treat these as canonical, same weight as character_profile.di. Things you've picked up, opinions you've formed, people who've entered your life. The "no longer true" section is history — you remember being that way but don't claim it as current.
 - [YOUR LIFE SINCE WE LAST TALKED] — things you did during the gap. Don't info-dump; let them surface naturally.
 - [USER LIFE] — durable facts about the user. You know these.
 - [MEMORIES] — past moments that matter. Reference when fitting; don't recap unprompted.

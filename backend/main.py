@@ -4833,6 +4833,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     use_characters = False
     use_characters_interview = False
     characters_finalize_pending = False
+    characters_consolidate_pending = False
     characters_slash_feedback: Optional[str] = None
     if gs.get("is_characters") and request.project:
         from characters_runtime import preflight as _characters_preflight
@@ -4871,6 +4872,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         elif _pf.finalize:
             characters_finalize_pending = True
             use_characters_interview = True  # we're still in interview mode until finalize succeeds
+        elif _pf.consolidate:
+            characters_consolidate_pending = True
+            use_characters = True  # not interview — consolidate is a correspondence-mode command
         elif _pf.interview_mode:
             use_characters_interview = True
         else:
@@ -5386,8 +5390,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     if _original_model:
         client = provider.get_client(api_key)
 
-    # Characters interview mode: force model to Opus 4.5 regardless of user's selection
-    if use_characters_interview:
+    # Characters interview mode: force model to Opus 4.5 regardless of user's selection.
+    # Consolidate uses the same model — force-swap on either path so the client is correct.
+    if use_characters_interview or characters_consolidate_pending:
         from character_interview import INTERVIEW_MODEL
         if model_id != INTERVIEW_MODEL:
             model_id = INTERVIEW_MODEL
@@ -5395,9 +5400,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             if api_key:
                 client = provider.get_client(api_key)
-                logger.info(f"Characters interview mode: forced model to {INTERVIEW_MODEL} for {username}")
+                logger.info(f"Characters: forced model to {INTERVIEW_MODEL} for {username} (interview/consolidate)")
             else:
-                logger.warning(f"Characters interview mode: no API key for {INTERVIEW_MODEL}; falling back to {request.model or data.get('model')}")
+                logger.warning(f"Characters: no API key for {INTERVIEW_MODEL}; falling back to {request.model or data.get('model')}")
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
@@ -6490,6 +6495,78 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 "hud_state": None,
                 "characters_finalize_ok": _ok,
                 "profile_path": _result.get("path"),
+            }
+            yield f"event: done\ndata: {json.dumps(_done_data)}\n\n"
+            return
+
+        # Characters /consolidate: Opus 4.5 reads profile + growth + memories,
+        # proposes a merged profile. Stored on data for /accept-consolidation
+        # or /reject-consolidation. Bypasses streaming entirely (mirrors /finalize).
+        if characters_consolidate_pending:
+            from characters_runtime import run_consolidate as _characters_consolidate
+            _characters_dir = (
+                get_project_dir(username, request.project)
+                if request.project else None
+            )
+
+            yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
+
+            _result = await asyncio.to_thread(_characters_consolidate, client, data, _characters_dir)
+            _feedback = _result.get("feedback") or "Consolidation completed."
+            _ok = bool(_result.get("ok"))
+            _usage = _result.get("usage") or {}
+            _input_t = _usage.get("input_tokens", 0) or 0
+            _output_t = _usage.get("output_tokens", 0) or 0
+            _cost_value = float(_result.get("cost", 0.0) or 0.0)
+            _cost_str = f"${_cost_value:.6f}"
+            _tokens_str = f"{_input_t}↑ {_output_t}↓"
+            _consolidate_model = "claude-opus-4-5"
+
+            _assistant_msg_id = generate_message_id()
+            _assistant_msg = {
+                "id": _assistant_msg_id,
+                "parent_id": user_msg_id,
+                "role": "assistant",
+                "content": _feedback,
+                "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                "tokens": _tokens_str,
+                "cost": _cost_str,
+                "model": _consolidate_model,
+                "total_tokens": _input_t + _output_t,
+                "total_claude_tokens": _input_t + _output_t,
+                "characters_consolidate": True,
+                "characters_consolidate_ok": _ok,
+            }
+            data["messages"].append(_assistant_msg)
+            data["current_leaf_id"] = _assistant_msg_id
+
+            try:
+                _stats = data.setdefault("stats", create_empty_stats())
+                _stats["total_cost"] = float(_stats.get("total_cost", 0.0) or 0.0) + _cost_value
+                _stats["total_input_tokens"] = int(_stats.get("total_input_tokens", 0) or 0) + _input_t
+                _stats["total_output_tokens"] = int(_stats.get("total_output_tokens", 0) or 0) + _output_t
+            except Exception:
+                pass
+
+            save_chat(username, request.chat_name, data, request.project)
+
+            yield f"event: content\ndata: {json.dumps({'delta': _feedback})}\n\n"
+
+            _branch_path_final = get_path_to_root(data["messages"], _assistant_msg_id)
+            _done_data = {
+                "assistant_message": _feedback,
+                "tokens": _tokens_str,
+                "cost": _cost_str,
+                "stats": data.get("stats", create_empty_stats()),
+                "context_start_index": 1,
+                "reasoning": None,
+                "user_message_id": user_msg_id,
+                "assistant_message_id": _assistant_msg_id,
+                "current_leaf_id": _assistant_msg_id,
+                "total_messages": len(_branch_path_final),
+                "model": _consolidate_model,
+                "hud_state": None,
+                "characters_consolidate_ok": _ok,
             }
             yield f"event: done\ndata: {json.dumps(_done_data)}\n\n"
             return
