@@ -53,7 +53,7 @@ CHARACTER_MEMORY_MAX_TOTAL = None  # no cap — files grow as needed
 # but are excluded from reads, recall indices, and rendering. High-impact memories
 # (impact >= threshold) NEVER auto-archive — they survive forever unless the user
 # explicitly drops them.
-CHARACTER_MEMORY_HYGIENE_DAYS = 365            # 12 months
+CHARACTER_MEMORY_HYGIENE_DAYS = 60             # 2 months unreferenced → archive (only hits 1-2★)
 CHARACTER_MEMORY_HYGIENE_MIN_IMPACT = 3        # impact >= 3 is permanent
 
 CALLBACK_RESOLVED_RETENTION_DAYS = 30  # real days, not turns
