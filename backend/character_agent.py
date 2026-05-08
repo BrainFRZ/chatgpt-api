@@ -332,7 +332,7 @@ def determine_character_ops(
     )
 
     # Stable across turns: character_profile.di + user_life.di. Cache these
-    # with cache_control=ephemeral so subsequent turns within the TTL pay
+    # with cache_control=ephemeral 1h so subsequent turns within the hour pay
     # cache-read rate ($0.30/MTok) instead of full input ($3/MTok).
     stable_parts = ["[CHARACTER PROFILE]", profile_doc or "(missing)", ""]
     if user_life_doc:
@@ -366,7 +366,7 @@ def determine_character_ops(
                     {
                         "type": "text",
                         "text": stable_text,
-                        "cache_control": {"type": "ephemeral"},
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
                     },
                     {
                         "type": "text",

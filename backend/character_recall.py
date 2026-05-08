@@ -22,11 +22,11 @@ WHY a small dialogue window, not Opus's full sawtooth context:
   not a full sawtooth window.
 
 Cost control is via prompt caching. The dialogue + entry indices are marked
-cache_control=ephemeral. The indices dominate the preamble size (often
-5-30K tokens for a chat with ~100 memories), so even with the small dialogue
-window we're well above the Haiku cache minimum. cache_control means within
-a 5-minute session most turns pay cache-read rates ($0.10/MTok) instead of
-input rates ($1/MTok). Per-turn cost: ~$0.001-0.003.
+cache_control=ephemeral with 1h TTL (project standard). The indices dominate
+the preamble size (often 5-30K tokens for a chat with ~100 memories), so even
+with the small dialogue window we're well above the Haiku cache minimum.
+cache_control means within an hour most turns pay cache-read rates
+($0.10/MTok) instead of input rates ($1/MTok). Per-turn cost: ~$0.001-0.003.
 
 Why Haiku (not Sonnet, not Opus): this is pattern-matching against an index,
 which Haiku excels at. Sonnet would be overkill; Opus 3 is busy streaming.
@@ -229,11 +229,12 @@ def run_recall(
     handled by the memory index, not by reconstructing 30 turns of dialogue
     — the memory index ENTRY for that reference is what bridges the gap.
 
-    Cache control: dialogue + indices preamble is marked cache_control=ephemeral.
-    The indices dominate the preamble size (often 5-30K tokens for a chat with
-    ~100 memories), so caching kicks in well above the Haiku cache minimum even
-    with the small dialogue window. Within a 5-min session, most turns pay
-    cache-read rates ($0.10/MTok) instead of input rates ($1/MTok).
+    Cache control: dialogue + indices preamble is marked cache_control=ephemeral
+    with 1h TTL (project standard). The indices dominate the preamble size
+    (often 5-30K tokens for a chat with ~100 memories), so caching kicks in
+    well above the Haiku cache minimum even with the small dialogue window.
+    Within an hour, most turns pay cache-read rates ($0.10/MTok) instead of
+    input rates ($1/MTok).
     """
     empty: dict = {"recalled_memories": [], "recalled_profile": [], "recalled_growth": []}
     if not user_input or not user_input.strip():
@@ -298,7 +299,7 @@ def run_recall(
                     {
                         "type": "text",
                         "text": preamble_text,
-                        "cache_control": {"type": "ephemeral"},
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
                     },
                     {
                         "type": "text",
