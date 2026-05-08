@@ -221,10 +221,11 @@ def format_tool_result_text(result: dict) -> str:
     parts = [result.get("answer", "").strip()]
     sources = result.get("sources") or []
     if sources:
-        # Sources are here for two reasons: (1) the model can cross-reference if the
-        # answer reads thinly, (2) if the user asks "where'd you see that?" the model
-        # can name a source in voice (e.g. "Reuters", "AP"). The TITLE / site name is
-        # what the character would say aloud — not the URL.
+        # Sources serve three purposes: (1) cross-reference if the answer reads
+        # thin, (2) source-name attribution if the user asks "where'd you see
+        # that?", (3) link-sharing on TEXT channel (real friends text articles).
+        # On voice/video/in-person channels, URLs are still off-limits — only
+        # title/site name can be spoken.
         src_lines = []
         for i, s in enumerate(sources, 1):
             title = s.get("title") or ""
@@ -237,11 +238,20 @@ def format_tool_result_text(result: dict) -> str:
                 line += f" — {url}"
             src_lines.append(line)
         if src_lines:
-            parts.append("\nSources (use the TITLE if asked where you saw it; never read URLs aloud):")
+            parts.append(
+                "\nSources — channel-conditional usage:"
+                "\n  - TEXT channel: sharing an actual URL is fine and friend-natural"
+                " (\"saw this, [url]\" / \"thought of you [url]\"). Pick at most ONE link;"
+                " don't dump the source list."
+                "\n  - PHONE / VIDEO / IN-PERSON channel: NEVER recite URLs. Use only"
+                " the title/site name if asked (\"Reuters\", \"AP\", \"ESPN\")."
+            )
             parts.extend(src_lines)
 
     parts.append(
-        "\n(Rephrase in voice — take only what answers the moment. Don't volunteer sources; "
-        "if asked, name them casually using the title only. Don't recite URLs.)"
+        "\n(Rephrase in voice — take only what answers the moment. Don't write"
+        " academic-style citations. On TEXT channel you may attach ONE link if"
+        " the article itself is what you're sharing; on voice/in-person never"
+        " recite URLs — name the source casually by title only if asked.)"
     )
     return "\n".join(parts)
