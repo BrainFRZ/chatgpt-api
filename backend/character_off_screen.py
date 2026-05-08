@@ -36,10 +36,10 @@ OFF_SCREEN_MODEL = "claude-opus-4-5"
 OFF_SCREEN_MAX_TOKENS = 2048
 OFF_SCREEN_TIMEOUT_S = 30
 
-OPUS_45_INPUT_RATE = 15.00
-OPUS_45_CACHE_READ_RATE = 1.50
-OPUS_45_CACHE_WRITE_RATE = 18.75
-OPUS_45_OUTPUT_RATE = 75.00
+OPUS_45_INPUT_RATE = 5.00
+OPUS_45_CACHE_READ_RATE = 0.50
+OPUS_45_CACHE_WRITE_RATE = 10.00   # 1hr cache write (2x base); off-screen doesn't use cache_control today, but match project standard
+OPUS_45_OUTPUT_RATE = 25.00
 
 
 def compute_off_screen_cost(usage: dict) -> float:

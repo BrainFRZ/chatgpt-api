@@ -36,10 +36,10 @@ CHARACTER_AGENT_MODEL = "claude-sonnet-4-6"
 CHARACTER_AGENT_MAX_TOKENS = 2048
 CHARACTER_AGENT_TIMEOUT_S = 25  # slightly higher than Haiku — Sonnet calls take a beat longer
 
-# Sonnet 4.6 pricing per MTok ($/1M tokens).
+# Sonnet 4.6 pricing per MTok ($/1M tokens). 1hr cache TTL (project standard).
 SONNET_INPUT_RATE = 3.00
 SONNET_CACHE_READ_RATE = 0.30
-SONNET_CACHE_WRITE_RATE = 3.75    # 5min cache write
+SONNET_CACHE_WRITE_RATE = 6.00    # 1hr cache write (2x base)
 SONNET_OUTPUT_RATE = 15.00
 
 

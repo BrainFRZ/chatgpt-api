@@ -52,10 +52,10 @@ CHARACTER_RECALL_MODEL = "claude-haiku-4-5-20251001"
 CHARACTER_RECALL_MAX_TOKENS = 512  # tool output is small (just id arrays)
 CHARACTER_RECALL_TIMEOUT_S = 15
 
-# Haiku 4.5 pricing
+# Haiku 4.5 pricing. 1hr cache TTL (project standard).
 HAIKU_INPUT_RATE = 1.00
 HAIKU_CACHE_READ_RATE = 0.10
-HAIKU_CACHE_WRITE_RATE = 1.25
+HAIKU_CACHE_WRITE_RATE = 2.00     # 1hr cache write (2x base)
 HAIKU_OUTPUT_RATE = 5.00
 
 # Maximum ids to fetch per kind. The agent should be selective; this is a hard

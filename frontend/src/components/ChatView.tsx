@@ -711,6 +711,27 @@ export default function ChatView({
                         {' '}(Haiku)
                       </span>
                     )}
+                    {(msg as any).recall_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        Recall: I:{(msg as any).recall_usage.input_tokens || 0} O:{(msg as any).recall_usage.output_tokens || 0}
+                        {typeof (msg as any).recall_cost === 'number' && ` | $${(msg as any).recall_cost.toFixed(6)}`}
+                        {' '}(Haiku)
+                      </span>
+                    )}
+                    {(msg as any).character_agent_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        State: I:{(msg as any).character_agent_usage.input_tokens || 0} O:{(msg as any).character_agent_usage.output_tokens || 0}
+                        {typeof (msg as any).character_agent_cost === 'number' && ` | $${(msg as any).character_agent_cost.toFixed(6)}`}
+                        {' '}(Sonnet)
+                      </span>
+                    )}
+                    {(msg as any).off_screen_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        Off-screen: I:{(msg as any).off_screen_usage.input_tokens || 0} O:{(msg as any).off_screen_usage.output_tokens || 0}
+                        {typeof (msg as any).off_screen_cost === 'number' && ` | $${(msg as any).off_screen_cost.toFixed(6)}`}
+                        {' '}(Opus 4.5)
+                      </span>
+                    )}
                     {/* Branch navigation - show only for user messages with siblings */}
                     {msg.role === 'user' && (() => {
                       if (!msg.id) return null;
