@@ -1228,7 +1228,7 @@ def ensure_project_exists(username: str, project: str) -> bool:
     """Create project directory if it doesn't exist. Returns True if new."""
     project_dir = get_project_dir(username, project)
     is_new = not os.path.exists(project_dir)
-    
+
     if is_new:
         os.makedirs(project_dir)
         os.makedirs(os.path.join(project_dir, "uploads"))
@@ -1240,8 +1240,35 @@ def ensure_project_exists(username: str, project: str) -> bool:
             "last_accessed": datetime.now(timezone.utc).isoformat(),
             "model": DEFAULT_MODEL
         })
-    
+
     return is_new
+
+
+def _maybe_copy_base_user_life(username: str, project_dir: str) -> bool:
+    """Auto-copy {user_dir}/base_user_life.di → {project_dir}/user_life.di if:
+      - base file exists
+      - target doesn't already exist (preserves any per-project customization)
+
+    Returns True if a copy was made. Logs but doesn't raise on file errors.
+    Used by Characters projects (gamesystem set + chat creation) to seed each
+    project with the user's curated base.
+    """
+    base_path = os.path.join(get_user_dir(username), "base_user_life.di")
+    target_path = os.path.join(project_dir, "user_life.di")
+    if not os.path.isfile(base_path):
+        return False
+    if os.path.exists(target_path):
+        return False
+    try:
+        with open(base_path, "r", encoding="utf-8") as src:
+            content = src.read()
+        with open(target_path, "w", encoding="utf-8") as dst:
+            dst.write(content)
+        logger.info(f"Auto-copied base_user_life.di → {target_path}")
+        return True
+    except OSError as e:
+        logger.warning(f"Failed to auto-copy base_user_life.di for {username}/{os.path.basename(project_dir)}: {e}")
+        return False
 
 HACK_ONLY_FILES = {"Hacking Rulebook.md"}
 COMBAT_ONLY_FILES = {"Combat Ruleset.md"}
@@ -2331,6 +2358,11 @@ async def create_chat(request: CreateChatRequest):
         project_dir = get_project_dir(username, request.project)
         if not has_character_profile(project_dir):
             data["_characters_interview_mode"] = True
+        # Safety-net auto-copy of base_user_life.di → user_life.di. Mostly a
+        # no-op (set_project_game_system handles the primary copy when the
+        # user picks Characters), but covers projects created before this
+        # change shipped, or any path that bypasses the gamesystem-set flow.
+        _maybe_copy_base_user_life(username, project_dir)
 
     save_chat(username, chat_name, data, request.project)
 
@@ -12586,6 +12618,12 @@ def set_project_game_system(request: SetProjectGameSystemRequest):
     metadata = load_project_metadata(username, request.project)
     metadata["game_system"] = request.game_system
     save_project_metadata(username, request.project, metadata)
+
+    # Characters projects: auto-seed user_life.di from base_user_life.di if missing.
+    # Fires when the user picks Characters in the gamesystem dropdown. Idempotent —
+    # won't overwrite an existing user_life.di or run if no base file exists.
+    if request.game_system == "characters":
+        _maybe_copy_base_user_life(username, project_dir)
 
     return {"status": "ok", "game_system": request.game_system}
 
