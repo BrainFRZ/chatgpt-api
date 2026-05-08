@@ -331,10 +331,17 @@ def determine_character_ops(
         branch_msg_ids=branch_msg_ids,
     )
 
-    user_msg_parts = ["[CHARACTER PROFILE]", profile_doc or "(missing)", ""]
+    # Stable across turns: character_profile.di + user_life.di. Cache these
+    # with cache_control=ephemeral so subsequent turns within the TTL pay
+    # cache-read rate ($0.30/MTok) instead of full input ($3/MTok).
+    stable_parts = ["[CHARACTER PROFILE]", profile_doc or "(missing)", ""]
     if user_life_doc:
-        user_msg_parts += ["[USER LIFE — seed doc]", user_life_doc, ""]
-    user_msg_parts += [
+        stable_parts += ["[USER LIFE — seed doc]", user_life_doc, ""]
+    stable_text = "\n".join(stable_parts)
+
+    # Volatile per turn: state snapshot (memories/profile/growth/callbacks change
+    # as ops are applied), the user message, the character's reply.
+    volatile_text = "\n".join([
         "[CURRENT STATE]",
         state_summary,
         "",
@@ -345,8 +352,7 @@ def determine_character_ops(
         character_reply.strip(),
         "",
         "Determine state ops for this turn. Call report_character_state with appropriate arrays (empty arrays are correct when nothing changes).",
-    ]
-    user_msg = "\n".join(user_msg_parts)
+    ])
 
     tool = build_character_agent_tool()
     try:
@@ -354,7 +360,20 @@ def determine_character_ops(
             model=CHARACTER_AGENT_MODEL,
             max_tokens=CHARACTER_AGENT_MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": stable_text,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": volatile_text,
+                    },
+                ],
+            }],
             tools=[tool],
             tool_choice={"type": "tool", "name": "report_character_state"},
             timeout=CHARACTER_AGENT_TIMEOUT_S,
