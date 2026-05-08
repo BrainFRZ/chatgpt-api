@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 INTERVIEW_MODEL = "claude-opus-4-5"  # Anthropic API model name (dashed form)
 INTERVIEW_MAX_TOKENS = 4096
 FINALIZE_MAX_TOKENS = 8192
-INTERVIEW_TIMEOUT_S = 60
+INTERVIEW_TIMEOUT_S = 300  # backstop; streaming uses idle-timeout, not total-time
 
 OPUS_45_INPUT_RATE = 5.00
 OPUS_45_CACHE_READ_RATE = 0.50
@@ -449,42 +449,52 @@ def finalize_profile(client, transcript: list, existing_profile: Optional[str] =
     transcript: list of {role, content} dicts from the interview session.
     existing_profile: current character_profile.di content if this is a re-interview;
         the finalize agent will merge changes into it rather than rewriting from scratch.
+
+    Uses streaming. The finalize call generates up to ~8K tokens of profile —
+    a non-streaming request often exceeds the SDK's request-level timeout.
+    Streaming uses a per-chunk idle timeout instead, which handles long
+    generations correctly. We accumulate the full text before returning.
     """
     if not transcript:
         return None, {}
 
     user_msg = build_finalize_user_message(transcript, existing_profile=existing_profile)
+    text_parts: list = []
+    final_message = None
     try:
-        response = client.messages.create(
+        with client.messages.stream(
             model=INTERVIEW_MODEL,
             max_tokens=FINALIZE_MAX_TOKENS,
             system=FINALIZE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             timeout=INTERVIEW_TIMEOUT_S,
-        )
+        ) as stream:
+            for text_chunk in stream.text_stream:
+                if text_chunk:
+                    text_parts.append(text_chunk)
+            final_message = stream.get_final_message()
     except Exception as e:
         logger.error(f"character_interview finalize: API call failed: {type(e).__name__}: {e}")
         return None, {}
 
-    text_parts = []
-    for block in response.content:
-        if block.type == "text":
-            text_parts.append(block.text)
-    profile = "\n".join(text_parts).strip()
+    profile = "".join(text_parts).strip()
 
     # Strip any wrapping code fences if the model added them
     profile = re.sub(r"^```(?:markdown|md)?\s*\n", "", profile)
     profile = re.sub(r"\n```\s*$", "", profile)
 
-    ru = response.usage
-    usage = {
-        "input_tokens": ru.input_tokens
-        + (getattr(ru, 'cache_read_input_tokens', 0) or 0)
-        + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
-        "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
-        "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
-        "output_tokens": ru.output_tokens,
-    }
+    if final_message is not None and getattr(final_message, "usage", None):
+        ru = final_message.usage
+        usage = {
+            "input_tokens": ru.input_tokens
+            + (getattr(ru, 'cache_read_input_tokens', 0) or 0)
+            + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
+            "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
+            "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
+            "output_tokens": ru.output_tokens,
+        }
+    else:
+        usage = {"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_tokens": 0}
 
     if not profile or len(profile) < 200:
         logger.warning(f"character_interview finalize: profile output suspiciously short ({len(profile)} chars)")

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 CONSOLIDATE_MODEL = "claude-opus-4-5"  # Anthropic API model name (dashed form)
 CONSOLIDATE_MAX_TOKENS = 8192
-CONSOLIDATE_TIMEOUT_S = 60
+CONSOLIDATE_TIMEOUT_S = 300  # backstop; streaming uses idle-timeout, not total-time
 
 OPUS_45_INPUT_RATE = 5.00
 OPUS_45_CACHE_READ_RATE = 0.50
@@ -247,35 +247,43 @@ def run_consolidation(
         + "Restraint is the signal of good consolidation."
     )
 
+    # Streaming for the same reason finalize streams: 8K-token output can
+    # exceed the request-level timeout on a non-streaming call. Streaming uses
+    # per-chunk idle timeout instead, which handles long generations correctly.
+    text_parts: list = []
+    final_message = None
     try:
-        response = client.messages.create(
+        with client.messages.stream(
             model=CONSOLIDATE_MODEL,
             max_tokens=CONSOLIDATE_MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             timeout=CONSOLIDATE_TIMEOUT_S,
-        )
+        ) as stream:
+            for text_chunk in stream.text_stream:
+                if text_chunk:
+                    text_parts.append(text_chunk)
+            final_message = stream.get_final_message()
     except Exception as e:
         logger.error(f"character_consolidate: API call failed: {type(e).__name__}: {e}")
         return None, {}
 
-    raw_text = ""
-    for block in response.content:
-        if block.type == "text":
-            raw_text += block.text
-    raw_text = raw_text.strip()
+    raw_text = "".join(text_parts).strip()
 
     commentary, proposed_profile, merged_ids, elevated_ids = _parse_consolidate_output(raw_text)
 
-    ru = response.usage
-    usage = {
-        "input_tokens": ru.input_tokens
-        + (getattr(ru, 'cache_read_input_tokens', 0) or 0)
-        + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
-        "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
-        "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
-        "output_tokens": ru.output_tokens,
-    }
+    if final_message is not None and getattr(final_message, "usage", None):
+        ru = final_message.usage
+        usage = {
+            "input_tokens": ru.input_tokens
+            + (getattr(ru, 'cache_read_input_tokens', 0) or 0)
+            + (getattr(ru, 'cache_creation_input_tokens', 0) or 0),
+            "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
+            "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
+            "output_tokens": ru.output_tokens,
+        }
+    else:
+        usage = {"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_tokens": 0}
 
     if not proposed_profile or len(proposed_profile) < 200:
         logger.warning(
