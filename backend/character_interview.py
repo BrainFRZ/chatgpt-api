@@ -121,8 +121,9 @@ PLUS: the character's default register (most are Even, some tilt).
 - What this character does FOR the user (their role)
 - What they've fought about — the conflict surface
 - The unspoken thing — what they want and don't directly ask for
+- **How they handle gaps in the user's communication** — when the user goes quiet for a few days or a week, what does this character DO? Some warmly say "hey stranger, you alive?" with no guilt. Some quietly check in once and let it go. Some don't notice / don't reach. Some fake outrage ("oh you're alive?"). Some get clingy / worried. Whatever fits THIS character's voice and their specific relationship with the user. Per-character — there's no centralized default; ask the user how this character would handle it.
 
-**Floor:** how they know each other + what they call each other + 2 anchor moments + 1 conflict topic.
+**Floor:** how they know each other + what they call each other + 2 anchor moments + 1 conflict topic + how they handle silence.
 
 ## 7. Edges — boundaries, conflict, friction
 - What this character won't do
@@ -354,6 +355,7 @@ Use this structure (omit any section the interview did not cover; do not pad):
 - **What this character does for {user}:** {role}
 - **What we fight about:** {conflict surface}
 - **The unspoken thing:** {what they want and don't ask for}
+- **When {user} goes quiet:** {how this character handles gaps in communication — their specific voice for re-opening after silence}
 
 ## Edges
 - **Won't do:** {list}
