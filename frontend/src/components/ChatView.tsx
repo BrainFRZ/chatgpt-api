@@ -300,7 +300,20 @@ export default function ChatView({
   return (
     <>
       <div style={{...styles.chatHeader, ...(isMobile ? styles.chatHeaderMobile : {})}}>
-        <h2 style={styles.chatTitle}>{currentChat}</h2>
+        <h2 style={styles.chatTitle}>
+          {currentChat}
+          {(() => {
+            // "Currently in interview mode" = the latest message carries the tag.
+            // After /finalize, subsequent correspondence messages drop the tag,
+            // so the suffix disappears automatically.
+            const lastMsg: any = messages.length > 0 ? messages[messages.length - 1] : null;
+            return lastMsg?._characters_interview_mode ? (
+              <span style={{ color: '#c89866', fontWeight: 400, marginLeft: '8px' }}>
+                — Interview
+              </span>
+            ) : null;
+          })()}
+        </h2>
         {viewerCount > 1 && (
           <span style={styles.viewerCount} title={`${viewerCount} viewers connected`}>
             {viewerCount} viewing
@@ -415,6 +428,7 @@ export default function ChatView({
           const isChaseMode = !!(msg as any).chase_mode;
           const isCombatMode = !!(msg as any).combat_mode;
           const isNetCombatMode = !!(msg as any).net_combat_mode;
+          const isInterviewMode = !!(msg as any)._characters_interview_mode;
           // Check if this message pair is manually unstaged (Novels)
           const isUnstaged = msg.role === 'user' ? msg.staged === false
             : (i > 0 && messages[i - 1]?.role === 'user' && messages[i - 1]?.staged === false);
@@ -441,6 +455,10 @@ export default function ChatView({
           } else if (isSexMode) {
             // Sex mode: warm rose/pink tint
             backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
+          } else if (isInterviewMode) {
+            // Interview / re-interview mode: parchment-tan tint — "writing
+            // the character down" / scribe vibe.
+            backgroundColor = msg.role === 'user' ? '#2a261a' : '#1f1c10';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -462,6 +480,7 @@ export default function ChatView({
                 isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} :
                 isChaseMode ? {borderLeft: '3px solid #00d4ff', paddingLeft: '8px'} :
                 isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} :
+                isInterviewMode ? {borderLeft: '3px solid #c89866', paddingLeft: '8px'} :
                 {}
               )}}>
                 {isNetCombatMode && <span style={{color: '#a855f7', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>NET+MEAT</span>}
