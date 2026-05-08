@@ -456,11 +456,12 @@ export default function ChatView({
             // Sex mode: warm rose/pink tint
             backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
           } else if (isInterviewMode) {
-            // Interview / re-interview mode: parchment tint. Real parchment
-            // has R≈G > B (#F1E9D2, #EBD5B3, #E8DCB8 etc) — not R >> G as in
-            // brown. Keep that proportion and push lightness clearly above
-            // the other mode bgs (~28% vs ~13%) so it reads as warm paper.
-            backgroundColor = msg.role === 'user' ? '#5e5532' : '#423b22';
+            // Interview / re-interview mode: actual parchment cream as bg
+            // (#e8dcb8 = aged-paper standard) with dark sepia text — like
+            // an actual scroll. Different visual logic from the other modes
+            // (which tint dark) because parchment IS light, and dark text
+            // on cream is the only way it reads as paper, not mud.
+            backgroundColor = msg.role === 'user' ? '#e8dcb8' : '#dac9a3';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -472,7 +473,11 @@ export default function ChatView({
               className="message"
               style={{
                 ...styles.message,
-                backgroundColor
+                backgroundColor,
+                // Interview-mode: dark sepia text on parchment cream bg.
+                // Cascades to all descendants (role label, markdown content,
+                // footer) so the whole message reads as scroll-like.
+                ...(isInterviewMode ? { color: '#3a2818' } : {})
               }}
             >
               <div style={{...styles.messageRole, ...(
@@ -482,7 +487,7 @@ export default function ChatView({
                 isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} :
                 isChaseMode ? {borderLeft: '3px solid #00d4ff', paddingLeft: '8px'} :
                 isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} :
-                isInterviewMode ? {borderLeft: '3px solid #ead9b2', paddingLeft: '8px'} :
+                isInterviewMode ? {borderLeft: '3px solid #6b4a23', paddingLeft: '8px', color: '#3a2818'} :
                 {}
               )}}>
                 {isNetCombatMode && <span style={{color: '#a855f7', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>NET+MEAT</span>}
