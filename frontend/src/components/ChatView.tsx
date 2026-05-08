@@ -25,6 +25,33 @@ import { SlashCommandPicker, SlashCommand, useSlashPickerState } from './SlashCo
  *   - Location passed through
  *   - Middle dots as separators
  */
+/** Render a side-agent usage dict in the project-standard "I:X C:Y W:Z O:Q R:R T:N"
+ * format (mirrors the main provider's format_token_string).  Mirrors the cache
+ * refresh-overlap heuristic: if cache_read and cache_creation are within 10% of
+ * each other (a 1h-cache TTL refresh event), we count the larger as T contribution
+ * once instead of double-counting.
+ *
+ * Side-agent usage dicts have an `input_tokens` field that's already the SUM of
+ * non-cached + cache_read + cache_creation (per how the side-agent files build it).
+ */
+function formatUsageString(usage: any): string {
+  if (!usage || typeof usage !== 'object') return '';
+  const totalInput = usage.input_tokens || 0;
+  const cacheRead = usage.cache_read_tokens || 0;
+  const cacheWrite = usage.cache_creation_tokens || 0;
+  const output = usage.output_tokens || 0;
+  const reasoning = usage.reasoning_tokens || 0;
+  const nonCached = Math.max(0, totalInput - cacheRead - cacheWrite);
+  const r = cacheRead;
+  const w = cacheWrite;
+  const cachedPortion =
+    r > 0 && w > 0 && Math.abs(r - w) < 0.1 * Math.max(r, w)
+      ? Math.max(r, w) // refresh-overlap
+      : r + w;
+  const total = nonCached + cachedPortion + output + reasoning;
+  return `I:${nonCached} C:${r} W:${w} O:${output} R:${reasoning} T:${total}`;
+}
+
 function _extractHudFromMsg(msg: any): any | null {
   if (!msg || typeof msg !== 'object') return null;
   const psa = msg.pipeline_state_after;
@@ -706,28 +733,28 @@ export default function ChatView({
                     )}
                     {(msg as any).flag_agent_usage && (
                       <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Flags: I:{(msg as any).flag_agent_usage.input_tokens || 0} O:{(msg as any).flag_agent_usage.output_tokens || 0}
+                        Flags: {formatUsageString((msg as any).flag_agent_usage)}
                         {typeof (msg as any).flag_agent_cost === 'number' && ` | $${(msg as any).flag_agent_cost.toFixed(6)}`}
                         {' '}(Haiku)
                       </span>
                     )}
                     {(msg as any).recall_usage && (
                       <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Recall: I:{(msg as any).recall_usage.input_tokens || 0} O:{(msg as any).recall_usage.output_tokens || 0}
+                        Recall: {formatUsageString((msg as any).recall_usage)}
                         {typeof (msg as any).recall_cost === 'number' && ` | $${(msg as any).recall_cost.toFixed(6)}`}
                         {' '}(Haiku)
                       </span>
                     )}
                     {(msg as any).character_agent_usage && (
                       <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        State: I:{(msg as any).character_agent_usage.input_tokens || 0} O:{(msg as any).character_agent_usage.output_tokens || 0}
+                        State: {formatUsageString((msg as any).character_agent_usage)}
                         {typeof (msg as any).character_agent_cost === 'number' && ` | $${(msg as any).character_agent_cost.toFixed(6)}`}
                         {' '}(Sonnet)
                       </span>
                     )}
                     {(msg as any).off_screen_usage && (
                       <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Off-screen: I:{(msg as any).off_screen_usage.input_tokens || 0} O:{(msg as any).off_screen_usage.output_tokens || 0}
+                        Off-screen: {formatUsageString((msg as any).off_screen_usage)}
                         {typeof (msg as any).off_screen_cost === 'number' && ` | $${(msg as any).off_screen_cost.toFixed(6)}`}
                         {' '}(Opus 4.5)
                       </span>
