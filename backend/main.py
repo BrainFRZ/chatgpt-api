@@ -1054,13 +1054,29 @@ def build_system_content(username: str, project: str, include_base: bool = True,
         beat_state: pipeline_state.beat_state dict (current_session, current_beat, etc).
     """
     instructions = get_instructions(username, project)
-    # If project instructions.di was missing (got hardcoded default), apply overrides
+    # Layering: gamesystem-supplied default_instructions are ALWAYS loaded as
+    # baseline (when provided). Project's own instructions.di appends on top
+    # for project-specific additions. Without this, providing any project
+    # instructions.di would silently nuke the gamesystem's baseline rules.
+    #
+    # ensure_project_exists writes a stub "You are a helpful assistant." when a
+    # project is first created. Treat that exact stub as "no real project
+    # rules" so it doesn't pollute the layered prompt for fresh projects.
+    PLACEHOLDER_INSTRUCTIONS = "You are a helpful assistant."
     if project:
         project_instructions_path = os.path.join(get_user_dir(username), "projects", project, "instructions.di")
         has_project_instructions = os.path.exists(project_instructions_path)
-        if not has_project_instructions:
+        is_real_project_content = (
+            has_project_instructions and instructions.strip() != PLACEHOLDER_INSTRUCTIONS
+        )
+        if is_real_project_content:
+            # Real project content — append to gamesystem default (if any).
+            if default_instructions:
+                instructions = default_instructions + "\n\n" + instructions
+            # else: just `instructions` (the project file content) as-is
+        else:
+            # No real project content (file missing or just the stub) — use fallback chain.
             if fallback_to_user_instructions:
-                # Fall back to user-level instructions.di (same as free chats)
                 instructions = get_instructions(username, None)
             elif default_instructions:
                 instructions = default_instructions
