@@ -32,7 +32,7 @@ from game_systems.characters import (
 
 logger = logging.getLogger(__name__)
 
-OFF_SCREEN_MODEL = "claude-opus-4-5"
+OFF_SCREEN_MODEL = "claude-opus-4.5"
 OFF_SCREEN_MAX_TOKENS = 2048
 OFF_SCREEN_TIMEOUT_S = 30
 

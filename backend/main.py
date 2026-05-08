@@ -6203,7 +6203,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     from character_off_screen import compute_off_screen_cost
                     data["off_screen_usage"] = _osc_meta["usage"]
                     data["off_screen_cost"] = compute_off_screen_cost(_osc_meta["usage"])
-                    data["off_screen_model"] = "claude-opus-4-5"
+                    data["off_screen_model"] = "claude-opus-4.5"
 
                 # Recall telemetry
                 _recall_payload, _recall_usage = _recall_result if isinstance(_recall_result, tuple) else ({}, {})
@@ -6550,7 +6550,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             _cost_value = float(_result.get("cost", 0.0) or 0.0)
             _cost_str = f"${_cost_value:.6f}"
             _tokens_str = f"{_input_t}↑ {_output_t}↓"
-            _finalize_model = "claude-opus-4-5"
+            _finalize_model = "claude-opus-4.5"
 
             # Synthesize an assistant message containing the feedback. Mirrors the field
             # shape of normal assistant messages so the frontend's done-event handler and
@@ -6636,7 +6636,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             _cost_value = float(_result.get("cost", 0.0) or 0.0)
             _cost_str = f"${_cost_value:.6f}"
             _tokens_str = f"{_input_t}↑ {_output_t}↓"
-            _consolidate_model = "claude-opus-4-5"
+            _consolidate_model = "claude-opus-4.5"
 
             _assistant_msg_id = generate_message_id()
             _assistant_msg = {
@@ -10430,7 +10430,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if data.get("off_screen_usage"):
                             assistant_msg_data["off_screen_usage"] = data["off_screen_usage"]
                             assistant_msg_data["off_screen_cost"] = float(data.get("off_screen_cost", 0.0) or 0.0)
-                            assistant_msg_data["off_screen_model"] = data.get("off_screen_model", "claude-opus-4-5")
+                            assistant_msg_data["off_screen_model"] = data.get("off_screen_model", "claude-opus-4.5")
                         if data.get("recall_usage"):
                             assistant_msg_data["recall_usage"] = data["recall_usage"]
                             assistant_msg_data["recall_cost"] = float(data.get("recall_cost", 0.0) or 0.0)

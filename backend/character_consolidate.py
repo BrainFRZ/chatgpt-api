@@ -23,7 +23,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-CONSOLIDATE_MODEL = "claude-opus-4-5"
+CONSOLIDATE_MODEL = "claude-opus-4.5"
 CONSOLIDATE_MAX_TOKENS = 8192
 CONSOLIDATE_TIMEOUT_S = 60
 

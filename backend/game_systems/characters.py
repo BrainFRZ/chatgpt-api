@@ -1311,7 +1311,7 @@ GAME_SYSTEM = {
 
     # Default narration model + fallback
     "default_model": "claude-3-opus",
-    "fallback_model": "claude-opus-4-5",
+    "fallback_model": "claude-opus-4.5",
 
     # Marker so main.py can take the Characters branch
     "is_characters": True,
