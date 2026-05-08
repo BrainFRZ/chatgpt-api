@@ -141,9 +141,9 @@ WB_MOD_CAP = 2  # ±2 cumulative cap on the next-roll modifier
 VALID_CHANNELS = ("text", "phone", "inperson", "video")
 DEFAULT_CHANNEL = "text"
 
-# Sawtooth context trimming (overrides single-agent global default)
-CHARACTERS_THRESHOLD_PAIRS = 60
-CHARACTERS_TARGET_PAIRS = 40
+# Sawtooth context trimming inherits SINGLE_AGENT_* (40/20). Long-term continuity
+# is delegated to file-backed memories/profile/growth/callbacks/off-screen, so the
+# dialogue window only needs to hold the immediate exchange.
 
 ARC_STATE_MAX_LEN = 80
 
@@ -896,10 +896,10 @@ def build_wall_clock_injection(state: dict) -> str:
 def build_channel_injection(state: dict) -> str:
     channel = state.get("channel") or DEFAULT_CHANNEL
     descriptions = {
-        "text": "TEXT MESSAGES — terse, lowercase-ok, fragmented, abbreviations welcome, no scene-setting prose.",
-        "phone": "PHONE CALL — spoken voice, full sentences, vocal mannerisms, sounds-of-the-room ok, no visual description.",
-        "inperson": "IN PERSON — full sensory presence, body language, gestures, environment around you.",
-        "video": "VIDEO CALL — face-to-face but mediated, vocal AND visual cues, mediated presence.",
+        "text": "TEXT MESSAGES — terse, lowercase-ok, fragmented, abbreviations welcome, no scene-setting prose. LENGTH: ONE sentence most of the time. Up to 3 sentences when something genuinely needs more. Going beyond 3 should be rare and only when absolutely necessary (a real story being told, a hard thing being processed). Default to one.",
+        "phone": "PHONE CALL — spoken voice, full sentences, vocal mannerisms, sounds-of-the-room ok, no visual description. LENGTH: up to a paragraph. Go longer only when needed.",
+        "inperson": "IN PERSON — full sensory presence, body language, gestures, environment around you. LENGTH: up to ~300 tokens (a few short paragraphs). Going longer should be rare and only when absolutely necessary — a real scene unfolding, not just stretching out.",
+        "video": "VIDEO CALL — face-to-face but mediated, vocal AND visual cues, mediated presence. LENGTH: up to a paragraph. Go longer only when needed.",
     }
     return f"[CHANNEL] {channel.upper()} — {descriptions.get(channel, '')}"
 
@@ -1226,11 +1226,13 @@ You are corresponding with the user as a specific person — defined in `charact
 If you learn something new and durable about yourself or the user, the side agent will record it. You don't need to flag it explicitly.
 
 ## Channels
-The user controls the channel via /text, /phone, /inperson, /video. Match the medium:
-- Text: terse, fragmented, lowercase-ok, no scene description.
-- Phone: speech, full sentences, vocal mannerisms, room sounds ok.
-- In-person: full sensory presence, body language, environment.
-- Video: face-to-face but mediated.
+The user controls the channel via /text, /phone, /inperson, /video. Match the medium AND its length:
+- Text: terse, fragmented, lowercase-ok, no scene description. **One sentence by default.** Up to 3 when needed. Going beyond 3 should be rare.
+- Phone: speech, full sentences, vocal mannerisms, room sounds ok. **Up to a paragraph.** Longer only when necessary.
+- In-person: full sensory presence, body language, environment. **Up to ~300 tokens** (a few short paragraphs). Going longer should be rare.
+- Video: face-to-face but mediated. **Up to a paragraph.** Longer only when necessary.
+
+These are real channels, not literary modes. Texts that run paragraphs feel wrong. Match the rhythm of the actual medium.
 
 ## Time and gaps
 You live on real time. If the user opens after a gap, you may have things to share — but only if there's natural room. Don't lead with a recap.
@@ -1274,9 +1276,7 @@ GAME_SYSTEM = {
     # If you ever want shared rules across all Characters projects, create a separate
     # characters_instructions.di mechanism — do NOT flip this flag.
     "use_base_instructions": False,
-    "trimming": "pair",                # Pair-based sawtooth (60/40, see CHARACTERS_*_PAIRS above)
-    "characters_threshold_pairs": CHARACTERS_THRESHOLD_PAIRS,
-    "characters_target_pairs": CHARACTERS_TARGET_PAIRS,
+    "trimming": "pair",                # Pair-based sawtooth, inherits SINGLE_AGENT_*_PAIRS (40/20)
 
     # Default instructions when project lacks instructions.di
     "default_instructions": CHARACTERS_DEFAULT_INSTRUCTIONS,

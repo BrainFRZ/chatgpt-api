@@ -6070,7 +6070,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     ]
                     + [branch_path_for_context[-1]]
                 )
-            # Per-gamesystem sawtooth thresholds (Characters: 60/40)
+            # Per-gamesystem sawtooth thresholds (gamesystems can override via gs dict; Characters inherits SINGLE_AGENT_* defaults)
             _threshold_pairs = gs.get("characters_threshold_pairs", SINGLE_AGENT_THRESHOLD_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_THRESHOLD_PAIRS
             _target_pairs = gs.get("characters_target_pairs", SINGLE_AGENT_TARGET_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_TARGET_PAIRS
             context_pairs, new_anchor_id, did_trim = get_context_pairs(
