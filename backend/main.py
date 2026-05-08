@@ -6703,7 +6703,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
 
-            _result = await asyncio.to_thread(_characters_finalize, client, data, _characters_dir, _transcript)
+            # Finalize takes 60-180s for an 8K-token profile. Run it in a task
+            # so we can emit SSE keepalives every 10s — without them, nginx
+            # (or any reverse proxy with a default ~60s idle timeout) kills the
+            # connection mid-call and the frontend sees "network error" even
+            # though the model is still generating successfully.
+            _finalize_task = asyncio.create_task(
+                asyncio.to_thread(_characters_finalize, client, data, _characters_dir, _transcript)
+            )
+            while not _finalize_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(_finalize_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+            _result = _finalize_task.result()
             _feedback = _result.get("feedback") or "Finalization completed."
             _ok = bool(_result.get("ok"))
             _usage = _result.get("usage") or {}
@@ -6787,10 +6800,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             yield f"event: init\ndata: {json.dumps({'user_message_id': user_msg_id})}\n\n"
 
-            _result = await asyncio.to_thread(
-                _characters_consolidate, client, data, _characters_dir,
-                branch_msg_ids=_consolidate_branch_ids,
+            # Same long-call keepalive pattern as finalize. Consolidate also
+            # takes 60-180s and was hitting the proxy idle timeout.
+            _consolidate_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _characters_consolidate, client, data, _characters_dir,
+                    branch_msg_ids=_consolidate_branch_ids,
+                )
             )
+            while not _consolidate_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(_consolidate_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+            _result = _consolidate_task.result()
             _feedback = _result.get("feedback") or "Consolidation completed."
             _ok = bool(_result.get("ok"))
             _usage = _result.get("usage") or {}
