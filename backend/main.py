@@ -571,8 +571,8 @@ def calculate_context_window(
         content = last_msg["content"]
         attached_files = last_msg.get("attached_files", [])
         if attached_files:
-            file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached_files]
-            content = "\n\n".join(file_wrappers) + "\n\n" + content
+            wrappers = [_attached_file_text_repr(f) for f in attached_files]
+            content = "\n\n".join(wrappers) + "\n\n" + content
         new_user_tokens = token_counter(content)
 
     # Base tokens that are always included
@@ -591,8 +591,8 @@ def calculate_context_window(
             content = msg.get("content", "")
             attached = msg.get("attached_files", [])
             if attached:
-                file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-                content = "\n\n".join(file_wrappers) + "\n\n" + content
+                wrappers = [_attached_file_text_repr(f) for f in attached]
+                content = "\n\n".join(wrappers) + "\n\n" + content
             msg_tokens = token_counter(content)
         total_tokens += msg_tokens
 
@@ -613,8 +613,8 @@ def calculate_context_window(
             content = msg.get("content", "")
             attached = msg.get("attached_files", [])
             if attached:
-                file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-                content = "\n\n".join(file_wrappers) + "\n\n" + content
+                wrappers = [_attached_file_text_repr(f) for f in attached]
+                content = "\n\n".join(wrappers) + "\n\n" + content
             msg_tokens = token_counter(content)
         if total_tokens + msg_tokens > target:
             # Including this message would exceed target, stop here
@@ -1733,7 +1733,121 @@ class ProjectChatsDetailedResponse(BaseModel):
 
 class AttachedFile(BaseModel):
     filename: str
-    content: str
+    content: str  # text body for text files; base64-encoded data for binary (images)
+    mime_type: str | None = None  # e.g. "image/png" — when set with image/* type, treated as image attachment
+
+
+def _is_image_attachment(f: dict) -> bool:
+    """True if `f` is an image attached_file (mime_type begins with 'image/')."""
+    return (f.get("mime_type") or "").startswith("image/")
+
+
+def _attached_file_text_repr(f: dict) -> str:
+    """Text representation of an attached file. For images, just a placeholder
+    so token counters don't choke on base64 blobs and history rendering reads
+    cleanly. For text files, the existing ====FILE:==== wrapper format."""
+    if _is_image_attachment(f):
+        return f"[image: {f['filename']}]"
+    return f"====FILE: {f['filename']}====\n{f.get('content', '')}\n====END FILE===="
+
+
+def build_image_content_blocks(msg: dict) -> list[dict]:
+    """Pull image attachments off a message and convert to Anthropic image
+    content blocks (base64 source). Returns [] if none. The latest user message
+    sends these as real image blocks; historical messages use the text
+    placeholder above so we don't pay for vision tokens on every turn."""
+    attached = msg.get("attached_files") or []
+    blocks = []
+    for f in attached:
+        if not _is_image_attachment(f):
+            continue
+        data = f.get("content")
+        mt = f.get("mime_type")
+        if not data or not mt:
+            continue
+        blocks.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mt, "data": data},
+        })
+    return blocks
+
+
+# Image URLs the user pastes directly in their message ("hey check this
+# out https://i.imgur.com/abc.png") — server-side fetched and added as
+# image content blocks alongside the text. Same pipeline as a file attach.
+_IMAGE_URL_REGEX = re.compile(
+    r'https?://[^\s<>"\']+\.(?:jpe?g|png|gif|webp)(?:\?[^\s<>"\']*)?',
+    re.IGNORECASE
+)
+_IMGUR_DIRECT_REGEX = re.compile(
+    r'https?://i\.imgur\.com/[A-Za-z0-9]+(?:\.[a-z]{3,4})?(?:\?[^\s<>"\']*)?',
+    re.IGNORECASE
+)
+_IMAGE_FETCH_MAX_BYTES = 5 * 1024 * 1024
+_IMAGE_FETCH_TIMEOUT_S = 6
+_MAX_IMAGES_PER_MESSAGE = 3
+
+
+def extract_image_urls_from_text(text: str) -> list[str]:
+    """Return distinct image URLs that appear in `text`. Conservative — only
+    URLs that look like direct image links (extension-bearing or i.imgur.com)."""
+    if not text or not isinstance(text, str):
+        return []
+    found: list[str] = []
+    seen = set()
+    for m in _IMAGE_URL_REGEX.finditer(text):
+        u = m.group(0)
+        if u not in seen:
+            seen.add(u)
+            found.append(u)
+    for m in _IMGUR_DIRECT_REGEX.finditer(text):
+        u = m.group(0)
+        if u not in seen:
+            seen.add(u)
+            found.append(u)
+    return found
+
+
+def fetch_image_url_as_block(url: str) -> dict | None:
+    """Fetch an image URL and convert to an Anthropic base64 image content block.
+    Returns None on any failure (network, non-image content-type, oversize)."""
+    import requests
+    import base64
+    try:
+        resp = requests.get(
+            url, timeout=_IMAGE_FETCH_TIMEOUT_S, stream=True, allow_redirects=True,
+            headers={"User-Agent": "Chorus-Characters/1.0"},
+        )
+    except Exception as e:
+        logger.warning(f"Image URL fetch failed: {url} — {e}")
+        return None
+    if resp.status_code != 200:
+        logger.info(f"Image URL non-200: {url} → {resp.status_code}")
+        return None
+    ct = (resp.headers.get("content-type") or "").lower().split(";")[0].strip()
+    if not ct.startswith("image/"):
+        logger.info(f"Image URL non-image content-type ({ct}): {url}")
+        return None
+    if ct == "image/jpg":
+        ct = "image/jpeg"
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _IMAGE_FETCH_MAX_BYTES:
+            logger.info(f"Image URL too large (>{_IMAGE_FETCH_MAX_BYTES} bytes): {url}")
+            return None
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        return None
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": ct, "data": b64},
+    }
 
 class SendMessageRequest(BaseModel):
     username: str
@@ -2041,8 +2155,8 @@ async def set_chat_model(request: SetChatModelRequest):
                 base_content = msg.get("content", "")
                 attached = msg.get("attached_files", [])
                 if attached:
-                    file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-                    content = "\n\n".join(file_wrappers) + "\n\n" + base_content
+                    wrappers = [_attached_file_text_repr(f) for f in attached]
+                    content = "\n\n".join(wrappers) + "\n\n" + base_content
                 else:
                     content = base_content
 
@@ -2610,8 +2724,8 @@ def send_message(request: SendMessageRequest):
                 base_content = msg.get("content", "")
                 attached = msg.get("attached_files", [])
                 if attached:
-                    file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-                    content = "\n\n".join(file_wrappers) + "\n\n" + base_content
+                    wrappers = [_attached_file_text_repr(f) for f in attached]
+                    content = "\n\n".join(wrappers) + "\n\n" + base_content
                 else:
                     content = base_content
 
@@ -2691,12 +2805,17 @@ def send_message(request: SendMessageRequest):
     attached_files_data = None
     if request.attached_files:
         attached_files_data = [
-            {"filename": f.filename, "content": f.content}
+            {"filename": f.filename, "content": f.content, "mime_type": f.mime_type}
             for f in request.attached_files
         ]
-        # Count tokens for attached files (matching build_message_content format)
-        file_wrappers = [f"====FILE: {f.filename}====\n{f.content}\n====END FILE====" for f in request.attached_files]
-        files_text = "\n\n".join(file_wrappers) + "\n\n"
+        # Count tokens for attached files (matching build_message_content format).
+        # Image attachments use a placeholder so base64 doesn't get text-counted —
+        # vision tokens come back from the actual API call.
+        wrappers = [
+            _attached_file_text_repr({"filename": f.filename, "content": f.content, "mime_type": f.mime_type})
+            for f in request.attached_files
+        ]
+        files_text = "\n\n".join(wrappers) + "\n\n"
         if model_id.startswith("claude") and hasattr(provider, 'count_tokens_buffered'):
             user_message_tokens += provider.count_tokens_buffered(files_text)
         else:
@@ -2739,15 +2858,14 @@ def send_message(request: SendMessageRequest):
             count_tokens_fn=token_counter
         )
 
-        # Helper to build message content with FILE wrappers
+        # Helper to build message content with FILE wrappers (and image placeholders).
+        # Real image content blocks are built separately via build_image_content_blocks.
         def build_message_content(msg):
             content = msg["content"]
             attached = msg.get("attached_files", [])
             if attached:
-                file_wrappers = []
-                for f in attached:
-                    file_wrappers.append(f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====")
-                files_text = "\n\n".join(file_wrappers)
+                wrappers = [_attached_file_text_repr(f) for f in attached]
+                files_text = "\n\n".join(wrappers)
                 content = f"{files_text}\n\n{content}"
             return content
 
@@ -4646,8 +4764,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 base_content = msg.get("content", "")
                 attached = msg.get("attached_files", [])
                 if attached:
-                    file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-                    content = "\n\n".join(file_wrappers) + "\n\n" + base_content
+                    wrappers = [_attached_file_text_repr(f) for f in attached]
+                    content = "\n\n".join(wrappers) + "\n\n" + base_content
                 else:
                     content = base_content
 
@@ -4775,8 +4893,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         content = msg["content"]
         attached = msg.get("attached_files", [])
         if attached:
-            file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-            files_text = "\n\n".join(file_wrappers)
+            wrappers = [_attached_file_text_repr(f) for f in attached]
+            files_text = "\n\n".join(wrappers)
             content = f"{files_text}\n\n{content}"
         return content
 
@@ -6292,7 +6410,28 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 parts.append(agency_reminder)
             parts.append(user_content)
             user_content = "\n\n".join(parts)
-            new_user_msg = {"role": "user", "content": user_content}
+            # Image attachments: send as actual image content blocks alongside
+            # the text. Only the latest user message gets full image blocks;
+            # historical messages keep the [image: filename] placeholder so we
+            # don't pay vision-token costs every turn.
+            _image_blocks = build_image_content_blocks(branch_path[-1])
+            # Image URLs in the user's text: server-side fetch + base64.
+            # Cap total images at _MAX_IMAGES_PER_MESSAGE (attachments + URLs).
+            _slots_left = _MAX_IMAGES_PER_MESSAGE - len(_image_blocks)
+            if _slots_left > 0:
+                _user_text_for_urls = (branch_path[-1].get("content") or "")
+                _found_urls = extract_image_urls_from_text(_user_text_for_urls)
+                for _u in _found_urls[:_slots_left]:
+                    _b = fetch_image_url_as_block(_u)
+                    if _b:
+                        _image_blocks.append(_b)
+            if _image_blocks:
+                new_user_msg = {
+                    "role": "user",
+                    "content": _image_blocks + [{"type": "text", "text": user_content}],
+                }
+            else:
+                new_user_msg = {"role": "user", "content": user_content}
         else:
             # No game state (e.g., Novels) — contract + pinned artifacts in system, no game injections
             base_content = branch_path[0]["content"]
@@ -6492,11 +6631,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
         elif use_characters and not use_characters_interview and gs.get("search_tool_enabled"):
-            # Characters correspondence: expose the Sonar search tool. Auto choice — the
-            # model decides per turn. Interview mode does not get the tool (interview is
-            # about defining the character, not pulling external info).
+            # Characters correspondence: expose Sonar search + fetch_url. Auto choice —
+            # the model decides per turn. Interview mode does not get the tools (interview
+            # is about defining the character, not pulling external info).
             from character_search import SONAR_SEARCH_TOOL
-            request_params["tools"] = [SONAR_SEARCH_TOOL]
+            from character_fetch_url import FETCH_URL_TOOL
+            request_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL]
             request_params["tool_choice"] = {"type": "auto"}
             # Opus 3 doesn't support extended thinking; explicit pop is harmless on other models.
             request_params.pop("thinking", None)
@@ -9947,24 +10087,33 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 await sync_manager.broadcast_to_chat(chat_key,
                                     SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": time_notifs}))
 
-                        # ── Characters: Sonar search tool follow-up loop (Claude only) ──
-                        # When the model fires search_web mid-stream, run Sonar, append a
-                        # tool_result, and re-stream so the model can continue its reply
+                        # ── Characters: tool follow-up loop (search_web + fetch_url, Claude only) ──
+                        # When the model fires search_web or fetch_url mid-stream, run the tool,
+                        # append a tool_result, and re-stream so the model can continue its reply
                         # with the answer in context. Bounded loop in case the model fires
-                        # multiple searches (we cap at 2 hops per turn).
+                        # multiple tools (we cap at 2 hops per turn).
                         if (use_characters and not use_characters_interview
                                 and model_id.startswith("claude")
                                 and usage.get('tool_uses')):
                             from character_search import (
                                 SONAR_SEARCH_TOOL,
                                 run_sonar_search,
-                                format_tool_result_text,
+                                format_tool_result_text as _format_search_result,
+                            )
+                            from character_fetch_url import (
+                                FETCH_URL_TOOL,
+                                run_fetch_url,
+                                format_tool_result_text as _format_fetch_result,
                             )
                             _search_tool_name = SONAR_SEARCH_TOOL["name"]
+                            _fetch_tool_name = FETCH_URL_TOOL["name"]
+                            _character_tool_names = {_search_tool_name, _fetch_tool_name}
                             _search_calls_total = 0
                             _search_cost_total = 0.0
                             _search_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "num_search_queries": 0}
                             _search_log: list = []  # [{query, reason, ok, sources_count}] per call — surfaced to UI + persisted
+                            _fetch_calls_total = 0
+                            _fetch_log: list = []   # [{url, reason, ok, title, error}] per call
                             _max_search_hops = 2
                             _hop = 0
                             _current_tool_uses = usage.get('tool_uses') or []
@@ -9973,42 +10122,60 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             _perplexity_key = get_api_key(username, "perplexity")
 
                             while _hop < _max_search_hops:
-                                _search_calls = [t for t in _current_tool_uses if t.get("name") == _search_tool_name]
-                                if not _search_calls:
+                                _tool_calls = [t for t in _current_tool_uses if t.get("name") in _character_tool_names]
+                                if not _tool_calls:
                                     break
                                 _hop += 1
-                                # Run each search call (sequentially — Opus 3 typically issues one)
                                 _tool_results = []
-                                for _call in _search_calls:
-                                    _query = ""
-                                    _reason = ""
-                                    _input = _call.get("input")
-                                    if isinstance(_input, dict):
+                                for _call in _tool_calls:
+                                    _name = _call.get("name")
+                                    _input = _call.get("input") if isinstance(_call.get("input"), dict) else {}
+                                    if _name == _search_tool_name:
                                         _query = str(_input.get("query") or "").strip()
                                         _reason = str(_input.get("reason") or "").strip()[:80]
-                                    _result = await asyncio.to_thread(run_sonar_search, _perplexity_key, _query)
-                                    _search_calls_total += 1
-                                    _search_cost_total += float(_result.get("cost", 0.0) or 0.0)
-                                    _u = _result.get("usage") or {}
-                                    for _k in ("prompt_tokens", "completion_tokens", "total_tokens", "num_search_queries"):
-                                        _search_usage_total[_k] = _search_usage_total.get(_k, 0) + (_u.get(_k, 0) or 0)
-                                    _search_log.append({
-                                        "query": _query,
-                                        "reason": _reason,
-                                        "ok": bool(_result.get("ok")),
-                                        "sources_count": len(_result.get("sources") or []),
-                                        "error": _result.get("error") if not _result.get("ok") else None,
-                                    })
-                                    # Stream a per-search banner notification immediately so the user
-                                    # sees "🔍 Nora is checking Roxy hours" while the character types.
-                                    _notif = {
-                                        "type": "character_search",
-                                        "query": _query,
-                                        "reason": _reason,
-                                        "ok": bool(_result.get("ok")),
-                                    }
-                                    if not _result.get("ok") and _result.get("error"):
-                                        _notif["error"] = str(_result.get("error"))[:200]
+                                        _result = await asyncio.to_thread(run_sonar_search, _perplexity_key, _query)
+                                        _search_calls_total += 1
+                                        _search_cost_total += float(_result.get("cost", 0.0) or 0.0)
+                                        _u = _result.get("usage") or {}
+                                        for _k in ("prompt_tokens", "completion_tokens", "total_tokens", "num_search_queries"):
+                                            _search_usage_total[_k] = _search_usage_total.get(_k, 0) + (_u.get(_k, 0) or 0)
+                                        _search_log.append({
+                                            "query": _query, "reason": _reason,
+                                            "ok": bool(_result.get("ok")),
+                                            "sources_count": len(_result.get("sources") or []),
+                                            "error": _result.get("error") if not _result.get("ok") else None,
+                                        })
+                                        _notif = {
+                                            "type": "character_search",
+                                            "query": _query, "reason": _reason,
+                                            "ok": bool(_result.get("ok")),
+                                        }
+                                        if not _result.get("ok") and _result.get("error"):
+                                            _notif["error"] = str(_result.get("error"))[:200]
+                                        _content = _format_search_result(_result)
+                                    else:
+                                        # fetch_url
+                                        _url = str(_input.get("url") or "").strip()
+                                        _reason = str(_input.get("reason") or "").strip()[:80]
+                                        _result = await asyncio.to_thread(run_fetch_url, _url)
+                                        _fetch_calls_total += 1
+                                        _fetch_log.append({
+                                            "url": _result.get("url") or _url,
+                                            "reason": _reason,
+                                            "ok": bool(_result.get("ok")),
+                                            "title": _result.get("title"),
+                                            "error": _result.get("error") if not _result.get("ok") else None,
+                                        })
+                                        _notif = {
+                                            "type": "character_fetch_url",
+                                            "url": _result.get("url") or _url,
+                                            "reason": _reason,
+                                            "title": _result.get("title"),
+                                            "ok": bool(_result.get("ok")),
+                                        }
+                                        if not _result.get("ok") and _result.get("error"):
+                                            _notif["error"] = str(_result.get("error"))[:200]
+                                        _content = _format_fetch_result(_result)
                                     if not client_disconnected:
                                         yield f"event: state_notifications\ndata: {json.dumps([_notif])}\n\n"
                                         await sync_manager.broadcast_to_chat(
@@ -10018,7 +10185,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _tool_results.append({
                                         "type": "tool_result",
                                         "tool_use_id": _call.get("id"),
-                                        "content": format_tool_result_text(_result),
+                                        "content": _content,
                                         **({"is_error": True} if not _result.get("ok") else {}),
                                     })
 
@@ -10061,7 +10228,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         is_free_chat=is_free_chat,
                                         use_cache=False,
                                     )
-                                    _followup_params["tools"] = [SONAR_SEARCH_TOOL]
+                                    _followup_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL]
                                     _followup_params["tool_choice"] = {"type": "auto"}
                                     _followup_params.pop("thinking", None)
                                     _followup_params.pop("output_config", None)
@@ -10098,6 +10265,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 # "Nora looked up X" badges after the turn streams (matching how
                                 # state_notifications fired live during streaming).
                                 data["search_log"] = _search_log
+                            if _fetch_calls_total > 0:
+                                data["fetch_url_calls"] = _fetch_calls_total
+                                data["fetch_url_log"] = _fetch_log
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
@@ -10445,6 +10615,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["search_model"] = data.get("search_model", "sonar")
                             if data.get("search_log"):
                                 assistant_msg_data["search_log"] = data["search_log"]
+                        if data.get("fetch_url_calls"):
+                            assistant_msg_data["fetch_url_calls"] = int(data.get("fetch_url_calls", 0) or 0)
+                            if data.get("fetch_url_log"):
+                                assistant_msg_data["fetch_url_log"] = data["fetch_url_log"]
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 

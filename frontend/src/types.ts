@@ -47,7 +47,7 @@ export interface ChatMessage {
   tokens?: string;
   cost?: string;
   reasoning?: string;
-  attached_files?: {filename: string, content: string}[];
+  attached_files?: {filename: string, content: string, mime_type?: string}[];
   model?: string;  // Model used for this response (assistant messages only)
   service_tier?: 'flex' | 'standard' | null;  // GPT service tier (flex or standard)
   bookmark?: string;  // User-defined bookmark annotation

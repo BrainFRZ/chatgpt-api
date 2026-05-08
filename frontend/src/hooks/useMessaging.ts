@@ -42,7 +42,7 @@ interface UseMessagingDeps {
 
 export function useMessaging(deps: UseMessagingDeps) {
   const [newMessage, setNewMessageRaw] = useState('');
-  const [stagedFiles, setStagedFiles] = useState<{filename: string, content: string}[]>([]);
+  const [stagedFiles, setStagedFiles] = useState<{filename: string, content: string, mime_type?: string}[]>([]);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [textareaHeight, setTextareaHeight] = useState(85);
@@ -890,19 +890,47 @@ export function useMessaging(deps: UseMessagingDeps) {
     if (!event.target.files) return;
 
     const files = Array.from(event.target.files);
-    const newStagedFiles: {filename: string, content: string}[] = [];
+    const newStagedFiles: {filename: string, content: string, mime_type?: string}[] = [];
+
+    const TEXT_EXTS = ['txt', 'md', 'yaml', 'yml'];
+    const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+    const MAX_IMAGE_BYTES = 5 * 1024 * 1024;  // 5MB
 
     for (const file of files) {
-      // Check extension
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (!['txt', 'md', 'yaml', 'yml'].includes(ext || '')) {
-        deps.setError(`${file.name}: Only .txt, .md, .yaml, and .yml files are allowed`);
+      const mime = file.type || '';
+      const isImage = IMAGE_MIME.has(mime);
+      const isText = TEXT_EXTS.includes(ext || '');
+
+      if (!isImage && !isText) {
+        deps.setError(`${file.name}: only .txt/.md/.yaml/.yml or image files (PNG/JPEG/GIF/WebP) are allowed`);
+        continue;
+      }
+
+      if (isImage && file.size > MAX_IMAGE_BYTES) {
+        deps.setError(`${file.name}: image is over 5MB; please use a smaller version`);
         continue;
       }
 
       try {
-        const content = await file.text();
-        newStagedFiles.push({ filename: file.name, content });
+        if (isImage) {
+          // Read as base64 (strip the data URL prefix). Backend stores this
+          // base64 string and re-emits it as an Anthropic image content block.
+          const dataUrl: string = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error('FileReader failed'));
+            reader.readAsDataURL(file);
+          });
+          const commaIdx = dataUrl.indexOf(',');
+          const b64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+          // Normalize image/jpg → image/jpeg (Anthropic expects the canonical form)
+          const normalizedMime = mime === 'image/jpg' ? 'image/jpeg' : mime;
+          newStagedFiles.push({ filename: file.name, content: b64, mime_type: normalizedMime });
+        } else {
+          const content = await file.text();
+          newStagedFiles.push({ filename: file.name, content });
+        }
       } catch (err) {
         deps.setError(`Could not read ${file.name}`);
       }
@@ -912,7 +940,6 @@ export function useMessaging(deps: UseMessagingDeps) {
       setStagedFiles(prev => [...prev, ...newStagedFiles]);
     }
 
-    // Clear input so same file can be selected again
     if (chatFileInputRef.current) {
       chatFileInputRef.current.value = '';
     }

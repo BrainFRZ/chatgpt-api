@@ -42,6 +42,7 @@
 !backend/character_consolidate.py
 !backend/character_storage.py
 !backend/character_recall.py
+!backend/character_fetch_url.py
 !backend/characters_runtime.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py

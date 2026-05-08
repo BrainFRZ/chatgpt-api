@@ -882,12 +882,21 @@ def build_agent_system_prompt(contract: str, instructions: str, project_files: s
 
 
 def build_message_content(msg: dict) -> str:
-    """Build message content string, including any attached files."""
+    """Build message content string, including any attached files.
+    Image attachments use a placeholder ([image: filename]) so the historical
+    context stays text-only — actual image content blocks for the latest user
+    message are built separately in main.py via build_image_content_blocks."""
     content = msg.get("content", "")
     attached = msg.get("attached_files", [])
     if attached:
-        file_wrappers = [f"====FILE: {f['filename']}====\n{f['content']}\n====END FILE====" for f in attached]
-        files_text = "\n\n".join(file_wrappers)
+        wrappers = []
+        for f in attached:
+            mt = (f.get("mime_type") or "")
+            if mt.startswith("image/"):
+                wrappers.append(f"[image: {f['filename']}]")
+            else:
+                wrappers.append(f"====FILE: {f['filename']}====\n{f.get('content', '')}\n====END FILE====")
+        files_text = "\n\n".join(wrappers)
         content = f"{files_text}\n\n{content}"
     return content
 

@@ -653,20 +653,42 @@ export default function ChatView({
                   {/* Attached files display */}
                   {msg.role === 'user' && msg.attached_files && msg.attached_files.length > 0 && (
                     <div style={styles.attachedFilesDisplay}>
-                      {msg.attached_files.length === 1 ? (
-                        <span style={styles.attachedFilesSingle}>📎 {msg.attached_files[0].filename}</span>
-                      ) : (
-                        <details style={styles.attachedFilesDetails}>
-                          <summary style={styles.attachedFilesSummary}>
-                            📎 {msg.attached_files.length} files attached
-                          </summary>
-                          <div style={styles.attachedFilesExpanded}>
-                            {msg.attached_files.map((file, idx) => (
-                              <div key={idx} style={styles.attachedFileItem}>📄 {file.filename}</div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
+                      {(() => {
+                        const imageFiles = msg.attached_files.filter((f: any) => (f.mime_type || '').startsWith('image/'));
+                        const otherFiles = msg.attached_files.filter((f: any) => !(f.mime_type || '').startsWith('image/'));
+                        return (
+                          <>
+                            {imageFiles.length > 0 && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: otherFiles.length > 0 ? '8px' : 0 }}>
+                                {imageFiles.map((file: any, idx: number) => (
+                                  <img
+                                    key={idx}
+                                    src={`data:${file.mime_type};base64,${file.content}`}
+                                    alt={file.filename}
+                                    title={file.filename}
+                                    style={{ maxWidth: '320px', maxHeight: '320px', borderRadius: '6px', border: '1px solid #444', objectFit: 'contain' }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                            {otherFiles.length === 1 && (
+                              <span style={styles.attachedFilesSingle}>📎 {otherFiles[0].filename}</span>
+                            )}
+                            {otherFiles.length > 1 && (
+                              <details style={styles.attachedFilesDetails}>
+                                <summary style={styles.attachedFilesSummary}>
+                                  📎 {otherFiles.length} files attached
+                                </summary>
+                                <div style={styles.attachedFilesExpanded}>
+                                  {otherFiles.map((file: any, idx: number) => (
+                                    <div key={idx} style={styles.attachedFileItem}>📄 {file.filename}</div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
                   {msg.role === 'assistant' && (msg as any).ship_combat_started && !(prevMsg && prevMsg.role === 'user' && (prevMsg as any).ship_combat_hidden_init) && (
@@ -959,6 +981,28 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_fetch_url') {
+                const failed = n.ok === false;
+                return (
+                  <div key={i} style={{
+                    ...styles.searchNotification,
+                    ...(failed ? styles.searchNotificationError : {}),
+                  }}>
+                    <span style={styles.notificationLabel}>
+                      {failed ? '🔗 fetch failed' : '🔗 reading link'}
+                    </span>
+                    {n.reason && <>: {n.reason}</>}
+                    {n.title && (
+                      <span style={styles.notificationReason}> — "{n.title}"</span>
+                    )}
+                    {failed && n.error && (
+                      <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                        {n.error}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
               if (n.type === 'voice_update') {
                 return (
                   <div key={i} style={styles.voiceNotification}>
@@ -1023,18 +1067,21 @@ export default function ChatView({
         {/* Staged files bar */}
         {stagedFiles.length > 0 && (
           <div style={styles.stagedFilesBar}>
-            {stagedFiles.map((file, idx) => (
-              <div key={idx} style={styles.stagedFileChip}>
-                <span style={styles.stagedFileName}>📄 {file.filename}</span>
-                <button
-                  onClick={() => removeStagedFile(idx)}
-                  style={styles.stagedFileRemove}
-                  title="Remove file"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
+            {stagedFiles.map((file, idx) => {
+              const isImage = (file as any).mime_type?.startsWith('image/');
+              return (
+                <div key={idx} style={styles.stagedFileChip}>
+                  <span style={styles.stagedFileName}>{isImage ? '🖼️' : '📄'} {file.filename}</span>
+                  <button
+                    onClick={() => removeStagedFile(idx)}
+                    style={styles.stagedFileRemove}
+                    title="Remove file"
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -1063,7 +1110,7 @@ export default function ChatView({
               ref={chatFileInputRef}
               onChange={handleChatFileSelect}
               multiple
-              accept=".txt,.md,.yaml,.yml"
+              accept=".txt,.md,.yaml,.yml,image/png,image/jpeg,image/gif,image/webp"
               style={{ display: 'none' }}
             />
           </div>
