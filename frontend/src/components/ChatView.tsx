@@ -308,7 +308,7 @@ export default function ChatView({
             // so the suffix disappears automatically.
             const lastMsg: any = messages.length > 0 ? messages[messages.length - 1] : null;
             return lastMsg?._characters_interview_mode ? (
-              <span style={{ color: '#c89866', fontWeight: 400, marginLeft: '8px' }}>
+              <span style={{ color: '#94b3d4', fontWeight: 400, marginLeft: '8px' }}>
                 — Interview
               </span>
             ) : null;
@@ -456,9 +456,10 @@ export default function ChatView({
             // Sex mode: warm rose/pink tint
             backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
           } else if (isInterviewMode) {
-            // Interview / re-interview mode: parchment-tan tint — "writing
-            // the character down" / scribe vibe.
-            backgroundColor = msg.role === 'user' ? '#2a261a' : '#1f1c10';
+            // Interview / re-interview mode: cool slate-blue — documentation
+            // / notebook feel. Distinct from the saturated mode palette and
+            // from the default blue-purple chat colors.
+            backgroundColor = msg.role === 'user' ? '#1c2a3a' : '#101820';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -480,7 +481,7 @@ export default function ChatView({
                 isShipCombatMode ? {borderLeft: '3px solid #f59e0b', paddingLeft: '8px'} :
                 isChaseMode ? {borderLeft: '3px solid #00d4ff', paddingLeft: '8px'} :
                 isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} :
-                isInterviewMode ? {borderLeft: '3px solid #c89866', paddingLeft: '8px'} :
+                isInterviewMode ? {borderLeft: '3px solid #94b3d4', paddingLeft: '8px'} :
                 {}
               )}}>
                 {isNetCombatMode && <span style={{color: '#a855f7', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>NET+MEAT</span>}
