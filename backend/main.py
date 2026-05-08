@@ -6204,13 +6204,31 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     ]
                     + [branch_path_for_context[-1]]
                 )
-            # Per-gamesystem sawtooth thresholds (gamesystems can override via gs dict; Characters inherits SINGLE_AGENT_* defaults)
-            _threshold_pairs = gs.get("characters_threshold_pairs", SINGLE_AGENT_THRESHOLD_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_THRESHOLD_PAIRS
-            _target_pairs = gs.get("characters_target_pairs", SINGLE_AGENT_TARGET_PAIRS) if (use_characters or use_characters_interview) else SINGLE_AGENT_TARGET_PAIRS
-            context_pairs, new_anchor_id, did_trim = get_context_pairs(
-                branch_path_for_context, _threshold_pairs, _target_pairs, trim_anchor_id
-            )
-            data["_trim_anchor_id"] = new_anchor_id
+            if use_characters_interview:
+                # Interview mode does NOT sawtooth. The interviewer has to
+                # remember the entire session — which sections have been
+                # asked, what was answered, where we are in the flow. Total
+                # interview volume tops out at maybe 30K tokens (a rich-tier
+                # 90-min interview), well inside Opus 4.5's window. Trimming
+                # mid-interview drops earlier sections and the agent loses
+                # the thread. Send the entire filtered history every turn.
+                context_pairs = [
+                    {"role": msg["role"], "content": build_message_content(msg)}
+                    for msg in branch_path_for_context[1:-1]
+                ]
+                new_anchor_id = None
+                did_trim = False
+                # Clear any stale anchor from a previously trimmed interview
+                # turn so subsequent turns also start fresh.
+                data.pop("_trim_anchor_id", None)
+            else:
+                # Correspondence mode: pair-based sawtooth (gamesystems can override).
+                _threshold_pairs = gs.get("characters_threshold_pairs", SINGLE_AGENT_THRESHOLD_PAIRS) if use_characters else SINGLE_AGENT_THRESHOLD_PAIRS
+                _target_pairs = gs.get("characters_target_pairs", SINGLE_AGENT_TARGET_PAIRS) if use_characters else SINGLE_AGENT_TARGET_PAIRS
+                context_pairs, new_anchor_id, did_trim = get_context_pairs(
+                    branch_path_for_context, _threshold_pairs, _target_pairs, trim_anchor_id
+                )
+                data["_trim_anchor_id"] = new_anchor_id
             data.pop("_stateful_trimming", None)  # clean up legacy flag
 
             if did_trim:
