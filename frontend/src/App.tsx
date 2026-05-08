@@ -307,7 +307,7 @@ function App() {
   const [projectModel, setProjectModel] = useState<string | null>(null);
   const isPipelineProject = projectModel?.startsWith('gpt') ?? false;
   const [projectGameSystem, setProjectGameSystem] = useState<string | null>(null);
-  const [availableGameSystems, setAvailableGameSystems] = useState<{id: string, name: string}[]>([]);
+  const [availableGameSystems, setAvailableGameSystems] = useState<{id: string, name: string, slash_commands?: any[]}[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);

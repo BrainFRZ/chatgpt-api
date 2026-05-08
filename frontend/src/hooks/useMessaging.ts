@@ -461,14 +461,17 @@ export function useMessaging(deps: UseMessagingDeps) {
     }
   };
 
-  const sendMessage = async () => {
-    if (!newMessage.trim() || !deps.user || !deps.currentChat || deps.isLoading.has(deps.currentChat)) return;
+  const sendMessage = async (overrideText?: string) => {
+    // overrideText lets callers (e.g. the slash-command picker) bypass the
+    // input-state read so we don't race the React render after setNewMessage.
+    const effectiveText = overrideText !== undefined ? overrideText : newMessage;
+    if (!effectiveText.trim() || !deps.user || !deps.currentChat || deps.isLoading.has(deps.currentChat)) return;
     deps.setStateNotifications([]);
 
     const ctx = createContextGuard();
 
     // Handle /sex (no args) → end scene via API
-    const trimmedMsg = newMessage.trim();
+    const trimmedMsg = effectiveText.trim();
     if (trimmedMsg.toLowerCase() === '/sex' && deps.currentProject) {
       setNewMessage('');
       deps.setIsLoading(prev => new Set(prev).add(ctx.chat!));
@@ -501,7 +504,7 @@ export function useMessaging(deps: UseMessagingDeps) {
       return;
     }
 
-    const messageText = newMessage;
+    const messageText = effectiveText;
     const filesToSend = [...stagedFiles];
 
     setNewMessage('');

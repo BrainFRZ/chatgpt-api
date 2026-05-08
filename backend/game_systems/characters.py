@@ -1243,11 +1243,39 @@ Don't perform helpfulness. Don't ask "what can I help with." Don't summarize. Do
 Disagree when you actually disagree. Push back when something's off."""
 
 
+# ── Slash commands (SSOT for the picker) ───────────────────────────
+# Each entry describes one /command available in Characters chats.
+#   name:        the literal slash command (case used for display)
+#   description: short one-liner shown next to the name in the picker
+#   icon:        Lucide icon name (rendered in frontend SlashIcons registry)
+#   args:        None for argless (Enter sends), or {"placeholder": str} when
+#                an argument is required (Enter inserts "/cmd " into textarea
+#                so the user can type the arg; second Enter sends).
+#   condition:   optional flag key from chat_state.slash_conditions; if set
+#                and the flag is falsy on the chat, the command is hidden.
+
+SLASH_COMMANDS = [
+    {"name": "/text", "description": "Switch to text-message channel", "icon": "MessageSquare", "args": None},
+    {"name": "/phone", "description": "Switch to phone-call channel", "icon": "Phone", "args": None},
+    {"name": "/inperson", "description": "Switch to in-person channel", "icon": "Users", "args": None},
+    {"name": "/video", "description": "Switch to video-call channel", "icon": "Video", "args": None},
+    {"name": "/resolve", "description": "Resolve a callback by id", "icon": "Check", "args": {"placeholder": "<id> [resolution text]"}},
+    {"name": "/dismiss", "description": "Dismiss a callback by id", "icon": "X", "args": {"placeholder": "<id> [reason]"}},
+    {"name": "/seed-event", "description": "Plant a manual life event for the character", "icon": "Sparkles", "args": {"placeholder": "what happened to them"}},
+    {"name": "/reinterview", "description": "Re-interview the character to refine the profile", "icon": "ClipboardEdit", "args": None},
+    {"name": "/consolidate", "description": "Merge growth entries into character_profile.di", "icon": "Layers", "args": None},
+    {"name": "/finalize", "description": "Finalize the character profile (interview mode)", "icon": "CheckCircle", "args": None, "condition": "characters_interview_mode"},
+    {"name": "/accept-consolidation", "description": "Accept the pending consolidation proposal", "icon": "Check", "args": None, "condition": "characters_consolidation_pending"},
+    {"name": "/reject-consolidation", "description": "Reject the pending consolidation proposal", "icon": "X", "args": None, "condition": "characters_consolidation_pending"},
+]
+
+
 # ── Game system registration ───────────────────────────────────────
 
 GAME_SYSTEM = {
     "id": "characters",
     "display_name": "Characters",
+    "slash_commands": SLASH_COMMANDS,
 
     # No TTRPG contracts
     "events_contract": "",

@@ -1,9 +1,10 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useRef, useCallback, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { styles } from '../styles';
 import { ChatMessage, ModelInfo, convertMathDelimiters, formatTimestamp } from '../types';
+import { SlashCommandPicker, SlashCommand, useSlashPickerState } from './SlashCommandPicker';
 
 /** Format the in-fiction time/date/location HUD line for an assistant
  * message.  Reads from msg.pipeline_state_after.hud_state — the
@@ -70,7 +71,7 @@ interface ChatViewProps {
   currentProject: string | null;
   viewerCount: number;
   projectGameSystem: string | null;
-  availableGameSystems: {id: string, name: string}[];
+  availableGameSystems: {id: string, name: string, slash_commands?: SlashCommand[]}[];
   handleProjectGameSystemChange: (v: string) => void;
   availableModels: ModelInfo[];
   selectedModel: string;
@@ -113,7 +114,7 @@ interface ChatViewProps {
   newMessage: string;
   setNewMessage: (v: string) => void;
   textareaHeight: number;
-  sendMessage: () => void;
+  sendMessage: (overrideText?: string) => void;
   updatesText: string;
   onNotesClick: () => void;
   stateNotifications: any[];
@@ -202,6 +203,60 @@ export default function ChatView({
   chatGameSystem,
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Slash command picker — pulls the per-gamesystem command list from
+  // availableGameSystems (backend SSOT) and shows a filtered list when the
+  // input starts with "/".
+  const slashCommandsForGameSystem: SlashCommand[] = useMemo(() => {
+    const id = chatGameSystem || null;
+    if (!id) return [];
+    const gs = availableGameSystems.find(g => g.id === id);
+    return gs?.slash_commands || [];
+  }, [chatGameSystem, availableGameSystems]);
+
+  const slashPicker = useSlashPickerState(newMessage, slashCommandsForGameSystem);
+  const [slashIdx, setSlashIdx] = useState(0);
+
+  // Reset selection to top whenever the filtered list changes.
+  React.useEffect(() => {
+    setSlashIdx(0);
+  }, [slashPicker.filtered.length, slashPicker.query]);
+
+  const handleSlashPick = useCallback((cmd: SlashCommand) => {
+    if (cmd.args) {
+      // Argful: insert "/cmd " into the textarea, dismiss picker by adding space.
+      // The space causes useSlashPickerState to close (it bails on whitespace).
+      setNewMessage(`${cmd.name} `);
+      // Refocus and move cursor to end so user can start typing the arg.
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          ta.setSelectionRange(ta.value.length, ta.value.length);
+        }
+      });
+    } else {
+      // Argless: send immediately. Pass override text directly to avoid the
+      // React render race — setNewMessage doesn't flush before sendMessage's
+      // closure reads the input state.
+      setNewMessage('');
+      sendMessage(cmd.name);
+    }
+  }, [setNewMessage, sendMessage]);
+
+  const handleSlashInsert = useCallback((cmd: SlashCommand) => {
+    // Tab: insert into textarea regardless of args. Adds trailing space when
+    // the command takes args; otherwise just the bare command.
+    setNewMessage(cmd.args ? `${cmd.name} ` : cmd.name);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    });
+  }, [setNewMessage]);
 
   const scheduleTooltipHide = useCallback(() => {
     if (tooltipHideTimeout.current) clearTimeout(tooltipHideTimeout.current);
@@ -958,10 +1013,39 @@ export default function ChatView({
               ⋮⋮
             </div>
             <textarea
+              ref={textareaRef}
               placeholder={isDraggingFile ? "Drop files here..." : "Type a message..."}
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
               onKeyDown={(e) => {
+                // Slash picker is active: intercept arrow keys / Enter / Tab / Esc.
+                if (slashPicker.open && slashPicker.filtered.length > 0) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setSlashIdx(i => Math.min(i + 1, slashPicker.filtered.length - 1));
+                    return;
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setSlashIdx(i => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSlashPick(slashPicker.filtered[slashIdx]);
+                    return;
+                  }
+                  if (e.key === 'Tab') {
+                    e.preventDefault();
+                    handleSlashInsert(slashPicker.filtered[slashIdx]);
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setNewMessage('');
+                    return;
+                  }
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   sendMessage();
@@ -972,6 +1056,15 @@ export default function ChatView({
                 height: isMobile ? '60px' : `${textareaHeight}px`
               }}
             />
+            {slashPicker.open && slashPicker.filtered.length > 0 && (
+              <SlashCommandPicker
+                commands={slashPicker.filtered}
+                selectedIndex={slashIdx}
+                onSelectIndex={setSlashIdx}
+                onPick={handleSlashPick}
+                onInsert={handleSlashInsert}
+              />
+            )}
           </div>
 
           <div style={styles.buttonColumn}>

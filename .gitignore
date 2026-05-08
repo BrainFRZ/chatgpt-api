@@ -19,6 +19,8 @@
 !frontend/src/components/ProjectLanding.tsx
 !frontend/src/components/Modals.tsx
 !frontend/src/components/NetMapPopup.tsx
+!frontend/src/components/SlashCommandPicker.tsx
+!frontend/src/components/SlashIcons.tsx
 !frontend/src/hooks/
 !frontend/src/hooks/useMessaging.ts
 !frontend/src/hooks/useSync.ts
