@@ -457,11 +457,11 @@ export default function ChatView({
             backgroundColor = msg.role === 'user' ? '#2e1a2a' : '#1f0f1f';
           } else if (isInterviewMode) {
             // Interview / re-interview mode: actual parchment cream as bg
-            // (#e8dcb8 = aged-paper standard) with dark sepia text — like
-            // an actual scroll. Different visual logic from the other modes
-            // (which tint dark) because parchment IS light, and dark text
-            // on cream is the only way it reads as paper, not mud.
-            backgroundColor = msg.role === 'user' ? '#e8dcb8' : '#dac9a3';
+            // with dark sepia text — like an actual scroll. Different visual
+            // logic from the other modes (which tint dark) because parchment
+            // IS light. User = fresh parchment (#e8dcb8). Assistant =
+            // visibly more aged (#bda47a) for clear role distinction.
+            backgroundColor = msg.role === 'user' ? '#e8dcb8' : '#bda47a';
           } else {
             // In context: normal colors
             backgroundColor = msg.role === 'user' ? '#2a2a4e' : '#1e1e3a';
@@ -470,7 +470,7 @@ export default function ChatView({
           return (
             <div
               key={i}
-              className="message"
+              className={isInterviewMode ? 'message interview-message' : 'message'}
               style={{
                 ...styles.message,
                 backgroundColor,

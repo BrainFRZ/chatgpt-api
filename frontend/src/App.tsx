@@ -106,6 +106,31 @@ function App() {
           margin: 0.5em 0;
           color: #bbb;
         }
+        /* Interview-mode parchment overrides: the global markdown rules above
+           hardcode dark-theme colors (white bold, dark code bg, blue links).
+           When a message is in interview mode, override those so the markdown
+           reads as ink-on-parchment instead of bleeding through the cream bg. */
+        .interview-message .messageContent strong { color: #3a2818; }
+        .interview-message .messageContent em { color: #3a2818; }
+        .interview-message .messageContent code {
+          background-color: #d4c194;
+          color: #3a2818;
+        }
+        .interview-message .messageContent pre {
+          background-color: #d4c194;
+          color: #3a2818;
+        }
+        .interview-message .messageContent a { color: #6b4a23; }
+        .interview-message .messageContent blockquote {
+          border-left-color: #6b4a23;
+          color: #5a4530;
+        }
+        .interview-message .messageContent h1,
+        .interview-message .messageContent h2,
+        .interview-message .messageContent h3,
+        .interview-message .messageContent h4,
+        .interview-message .messageContent h5,
+        .interview-message .messageContent h6 { color: #3a2818; }
         .resizeHandle:hover {
           color: #aaa;
           background-color: rgba(255, 255, 255, 0.1);
