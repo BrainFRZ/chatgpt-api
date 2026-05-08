@@ -299,6 +299,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.ship_combat_mode) (newUserMessage as any).ship_combat_mode = true;
             if (data.net_combat_mode) (newUserMessage as any).net_combat_mode = true;
             if (data.chase_mode) (newUserMessage as any).chase_mode = true;
+            if (data._characters_interview_mode) (newUserMessage as any)._characters_interview_mode = true;
 
             const assistantMessage: ChatMessage = {
               id: data.assistant_message_id,
@@ -318,6 +319,7 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.net_combat_mode) (assistantMessage as any).net_combat_mode = true;
             if (data.chase_mode) (assistantMessage as any).chase_mode = true;
             if (data.sex_mode) (assistantMessage as any).sex_mode = true;
+            if (data._characters_interview_mode) (assistantMessage as any)._characters_interview_mode = true;
             if (data.ship_combat_started) (assistantMessage as any).ship_combat_started = true;
             if (data.ship_combat_opening_narration) (assistantMessage as any).ship_combat_opening_narration = data.ship_combat_opening_narration;
             if (typeof data.ship_combat_opening_embedded === 'boolean') (assistantMessage as any).ship_combat_opening_embedded = data.ship_combat_opening_embedded;
@@ -737,6 +739,12 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             if (data.sex_mode) {
               (userMsgWithId as any).sex_mode = true;
+            }
+            // Characters interview mode: tag both user and assistant so the
+            // parchment styling kicks in immediately, not just after refresh.
+            if (data._characters_interview_mode) {
+              (userMsgWithId as any)._characters_interview_mode = true;
+              (assistantMessage as any)._characters_interview_mode = true;
             }
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
               ? (data.ship_combat_init_message as ChatMessage)

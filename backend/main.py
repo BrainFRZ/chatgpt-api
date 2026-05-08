@@ -6607,6 +6607,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 "hud_state": None,
                 "characters_finalize_ok": _ok,
                 "profile_path": _result.get("path"),
+                "_characters_interview_mode": True,
             }
             yield f"event: done\ndata: {json.dumps(_done_data)}\n\n"
             return
@@ -10771,6 +10772,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             done_data['sex_mode'] = True
                             if sex_scene_complete:
                                 done_data['sex_complete'] = True
+                        if use_characters_interview:
+                            done_data['_characters_interview_mode'] = True
                         if _sex_handoff_detected:
                             done_data['sex_mode_handoff'] = True
                             done_data['sex_handoff_npcs'] = _sex_handoff_npcs
