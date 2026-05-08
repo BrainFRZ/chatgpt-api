@@ -20,7 +20,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-INTERVIEW_MODEL = "claude-opus-4.5"
+INTERVIEW_MODEL = "claude-opus-4-5"  # Anthropic API model name (dashed form)
 INTERVIEW_MAX_TOKENS = 4096
 FINALIZE_MAX_TOKENS = 8192
 INTERVIEW_TIMEOUT_S = 60

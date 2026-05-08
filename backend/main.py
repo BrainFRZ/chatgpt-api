@@ -5558,17 +5558,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # Characters interview mode: force model to Opus 4.5 regardless of user's selection.
     # Consolidate uses the same model — force-swap on either path so the client is correct.
+    # NOTE: INTERVIEW_MODEL is the Anthropic API name (dashed: "claude-opus-4-5"),
+    # used directly in character_interview.py's API calls. ProviderRegistry uses the
+    # Chorus-internal id (dotted: "claude-opus-4.5") — different convention. Look up
+    # via the dotted form here.
     if use_characters_interview or characters_consolidate_pending:
-        from character_interview import INTERVIEW_MODEL
-        if model_id != INTERVIEW_MODEL:
-            model_id = INTERVIEW_MODEL
+        _interview_registry_id = "claude-opus-4.5"
+        if model_id != _interview_registry_id:
+            model_id = _interview_registry_id
             provider = ProviderRegistry.get(model_id)
             api_key = get_api_key(username, ProviderRegistry.get_required_api_key(model_id))
             if api_key:
                 client = provider.get_client(api_key)
-                logger.info(f"Characters: forced model to {INTERVIEW_MODEL} for {username} (interview/consolidate)")
+                logger.info(f"Characters: forced model to {model_id} for {username} (interview/consolidate)")
             else:
-                logger.warning(f"Characters: no API key for {INTERVIEW_MODEL}; falling back to {request.model or data.get('model')}")
+                logger.warning(f"Characters: no API key for {model_id}; falling back to {request.model or data.get('model')}")
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
