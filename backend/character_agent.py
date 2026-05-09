@@ -96,13 +96,7 @@ You are NOT writing the character. You are reading what was written and updating
    Do NOT add: ephemeral moods, single-conversation jokes, things already in character_profile.di or [GROWTH], speculation about what they MIGHT do. The bar is "this would make sense to merge into character_profile.di in 2 weeks."
    Use **obsolete** when something that was in [GROWTH] stops being true (finished the book, broke up with the person, dropped the hobby). Use **update** to refine existing entries (e.g. "still reading LotR" → "finished LotR"). Most turns: no growth_ops. The signal of a good extractor is restraint.
 
-7) **consume_event_seed_op** — clear the [LIFE EVENT] from the model's context once it has been delivered. Emit `{action: "consume"}` (single op) when EITHER:
-   - The character clearly surfaced the event in their reply this turn (introduced it, mentioned it specifically, or answered the user's question about it), OR
-   - The user's input addresses or asks about the event and the character has now responded.
-   Do NOT emit consume on the same turn the seed was first injected unless the character actually surfaced it. Do NOT emit consume if the event hasn't been touched at all yet — let it stay in context for the next turn so the model has another chance.
-   Once consumed, you may also emit a corresponding memory_op or growth_op so the event lives on as a memory or a durable change (e.g. "Nora's cat ran away" → memory at impact 4; "Nora started a new job" → growth entry under "milestone").
-
-8) **schedule_ops** — mutate the character's planned schedule when this turn implied a change. The character's [SCHEDULE] is shown to you below; each event has an `id` (e.g. `sch-3`).
+7) **schedule_ops** — mutate the character's planned schedule when this turn implied a change. The character's [SCHEDULE] is shown to you below; each event has an `id` (e.g. `sch-3`).
    - **cancel**: emit when a planned event is no longer happening. `{op: "cancel", event_id: "sch-N", reason: "..."}`. Reasons: "Kira bailed", "too tired", "rescheduled to next week".
    - **modify**: emit when a planned event is moving, shrinking, swapping participants, etc. `{op: "modify", event_id: "sch-N", fields: {when_local?: "...", with?: [...], location?: "...", duration_min?: N, anticipation?: "..."}, reason: "..."}`. Only include the fields that changed.
    - **add**: emit when this turn introduces a NEW planned event the character or user committed to. `{op: "add", fields: {kind: "social|family|self_care|admin|anticipated", title: "...", with: [...], when_local: "ISO8601", duration_min: N, location: "...", anticipation: "looking_forward|dreading|neutral"}, reason: "..."}`. Use add only for things they explicitly commit to in this turn — not for floated ideas, not for things already on the schedule.
@@ -220,13 +214,6 @@ def build_character_agent_tool() -> dict:
                         },
                     },
                 },
-                "consume_event_seed_op": {
-                    "type": "object",
-                    "description": "Optional. Emit {action: 'consume'} when the [LIFE EVENT] seed has been delivered to the user (character surfaced it OR user addressed it and was answered). Pair with a memory_op or growth_op so the event lives on after consumption.",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["consume"]},
-                    },
-                },
                 "schedule_ops": {
                     "type": "array",
                     "description": "Schedule mutations implied by this turn (cancel / modify / add). Empty when no planned events changed.",
@@ -277,8 +264,8 @@ def _summarize_state(
     """Render the side agent's view of current state.
 
     File-backed kinds (memories, user_profile, growth) read from the store and
-    are branch-filtered. State-backed kinds (callbacks, wellbeing, arc, life_events)
-    come from characters_state directly.
+    are branch-filtered. State-backed kinds (callbacks, wellbeing, arc) come
+    from characters_state directly. Schedule events come from schedule.json.
     """
     if not isinstance(characters_state, dict):
         return ""
@@ -312,7 +299,7 @@ def _summarize_state(
                 cat = f"[{g.get('category')}] " if g.get('category') else ""
                 parts.append(f"  #{g.get('id')} {cat}{g.get('text', '')[:200]}")
 
-    # State-backed: callbacks / wellbeing / arc / life events
+    # State-backed: callbacks / wellbeing / arc
     cbs = (characters_state.get("callbacks") or {}).get("open") or []
     if cbs:
         parts.append("[CALLBACKS — OPEN]:")
@@ -320,15 +307,6 @@ def _summarize_state(
             if not isinstance(cb, dict):
                 continue
             parts.append(f"  #{cb.get('id')} ({cb.get('source', '?')}, since {cb.get('created_date', '?')}): {cb.get('original_text', '')[:160]}")
-
-    pending_seed = ((characters_state.get("life_events") or {}).get("pending_seed") or {})
-    if isinstance(pending_seed, dict) and pending_seed.get("hint"):
-        parts.append(
-            f"[LIFE EVENT — pending, planted {pending_seed.get('planted_date', '?')}, "
-            f"{pending_seed.get('magnitude', '?')}/{pending_seed.get('category', '?')}, "
-            f"source={pending_seed.get('source', 'auto')}]: {pending_seed.get('hint', '')[:200]}"
-        )
-        parts.append("  → If the character surfaced this in their reply (or the user addressed it and was answered), emit consume_event_seed_op AND a memory_op/growth_op so the event lives on.")
 
     wb = characters_state.get("wellbeing") or {}
     parts.append(f"[WELLBEING] {wb.get('state', 'Even')}; current wb_mod for tomorrow: {wb.get('wb_mod', 0)}")
@@ -485,7 +463,6 @@ def apply_character_ops_to_state(
         apply_callback_ops,
         apply_wb_mod_ops,
         apply_arc_state_op,
-        consume_pending_event_seed,
     )
 
     if not isinstance(characters_state, dict):
@@ -534,12 +511,5 @@ def apply_character_ops_to_state(
     arc_op = ops.get("arc_state_op")
     if isinstance(arc_op, dict) and arc_op.get("action") == "set":
         characters_state["arc_state"] = apply_arc_state_op(characters_state.get("arc_state", ""), arc_op)
-    consume_op = ops.get("consume_event_seed_op")
-    if isinstance(consume_op, dict) and consume_op.get("action") == "consume":
-        life_events = characters_state.get("life_events") or {}
-        consumed = consume_pending_event_seed(life_events, today_iso)
-        if consumed:
-            characters_state["life_events"] = life_events
-            logger.info(f"character_agent: consumed life-event seed {consumed.get('magnitude')}/{consumed.get('category')} via in-conversation delivery")
 
     return characters_state

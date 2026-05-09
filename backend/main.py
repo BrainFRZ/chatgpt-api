@@ -6381,11 +6381,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         result = await asyncio.to_thread(
                             maybe_generate_off_screen, client, characters_state, _project_dir
                         )
-                        # off-screen consumes the life-event seed in characters_state.life_events;
-                        # since life_events is now project-level, persist after the consumption.
-                        # NB: persist runs to_thread because save_project_state does blocking
-                        # file IO + fcntl.flock acquire — running it on the asyncio main thread
-                        # would stall the event loop under lock contention from another chat.
+                        # Off-screen used to consume the life-event seed (Phase-2-and-earlier).
+                        # Phase 3 removed life_events; this persist call is now a defensive
+                        # no-op for the off_screen path, but kept in case any future hook
+                        # mutates project-level state during the gap-fill. Cheap (no project
+                        # fields changed → quick lock + write of unchanged data).
+                        # NB: to_thread because save_project_state does blocking file IO +
+                        # fcntl.flock acquire.
                         if result is not None:
                             from character_project_state import persist_project_state_from
                             await asyncio.to_thread(

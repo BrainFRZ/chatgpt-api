@@ -79,9 +79,7 @@ CHARACTER_GROWTH_CATEGORIES = (
 # Roll cadence: once per real ISO week (year + week tuple), gated on first
 # message of an ET day. Gated also on a grace period so freshly-interviewed
 # characters don't have a major event in their first week.
-LIFE_EVENT_GRACE_DAYS = 14            # no auto rolls until this many days after first_seen_date
-LIFE_EVENT_PENDING_SEED_TTL_DAYS = 14 # if a seed sits unused for this long, expire it
-LIFE_EVENT_HISTORY_CAP = 30           # keep this many rolled events for diagnostics
+LIFE_EVENT_GRACE_DAYS = 14            # no major-event rolls until this many days after first_seen_date
 
 # Weighted d100 — most rolls produce no event. Real-life-ish rates:
 #   1-65   → no event       (65%)
@@ -222,12 +220,6 @@ def init_characters_state() -> dict:
         "character_growth": {               # second profile layer: emergent facts about the character
             "next_id": 1,
             "entries": [],                  # [{id, date, text, category, source, obsolete?, obsolete_date?, obsolete_reason?}]
-        },
-        "life_events": {                    # weekly auto-roll for major life events; gives character life forward momentum
-            "first_seen_date": None,        # ET date of first message; anchors the 2-week grace period
-            "last_rolled_year_week": None,  # [iso_year, iso_week] when we last rolled; one roll per ISO week
-            "pending_seed": None,           # {magnitude, category, hint, planted_date, source} — consumed by off-screen agent
-            "history": [],                  # rolled events for diagnostics + future "don't pile on" heuristics
         },
         "flakiness_bands": None,            # per-category {as_planned, modified, cancelled}; set by interview or bootstrap
         "scheduler_state": {},              # {last_resolver_run_at, last_planner_run_week_of}; updated by cron jobs
@@ -601,22 +593,6 @@ def _pick_event_magnitude(rng: random.Random) -> Optional[str]:
     return None
 
 
-def _roll_event_seed(rng: random.Random) -> Optional[dict]:
-    """Roll for an event. Returns the seed dict, or None for no-event."""
-    magnitude = _pick_event_magnitude(rng)
-    if not magnitude:
-        return None
-    bucket = LIFE_EVENT_TABLE.get(magnitude) or []
-    if not bucket:
-        return None
-    chosen = rng.choice(bucket)
-    return {
-        "magnitude": magnitude,
-        "category": chosen["category"],
-        "hint": chosen["hint"],
-    }
-
-
 def _isocalendar_year_week(iso_date: str) -> Optional[tuple]:
     """Return (iso_year, iso_week) for an ISO date string, or None on parse failure."""
     if not iso_date:
@@ -629,129 +605,43 @@ def _isocalendar_year_week(iso_date: str) -> Optional[tuple]:
     return (cal[0], cal[1])
 
 
-def maybe_roll_life_event(life_events: dict, today_iso: str, rng: Optional[random.Random] = None) -> dict:
-    """Weekly life-event roll. Mutates and returns life_events.
+def roll_major_event(
+    today_iso: str,
+    first_seen_date: Optional[str],
+    rng: Optional[random.Random] = None,
+) -> Optional[dict]:
+    """Pure helper: roll a weekly major-event seed for the planner to honor.
 
-    Rules:
-      - On the first call ever, just stamp first_seen_date and skip the roll.
-      - Skip the roll until LIFE_EVENT_GRACE_DAYS days after first_seen_date.
-      - At most one roll per ISO week (year + week).
-      - If a pending seed already exists, do not re-roll — but still advance
-        last_rolled_year_week so we don't keep retrying.
-      - If a pending seed is older than LIFE_EVENT_PENDING_SEED_TTL_DAYS, expire it
-        before considering a new roll.
+    Returns a dict {magnitude, category, hint} or None for no-event-this-week.
+
+    Caller responsibilities (the planner):
+    - Track first_seen_date (in scheduler_state.first_seen_date) and pass it in.
+      None means "first roll ever" — function returns None and caller stamps
+      today as first_seen_date so the grace period anchors.
+    - Track last_rolled_year_week and skip calling for a week already rolled
+      (the planner naturally runs once a week so this is rarely needed).
+
+    Grace: returns None for the first LIFE_EVENT_GRACE_DAYS after
+    first_seen_date — fresh characters don't get hit with major events
+    immediately. Mirrors the original maybe_roll_life_event semantics.
     """
-    if not isinstance(life_events, dict):
-        life_events = {
-            "first_seen_date": None,
-            "last_rolled_year_week": None,
-            "pending_seed": None,
-            "history": [],
-        }
-
-    # Bootstrap: first-ever turn — anchor first_seen_date and skip
-    if not life_events.get("first_seen_date"):
-        life_events["first_seen_date"] = today_iso
-        return life_events
-
-    # Expire stale pending seeds (off-screen never had a chance to consume them)
-    pending = life_events.get("pending_seed")
-    if isinstance(pending, dict):
-        age = days_between_dates(pending.get("planted_date"), today_iso)
-        if age > LIFE_EVENT_PENDING_SEED_TTL_DAYS:
-            logger.info(f"life_event: expiring stale pending seed (age {age}d): {pending}")
-            life_events["pending_seed"] = None
-            pending = None
-
-    # Grace period
-    if days_between_dates(life_events.get("first_seen_date"), today_iso) < LIFE_EVENT_GRACE_DAYS:
-        return life_events
-
-    # Once per ISO week
-    today_yw = _isocalendar_year_week(today_iso)
-    if today_yw is None:
-        return life_events
-    last_yw_raw = life_events.get("last_rolled_year_week")
-    last_yw = tuple(last_yw_raw) if isinstance(last_yw_raw, (list, tuple)) and len(last_yw_raw) == 2 else None
-    if last_yw == today_yw:
-        return life_events
-
-    # If a seed is still pending, mark this week as rolled but don't overwrite
-    if pending:
-        life_events["last_rolled_year_week"] = list(today_yw)
-        return life_events
-
-    # Roll
+    if not first_seen_date:
+        return None
+    if days_between_dates(first_seen_date, today_iso) < LIFE_EVENT_GRACE_DAYS:
+        return None
     rng = rng or random.Random()
-    seed = _roll_event_seed(rng)
-    life_events["last_rolled_year_week"] = list(today_yw)
-    if seed:
-        seed["planted_date"] = today_iso
-        seed["source"] = "auto"
-        life_events["pending_seed"] = seed
-        history = life_events.setdefault("history", [])
-        if not isinstance(history, list):
-            history = []
-        history.append({**seed, "consumed": False})
-        if len(history) > LIFE_EVENT_HISTORY_CAP:
-            history = history[-LIFE_EVENT_HISTORY_CAP:]
-        life_events["history"] = history
-        logger.info(f"life_event: rolled {seed['magnitude']}/{seed['category']} seed for {today_iso}")
-    else:
-        logger.debug(f"life_event: weekly roll produced no event for {today_iso}")
-    return life_events
-
-
-def set_manual_event_seed(life_events: dict, hint: str, today_iso: str) -> dict:
-    """Set a manually-authored event seed. Replaces any pending auto seed."""
-    if not isinstance(life_events, dict):
-        life_events = {"first_seen_date": today_iso, "last_rolled_year_week": None, "pending_seed": None, "history": []}
-    if not life_events.get("first_seen_date"):
-        life_events["first_seen_date"] = today_iso
-    seed = {
-        "magnitude": "manual",
-        "category": "manual",
-        "hint": str(hint or "")[:600],
-        "planted_date": today_iso,
-        "source": "manual",
+    magnitude = _pick_event_magnitude(rng)
+    if not magnitude:
+        return None
+    bucket = LIFE_EVENT_TABLE.get(magnitude) or []
+    if not bucket:
+        return None
+    chosen = rng.choice(bucket)
+    return {
+        "magnitude": magnitude,
+        "category": chosen["category"],
+        "hint": chosen["hint"],
     }
-    life_events["pending_seed"] = seed
-    history = life_events.setdefault("history", [])
-    if not isinstance(history, list):
-        history = []
-    history.append({**seed, "consumed": False})
-    if len(history) > LIFE_EVENT_HISTORY_CAP:
-        history = history[-LIFE_EVENT_HISTORY_CAP:]
-    life_events["history"] = history
-    return life_events
-
-
-def consume_pending_event_seed(life_events: dict, today_iso: str) -> Optional[dict]:
-    """Pop the pending seed (called by the off-screen agent after successful generation).
-
-    Marks the matching history entry as consumed for diagnostics.
-    Returns the seed (or None if there was nothing to consume).
-    """
-    if not isinstance(life_events, dict):
-        return None
-    seed = life_events.get("pending_seed")
-    if not isinstance(seed, dict):
-        return None
-    life_events["pending_seed"] = None
-    history = life_events.get("history") or []
-    if isinstance(history, list):
-        # Find the most recent matching unconsumed entry and mark it
-        for h in reversed(history):
-            if (
-                isinstance(h, dict)
-                and not h.get("consumed")
-                and h.get("planted_date") == seed.get("planted_date")
-                and h.get("source") == seed.get("source")
-            ):
-                h["consumed"] = True
-                h["consumed_date"] = today_iso
-                break
-    return seed
 
 
 # ── Wellbeing ───────────────────────────────────────────────────────
@@ -926,40 +816,6 @@ def build_arc_state_injection(state: dict) -> str:
         return ""
     return f"[ARC] Where this relationship is right now: {arc}"
 
-
-def build_life_event_injection(state: dict) -> str:
-    """Render the pending life-event seed.
-
-    The seed represents something that's happening to the character right now.
-    It needs to surface in conversation — the character introduces or references
-    it naturally when there's an opening. The side agent (Sonnet 4.6) emits a
-    consume op once the event has been delivered to the user, so the seed
-    doesn't keep prompting the model after it's been addressed.
-
-    The seed lives in characters_state.life_events.pending_seed and is set by:
-    - The weekly auto-roll (post-grace-period; the off-screen agent will also
-      weave it into gap days if a gap occurs).
-    - /seed-event manual override.
-    """
-    seed = ((state.get("life_events") or {}).get("pending_seed") or {})
-    if not isinstance(seed, dict) or not seed.get("hint"):
-        return ""
-    magnitude = seed.get("magnitude") or "?"
-    category = seed.get("category") or "?"
-    hint = seed.get("hint")
-    source = seed.get("source") or "auto"
-    planted = seed.get("planted_date") or "?"
-    source_note = (
-        " (USER-AUTHORED — the user wants this specific event to happen, honor it directly)"
-        if source == "manual" else ""
-    )
-    return (
-        f"[LIFE EVENT — currently happening to you, planted {planted}, magnitude={magnitude}/{category}]{source_note}\n"
-        f"  Hint: {hint}\n"
-        f"  Generate the specific event from this hint using your own profile (so it lands plausibly for who you are). "
-        f"Surface it in conversation when there's a natural opening — not as an announcement, just as the thing on your mind. "
-        f"Once you've introduced it (or the user asks about it and you've answered), don't keep harping on it; the side agent will clear the prompt and the event lives on as a memory or growth entry."
-    )
 
 
 def build_character_growth_injection(state: dict) -> str:
@@ -1206,27 +1062,36 @@ def build_life_stream_injection(state: dict) -> str:
 
 
 def build_schedule_injection(state: dict) -> str:
-    """Render the planned-schedule slice for the current+near-future window.
+    """Render the schedule slice — recent elapsed events + upcoming planned ones.
 
     Reads from state["_render_payload"]["schedule"] — a list of event dicts
-    populated by characters_runtime.populate_render_payload at turn-start.
-    Only events with status="planned" surface here; resolved/cancelled events
-    flow through the life_stream → recall path instead.
+    populated by characters_runtime.populate_render_payload (forward window: 4
+    days out for status=planned; backward window: 24h back for status in
+    as_planned/modified/cancelled).
 
-    Format: relative day + compact time + title + (kind/anticipation hints).
-    The header tells the model to reference plans naturally without reciting.
+    Format: two sections when both kinds are present —
+      [SCHEDULE — RECENT] for what happened the last day
+      [SCHEDULE — UPCOMING] for what's still planned
+    Either section is omitted if empty. Past events get a status-based marker
+    so the model knows they're behind the character (e.g., "did" / "missed" /
+    "rescheduled") rather than coming up.
     """
     payload = state.get("_render_payload") or {}
     events = payload.get("schedule") if isinstance(payload, dict) else None
     if not isinstance(events, list) or not events:
         return ""
 
-    lines = []
+    PAST_STATUSES = {"as_planned", "modified", "cancelled"}
+    past_lines: list[str] = []
+    upcoming_lines: list[str] = []
+
     for ev in events:
         if not isinstance(ev, dict):
             continue
-        if ev.get("status") != "planned":
+        status = ev.get("status")
+        if status not in PAST_STATUSES and status != "planned":
             continue
+
         title = ev.get("title") or "(untitled)"
         kind = ev.get("kind") or ""
         anticipation = ev.get("anticipation") or ""
@@ -1240,8 +1105,6 @@ def build_schedule_injection(state: dict) -> str:
                 dt = datetime.fromisoformat(when_local)
                 wd = dt.strftime("%a")
                 date_part = f"{dt.month}/{dt.day}"
-                # %I gives 12-hour with leading zero (always 2 chars), so
-                # lstrip("0") just removes the single-digit-hour leading zero.
                 time_part = dt.strftime("%I:%M%p").lstrip("0").lower()
                 if ":00" in time_part:
                     time_part = time_part.replace(":00", "")
@@ -1255,19 +1118,36 @@ def build_schedule_injection(state: dict) -> str:
         tail_bits = []
         if kind:
             tail_bits.append(kind)
-        if anticipation == "looking_forward":
-            tail_bits.append("looking forward")
-        elif anticipation == "dreading":
-            tail_bits.append("dreading")
+        if status == "planned":
+            if anticipation == "looking_forward":
+                tail_bits.append("looking forward")
+            elif anticipation == "dreading":
+                tail_bits.append("dreading")
+        else:
+            # Past event — status marker tells the model what happened
+            if status == "as_planned":
+                tail_bits.append("happened")
+            elif status == "modified":
+                tail_bits.append("happened differently — see recent life")
+            elif status == "cancelled":
+                tail_bits.append("cancelled — see recent life")
         tail = f" ({', '.join(tail_bits)})" if tail_bits else ""
 
-        lines.append(f"  - {when_str}: {title}{with_part}{loc_part}{tail}")
+        line = f"  - {when_str}: {title}{with_part}{loc_part}{tail}"
+        if status == "planned":
+            upcoming_lines.append(line)
+        else:
+            past_lines.append(line)
 
-    if not lines:
+    if not past_lines and not upcoming_lines:
         return ""
 
-    header = "[SCHEDULE — your plans this week; reference naturally, don't recite]"
-    return header + "\n" + "\n".join(lines)
+    sections = []
+    if past_lines:
+        sections.append("[SCHEDULE — RECENT (last day, behind you now)]\n" + "\n".join(past_lines))
+    if upcoming_lines:
+        sections.append("[SCHEDULE — UPCOMING (still ahead; reference naturally, don't recite)]\n" + "\n".join(upcoming_lines))
+    return "\n\n".join(sections)
 
 
 def build_prior_inner_states_injection(state: dict) -> str:
@@ -1388,7 +1268,6 @@ def build_characters_injections(state: dict) -> str:
         build_channel_injection,
         build_wellbeing_injection,
         build_arc_state_injection,
-        build_life_event_injection,
         build_character_growth_injection,
         build_off_screen_injection,
         build_life_stream_injection,

@@ -52,12 +52,6 @@ def test_save_then_load_round_trip(project_dir):
         "callbacks": {"next_id": 5, "open": [{"id": 1, "topic": "test"}], "resolved": [], "dismissed": []},
         "wellbeing": {"state": "Even", "rolled_date": "2026-05-09", "wb_mod": 1},
         "arc_state": "established daily rhythm",
-        "life_events": {
-            "first_seen_date": "2026-05-01",
-            "last_rolled_year_week": [2026, 19],
-            "pending_seed": None,
-            "history": [],
-        },
         "flakiness_bands": {
             "work":   {"as_planned": 0.99, "modified": 0.0,  "cancelled": 0.01},
             "social": {"as_planned": 0.80, "modified": 0.15, "cancelled": 0.05},
@@ -194,7 +188,7 @@ def test_load_returns_none_when_file_is_a_list(project_dir):
 
 
 def test_save_then_overlay_roundtrip_preserves_nested_data(project_dir):
-    """End-to-end: complex callback list + nested life_events history survive."""
+    """End-to-end: complex callback list + nested scheduler_state survive."""
     rich_state = {
         "callbacks": {
             "next_id": 12,
@@ -205,29 +199,23 @@ def test_save_then_overlay_roundtrip_preserves_nested_data(project_dir):
             "resolved": [{"id": 5, "topic": "old thing"}],
             "dismissed": [],
         },
-        "life_events": {
+        "scheduler_state": {
             "first_seen_date": "2026-04-01",
-            "last_rolled_year_week": [2026, 18],
-            "pending_seed": {
-                "magnitude": "moderate",
-                "category": "work_shift",
-                "hint": "new manager arrived",
-                "planted_date": "2026-05-05",
-                "source": "auto",
-            },
-            "history": [
-                {"week": [2026, 17], "magnitude": None, "consumed": True},
-                {"week": [2026, 18], "magnitude": "moderate", "category": "work_shift", "consumed": False},
-            ],
+            "last_resolver_run_at": "2026-05-09T13:00:00-04:00",
+            "last_planner_run_week_of": "2026-05-04",
+        },
+        "flakiness_bands": {
+            "work":   {"as_planned": 0.99, "modified": 0.0,  "cancelled": 0.01},
         },
     }
     save_project_state(project_dir, rich_state)
-    fresh_cs = {"callbacks": {}, "life_events": {}}
+    fresh_cs = {"callbacks": {}, "scheduler_state": {}}
     overlay_project_state_into(fresh_cs, project_dir)
     assert fresh_cs["callbacks"]["next_id"] == 12
     assert len(fresh_cs["callbacks"]["open"]) == 2
-    assert fresh_cs["life_events"]["pending_seed"]["hint"] == "new manager arrived"
-    assert fresh_cs["life_events"]["history"][1]["category"] == "work_shift"
+    assert fresh_cs["scheduler_state"]["first_seen_date"] == "2026-04-01"
+    assert fresh_cs["scheduler_state"]["last_planner_run_week_of"] == "2026-05-04"
+    assert fresh_cs["flakiness_bands"]["work"]["as_planned"] == 0.99
 
 
 def test_PROJECT_LEVEL_FIELDS_includes_ripeness_date():
@@ -237,7 +225,11 @@ def test_PROJECT_LEVEL_FIELDS_includes_ripeness_date():
     assert "callbacks" in PROJECT_LEVEL_FIELDS
     assert "wellbeing" in PROJECT_LEVEL_FIELDS
     assert "arc_state" in PROJECT_LEVEL_FIELDS
-    assert "life_events" in PROJECT_LEVEL_FIELDS
+    assert "flakiness_bands" in PROJECT_LEVEL_FIELDS
+    assert "scheduler_state" in PROJECT_LEVEL_FIELDS
+    # Phase 3: life_events folded into the planner; major events are entries
+    # in life_stream.jsonl with kind=major_event, no longer a state field.
+    assert "life_events" not in PROJECT_LEVEL_FIELDS
     # Chat-level fields explicitly excluded
     assert "channel" not in PROJECT_LEVEL_FIELDS
     assert "wall_clock" not in PROJECT_LEVEL_FIELDS

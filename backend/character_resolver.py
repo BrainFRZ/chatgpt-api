@@ -184,6 +184,13 @@ def _format_event_for_prompt(ev: dict, rolled_outcome: str) -> str:
     parts.append(f"  event_id: {ev.get('id')}")
     parts.append(f"  rolled_outcome: {rolled_outcome}")
     parts.append(f"  kind: {ev.get('kind', '?')}")
+    # Magnitude is "normal" for ordinary planned events; "major" for the
+    # planner's weekly major-event roll (loss / job change / health real /
+    # relationship shift). Surface to Sonnet so the narration calibrates —
+    # a "loss" magnitude=major is grief-shaped, not a generic mood bump.
+    magnitude = ev.get("magnitude") or "normal"
+    if magnitude != "normal":
+        parts.append(f"  magnitude: {magnitude}  ← weight the narrative accordingly")
     parts.append(f"  title: {ev.get('title', '?')}")
     parts.append(f"  when_local: {ev.get('when_local', '?')}")
     parts.append(f"  duration_min: {ev.get('duration_min', '?')}")

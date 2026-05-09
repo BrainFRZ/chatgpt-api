@@ -46,7 +46,7 @@ LIFE_STREAM_FILENAME = "life_stream.jsonl"
 _LOCK_FILENAME = ".character_state.lock"
 
 EVENT_KINDS = ("work", "social", "family", "self_care", "admin", "anticipated")
-EVENT_STATUSES = ("planned", "as_planned", "modified", "cancelled", "replaced")
+EVENT_STATUSES = ("planned", "as_planned", "modified", "cancelled")
 LIFE_STREAM_KINDS = ("resolved_planned", "unplanned", "schedule_change", "major_event")
 
 

@@ -120,6 +120,10 @@ def _resolver_job_id(project_dir: str) -> str:
     return f"daily_resolver:{os.path.abspath(project_dir)}"
 
 
+def _planner_job_id(project_dir: str) -> str:
+    return f"weekly_planner:{os.path.abspath(project_dir)}"
+
+
 def register_resolver_for_project(project_dir: str) -> bool:
     """Register the daily-resolver cron job for one project. Idempotent —
     re-registering replaces the existing entry.
@@ -152,9 +156,40 @@ def register_resolver_for_project(project_dir: str) -> bool:
     return True
 
 
+def register_planner_for_project(project_dir: str) -> bool:
+    """Register the weekly-planner cron job for one project. Idempotent —
+    re-registering replaces the existing entry. Sundays at 20:00 ET.
+    """
+    sched = _scheduler_instance()
+    if sched is None:
+        return False
+    from apscheduler.triggers.cron import CronTrigger
+
+    project_dir = os.path.abspath(project_dir)
+    job_id = _planner_job_id(project_dir)
+    trigger = CronTrigger(
+        day_of_week=WEEKLY_PLANNER_DAY,
+        hour=WEEKLY_PLANNER_HOUR,
+        minute=0,
+        timezone=_TZ_NAME,
+    )
+    sched.add_job(
+        _run_planner_job_async,
+        trigger=trigger,
+        args=[project_dir],
+        id=job_id,
+        replace_existing=True,
+        misfire_grace_time=3600 * 6,  # 6hr grace; planner only runs once a week
+        coalesce=True,
+        max_instances=1,
+    )
+    logger.info(f"scheduler: registered {job_id} at {WEEKLY_PLANNER_DAY} {WEEKLY_PLANNER_HOUR}:00 ET")
+    return True
+
+
 def register_all_projects(data_root: Optional[str] = None) -> int:
-    """Walk all Characters-enabled projects and register their resolver jobs.
-    Returns the number registered.
+    """Walk all Characters-enabled projects and register their resolver +
+    planner jobs. Returns the number of projects registered.
     """
     sched = _scheduler_instance()
     if sched is None:
@@ -162,9 +197,11 @@ def register_all_projects(data_root: Optional[str] = None) -> int:
     projects = discover_characters_projects(data_root)
     n = 0
     for p in projects:
-        if register_resolver_for_project(p):
+        ok_resolver = register_resolver_for_project(p)
+        ok_planner = register_planner_for_project(p)
+        if ok_resolver or ok_planner:
             n += 1
-    logger.info(f"scheduler: registered resolver jobs for {n} projects")
+    logger.info(f"scheduler: registered jobs for {n} projects")
     return n
 
 
@@ -191,6 +228,36 @@ def _run_resolver_blocking(project_dir: str) -> dict:
     from character_resolver import run_daily_resolver
     client = anthropic.Anthropic()  # picks up ANTHROPIC_API_KEY from env
     return run_daily_resolver(client, project_dir)
+
+
+async def _run_planner_job_async(project_dir: str) -> None:
+    """APScheduler-invoked job: weekly planner pass. Wraps blocking SDK calls."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.error(
+            f"scheduler: ANTHROPIC_API_KEY not set — planner for {project_dir} cannot run."
+        )
+        return
+    try:
+        meta = await asyncio.to_thread(_run_planner_blocking, project_dir)
+        logger.info(f"scheduler: planner pass for {os.path.basename(project_dir)}: {meta}")
+    except Exception as e:
+        logger.error(f"scheduler: planner job for {project_dir} crashed: {type(e).__name__}: {e}")
+
+
+def _run_planner_blocking(project_dir: str) -> dict:
+    """Sync wrapper: build Anthropic client + call run_weekly_planner."""
+    import anthropic
+    from character_planner import run_weekly_planner
+    client = anthropic.Anthropic()
+    return run_weekly_planner(client, project_dir)
+
+
+async def trigger_planner_now(project_dir: str) -> dict:
+    """On-demand planner pass for one project. Used by interview-finalize to
+    seed the initial week for a brand new character without waiting for Sunday."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return {"error": "ANTHROPIC_API_KEY not set"}
+    return await asyncio.to_thread(_run_planner_blocking, project_dir)
 
 
 # ── On-demand catch-up (called from session-resume path in main.py) ─

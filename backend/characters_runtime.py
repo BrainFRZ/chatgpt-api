@@ -33,8 +33,6 @@ from game_systems.characters import (
     apply_channel_op,
     apply_arc_state_op,
     maybe_roll_wellbeing,
-    maybe_roll_life_event,
-    set_manual_event_seed,
     roll_callback_ripeness,
     update_wall_clock,
     is_first_message_of_et_day,
@@ -98,12 +96,8 @@ def get_characters_state(data: dict, project_dir: Optional[str] = None) -> dict:
     cs.setdefault("channel", DEFAULT_CHANNEL)
     cs.setdefault("user_profile", {"next_id": 1, "entries": []})
     cs.setdefault("character_growth", {"next_id": 1, "entries": []})
-    cs.setdefault("life_events", {
-        "first_seen_date": None,
-        "last_rolled_year_week": None,
-        "pending_seed": None,
-        "history": [],
-    })
+    # life_events removed in Phase 3 — major events fold into schedule.json /
+    # life_stream.jsonl via the planner. Don't backfill the deprecated field.
     cs.setdefault("off_screen_log", None)
     cs.setdefault("wall_clock", {"first_message_at": None, "last_user_message_at": None, "last_message_at": None})
     cs.setdefault("ripe_callbacks", [])
@@ -167,23 +161,29 @@ def populate_render_payload(
         except Exception as e:
             logger.warning(f"populate_render_payload: store read failed: {e}")
 
-        # Schedule: load schedule.json and slice to events overlapping the visible
-        # window (now through 4 days out). Includes in-progress events (start in
-        # the past, end in the future). Hides resolved/cancelled events — those
-        # flow through life_stream → recall instead.
+        # Schedule: load schedule.json and slice to two windows:
+        #   - Forward (upcoming): planned events whose end is still in the future,
+        #     out to 4 days. Includes in-progress events (start past, end future).
+        #   - Backward (recently elapsed): as_planned / modified / cancelled
+        #     events whose end falls within the last 24h. Critical for skip-roll
+        #     days — without this slice, planned events that auto-stamp to
+        #     as_planned with empty resolution silently disappear from the
+        #     character's view, leaving her unaware that she had a cafe shift
+        #     this morning. The injection tags these as past so the model knows
+        #     they're behind her, not upcoming.
         try:
             from character_schedule import load_schedule
             schedule = load_schedule(project_dir)
             if isinstance(schedule, dict):
                 events_all = schedule.get("events") or []
                 now_dt = datetime.now().astimezone()
-                window_end = now_dt + timedelta(days=4)
-                planned_in_window = []
+                forward_end = now_dt + timedelta(days=4)
+                back_start = now_dt - timedelta(hours=24)
+                in_window = []
                 for ev in events_all:
                     if not isinstance(ev, dict):
                         continue
-                    if ev.get("status") != "planned":
-                        continue
+                    status = ev.get("status")
                     when_str = ev.get("when_local")
                     if not isinstance(when_str, str) or not when_str:
                         continue
@@ -192,15 +192,20 @@ def populate_render_payload(
                         if ev_start.tzinfo is None:
                             ev_start = ev_start.astimezone()
                         ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
-                        # Include if the event's window overlaps with [now, now+4d]:
-                        # event is still in progress (end > now) AND starts within window.
-                        if ev_end > now_dt and ev_start <= window_end:
-                            planned_in_window.append(ev)
                     except (ValueError, TypeError):
                         continue
+
+                    if status == "planned":
+                        # Forward-looking: still upcoming or in-progress
+                        if ev_end > now_dt and ev_start <= forward_end:
+                            in_window.append(ev)
+                    elif status in ("as_planned", "modified", "cancelled"):
+                        # Backward-looking: elapsed within last 24h
+                        if back_start <= ev_end <= now_dt:
+                            in_window.append(ev)
                 # Sort chronologically
-                planned_in_window.sort(key=lambda e: e.get("when_local") or "")
-                payload["schedule"] = planned_in_window
+                in_window.sort(key=lambda e: e.get("when_local") or "")
+                payload["schedule"] = in_window
         except Exception as e:
             logger.warning(f"populate_render_payload: schedule load failed: {e}")
     if isinstance(recall, dict):
@@ -407,8 +412,8 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
         }
 
     # Manual event seed: lets the user plant a specific life event for the
-    # off-screen agent to weave into the next session-resume's days. Bypasses
-    # the auto-roll's grace period and table — whatever the user types is the seed.
+    # writes directly to life_stream as a major_event entry. Recall (Haiku) and
+    # off-screen will surface it the same way they handle resolver-written events.
     if cmd == "/seed-event":
         hint = arg.strip()
         if not hint:
@@ -416,16 +421,31 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
                 "kind": "error",
                 "feedback": "Usage: /seed-event <what happened to the character>. Example: /seed-event her cat ran away",
             }
-        cs["life_events"] = set_manual_event_seed(cs.get("life_events") or {}, hint, today)
-        # Persist project-level state so the seeded event is visible across all chats
-        from character_project_state import persist_project_state_from
-        persist_project_state_from(cs, project_dir)
+        if not project_dir:
+            return {"kind": "error", "feedback": "/seed-event requires a project."}
+        try:
+            from character_schedule import append_life_stream
+            from datetime import datetime as _dt
+            now_iso = _dt.now().astimezone().isoformat(timespec="seconds")
+            append_life_stream(project_dir, {
+                "id": f"ls-{today}-seed-{abs(hash(hint)) % 100000:05d}",
+                "at_local": now_iso,
+                "kind": "major_event",
+                "ref": None,
+                "summary": hint[:600],
+                "tone": "even",
+                "available_to_recall": True,
+                "source": "manual",
+            })
+        except Exception as e:
+            logger.error(f"/seed-event: failed to write life_stream entry: {e}")
+            return {"kind": "error", "feedback": f"Failed to seed event: {e}"}
         return {
             "kind": "event_seeded",
             "feedback": (
-                f"Event seeded: \"{hint[:120]}\". The character will incorporate this into their "
-                "off-screen life on the next session-resume (i.e. when you come back after a >12h gap "
-                "or in their next \"what's been going on\" mention)."
+                f"Event seeded: \"{hint[:120]}\". The character will incorporate this naturally "
+                "via recall (when relevant to your next message) or via off-screen narration "
+                "(if you come back after a gap)."
             ),
         }
 
@@ -555,10 +575,9 @@ def prepare_state_for_turn(
         # no callback_ops are emitted today, otherwise old resolved entries can linger
         # indefinitely on quiet days.
         cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [], 0, today_iso)
-        # Weekly life-event roll. Self-gates internally to fire once per ISO week
-        # past the grace period.
-        cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_iso, rng=rng)
-        project_state_dirty = True  # wellbeing/callbacks/life_events/ripeness-date all touched
+        # Weekly major-event roll moved to character_planner (Phase 3) — fires
+        # via the Sunday APScheduler cron, not on first-message-of-day.
+        project_state_dirty = True  # wellbeing/callbacks/ripeness-date all touched
         # Hygiene: archive stale low-impact memories. Cheap (file rewrite, no
         # model calls). Memories with impact >= 3 are permanent; impact 1-2
         # memories untouched for 12+ months get soft-archived.
@@ -593,10 +612,13 @@ def stamp_user_turn(characters_state: dict) -> dict:
 
 
 def maybe_generate_off_screen(client, characters_state: dict, project_dir: Optional[str]) -> Optional[dict]:
-    """If gap since last_user_message_at exceeds threshold, call Opus 4.5 to fill in.
+    """If gap since last_user_message_at exceeds threshold, build the off-screen
+    log from life_stream entries (deterministic — no API call). Returns None
+    when no gap or when life_stream had no entries for the gap window.
 
-    This MUST run before prepare_state_for_turn updates last_user_message_at — caller
-    is responsible for ordering.
+    This MUST run before prepare_state_for_turn updates last_user_message_at —
+    caller is responsible for ordering. `client` arg is unused (kept for the
+    pre-Phase-2 signature compatibility).
     """
     from character_off_screen import generate_off_screen_log, should_generate_off_screen
     wc = characters_state.get("wall_clock") or {}
@@ -907,16 +929,40 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
 
     data["_characters_interview_mode"] = False
 
-    # Register the resolver job for this newly-completed character. Without
-    # this, scheduler.register_all_projects() only runs at app startup, so a
-    # character interviewed mid-session wouldn't get scheduled jobs until the
-    # next restart. Soft-fail: if the scheduler isn't running (apscheduler not
-    # installed, or test context), this is a no-op.
+    # Register the resolver + planner jobs for this newly-completed character.
+    # Without this, scheduler.register_all_projects() only runs at app startup,
+    # so a character interviewed mid-session wouldn't get scheduled jobs until
+    # the next restart. Soft-fail: if the scheduler isn't running (apscheduler
+    # not installed, or test context), this is a no-op.
     try:
-        from scheduler import register_resolver_for_project
+        from scheduler import register_resolver_for_project, register_planner_for_project
         register_resolver_for_project(project_dir)
+        register_planner_for_project(project_dir)
     except Exception as e:
-        logger.warning(f"finalize_interview: failed to register resolver job: {e}")
+        logger.warning(f"finalize_interview: failed to register scheduler jobs: {e}")
+
+    # Seed the initial week immediately. Without this, a freshly-interviewed
+    # character has no schedule until the next Sunday cron fires (up to 7
+    # days away). Run synchronously with the existing client; cost is one
+    # Sonnet 4.6 call (~$0.01-0.02). Stamps first_seen_date and generates
+    # the current week's events.
+    try:
+        from character_planner import run_weekly_planner, this_week_monday
+        from game_systems.characters import now_et
+        seed_meta = run_weekly_planner(
+            client, project_dir,
+            now_dt=now_et(),
+            week_of=this_week_monday(now_et()),
+        )
+        if seed_meta.get("skipped"):
+            logger.info(f"finalize_interview: initial planner pass skipped — {seed_meta.get('reason')}")
+        else:
+            logger.info(
+                f"finalize_interview: seeded initial week ({seed_meta.get('events_planned', 0)} events) "
+                f"for {os.path.basename(project_dir)}"
+            )
+    except Exception as e:
+        logger.warning(f"finalize_interview: initial planner seed failed: {e}")
 
     return {
         "ok": True,

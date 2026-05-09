@@ -30,6 +30,7 @@
 !frontend/tsconfig.json
 !backend/tests/test_character_panel.py
 !backend/tests/test_character_inner_state.py
+!backend/tests/test_character_planner.py
 !backend/tests/test_character_project_state.py
 !backend/tests/test_character_schedule.py
 !backend/tests/test_character_resolver.py
@@ -48,6 +49,7 @@
 !backend/character_recall.py
 !backend/character_fetch_url.py
 !backend/character_inner_state.py
+!backend/character_planner.py
 !backend/character_project_state.py
 !backend/character_schedule.py
 !backend/character_resolver.py

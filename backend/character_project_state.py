@@ -47,7 +47,6 @@ PROJECT_LEVEL_FIELDS = (
     "callbacks",
     "wellbeing",
     "arc_state",
-    "life_events",
     "flakiness_bands",
     "scheduler_state",
     "last_ripeness_rolled_date",

@@ -148,7 +148,7 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
 
     Reads memories from `_render_payload` (already populated by recall and
     branch-filtered) — does NOT re-read the store. Reads callbacks /
-    wellbeing / arc / life_events directly from characters_state.
+    wellbeing / arc directly from characters_state.
 
     Differs from character_agent._summarize_state: that one focuses on
     state-extraction (memory ids, growth ledger, branch metadata). This
@@ -226,14 +226,6 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
                 continue
             ripe = " (RIPE)" if cb.get("ripe") else ""
             parts.append(f"  ({cb.get('source', '?')}, since {cb.get('created_date', '?')}){ripe}: {cb.get('original_text', '')[:160]}")
-
-    pending_seed = ((characters_state.get("life_events") or {}).get("pending_seed") or {})
-    if isinstance(pending_seed, dict) and pending_seed.get("hint"):
-        parts.append(
-            f"[LIFE EVENT — something happening to her right now, "
-            f"{pending_seed.get('magnitude', '?')}/{pending_seed.get('category', '?')}]: "
-            f"{pending_seed.get('hint', '')[:200]}"
-        )
 
     wb = characters_state.get("wellbeing") or {}
     parts.append(f"[WELLBEING — baseline mood band today] {wb.get('state', 'Even')}")
