@@ -235,6 +235,7 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
     prior_states = payload.get("prior_inner_states") if isinstance(payload, dict) else None
     if isinstance(prior_states, list) and prior_states:
         parts.append("[YOUR RECENT INNER STATES — emotional continuity, oldest first]:")
+        from datetime import datetime as _dt
         for entry in prior_states:
             if not isinstance(entry, dict):
                 continue
@@ -248,13 +249,26 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
                 label = f"{turns_ago} turns ago"
             else:
                 label = "recent"
+            # Absolute timestamp on each prior state so it cross-references
+            # directly with the stamped historical message it came from.
+            ts_str = entry.get("timestamp")
+            ts_part = ""
+            if isinstance(ts_str, str) and ts_str:
+                try:
+                    _ts_dt = _dt.fromisoformat(ts_str)
+                    _wd = _ts_dt.strftime("%A")
+                    _date = _ts_dt.strftime("%Y-%m-%d")
+                    _time = _ts_dt.strftime("%I:%M %p").lstrip("0")
+                    ts_part = f" ({_wd} {_date} {_time})"
+                except (ValueError, TypeError):
+                    ts_part = ""
             field_parts = []
             for key in ("feeling", "wanting", "noticing", "holding_back"):
                 v = p.get(key)
                 if isinstance(v, str) and v.strip():
                     field_parts.append(f"{key}: {v.strip()}")
             if field_parts:
-                parts.append(f"  {label} — {' / '.join(field_parts)}")
+                parts.append(f"  {label}{ts_part} — {' / '.join(field_parts)}")
 
     off_screen_log = characters_state.get("off_screen_log")
     if isinstance(off_screen_log, dict):

@@ -1171,6 +1171,7 @@ def build_prior_inner_states_injection(state: dict) -> str:
     if not isinstance(prior, list) or not prior:
         return ""
 
+    from datetime import datetime as _dt
     lines = []
     for entry in prior:
         if not isinstance(entry, dict):
@@ -1185,13 +1186,28 @@ def build_prior_inner_states_injection(state: dict) -> str:
             label = f"{turns_ago} turns ago"
         else:
             label = "recent"
+        # Absolute timestamp — same format as the [NOW] block and the
+        # baked-in historical message stamps. Lets the model cross-reference
+        # this inner state directly with the stamped assistant message it
+        # came from instead of having to count back through history.
+        ts_str = entry.get("timestamp")
+        ts_part = ""
+        if isinstance(ts_str, str) and ts_str:
+            try:
+                _ts_dt = _dt.fromisoformat(ts_str)
+                _wd = _ts_dt.strftime("%A")
+                _date = _ts_dt.strftime("%Y-%m-%d")
+                _time = _ts_dt.strftime("%I:%M %p").lstrip("0")
+                ts_part = f" ({_wd} {_date} {_time})"
+            except (ValueError, TypeError):
+                ts_part = ""
         field_parts = []
         for key, friendly in (("feeling", "feeling"), ("wanting", "wanting"), ("noticing", "noticing"), ("holding_back", "holding back")):
             v = p.get(key)
             if isinstance(v, str) and v.strip():
                 field_parts.append(f"{friendly}: {v.strip()}")
         if field_parts:
-            lines.append(f"- {label} — {' / '.join(field_parts)}")
+            lines.append(f"- {label}{ts_part} — {' / '.join(field_parts)}")
 
     if not lines:
         return ""

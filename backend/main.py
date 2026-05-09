@@ -6462,6 +6462,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     if isinstance(_hist_payload, dict) and _hist_payload:
                         _prior_inner_states_list.append({
                             "turns_ago": _assistant_seen_count,
+                            "timestamp": _hist_msg.get("timestamp"),
                             "payload": _hist_payload,
                         })
                     if len(_prior_inner_states_list) >= 3:

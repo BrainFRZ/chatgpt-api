@@ -447,6 +447,63 @@ def test_prior_states_in_injection_assembly():
     # the prior block exists)
 
 
+def test_prior_states_renders_timestamp_when_available():
+    """Absolute timestamp on each entry renders alongside the relative label."""
+    state = {
+        "_render_payload": {
+            "prior_inner_states": [
+                {
+                    "turns_ago": 1,
+                    "timestamp": "2026-05-09T15:42:00",
+                    "payload": {"feeling": "warming"},
+                },
+            ]
+        }
+    }
+    block = build_prior_inner_states_injection(state)
+    assert "last turn" in block
+    # Full weekday name + date + time, matching [NOW] format
+    assert "Saturday" in block  # 2026-05-09 is a Saturday
+    assert "2026-05-09" in block
+    assert "3:42 PM" in block
+
+
+def test_prior_states_works_without_timestamp():
+    """Entries without timestamp still render (just the relative label)."""
+    state = {
+        "_render_payload": {
+            "prior_inner_states": [
+                {"turns_ago": 1, "payload": {"feeling": "calm"}},  # no timestamp
+            ]
+        }
+    }
+    block = build_prior_inner_states_injection(state)
+    assert "last turn" in block
+    assert "calm" in block
+    # No timestamp parens should appear when timestamp is missing
+    assert "(" not in block.split("\n")[1]  # the entry line
+
+
+def test_prior_states_handles_invalid_timestamp_gracefully():
+    """Unparseable timestamp does not crash; entry renders without ts."""
+    state = {
+        "_render_payload": {
+            "prior_inner_states": [
+                {
+                    "turns_ago": 2,
+                    "timestamp": "not a real timestamp",
+                    "payload": {"feeling": "ok"},
+                },
+            ]
+        }
+    }
+    block = build_prior_inner_states_injection(state)
+    assert "2 turns ago" in block
+    assert "ok" in block
+    # No malformed timestamp leaks through
+    assert "not a real timestamp" not in block
+
+
 def test_prior_states_assembly_order_prior_before_current():
     """[PRIOR INNER STATES] must render BEFORE [INNER STATE] (current turn)."""
     state = {
