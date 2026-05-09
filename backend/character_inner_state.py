@@ -158,6 +158,21 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
         return ""
     parts = []
 
+    # Wall-clock context: current time + silence duration since last user
+    # message. Same shape Opus gets in [NOW]. The inner-state pre-pass needs
+    # this so feelings can be calibrated by temporal reality — "stung 30
+    # seconds ago" vs "stung 90 minutes ago" produce very different inner
+    # states even with identical other context.
+    try:
+        from game_systems.characters import build_wall_clock_injection
+        wc_block = build_wall_clock_injection(characters_state)
+        if wc_block:
+            parts.append(wc_block)
+    except Exception:
+        # Soft-fail: if the helper can't be imported or errors, the rest of
+        # the inner-state pass still works without timing context.
+        pass
+
     payload = characters_state.get("_render_payload") or {}
     if isinstance(payload, dict):
         # Surface the same memories Opus is about to see — core + recall-surfaced.
