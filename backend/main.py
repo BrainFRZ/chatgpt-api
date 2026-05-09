@@ -6320,9 +6320,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         )
                         # off-screen consumes the life-event seed in characters_state.life_events;
                         # since life_events is now project-level, persist after the consumption.
+                        # NB: persist runs to_thread because save_project_state does blocking
+                        # file IO + fcntl.flock acquire — running it on the asyncio main thread
+                        # would stall the event loop under lock contention from another chat.
                         if result is not None:
                             from character_project_state import persist_project_state_from
-                            persist_project_state_from(characters_state, _project_dir)
+                            await asyncio.to_thread(
+                                persist_project_state_from, characters_state, _project_dir
+                            )
                         return result
                     except Exception as e:
                         logger.warning(f"Characters off-screen failed: {e}")

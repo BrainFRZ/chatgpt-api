@@ -50,7 +50,13 @@ PROJECT_LEVEL_FIELDS = ("callbacks", "wellbeing", "arc_state", "life_events", "l
 def _exclusive_lock(project_dir: str):
     """Acquire an exclusive file lock for the project's character_state write.
     No-op on platforms without fcntl. Lock file is project_dir/.character_state.lock
-    so the actual data file isn't held open across the lock duration."""
+    so the actual data file isn't held open across the lock duration.
+
+    Syncthing note: the lock file IS in the project dir, which means it will be
+    synced like any other file. It's a 0-byte sentinel so the sync cost is
+    negligible, but it can occasionally trigger conflict-file creation if two
+    devices touch it near-simultaneously. To suppress, add `.character_state.lock`
+    to the project's `.stignore` (Syncthing per-folder ignore file)."""
     if not _HAS_FCNTL:
         yield
         return
@@ -131,7 +137,14 @@ def save_project_state(project_dir: Optional[str], state: dict) -> bool:
                     pass
                 raise
     except OSError as e:
-        logger.warning(f"save_project_state: failed to write {path}: {e}")
+        # P2: this is a real divergence — in-memory state has the new values
+        # but disk doesn't. The next overlay will silently revert to the stale
+        # file. Log at error level so it surfaces in monitoring; callers don't
+        # currently react to a False return, but this is at least visible.
+        logger.error(
+            f"save_project_state: failed to write {path}: {e} — in-memory "
+            f"mutations to {list(project_payload.keys())} will be lost on next overlay"
+        )
         return False
     return True
 
