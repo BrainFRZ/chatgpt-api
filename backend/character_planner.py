@@ -145,12 +145,27 @@ def this_week_monday(now_dt: datetime) -> date:
     return today - timedelta(days=today.weekday())
 
 
-def _carry_forward_events(existing_schedule: dict, week_end_dt: datetime) -> list[dict]:
-    """Salvage planned events from the existing schedule whose when_local is
-    BEYOND next week's window. Drops past events (the resolver should have
-    resolved them; if they're still planned they were missed and are stale)
-    and events inside next week's window (those will be replaced by the new
-    week's plan).
+def _carry_forward_events(
+    existing_schedule: dict,
+    week_start_dt: datetime,
+    week_end_dt: datetime,
+) -> list[dict]:
+    """Salvage planned events OUTSIDE the new [week_start_dt, week_end_dt)
+    window so the planner can be called repeatedly (e.g. finalize seeding
+    two weeks back-to-back) without each call wiping the prior call's plans.
+
+    Salvages:
+    - Events BEFORE the window's start that are still status=planned
+      (e.g. the prior week's plans being merged with a fresh future week)
+    - Events past the window's end (chat-added far-future, prior planner
+      runs that planned weeks further out)
+
+    Drops:
+    - Events INSIDE the new window — those are what the planner is about
+      to generate fresh; old planner-run events for the same week get
+      replaced.
+    - Resolved/cancelled/modified events (status != planned) — their
+      narratives live in life_stream, not the schedule.
     """
     salvaged: list[dict] = []
     if not isinstance(existing_schedule, dict):
@@ -159,7 +174,7 @@ def _carry_forward_events(existing_schedule: dict, week_end_dt: datetime) -> lis
         if not isinstance(ev, dict):
             continue
         if ev.get("status") != "planned":
-            continue  # don't carry forward resolved/cancelled events
+            continue  # resolved/cancelled events drop
         when_str = ev.get("when_local")
         if not isinstance(when_str, str):
             continue
@@ -169,7 +184,8 @@ def _carry_forward_events(existing_schedule: dict, week_end_dt: datetime) -> lis
                 ev_dt = ev_dt.astimezone()
         except (ValueError, TypeError):
             continue
-        if ev_dt >= week_end_dt:
+        # Salvage if outside the new window in either direction
+        if ev_dt < week_start_dt or ev_dt >= week_end_dt:
             salvaged.append(ev)
     return salvaged
 
@@ -234,7 +250,14 @@ def run_weekly_planner(
         logger.info(f"planner: stamped first_seen_date={sched_state['first_seen_date']} for {project_dir}")
 
     if week_of is None:
-        week_of = _next_monday(now_dt)
+        # Default: plan the week TWO weeks from now (next_monday + 7), not the
+        # immediately-next week. The Sunday cron pre-populates the week-after-
+        # next while the immediately-next week is already filled by the prior
+        # cron firing or the finalize-interview seed. This guarantees there's
+        # always at least one full future week visible in the schedule, even
+        # at the end of the current week — avoids the "I only have today
+        # planned" gap on Sunday morning before the cron fires.
+        week_of = _next_monday(now_dt) + timedelta(days=7)
     week_of_iso = week_of.isoformat()
 
     # Idempotence: bail if we already planned this week.
@@ -251,7 +274,7 @@ def run_weekly_planner(
     existing_schedule = load_schedule(project_dir)
     week_start_dt = datetime.combine(week_of, datetime.min.time()).astimezone()
     week_end_dt = week_start_dt + timedelta(days=7)
-    salvaged = _carry_forward_events(existing_schedule or {}, week_end_dt)
+    salvaged = _carry_forward_events(existing_schedule or {}, week_start_dt, week_end_dt)
 
     # Sonnet call — generate next week's events
     profile_doc = _read_file(os.path.join(project_dir, "character_profile.di"))

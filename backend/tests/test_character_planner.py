@@ -139,33 +139,39 @@ def test_run_planner_with_explicit_week_of(project_dir):
 
 # ── _carry_forward_events ────────────────────────────────────────────
 
-def test_carry_forward_keeps_far_future_planned():
-    week_end = datetime(2026, 5, 18).astimezone()  # next-Monday end of new week
+def test_carry_forward_keeps_events_outside_window_both_sides():
+    """Salvages events BEFORE start AND events past END, both directions.
+    Drops events inside the new window (planner overwrites those)."""
+    week_start = datetime(2026, 5, 11).astimezone()
+    week_end = datetime(2026, 5, 18).astimezone()
     schedule = {"events": [
         {"id": "sch-1", "status": "planned",
-         "when_local": "2026-06-01T19:00:00-04:00", "title": "concert"},  # 3 weeks out
+         "when_local": "2026-06-01T19:00:00-04:00", "title": "far-future"},  # past end, salvage
         {"id": "sch-2", "status": "planned",
-         "when_local": "2026-05-12T08:00:00-04:00", "title": "this week"},  # in next-week window, drop
+         "when_local": "2026-05-12T08:00:00-04:00", "title": "in window"},  # inside, drop
         {"id": "sch-3", "status": "planned",
-         "when_local": "2026-05-05T08:00:00-04:00", "title": "past"},  # past, drop
+         "when_local": "2026-05-05T08:00:00-04:00", "title": "before start"},  # before start (still planned), salvage
     ]}
-    salvaged = _carry_forward_events(schedule, week_end)
-    ids = [e["id"] for e in salvaged]
-    assert ids == ["sch-1"]
+    salvaged = _carry_forward_events(schedule, week_start, week_end)
+    ids = sorted(e["id"] for e in salvaged)
+    assert ids == ["sch-1", "sch-3"]
 
 
 def test_carry_forward_drops_resolved_events():
+    week_start = datetime(2026, 5, 11).astimezone()
     week_end = datetime(2026, 5, 18).astimezone()
     schedule = {"events": [
         {"id": "sch-1", "status": "as_planned",
          "when_local": "2026-06-01T19:00:00-04:00", "title": "happened"},
     ]}
-    assert _carry_forward_events(schedule, week_end) == []
+    assert _carry_forward_events(schedule, week_start, week_end) == []
 
 
 def test_carry_forward_handles_missing_schedule():
-    assert _carry_forward_events({}, datetime(2026, 5, 18).astimezone()) == []
-    assert _carry_forward_events(None, datetime(2026, 5, 18).astimezone()) == []
+    week_start = datetime(2026, 5, 11).astimezone()
+    week_end = datetime(2026, 5, 18).astimezone()
+    assert _carry_forward_events({}, week_start, week_end) == []
+    assert _carry_forward_events(None, week_start, week_end) == []
 
 
 # ── compute_planner_cost ─────────────────────────────────────────────
@@ -220,6 +226,7 @@ def test_first_seen_date_stamped_on_first_run_and_week_generated(project_dir):
         client, project_dir,
         now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),
         rng=random.Random(0),
+        week_of=date(2026, 5, 11),  # explicit so test is independent of default
     )
     # First-run still generates the week (does NOT bail after stamping)
     assert out["skipped"] is False
@@ -272,11 +279,12 @@ def test_post_grace_period_can_roll_major(project_dir):
 def test_idempotence_skips_when_week_already_planned(project_dir):
     """Running the planner twice for the same target Monday is a no-op on
     the second call."""
-    # Pre-stamp last_planner_run_week_of for next Monday
+    # Pre-stamp last_planner_run_week_of for the SAME week the planner is
+    # about to target (default = next_monday + 7 from Sunday 5/10 = 5/18)
     save_project_state(project_dir, {
         "scheduler_state": {
             "first_seen_date": "2026-04-01",
-            "last_planner_run_week_of": "2026-05-11",
+            "last_planner_run_week_of": "2026-05-18",
         },
         "callbacks": {"open": []},
         "wellbeing": {"state": "Even", "wb_mod": 0},
@@ -284,7 +292,7 @@ def test_idempotence_skips_when_week_already_planned(project_dir):
     client = MagicMock()
     out = run_weekly_planner(
         client, project_dir,
-        now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),  # Sunday → next Mon = 5/11
+        now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),  # cron default → 5/18
     )
     assert out["skipped"] is True
     assert out["reason"] == "week already planned"
@@ -294,14 +302,14 @@ def test_idempotence_skips_when_week_already_planned(project_dir):
 # ── run_weekly_planner: full flow with mocked Sonnet ─────────────────
 
 def test_planner_writes_schedule_with_correct_week(project_dir):
-    """Full flow: planner writes a schedule.json with week_of=next Monday and
-    the model's events, stamps revision_history per event, and bumps
-    scheduler_state.last_planner_run_week_of."""
+    """Full flow: planner writes a schedule.json with the model's events,
+    stamps revision_history per event, and bumps last_planner_run_week_of."""
     client = _mock_client(_mock_planner_response(_basic_week()))
     out = run_weekly_planner(
         client, project_dir,
         now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),
-        rng=random.Random(0),  # very unlikely to hit major (default seed)
+        rng=random.Random(0),
+        week_of=date(2026, 5, 11),  # explicit
     )
     assert out["skipped"] is False
     assert out["week_of"] == "2026-05-11"
@@ -319,6 +327,23 @@ def test_planner_writes_schedule_with_correct_week(project_dir):
     from character_project_state import load_project_state
     st = load_project_state(project_dir)
     assert st["scheduler_state"]["last_planner_run_week_of"] == "2026-05-11"
+
+
+def test_planner_default_targets_week_after_next(project_dir):
+    """The cron's natural target is the week starting next_monday + 7.
+    Running planner without explicit week_of from Sunday 5/10 8pm should
+    produce week_of=2026-05-18 (week-after-next), not 2026-05-11.
+    This is the user-visible "always at least one full future week
+    visible" semantic.
+    """
+    client = _mock_client(_mock_planner_response(_basic_week()))
+    out = run_weekly_planner(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),  # Sunday cron time
+        rng=random.Random(0),
+        # NO week_of — exercise the default
+    )
+    assert out["week_of"] == "2026-05-18"
 
 
 def test_new_event_ids_dont_collide_with_previous_week(project_dir):
@@ -432,6 +457,7 @@ def test_no_major_event_no_life_stream_entry(project_dir):
         client, project_dir,
         now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),
         rng=random.Random(0),
+        week_of=date(2026, 5, 11),  # explicit
     )
     assert out["major_event"] is False
     stream = read_life_stream_all(project_dir)
@@ -448,6 +474,7 @@ def test_planner_no_events_from_model(project_dir):
         client, project_dir,
         now_dt=datetime(2026, 5, 10, 20, 0).astimezone(),
         rng=random.Random(0),
+        week_of=date(2026, 5, 11),  # explicit
     )
     assert out["skipped"] is True
     assert out["reason"] == "no events from model"

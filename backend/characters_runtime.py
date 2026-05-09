@@ -972,26 +972,35 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
     except Exception as e:
         logger.warning(f"finalize_interview: failed to register scheduler jobs: {e}")
 
-    # Seed the initial week immediately. Without this, a freshly-interviewed
-    # character has no schedule until the next Sunday cron fires (up to 7
-    # days away). Run synchronously with the existing client; cost is one
-    # Sonnet 4.6 call (~$0.01-0.02). Stamps first_seen_date and generates
-    # the current week's events.
+    # Seed TWO weeks of schedule immediately — current week + next week. The
+    # cron's natural target is week-after-next (default week_of = next_monday
+    # + 7), so seeding both covers the gap before the cron starts rolling
+    # forward. Without seeding two weeks, a fresh character would have no
+    # plans for week N+1 until two cron firings later. Cost: ~$0.02-0.04 in
+    # Sonnet calls (two passes), once per character creation.
     try:
+        from datetime import timedelta as _td
         from character_planner import run_weekly_planner, this_week_monday
         from game_systems.characters import now_et
-        seed_meta = run_weekly_planner(
-            client, project_dir,
-            now_dt=now_et(),
-            week_of=this_week_monday(now_et()),
-        )
-        if seed_meta.get("skipped"):
-            logger.info(f"finalize_interview: initial planner pass skipped — {seed_meta.get('reason')}")
-        else:
-            logger.info(
-                f"finalize_interview: seeded initial week ({seed_meta.get('events_planned', 0)} events) "
-                f"for {os.path.basename(project_dir)}"
+        _now = now_et()
+        _this_week = this_week_monday(_now)
+        _next_week = _this_week + _td(days=7)
+        for week_of, label in ((_this_week, "current"), (_next_week, "next")):
+            seed_meta = run_weekly_planner(
+                client, project_dir,
+                now_dt=_now,
+                week_of=week_of,
             )
+            if seed_meta.get("skipped"):
+                logger.info(
+                    f"finalize_interview: {label} week seed skipped — {seed_meta.get('reason')}"
+                )
+            else:
+                logger.info(
+                    f"finalize_interview: seeded {label} week "
+                    f"({seed_meta.get('events_planned', 0)} events, week_of={week_of}) "
+                    f"for {os.path.basename(project_dir)}"
+                )
     except Exception as e:
         logger.warning(f"finalize_interview: initial planner seed failed: {e}")
 
