@@ -60,13 +60,19 @@ def has_character_profile(project_dir: Optional[str]) -> bool:
     return os.path.isfile(os.path.join(project_dir, "character_profile.di"))
 
 
-def get_characters_state(data: dict) -> dict:
+def get_characters_state(data: dict, project_dir: Optional[str] = None) -> dict:
     """Reach into pipeline_state for characters_state, initializing if needed.
 
     NOTE: character_memories / user_profile / character_growth used to live here as
     in-state lists. They're now file-backed (see character_storage.py). The fields
     are retained as empty placeholders for migration purposes — when migrate happens,
     legacy entries get copied to files and the fields get cleared.
+
+    callbacks / wellbeing / arc_state / life_events are also project-wide now —
+    backed by character_state.json via character_project_state. When project_dir
+    is supplied, the file's contents are overlaid on top of the chat-state defaults
+    so all chats in the project see the same canonical view of those fields.
+    Channel and wall_clock legitimately stay per-chat.
     """
     ps = data.setdefault("pipeline_state", {})
     if not isinstance(ps, dict):
@@ -93,6 +99,12 @@ def get_characters_state(data: dict) -> dict:
     cs.setdefault("off_screen_log", None)
     cs.setdefault("wall_clock", {"first_message_at": None, "last_user_message_at": None, "last_message_at": None})
     cs.setdefault("ripe_callbacks", [])
+    # Overlay project-level fields from character_state.json. The file is the
+    # canonical source of truth for these; chat-state copies are stale snapshots
+    # that get refreshed every time this function runs with a project_dir.
+    if project_dir:
+        from character_project_state import overlay_project_state_into
+        overlay_project_state_into(cs, project_dir)
     return cs
 
 
@@ -157,7 +169,7 @@ def maybe_migrate_storage(data: dict, project_dir: Optional[str]) -> dict:
     try:
         from character_storage import CharacterStore, migrate_state_to_files
         store = CharacterStore(project_dir)
-        cs = get_characters_state(data)
+        cs = get_characters_state(data, project_dir=project_dir)
         return migrate_state_to_files(cs, store)
     except Exception as e:
         logger.warning(f"maybe_migrate_storage: failed: {e}")
@@ -202,7 +214,11 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
 
-    cs = get_characters_state(data)
+    # Slash commands run BEFORE the main turn flow, so they're the earliest
+    # mutation point — load with project overlay so any project-level fields
+    # they touch (callbacks via /resolve and /dismiss, life_events via
+    # /seed-event) start from the canonical view.
+    cs = get_characters_state(data, project_dir=project_dir)
     today = today_et_iso()
 
     # Channel commands
@@ -258,6 +274,9 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
         else:
             op["reason"] = rest
         cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [op], 0, today)
+        # Persist project-level state so the resolution is visible across all chats
+        from character_project_state import persist_project_state_from
+        persist_project_state_from(cs, project_dir)
         return {
             "kind": f"callback_{action}d",
             "id": cb_id,
@@ -337,6 +356,9 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
                 "feedback": "Usage: /seed-event <what happened to the character>. Example: /seed-event her cat ran away",
             }
         cs["life_events"] = set_manual_event_seed(cs.get("life_events") or {}, hint, today)
+        # Persist project-level state so the seeded event is visible across all chats
+        from character_project_state import persist_project_state_from
+        persist_project_state_from(cs, project_dir)
         return {
             "kind": "event_seeded",
             "feedback": (
@@ -449,8 +471,11 @@ def prepare_state_for_turn(
     build_messages (it needs the Anthropic client + must run before rolls so
     it sees the pre-turn wall_clock).
     """
-    cs = get_characters_state(data)
+    # Load with project-state overlay so wellbeing/callbacks/life_events
+    # already reflect the canonical project view before we roll/mutate.
+    cs = get_characters_state(data, project_dir=project_dir)
     wc = cs.get("wall_clock") or {}
+    project_state_dirty = False
 
     if is_first_message_of_et_day(wc):
         rng = random.Random(rng_seed) if rng_seed is not None else random.Random()
@@ -463,6 +488,7 @@ def prepare_state_for_turn(
         # Weekly life-event roll. Self-gates internally to fire once per ISO week
         # past the grace period.
         cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_et_iso(), rng=rng)
+        project_state_dirty = True  # wellbeing/callbacks/life_events all touched
         # Hygiene: archive stale low-impact memories. Cheap (file rewrite, no
         # model calls). Memories with impact >= 3 are permanent; impact 1-2
         # memories untouched for 12+ months get soft-archived.
@@ -478,6 +504,10 @@ def prepare_state_for_turn(
         # Mid-day: keep wellbeing as is; clear ripe_callbacks so they don't surface every turn
         cs.setdefault("ripe_callbacks", [])
         cs["ripe_callbacks"] = []
+
+    if project_state_dirty:
+        from character_project_state import persist_project_state_from
+        persist_project_state_from(cs, project_dir)
 
     return cs
 
@@ -632,6 +662,10 @@ def run_post_stream_extraction(
             characters_state, ops, current_turn, today_et_iso(),
             project_dir=project_dir, branch_msg_id=branch_msg_id,
         )
+        # Persist project-level fields (callbacks/wellbeing/arc/life_events) so
+        # any side-agent ops that touched them propagate across all chats.
+        from character_project_state import persist_project_state_from
+        persist_project_state_from(characters_state, project_dir)
 
     # Stamp the wall_clock with assistant message timestamp
     characters_state["wall_clock"] = update_wall_clock(
@@ -674,7 +708,7 @@ def run_consolidate(
     if not profile_doc:
         return {"ok": False, "feedback": "Cannot consolidate: character_profile.di not found."}
 
-    cs = get_characters_state(data)
+    cs = get_characters_state(data, project_dir=project_dir)
 
     # Read growth + memories from file storage. Branch-filtered (so abandoned
     # experimental branches don't pollute canon) and excluding archived (those

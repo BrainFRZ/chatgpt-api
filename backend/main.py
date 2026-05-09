@@ -6279,7 +6279,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             except Exception as _mig_err:
                 logger.warning(f"Characters storage migration failed: {_mig_err}")
 
-            characters_state = get_characters_state(data)
+            characters_state = get_characters_state(data, project_dir=_project_dir)
             stateful_pipeline_state.setdefault("characters_state", characters_state)
             _branch_msg_ids = branch_msg_ids_from_branch_path(branch_path)
 
@@ -6315,9 +6315,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 async def _run_off_screen():
                     try:
-                        return await asyncio.to_thread(
+                        result = await asyncio.to_thread(
                             maybe_generate_off_screen, client, characters_state, _project_dir
                         )
+                        # off-screen consumes the life-event seed in characters_state.life_events;
+                        # since life_events is now project-level, persist after the consumption.
+                        if result is not None:
+                            from character_project_state import persist_project_state_from
+                            persist_project_state_from(characters_state, _project_dir)
+                        return result
                     except Exception as e:
                         logger.warning(f"Characters off-screen failed: {e}")
                         return None
@@ -6356,7 +6362,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 # Daily rolls (does NOT touch wall_clock — stamp_user_turn after injection build)
                 prepare_state_for_turn(data, _project_dir)
-                characters_state = get_characters_state(data)
+                characters_state = get_characters_state(data, project_dir=_project_dir)
                 stateful_pipeline_state["characters_state"] = characters_state
 
                 # Populate the render payload from file storage + recall results.
