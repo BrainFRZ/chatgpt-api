@@ -270,14 +270,87 @@ def test_run_resolver_bails_when_no_flakiness_bands(project_dir):
     assert sched["events"][0]["status"] == "as_planned"
 
 
-def test_run_resolver_no_elapsed_events(project_dir):
-    # Schedule has only future events
+def test_run_resolver_no_elapsed_events_with_unplanned_zero(project_dir):
+    """No elapsed events AND Poisson rolls 0 unplanned → quick bail with
+    no API call. The resolver still ran successfully (skipped=False) but
+    nothing was notable in the window."""
     _seed_schedule(project_dir, [
         _planned_event("sch-1", "2026-05-15T20:00:00-04:00", kind="social", duration_min=120),
     ])
-    out = run_daily_resolver(MagicMock(), project_dir, now_dt=datetime(2026, 5, 9, 13, 0).astimezone())
+
+    # Force: not skip-roll (0.99 > 0.35), Poisson returns 0 (first random < e^-1.5 ≈ 0.223)
+    class _Rng:
+        def __init__(self):
+            self.i = 0
+            self.vals = [0.99, 0.10]  # not skip, then poisson immediately exits at k=0
+        def random(self):
+            v = self.vals[min(self.i, len(self.vals) - 1)]
+            self.i += 1
+            return v
+
+    client = MagicMock()
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
+        rng=_Rng(),
+    )
     assert out["skipped"] is False
     assert out["elapsed_count"] == 0
+    assert out["unplanned"] == 0
+    assert out["reason"] == "empty roll"
+    # No API call when nothing to narrate
+    assert client.messages.create.call_count == 0
+
+
+def test_run_resolver_no_elapsed_events_but_unplanned_fires(project_dir):
+    """Regression: when no scheduled events elapsed but the unplanned roll
+    fires (Poisson > 0), the resolver still calls Sonnet to generate
+    unplanned-moment narrations. Without this, every cron pass that
+    landed between scheduled events would silently produce nothing —
+    breaking continuous-existence semantics on quiet schedule windows."""
+    _seed_schedule(project_dir, [
+        # Far-future event — won't elapse at the test's now_dt
+        _planned_event("sch-1", "2026-05-15T20:00:00-04:00", kind="social", duration_min=120),
+    ])
+
+    # Force: not skip-roll, Poisson returns 2, then padded values for outcome rolls (none to roll)
+    class _Rng:
+        def __init__(self):
+            self.i = 0
+            # Sequence:
+            #  [0] 0.99 → not skip-roll
+            #  [1] 0.99 → poisson iter 1: p=0.99, k=1 (still > L=0.223)
+            #  [2] 0.50 → poisson iter 2: p=0.495, k=2 (still > L=0.223)
+            #  [3] 0.30 → poisson iter 3: p=0.1485, k=3 (≤ L, returns k-1=2)
+            self.vals = [0.99, 0.99, 0.50, 0.30, 0.50, 0.50]
+        def random(self):
+            v = self.vals[min(self.i, len(self.vals) - 1)]
+            self.i += 1
+            return v
+
+    client = _mock_client(_mock_resolver_response(
+        resolutions=[],  # no events to resolve
+        unplanned=[
+            {"summary": "Marcus came in at 8:30 and lingered through her second pour.",
+             "tone": "even", "kind": "small_thing"},
+            {"summary": "The espresso machine started making a weird hiss again. Probably needs descaling.",
+             "tone": "frayed", "kind": "incident"},
+        ],
+    ))
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
+        rng=_Rng(),
+    )
+    assert out["skipped"] is False
+    assert out["elapsed_count"] == 0
+    assert out["unplanned"] == 2  # ls_entries minus n_resolutions
+    # API was called even though no events elapsed
+    assert client.messages.create.call_count == 1
+    # Life stream got entries
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 2
+    assert all(e["kind"] == "unplanned" for e in stream)
 
 
 # ── run_daily_resolver: skip-roll ────────────────────────────────────

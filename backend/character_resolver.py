@@ -343,12 +343,10 @@ def run_daily_resolver(
         if ev_end <= now_dt:
             elapsed.append(ev)
 
-    if not elapsed:
-        # Nothing to do; just stamp last_run forward and bail
-        _stamp_last_run(project_dir, state, now_dt)
-        return {"skipped": False, "elapsed_count": 0}
-
-    # Skip-roll
+    # Skip-roll first — gates BOTH event resolution AND unplanned-moment
+    # generation. The window can be "uneventful" even with no scheduled
+    # events to resolve (the character was just at work or asleep).
+    # Hard-override: chat-driven mutations in the window force a real run.
     chat_forced = _had_chat_revision_in_window(elapsed, last_run_iso)
     skipped = (rng.random() < SKIP_RATE) and not chat_forced
     if skipped:
@@ -361,14 +359,26 @@ def run_daily_resolver(
         _stamp_last_run(project_dir, state, now_dt)
         return {"skipped": True, "elapsed_count": len(elapsed), "chat_forced": False}
 
-    # Roll outcomes per event
+    # Roll outcomes per elapsed event (could be empty list when no events
+    # ended in this window — the character is still alive between events
+    # and may still have unplanned moments to log).
     rolled: list[dict] = []
     for ev in elapsed:
         outcome = roll_event_outcome(ev, bands, mood_state=mood_state, rng=rng)
         rolled.append({"event": ev, "outcome": outcome})
 
-    # Roll unplanned-moment count
+    # Roll unplanned-moment count. Independent of whether any scheduled
+    # events elapsed — the resolver's job is to log lived experience in
+    # the window, not just resolve what was on the calendar.
     unplanned_n = min(_poisson(UNPLANNED_LAMBDA, rng), UNPLANNED_MAX)
+
+    # Nothing to narrate? Stamp last_run and bail without an API call.
+    # Saves tokens on the common quiet-window case (Poisson rolled 0
+    # AND no events elapsed) while still treating the window as "ran
+    # successfully, just produced nothing notable."
+    if not rolled and unplanned_n == 0:
+        _stamp_last_run(project_dir, state, now_dt)
+        return {"skipped": False, "elapsed_count": 0, "unplanned": 0, "reason": "empty roll"}
 
     # Window for unplanned-moment timestamps
     window_start = (
