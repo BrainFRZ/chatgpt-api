@@ -168,6 +168,37 @@ def _ls_id(at_iso: str) -> str:
     return f"ls-{date_part}-{uuid.uuid4().hex[:6]}"
 
 
+def _thin_ls_entry(ev: dict, at_iso: str) -> dict:
+    """Build a minimal life_stream entry for an elapsed event when no model
+    narration is available (skip-roll or model-failed-to-narrate fallback).
+    Summary derives from the event title; the entry confirms the event
+    happened and is recall-able even without a narrative.
+    """
+    return {
+        "id": _ls_id(at_iso),
+        "at_local": at_iso,
+        "kind": "resolved_planned",
+        "ref": ev.get("id"),
+        "summary": ev.get("title") or "(scheduled event)",
+        "tone": "even",
+        "available_to_recall": True,
+    }
+
+
+def _event_end_iso(ev: dict, fallback_dt: datetime) -> str:
+    """Compute an event's end timestamp from when_local + duration_min.
+    Falls back to fallback_dt's iso string if the event's timing is
+    unparseable (defensive — should always parse for resolver input)."""
+    try:
+        ev_start = datetime.fromisoformat(ev["when_local"])
+        if ev_start.tzinfo is None:
+            ev_start = ev_start.astimezone()
+        ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
+        return ev_end.isoformat(timespec="seconds")
+    except (ValueError, TypeError, KeyError):
+        return fallback_dt.isoformat(timespec="seconds")
+
+
 def _spread_unplanned_times(window_start: datetime, window_end: datetime, n: int) -> list[datetime]:
     """Distribute n unplanned-moment timestamps evenly across [window_start, window_end]."""
     if n <= 0 or window_end <= window_start:
@@ -350,14 +381,29 @@ def run_daily_resolver(
     chat_forced = _had_chat_revision_in_window(elapsed, last_run_iso)
     skipped = (rng.random() < SKIP_RATE) and not chat_forced
     if skipped:
+        skip_ls_entries: list[dict] = []
         for ev in elapsed:
+            res_at_iso = _event_end_iso(ev, now_dt)
             stamp_resolution(
                 project_dir, ev["id"],
                 outcome="as_planned", what_happened="", how_it_went="", mood_delta=0,
-                at_iso=now_dt.isoformat(timespec="seconds"),
+                at_iso=res_at_iso,
             )
+            # Thin life_stream entry — the event happened even without
+            # narrative, and life_stream is the canonical "what happened"
+            # ledger. Without this, recall and off-screen miss skip-roll
+            # events entirely; the character has no grounding to share
+            # them in conversation beyond the schedule injection.
+            skip_ls_entries.append(_thin_ls_entry(ev, res_at_iso))
+        if skip_ls_entries:
+            append_life_stream_many(project_dir, skip_ls_entries)
         _stamp_last_run(project_dir, state, now_dt)
-        return {"skipped": True, "elapsed_count": len(elapsed), "chat_forced": False}
+        return {
+            "skipped": True,
+            "elapsed_count": len(elapsed),
+            "chat_forced": False,
+            "ls_thin_entries": len(skip_ls_entries),
+        }
 
     # Roll outcomes per elapsed event (could be empty list when no events
     # ended in this window — the character is still alive between events
@@ -457,18 +503,24 @@ def run_daily_resolver(
         })
         n_resolutions += 1
 
-    # Any rolled events the model failed to narrate get auto-stamped
+    # Any rolled events the model failed to narrate get auto-stamped AND
+    # get a thin life_stream entry — the event happened even without
+    # narrative; missing it from life_stream would silently lose the lived
+    # experience for that event.
     narrated_ids = {res.get("event_id") for res in (payload.get("resolutions") or []) if isinstance(res, dict)}
     for r in rolled:
         eid = r["event"]["id"]
         if eid in narrated_ids:
             continue
         logger.warning(f"resolver: model didn't narrate {eid} — auto-stamping with rolled outcome {r['outcome']}")
+        ev = r["event"]
+        res_at_iso = _event_end_iso(ev, now_dt)
         stamp_resolution(
             project_dir, eid, outcome=r["outcome"],
             what_happened="", how_it_went="", mood_delta=0,
-            at_iso=now_dt.isoformat(timespec="seconds"),
+            at_iso=res_at_iso,
         )
+        ls_entries.append(_thin_ls_entry(ev, res_at_iso))
 
     # Apply unplanned moments — backend-assigns timestamps via even spread
     unplanned_list = payload.get("unplanned") or []

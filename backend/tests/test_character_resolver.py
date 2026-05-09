@@ -384,8 +384,16 @@ def test_skip_roll_auto_stamps_without_api(project_dir):
     sched = load_schedule(project_dir)
     statuses = {ev["id"]: ev["status"] for ev in sched["events"]}
     assert statuses == {"sch-1": "as_planned", "sch-2": "as_planned"}
-    # No life_stream entries
-    assert read_life_stream_all(project_dir) == []
+    # Thin life_stream entries written for each elapsed event — the events
+    # happened even though skip-roll suppressed narration.
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 2
+    assert all(e["kind"] == "resolved_planned" for e in stream)
+    refs = sorted(e["ref"] for e in stream)
+    assert refs == ["sch-1", "sch-2"]
+    # Summary derives from event title (no model narrative)
+    summaries = sorted(e["summary"] for e in stream)
+    assert summaries == ["Event sch-1", "Event sch-2"]
 
 
 def test_skip_roll_forced_to_run_when_chat_revision_present(project_dir):
@@ -571,3 +579,9 @@ def test_api_failure_does_not_strand_elapsed_events(project_dir):
     # backend auto-stamps with the rolled bucket.
     sched = load_schedule(project_dir)
     assert sched["events"][0]["status"] != "planned"
+    # Thin life_stream entry should have been written so the event isn't
+    # silently lost from the lived-experience ledger when narration fails.
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 1
+    assert stream[0]["kind"] == "resolved_planned"
+    assert stream[0]["ref"] == "sch-1"
