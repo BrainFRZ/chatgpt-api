@@ -212,7 +212,21 @@ def _event_end_dt(ev: dict) -> Optional[datetime]:
         return None
 
 
-_RESOLVER_CRON_HOURS = (8, 13, 18)  # ET — must match scheduler.DAILY_RESOLVER_HOURS
+def _resolver_cron_hours() -> tuple:
+    """Lazy-import the cron schedule from scheduler.py to avoid drifting.
+
+    scheduler.py is the single source of truth for when the resolver
+    fires; this resolver module imports the same tuple at call time
+    rather than duplicating it. Falls back to a hardcoded default if
+    scheduler.py isn't importable (test contexts without apscheduler
+    might bypass it, but DAILY_RESOLVER_HOURS itself doesn't depend on
+    apscheduler).
+    """
+    try:
+        from scheduler import DAILY_RESOLVER_HOURS
+        return DAILY_RESOLVER_HOURS
+    except ImportError:
+        return (8, 13, 18)
 
 
 def _next_resolver_cron_time(now_dt: datetime) -> datetime:
@@ -229,11 +243,11 @@ def _next_resolver_cron_time(now_dt: datetime) -> datetime:
     today_et = now_dt.astimezone(TZ).date()
     candidates = []
     from datetime import time as _time
-    for h in _RESOLVER_CRON_HOURS:
+    for h in _resolver_cron_hours():
         candidates.append(datetime.combine(today_et, _time(h, 0), tzinfo=TZ))
     # Tomorrow's first cron — covers the case where now is past today's last cron
     tomorrow = today_et + timedelta(days=1)
-    candidates.append(datetime.combine(tomorrow, _time(_RESOLVER_CRON_HOURS[0], 0), tzinfo=TZ))
+    candidates.append(datetime.combine(tomorrow, _time(_resolver_cron_hours()[0], 0), tzinfo=TZ))
     for c in candidates:
         if c > now_dt:
             return c

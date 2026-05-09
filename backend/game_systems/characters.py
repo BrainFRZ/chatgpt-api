@@ -1155,7 +1155,19 @@ def build_schedule_injection(state: dict) -> str:
                 tail_bits.append("cancelled — see recent life")
         tail = f" ({', '.join(tail_bits)})" if tail_bits else ""
 
-        line = f"  - {when_str}: {title}{with_part}{loc_part}{tail}"
+        # If this is a pending pre-rolled event in its post-event-end gap
+        # window (cron stamp not yet fired), surface the rolled narration
+        # inline so Opus voice has detail to reference rather than just
+        # the "(happened)" marker. After the next cron stamps, the same
+        # narration shows up in life_stream via recall.
+        narration_part = ""
+        if pending_for_render:
+            wh = (pending_for_render.get("what_happened") or "").strip()
+            if wh:
+                # Truncate so injection doesn't bloat
+                narration_part = f" — {wh[:140]}"
+
+        line = f"  - {when_str}: {title}{with_part}{loc_part}{narration_part}{tail}"
         if effective_status == "planned":
             upcoming_lines.append(line)
         else:
