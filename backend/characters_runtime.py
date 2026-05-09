@@ -196,8 +196,16 @@ def populate_render_payload(
                         continue
 
                     if status == "planned":
-                        # Forward-looking: still upcoming or in-progress
-                        if ev_end > now_dt and ev_start <= forward_end:
+                        pending = ev.get("pending_resolution")
+                        if isinstance(pending, dict) and ev_end <= now_dt:
+                            # Pre-rolled by cron, not yet stamped (current cron
+                            # cycle's window). Treat as past for display so the
+                            # character has access to the rolled outcome
+                            # between event-end and next-cron-stamp.
+                            if back_start <= ev_end <= now_dt:
+                                in_window.append(ev)
+                        elif ev_end > now_dt and ev_start <= forward_end:
+                            # Forward-looking: still upcoming or in-progress
                             in_window.append(ev)
                     elif status in ("as_planned", "modified", "cancelled"):
                         # Backward-looking: elapsed within last 24h

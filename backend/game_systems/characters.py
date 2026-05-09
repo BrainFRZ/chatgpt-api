@@ -1084,6 +1084,7 @@ def build_schedule_injection(state: dict) -> str:
     PAST_STATUSES = {"as_planned", "modified", "cancelled"}
     past_lines: list[str] = []
     upcoming_lines: list[str] = []
+    now_dt = datetime.now().astimezone()
 
     for ev in events:
         if not isinstance(ev, dict):
@@ -1091,6 +1092,27 @@ def build_schedule_injection(state: dict) -> str:
         status = ev.get("status")
         if status not in PAST_STATUSES and status != "planned":
             continue
+        # If status=planned BUT pending_resolution exists AND event_end has
+        # passed, treat as past for rendering — the cron pre-rolled the
+        # outcome but hasn't formally stamped yet. Use the pending outcome
+        # for the status marker.
+        pending_for_render: Optional[dict] = None
+        effective_status = status
+        if status == "planned":
+            pending = ev.get("pending_resolution")
+            if isinstance(pending, dict):
+                when_local = ev.get("when_local")
+                if isinstance(when_local, str):
+                    try:
+                        ev_start = datetime.fromisoformat(when_local)
+                        if ev_start.tzinfo is None:
+                            ev_start = ev_start.astimezone()
+                        ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
+                        if ev_end <= now_dt:
+                            effective_status = pending.get("outcome", "as_planned")
+                            pending_for_render = pending
+                    except (ValueError, TypeError):
+                        pass
 
         title = ev.get("title") or "(untitled)"
         kind = ev.get("kind") or ""
@@ -1118,23 +1140,23 @@ def build_schedule_injection(state: dict) -> str:
         tail_bits = []
         if kind:
             tail_bits.append(kind)
-        if status == "planned":
+        if effective_status == "planned":
             if anticipation == "looking_forward":
                 tail_bits.append("looking forward")
             elif anticipation == "dreading":
                 tail_bits.append("dreading")
         else:
-            # Past event — status marker tells the model what happened
-            if status == "as_planned":
+            # Past event — status marker tells the model what happened.
+            if effective_status == "as_planned":
                 tail_bits.append("happened")
-            elif status == "modified":
+            elif effective_status == "modified":
                 tail_bits.append("happened differently — see recent life")
-            elif status == "cancelled":
+            elif effective_status == "cancelled":
                 tail_bits.append("cancelled — see recent life")
         tail = f" ({', '.join(tail_bits)})" if tail_bits else ""
 
         line = f"  - {when_str}: {title}{with_part}{loc_part}{tail}"
-        if status == "planned":
+        if effective_status == "planned":
             upcoming_lines.append(line)
         else:
             past_lines.append(line)

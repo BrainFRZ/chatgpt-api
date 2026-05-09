@@ -47,6 +47,17 @@ _LOCK_FILENAME = ".character_state.lock"
 
 EVENT_KINDS = ("work", "social", "family", "self_care", "admin", "anticipated")
 EVENT_STATUSES = ("planned", "as_planned", "modified", "cancelled")
+
+# Forward-rolling lifecycle: events get a `pending_resolution` field set by
+# the resolver's pre-roll phase (cron at time T_N rolls outcomes for events
+# ending in [T_N, T_{N+1}]). Pending stays until either:
+#   - The next cron stamps it (event_end has passed → status flips to outcome,
+#     resolution dict is set, life_stream entry written, pending cleared)
+#   - Chat-driven schedule_op mutation clears it (next cron re-rolls)
+# Schedule injection treats events with pending + event_end_past as "past" so
+# the model has access to the rolled outcome between event-end and next-cron-
+# stamp. Recall and life_stream don't see the entry until officially stamped.
+PENDING_RESOLUTION_FIELDS = ("outcome", "what_happened", "how_it_went", "mood_delta")
 LIFE_STREAM_KINDS = ("resolved_planned", "unplanned", "schedule_change", "major_event")
 
 
@@ -341,6 +352,9 @@ def apply_schedule_ops(
                 }
                 _append_revision(ev, rev)
                 ev["status"] = "cancelled"
+                # Chat-driven cancel invalidates any cron pre-roll. The chat is
+                # authoritative now; next cron sees status != planned and skips.
+                ev.pop("pending_resolution", None)
                 life_stream_entries.append({
                     "id": _ls_id(now_iso),
                     "at_local": now_iso,
@@ -373,6 +387,10 @@ def apply_schedule_ops(
                     if k not in _MODIFY_ALLOWED_FIELDS:
                         continue
                     ev[k] = v
+                # Modify invalidates pre-rolled outcome — the rolled narrative
+                # was conditioned on the old fields. Clear pending; next cron
+                # re-rolls based on the modified state.
+                ev.pop("pending_resolution", None)
                 life_stream_entries.append({
                     "id": _ls_id(now_iso),
                     "at_local": now_iso,

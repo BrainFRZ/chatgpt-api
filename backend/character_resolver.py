@@ -75,9 +75,13 @@ def compute_resolver_cost(usage: dict) -> float:
     ) / 1_000_000.0
 
 
-SYSTEM_PROMPT = """You are narrating what just happened in a character's life since the last resolver pass. You are NOT picking outcomes — those are already rolled by the backend dice. You ONLY write what the rolled outcomes look like in this character's specific voice.
+SYSTEM_PROMPT = """You are pre-narrating what's about to happen in a character's life over the upcoming window. The system reveals these events at their actual time — your narrations get committed to the canonical "what happened" ledger when real time crosses each event's end.
 
-For each event in [ELAPSED EVENTS]:
+You are NOT picking outcomes — those are already rolled by the backend dice. You ONLY write what the rolled outcomes look like in this character's specific voice. Past tense narration is correct: at any point AFTER the event has elapsed, this is how the character would describe it.
+
+Chat between the user and the character can MUTATE events between now and when they happen (cancel, reschedule, swap). If that happens, your narration here gets discarded and the next cron re-rolls. So treat your job as: "given the current state of the schedule and the rolled outcomes, here's the most likely shape of how this window unfolds."
+
+For each event in [UPCOMING EVENTS]:
 - The OUTCOME is given (as_planned | modified | cancelled). Honor it exactly. Do NOT change it.
 - Write `what_happened` in 1-2 sentences in third person, specific to THIS character (not generic).
   - as_planned: what unfolded, anything notable about THIS instance, or just that it happened normally
@@ -189,14 +193,52 @@ def _event_end_iso(ev: dict, fallback_dt: datetime) -> str:
     """Compute an event's end timestamp from when_local + duration_min.
     Falls back to fallback_dt's iso string if the event's timing is
     unparseable (defensive — should always parse for resolver input)."""
+    end = _event_end_dt(ev)
+    if end is None:
+        return fallback_dt.isoformat(timespec="seconds")
+    return end.isoformat(timespec="seconds")
+
+
+def _event_end_dt(ev: dict) -> Optional[datetime]:
+    """Parse an event's end datetime from when_local + duration_min.
+    Returns None if unparseable. Used for "is this event in the past/future"
+    checks in the forward-rolling lifecycle."""
     try:
         ev_start = datetime.fromisoformat(ev["when_local"])
         if ev_start.tzinfo is None:
             ev_start = ev_start.astimezone()
-        ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
-        return ev_end.isoformat(timespec="seconds")
+        return ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
     except (ValueError, TypeError, KeyError):
-        return fallback_dt.isoformat(timespec="seconds")
+        return None
+
+
+_RESOLVER_CRON_HOURS = (8, 13, 18)  # ET — must match scheduler.DAILY_RESOLVER_HOURS
+
+
+def _next_resolver_cron_time(now_dt: datetime) -> datetime:
+    """Returns the next 8am / 1pm / 6pm ET datetime strictly after now_dt.
+    Used by the pre-roll phase to scope which events are "ending in the
+    window I'm responsible for."
+
+    The 6pm cron's next-cron is 8am the following day — that overnight
+    window is wider than the daytime windows. λ=1.5 stays the same per
+    pass; λ-per-hour is lower overnight, which is fine since the
+    character is mostly asleep.
+    """
+    from game_systems.characters import TZ
+    today_et = now_dt.astimezone(TZ).date()
+    candidates = []
+    from datetime import time as _time
+    for h in _RESOLVER_CRON_HOURS:
+        candidates.append(datetime.combine(today_et, _time(h, 0), tzinfo=TZ))
+    # Tomorrow's first cron — covers the case where now is past today's last cron
+    tomorrow = today_et + timedelta(days=1)
+    candidates.append(datetime.combine(tomorrow, _time(_RESOLVER_CRON_HOURS[0], 0), tzinfo=TZ))
+    for c in candidates:
+        if c > now_dt:
+            return c
+    # Should be unreachable given we appended tomorrow's first
+    return now_dt + timedelta(hours=12)
 
 
 def _spread_unplanned_times(window_start: datetime, window_end: datetime, n: int) -> list[datetime]:
@@ -288,15 +330,41 @@ def run_daily_resolver(
     now_dt: Optional[datetime] = None,
     rng: Optional[random.Random] = None,
 ) -> dict:
-    """Run a single resolver pass. Returns a meta dict for telemetry/logging.
+    """Forward-rolling resolver pass. Three stages:
 
-    On skip-roll: returns {skipped: True, elapsed_count, ...}. No API call.
-    On run: returns {skipped: False, resolutions: N, unplanned: N, usage, cost, ...}.
-    On no-elapsed-events: returns {skipped: False, elapsed_count: 0}, no-op.
+    1. STAMP — events whose pre-rolled `pending_resolution` is past their
+       event_end get officially stamped: status flips, life_stream entry
+       written, mood_delta applied. Pending unplanned moments whose
+       at_local has passed get appended to life_stream too. This is
+       formal commit: "the cron pre-decided this; now real time has
+       crossed event_end, lock it in."
+
+    2. FALLBACK — events with status=planned, no pending, event_end <= now.
+       Legacy data or missed-cron events. Stamp thin (as_planned + empty
+       narrative + 0 mood) so they don't stay planned forever. The
+       character has zero detail for these — degraded mode.
+
+    3. PRE-ROLL — events ending in [now, next_resolver_cron] without
+       pending get rolled forward. Backend rolls the outcome bucket via
+       flakiness_bands; Sonnet narrates each (one Sonnet call per pass
+       covers all upcoming events + Poisson-rolled unplanned moments
+       for the same window). Stored as `pending_resolution` on each
+       event and `pending_unplanned[]` on the schedule. NOT yet in
+       life_stream — the next cron commits them.
+
+    Skip-roll gates only the PRE-ROLL stage (stages 1 + 2 always run —
+    stamping past pre-rolls and handling legacy events is bookkeeping).
+    Hard-override: chat-driven mutations on upcoming events force the
+    pre-roll to run regardless of skip-roll.
+
+    Chat between crons can mutate events (cancel/modify/add). Mutations
+    invalidate any pending_resolution → next cron re-rolls based on
+    the chat-updated state. Chat is authoritative between crons; cron
+    is authoritative at stamp time.
     """
     from character_schedule import (
         load_schedule,
-        stamp_resolution,
+        save_schedule,
         roll_event_outcome,
         append_life_stream_many,
         read_life_stream_tail,
@@ -307,7 +375,6 @@ def run_daily_resolver(
         return {"error": "bad project_dir", "skipped": True}
 
     if now_dt is None:
-        # Project tz: characters live in ET per the wall_clock helpers
         from game_systems.characters import now_et
         now_dt = now_et()
     if rng is None:
@@ -320,127 +387,196 @@ def run_daily_resolver(
     state = load_project_state(project_dir) or {}
     bands = state.get("flakiness_bands") or {}
     if not bands:
-        # Character has no flakiness_bands set yet (pre-interview / pre-bootstrap).
-        # Don't spend Sonnet tokens narrating events that would all roll as_planned
-        # with no nuance — auto-stamp elapsed events and bail. The first real
-        # resolver pass after bands get set will start producing texture.
-        elapsed_count = 0
-        for ev in schedule.get("events") or []:
-            if not isinstance(ev, dict) or ev.get("status") != "planned":
-                continue
-            when_str = ev.get("when_local")
-            if not isinstance(when_str, str):
-                continue
-            try:
-                ev_start = datetime.fromisoformat(when_str)
-                if ev_start.tzinfo is None:
-                    ev_start = ev_start.astimezone()
-            except (ValueError, TypeError):
-                continue
-            ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
-            if ev_end <= now_dt:
-                from character_schedule import stamp_resolution
-                stamp_resolution(
-                    project_dir, ev["id"],
-                    outcome="as_planned", what_happened="", how_it_went="", mood_delta=0,
-                    at_iso=now_dt.isoformat(timespec="seconds"),
-                )
-                elapsed_count += 1
+        # Pre-bootstrap / pre-interview character. Stamp any elapsed events
+        # thin and bail — no Sonnet narration, no pre-roll.
+        elapsed_stamped = _bail_no_bands_stamp(schedule, now_dt)
+        save_schedule(project_dir, schedule)
+        if elapsed_stamped:
+            append_life_stream_many(
+                project_dir,
+                [_thin_ls_entry(ev, _event_end_iso(ev, now_dt)) for ev in elapsed_stamped],
+            )
         _stamp_last_run(project_dir, state, now_dt)
-        return {"skipped": True, "reason": "no flakiness_bands", "elapsed_count": elapsed_count}
+        return {"skipped": True, "reason": "no flakiness_bands", "elapsed_count": len(elapsed_stamped)}
 
     mood_state = (state.get("wellbeing") or {}).get("state") or "Even"
     scheduler_state = state.get("scheduler_state") or {}
     last_run_iso = scheduler_state.get("last_resolver_run_at")
 
-    # Find elapsed planned events
-    elapsed: list[dict] = []
-    for ev in schedule.get("events") or []:
-        if not isinstance(ev, dict):
+    events: list[dict] = schedule.get("events") or []
+
+    # ── STAGE 1: STAMP pending pre-rolls whose time has passed ──────────
+    stage1_ls_entries: list[dict] = []
+    stamped_event_count = 0
+    total_mood_delta = 0
+    for ev in events:
+        pending = ev.get("pending_resolution")
+        if not isinstance(pending, dict):
             continue
-        if ev.get("status") != "planned":
+        ev_end = _event_end_dt(ev)
+        if ev_end is None or ev_end > now_dt:
             continue
-        when_str = ev.get("when_local")
-        duration_min = int(ev.get("duration_min") or 60)
-        if not isinstance(when_str, str):
+        outcome = pending.get("outcome", "as_planned")
+        what_happened = (pending.get("what_happened") or "").strip()
+        how_it_went = pending.get("how_it_went") if pending.get("how_it_went") in VALID_TONES else "even"
+        mood_delta = max(-2, min(2, int(pending.get("mood_delta") or 0)))
+        end_iso = ev_end.isoformat(timespec="seconds")
+        ev["status"] = outcome
+        ev["resolution"] = {
+            "at": end_iso,
+            "outcome": outcome,
+            "what_happened": what_happened,
+            "how_it_went": how_it_went,
+            "mood_delta": mood_delta,
+        }
+        ev.pop("pending_resolution", None)
+        stamped_event_count += 1
+        total_mood_delta += mood_delta
+        stage1_ls_entries.append({
+            "id": _ls_id(end_iso),
+            "at_local": end_iso,
+            "kind": "resolved_planned",
+            "ref": ev.get("id"),
+            "summary": what_happened or ev.get("title") or "(scheduled event)",
+            "tone": how_it_went,
+            "available_to_recall": True,
+        })
+
+    # Stamp pending unplanned whose at_local has passed
+    pending_unplanned = schedule.get("pending_unplanned") or []
+    remaining_pending: list[dict] = []
+    stamped_unplanned_count = 0
+    for up in pending_unplanned:
+        if not isinstance(up, dict):
             continue
         try:
-            ev_start = datetime.fromisoformat(when_str)
-            if ev_start.tzinfo is None:
-                ev_start = ev_start.astimezone()
+            up_at = datetime.fromisoformat(up.get("at_local", ""))
+            if up_at.tzinfo is None:
+                up_at = up_at.astimezone()
         except (ValueError, TypeError):
             continue
-        ev_end = ev_start + timedelta(minutes=duration_min)
-        if ev_end <= now_dt:
-            elapsed.append(ev)
+        if up_at <= now_dt:
+            stage1_ls_entries.append({
+                "id": up.get("id") or _ls_id(up["at_local"]),
+                "at_local": up["at_local"],
+                "kind": "unplanned",
+                "ref": None,
+                "summary": up.get("summary", ""),
+                "tone": up.get("tone", "even"),
+                "available_to_recall": True,
+            })
+            stamped_unplanned_count += 1
+        else:
+            remaining_pending.append(up)
+    schedule["pending_unplanned"] = remaining_pending
 
-    # Skip-roll first — gates BOTH event resolution AND unplanned-moment
-    # generation. The window can be "uneventful" even with no scheduled
-    # events to resolve (the character was just at work or asleep).
-    # Hard-override: chat-driven mutations in the window force a real run.
-    chat_forced = _had_chat_revision_in_window(elapsed, last_run_iso)
-    skipped = (rng.random() < SKIP_RATE) and not chat_forced
-    if skipped:
-        skip_ls_entries: list[dict] = []
-        for ev in elapsed:
-            res_at_iso = _event_end_iso(ev, now_dt)
-            stamp_resolution(
-                project_dir, ev["id"],
-                outcome="as_planned", what_happened="", how_it_went="", mood_delta=0,
-                at_iso=res_at_iso,
-            )
-            # Thin life_stream entry — the event happened even without
-            # narrative, and life_stream is the canonical "what happened"
-            # ledger. Without this, recall and off-screen miss skip-roll
-            # events entirely; the character has no grounding to share
-            # them in conversation beyond the schedule injection.
-            skip_ls_entries.append(_thin_ls_entry(ev, res_at_iso))
-        if skip_ls_entries:
-            append_life_stream_many(project_dir, skip_ls_entries)
+    # ── STAGE 2: FALLBACK for elapsed events with no pre-roll ───────────
+    fallback_ls_entries: list[dict] = []
+    for ev in events:
+        if ev.get("status") != "planned":
+            continue
+        if ev.get("pending_resolution"):
+            continue
+        ev_end = _event_end_dt(ev)
+        if ev_end is None or ev_end > now_dt:
+            continue
+        # Thin stamp — system missed pre-rolling, degrade gracefully
+        end_iso = ev_end.isoformat(timespec="seconds")
+        ev["status"] = "as_planned"
+        ev["resolution"] = {
+            "at": end_iso,
+            "outcome": "as_planned",
+            "what_happened": "",
+            "how_it_went": "even",
+            "mood_delta": 0,
+        }
+        fallback_ls_entries.append(_thin_ls_entry(ev, end_iso))
+
+    # Persist all of STAGE 1 + 2's writes
+    if stage1_ls_entries or fallback_ls_entries:
+        save_schedule(project_dir, schedule)
+        append_life_stream_many(project_dir, stage1_ls_entries + fallback_ls_entries)
+    elif schedule.get("pending_unplanned") != pending_unplanned:
+        save_schedule(project_dir, schedule)
+
+    # Apply STAGE 1's mood_delta to wb_mod
+    if total_mood_delta:
+        wb = state.setdefault("wellbeing", {"state": "Even", "wb_mod": 0})
+        wb["wb_mod"] = max(-WB_MOD_CAP, min(WB_MOD_CAP, int(wb.get("wb_mod", 0) or 0) + total_mood_delta))
+        save_project_state(project_dir, state)
+
+    # ── STAGE 3: PRE-ROLL outcomes for events ending in next window ─────
+    # Forward-looking: cron at T_N pre-rolls events ending [T_N, T_{N+1}].
+    # Their outcomes wait as `pending_resolution` until the next cron stamps.
+    # Chat between crons can mutate; mutation invalidates pending → re-roll.
+    next_cron_dt = _next_resolver_cron_time(now_dt)
+    upcoming: list[dict] = []
+    for ev in events:
+        if ev.get("status") != "planned":
+            continue
+        if ev.get("pending_resolution"):
+            continue
+        ev_end = _event_end_dt(ev)
+        if ev_end is None:
+            continue
+        if now_dt < ev_end <= next_cron_dt:
+            upcoming.append(ev)
+
+    # Skip-roll for the upcoming window
+    chat_forced = _had_chat_revision_in_window(upcoming, last_run_iso)
+    skipped_preroll = (rng.random() < SKIP_RATE) and not chat_forced
+    if skipped_preroll:
+        # Thin pending for each upcoming event — the event will happen
+        # uneventfully (as_planned, no narrative). Stamp on next cron.
+        for ev in upcoming:
+            ev["pending_resolution"] = {
+                "outcome": "as_planned",
+                "what_happened": "",
+                "how_it_went": "even",
+                "mood_delta": 0,
+            }
+        save_schedule(project_dir, schedule)
         _stamp_last_run(project_dir, state, now_dt)
         return {
             "skipped": True,
-            "elapsed_count": len(elapsed),
-            "chat_forced": False,
-            "ls_thin_entries": len(skip_ls_entries),
+            "stage": "preroll",
+            "stamped_events": stamped_event_count,
+            "stamped_unplanned": stamped_unplanned_count,
+            "fallback_stamped": len(fallback_ls_entries),
+            "preroll_thin": len(upcoming),
         }
 
-    # Roll outcomes per elapsed event (could be empty list when no events
-    # ended in this window — the character is still alive between events
-    # and may still have unplanned moments to log).
+    # Roll outcome for each upcoming event
     rolled: list[dict] = []
-    for ev in elapsed:
+    for ev in upcoming:
         outcome = roll_event_outcome(ev, bands, mood_state=mood_state, rng=rng)
         rolled.append({"event": ev, "outcome": outcome})
 
-    # Roll unplanned-moment count. Independent of whether any scheduled
-    # events elapsed — the resolver's job is to log lived experience in
-    # the window, not just resolve what was on the calendar.
+    # Roll Poisson for unplanned count in the upcoming window
     unplanned_n = min(_poisson(UNPLANNED_LAMBDA, rng), UNPLANNED_MAX)
 
-    # Nothing to narrate? Stamp last_run and bail without an API call.
-    # Saves tokens on the common quiet-window case (Poisson rolled 0
-    # AND no events elapsed) while still treating the window as "ran
-    # successfully, just produced nothing notable."
+    # Nothing to narrate this pass? Skip Sonnet entirely.
     if not rolled and unplanned_n == 0:
         _stamp_last_run(project_dir, state, now_dt)
-        return {"skipped": False, "elapsed_count": 0, "unplanned": 0, "reason": "empty roll"}
+        return {
+            "skipped": False,
+            "stage": "preroll",
+            "stamped_events": stamped_event_count,
+            "stamped_unplanned": stamped_unplanned_count,
+            "fallback_stamped": len(fallback_ls_entries),
+            "preroll_events": 0,
+            "preroll_unplanned": 0,
+            "reason": "empty preroll",
+        }
 
-    # Window for unplanned-moment timestamps
-    window_start = (
-        datetime.fromisoformat(last_run_iso).astimezone()
-        if isinstance(last_run_iso, str) and last_run_iso
-        else (now_dt - timedelta(hours=24))  # bootstrap window: 24hr back if no prior run
-    )
-
-    # Build context, call Sonnet
+    # Sonnet narrates the upcoming window — outcomes given, model writes
+    # what_happened + tone + mood_delta, plus unplanned moments
     profile_doc = _read_file(os.path.join(project_dir, "character_profile.di"))
     user_life_doc = _read_file(os.path.join(project_dir, "user_life.di"))
     life_tail = read_life_stream_tail(
         project_dir,
         since_iso=(now_dt - timedelta(hours=LIFE_STREAM_TAIL_HOURS)).isoformat(timespec="seconds"),
     )
-
     payload, usage = _call_sonnet(
         client,
         profile_doc=profile_doc,
@@ -449,82 +585,43 @@ def run_daily_resolver(
         life_tail=life_tail,
         rolled=rolled,
         unplanned_n=unplanned_n,
-        window_start=window_start,
-        window_end=now_dt,
+        window_start=now_dt,
+        window_end=next_cron_dt,
     )
 
-    # Apply resolutions — TRUST THE ROLL, NOT THE MODEL: override outcome with rolled bucket
+    # Apply pre-rolled resolutions to events as `pending_resolution`
     rolled_by_id = {r["event"]["id"]: r["outcome"] for r in rolled}
-    n_resolutions = 0
-    ls_entries: list[dict] = []
-    total_mood_delta = 0
+    narrated_ids: set[str] = set()
     for res in payload.get("resolutions") or []:
         if not isinstance(res, dict):
             continue
         eid = res.get("event_id")
         if eid not in rolled_by_id:
-            logger.warning(f"resolver: model emitted resolution for unknown event {eid!r} — skipping")
+            logger.warning(f"resolver: model emitted resolution for unknown event {eid!r}")
             continue
-        # Force backend's rolled outcome — model's outcome field is advisory only
-        backend_outcome = rolled_by_id[eid]
-        what_happened = (res.get("what_happened") or "").strip()
-        how_it_went = res.get("how_it_went") if res.get("how_it_went") in VALID_TONES else "even"
-        mood_delta = int(res.get("mood_delta") or 0)
-        mood_delta = max(-2, min(2, mood_delta))
-        total_mood_delta += mood_delta
-
-        ev_dict = next(r["event"] for r in rolled if r["event"]["id"] == eid)
-        # Resolution timestamp: end of the event's window
-        try:
-            ev_start_dt = datetime.fromisoformat(ev_dict["when_local"])
-            if ev_start_dt.tzinfo is None:
-                ev_start_dt = ev_start_dt.astimezone()
-            res_at_dt = ev_start_dt + timedelta(minutes=int(ev_dict.get("duration_min") or 60))
-        except (ValueError, TypeError):
-            res_at_dt = now_dt
-        res_at_iso = res_at_dt.isoformat(timespec="seconds")
-
-        stamp_resolution(
-            project_dir, eid,
-            outcome=backend_outcome,
-            what_happened=what_happened,
-            how_it_went=how_it_went,
-            mood_delta=mood_delta,
-            at_iso=res_at_iso,
-        )
-        ls_entries.append({
-            "id": _ls_id(res_at_iso),
-            "at_local": res_at_iso,
-            "kind": "resolved_planned",
-            "ref": eid,
-            "summary": what_happened or f"({backend_outcome}, no detail)",
-            "tone": how_it_went,
-            "available_to_recall": True,
-        })
-        n_resolutions += 1
-
-    # Any rolled events the model failed to narrate get auto-stamped AND
-    # get a thin life_stream entry — the event happened even without
-    # narrative; missing it from life_stream would silently lose the lived
-    # experience for that event.
-    narrated_ids = {res.get("event_id") for res in (payload.get("resolutions") or []) if isinstance(res, dict)}
+        narrated_ids.add(eid)
+        ev = next(r["event"] for r in rolled if r["event"]["id"] == eid)
+        ev["pending_resolution"] = {
+            "outcome": rolled_by_id[eid],  # backend-rolled, override model
+            "what_happened": (res.get("what_happened") or "").strip(),
+            "how_it_went": res.get("how_it_went") if res.get("how_it_went") in VALID_TONES else "even",
+            "mood_delta": max(-2, min(2, int(res.get("mood_delta") or 0))),
+        }
+    # Events the model didn't narrate get thin pending
     for r in rolled:
-        eid = r["event"]["id"]
-        if eid in narrated_ids:
+        if r["event"]["id"] in narrated_ids:
             continue
-        logger.warning(f"resolver: model didn't narrate {eid} — auto-stamping with rolled outcome {r['outcome']}")
-        ev = r["event"]
-        res_at_iso = _event_end_iso(ev, now_dt)
-        stamp_resolution(
-            project_dir, eid, outcome=r["outcome"],
-            what_happened="", how_it_went="", mood_delta=0,
-            at_iso=res_at_iso,
-        )
-        ls_entries.append(_thin_ls_entry(ev, res_at_iso))
+        logger.warning(f"resolver: model didn't narrate {r['event']['id']} — using thin pending")
+        r["event"]["pending_resolution"] = {
+            "outcome": r["outcome"],
+            "what_happened": "",
+            "how_it_went": "even",
+            "mood_delta": 0,
+        }
 
-    # Apply unplanned moments — backend-assigns timestamps via even spread
+    # Apply pre-rolled unplanned moments to schedule.pending_unplanned
     unplanned_list = payload.get("unplanned") or []
-    times = _spread_unplanned_times(window_start, now_dt, min(len(unplanned_list), unplanned_n))
+    times = _spread_unplanned_times(now_dt, next_cron_dt, min(unplanned_n, len(unplanned_list)))
     for i, up in enumerate(unplanned_list[:unplanned_n]):
         if not isinstance(up, dict):
             continue
@@ -533,41 +630,50 @@ def run_daily_resolver(
             continue
         tone = up.get("tone") if up.get("tone") in VALID_TONES else "even"
         at_iso = times[i].isoformat(timespec="seconds") if i < len(times) else now_dt.isoformat(timespec="seconds")
-        ls_entries.append({
+        schedule["pending_unplanned"] = (schedule.get("pending_unplanned") or []) + [{
             "id": _ls_id(at_iso),
             "at_local": at_iso,
-            "kind": "unplanned",
-            "ref": None,
             "summary": summary,
             "tone": tone,
-            "available_to_recall": True,
-        })
+        }]
 
-    # Append everything in one pass
-    if ls_entries:
-        append_life_stream_many(project_dir, ls_entries)
-
-    # Wellbeing: bump wb_mod by summed mood_delta, clamped at ±WB_MOD_CAP
-    wb = state.setdefault("wellbeing", {"state": "Even", "wb_mod": 0})
-    cur_mod = int(wb.get("wb_mod", 0) or 0)
-    new_mod = max(-WB_MOD_CAP, min(WB_MOD_CAP, cur_mod + total_mood_delta))
-    wb["wb_mod"] = new_mod
-
-    # Stamp last_resolver_run_at (also persists wellbeing change above)
+    save_schedule(project_dir, schedule)
     _stamp_last_run(project_dir, state, now_dt)
 
     cost = compute_resolver_cost(usage) if usage else 0.0
     return {
         "skipped": False,
-        "elapsed_count": len(elapsed),
-        "resolutions": n_resolutions,
-        "unplanned": len(ls_entries) - n_resolutions,
-        "mood_delta_total": total_mood_delta,
-        "wb_mod_after": new_mod,
+        "stage": "preroll",
+        "stamped_events": stamped_event_count,
+        "stamped_unplanned": stamped_unplanned_count,
+        "fallback_stamped": len(fallback_ls_entries),
+        "preroll_events": len(rolled),
+        "preroll_unplanned": min(unplanned_n, len(unplanned_list)),
+        "stage1_mood_delta": total_mood_delta,
         "usage": usage,
         "cost": cost,
         "model": RESOLVER_MODEL,
     }
+
+
+def _bail_no_bands_stamp(schedule: dict, now_dt: datetime) -> list[dict]:
+    """For pre-bootstrap characters: thin-stamp any events whose end has
+    passed and return the list (caller persists)."""
+    stamped: list[dict] = []
+    for ev in schedule.get("events") or []:
+        if not isinstance(ev, dict) or ev.get("status") != "planned":
+            continue
+        ev_end = _event_end_dt(ev)
+        if ev_end is None or ev_end > now_dt:
+            continue
+        end_iso = ev_end.isoformat(timespec="seconds")
+        ev["status"] = "as_planned"
+        ev["resolution"] = {
+            "at": end_iso, "outcome": "as_planned",
+            "what_happened": "", "how_it_went": "even", "mood_delta": 0,
+        }
+        stamped.append(ev)
+    return stamped
 
 
 def _stamp_last_run(project_dir: str, state: dict, now_dt: datetime) -> None:
@@ -600,7 +706,7 @@ def _call_sonnet(
     # Volatile context
     wb = state.get("wellbeing") or {}
     parts = []
-    parts.append(f"[WINDOW] from {window_start.isoformat(timespec='seconds')} to {window_end.isoformat(timespec='seconds')}")
+    parts.append(f"[UPCOMING WINDOW] {window_start.isoformat(timespec='seconds')} → {window_end.isoformat(timespec='seconds')}")
     parts.append(f"[CURRENT MOOD] {wb.get('state', 'Even')} (wb_mod for tomorrow's roll: {wb.get('wb_mod', 0)})")
     arc = state.get("arc_state") or ""
     if arc:
@@ -618,7 +724,7 @@ def _call_sonnet(
     parts.append(_format_life_stream_tail(life_tail))
     parts.append("")
 
-    parts.append(f"[ELAPSED EVENTS] ({len(rolled)} events. Honor the rolled_outcome for each — DO NOT change it):")
+    parts.append(f"[UPCOMING EVENTS] ({len(rolled)} events ending in this window. Honor the rolled_outcome for each — DO NOT change it):")
     for r in rolled:
         parts.append(_format_event_for_prompt(r["event"], r["outcome"]))
         parts.append("")

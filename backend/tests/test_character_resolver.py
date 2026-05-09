@@ -270,15 +270,15 @@ def test_run_resolver_bails_when_no_flakiness_bands(project_dir):
     assert sched["events"][0]["status"] == "as_planned"
 
 
-def test_run_resolver_no_elapsed_events_with_unplanned_zero(project_dir):
-    """No elapsed events AND Poisson rolls 0 unplanned → quick bail with
-    no API call. The resolver still ran successfully (skipped=False) but
-    nothing was notable in the window."""
+def test_run_resolver_no_upcoming_events_with_unplanned_zero(project_dir):
+    """No upcoming events in the next-cron window AND Poisson rolls 0
+    unplanned → quick bail with no API call. The resolver still ran
+    (skipped=False) but nothing was notable to pre-roll."""
+    # Event far in the future, outside next_cron window from Sat 1pm
     _seed_schedule(project_dir, [
         _planned_event("sch-1", "2026-05-15T20:00:00-04:00", kind="social", duration_min=120),
     ])
 
-    # Force: not skip-roll (0.99 > 0.35), Poisson returns 0 (first random < e^-1.5 ≈ 0.223)
     class _Rng:
         def __init__(self):
             self.i = 0
@@ -295,33 +295,26 @@ def test_run_resolver_no_elapsed_events_with_unplanned_zero(project_dir):
         rng=_Rng(),
     )
     assert out["skipped"] is False
-    assert out["elapsed_count"] == 0
-    assert out["unplanned"] == 0
-    assert out["reason"] == "empty roll"
+    assert out["preroll_events"] == 0
+    assert out["preroll_unplanned"] == 0
+    assert out["reason"] == "empty preroll"
     # No API call when nothing to narrate
     assert client.messages.create.call_count == 0
 
 
-def test_run_resolver_no_elapsed_events_but_unplanned_fires(project_dir):
-    """Regression: when no scheduled events elapsed but the unplanned roll
-    fires (Poisson > 0), the resolver still calls Sonnet to generate
-    unplanned-moment narrations. Without this, every cron pass that
-    landed between scheduled events would silently produce nothing —
-    breaking continuous-existence semantics on quiet schedule windows."""
+def test_run_resolver_no_upcoming_events_but_unplanned_fires(project_dir):
+    """Regression: when no upcoming events but Poisson rolls > 0 unplanned
+    moments, Sonnet narrates them. Their at_local is in the upcoming window
+    → stored as pending_unplanned. life_stream is empty until next cron stamps.
+    """
+    # Far-future event, won't be in the upcoming window
     _seed_schedule(project_dir, [
-        # Far-future event — won't elapse at the test's now_dt
         _planned_event("sch-1", "2026-05-15T20:00:00-04:00", kind="social", duration_min=120),
     ])
 
-    # Force: not skip-roll, Poisson returns 2, then padded values for outcome rolls (none to roll)
     class _Rng:
         def __init__(self):
             self.i = 0
-            # Sequence:
-            #  [0] 0.99 → not skip-roll
-            #  [1] 0.99 → poisson iter 1: p=0.99, k=1 (still > L=0.223)
-            #  [2] 0.50 → poisson iter 2: p=0.495, k=2 (still > L=0.223)
-            #  [3] 0.30 → poisson iter 3: p=0.1485, k=3 (≤ L, returns k-1=2)
             self.vals = [0.99, 0.99, 0.50, 0.30, 0.50, 0.50]
         def random(self):
             v = self.vals[min(self.i, len(self.vals) - 1)]
@@ -329,11 +322,11 @@ def test_run_resolver_no_elapsed_events_but_unplanned_fires(project_dir):
             return v
 
     client = _mock_client(_mock_resolver_response(
-        resolutions=[],  # no events to resolve
+        resolutions=[],
         unplanned=[
             {"summary": "Marcus came in at 8:30 and lingered through her second pour.",
              "tone": "even", "kind": "small_thing"},
-            {"summary": "The espresso machine started making a weird hiss again. Probably needs descaling.",
+            {"summary": "The espresso machine started hissing again.",
              "tone": "frayed", "kind": "incident"},
         ],
     ))
@@ -343,14 +336,15 @@ def test_run_resolver_no_elapsed_events_but_unplanned_fires(project_dir):
         rng=_Rng(),
     )
     assert out["skipped"] is False
-    assert out["elapsed_count"] == 0
-    assert out["unplanned"] == 2  # ls_entries minus n_resolutions
-    # API was called even though no events elapsed
+    assert out["preroll_events"] == 0
+    assert out["preroll_unplanned"] == 2
+    # API was called
     assert client.messages.create.call_count == 1
-    # Life stream got entries
-    stream = read_life_stream_all(project_dir)
-    assert len(stream) == 2
-    assert all(e["kind"] == "unplanned" for e in stream)
+    # life_stream still empty — pending_unplanned waits for next cron to stamp
+    assert read_life_stream_all(project_dir) == []
+    # Schedule has pending_unplanned populated
+    sched = load_schedule(project_dir)
+    assert len(sched.get("pending_unplanned", [])) == 2
 
 
 # ── run_daily_resolver: skip-roll ────────────────────────────────────
@@ -376,42 +370,41 @@ def test_skip_roll_auto_stamps_without_api(project_dir):
         now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
         rng=_ZeroRng(),
     )
+    # Skip-roll fires for the upcoming window's pre-roll. Existing
+    # behavior: stamping STAGE 1 still happens for events whose pending
+    # had been pre-rolled previously (n/a here — no prior pre-roll), and
+    # fallback STAGE 2 still stamps elapsed-but-unrolled events thin.
     assert out["skipped"] is True
-    assert out["elapsed_count"] == 2
-    # No API call made
+    assert out["fallback_stamped"] == 2  # both events fell to fallback
     assert client.messages.create.call_count == 0
-    # Both events stamped as_planned with empty resolution
     sched = load_schedule(project_dir)
     statuses = {ev["id"]: ev["status"] for ev in sched["events"]}
     assert statuses == {"sch-1": "as_planned", "sch-2": "as_planned"}
-    # Thin life_stream entries written for each elapsed event — the events
-    # happened even though skip-roll suppressed narration.
+    # Thin life_stream entries from fallback stamping
     stream = read_life_stream_all(project_dir)
     assert len(stream) == 2
     assert all(e["kind"] == "resolved_planned" for e in stream)
     refs = sorted(e["ref"] for e in stream)
     assert refs == ["sch-1", "sch-2"]
-    # Summary derives from event title (no model narrative)
-    summaries = sorted(e["summary"] for e in stream)
-    assert summaries == ["Event sch-1", "Event sch-2"]
 
 
-def test_skip_roll_forced_to_run_when_chat_revision_present(project_dir):
-    """Hard-override: even if skip-roll would fire, an elapsed event with a
-    chat-driven revision since last_resolver_run forces the run."""
+def test_skip_roll_forced_to_run_when_chat_revision_in_upcoming(project_dir):
+    """Hard-override: when a chat-driven revision is present on an upcoming
+    event since last_resolver_run, skip-roll's chat_forced gate forces the
+    pre-roll to run regardless of the dice."""
+    # Event in the upcoming window from now=Sat 1pm; next_cron=Sat 6pm
     _seed_schedule(project_dir, [
-        _planned_event("sch-1", "2026-05-09T08:00:00-04:00", kind="social", duration_min=60,
+        _planned_event("sch-1", "2026-05-09T15:00:00-04:00", kind="social", duration_min=60,
                        revision_history=[
-                           {"by": "chat", "at": "2026-05-09T07:30:00-04:00",
+                           {"by": "chat", "at": "2026-05-09T12:30:00-04:00",
                             "reason": "Kira bailed",
                             "diff": {"with": {"from": ["Kira"], "to": []}}},
                        ]),
     ])
-    # Set last_resolver_run_at BEFORE the chat revision
     save_project_state(project_dir, {
         "wellbeing": {"state": "Even", "wb_mod": 0},
         "flakiness_bands": ZARA_BANDS,
-        "scheduler_state": {"last_resolver_run_at": "2026-05-09T06:00:00-04:00"},
+        "scheduler_state": {"last_resolver_run_at": "2026-05-09T08:00:00-04:00"},
         "callbacks": {"open": []},
     })
 
@@ -421,7 +414,7 @@ def test_skip_roll_forced_to_run_when_chat_revision_present(project_dir):
 
     client = _mock_client(_mock_resolver_response(
         resolutions=[{"event_id": "sch-1", "outcome": "as_planned",
-                      "what_happened": "happened anyway", "how_it_went": "even", "mood_delta": 0}],
+                      "what_happened": "rescheduled vibes, fine", "how_it_went": "even", "mood_delta": 0}],
         unplanned=[],
     ))
     out = run_daily_resolver(
@@ -429,22 +422,28 @@ def test_skip_roll_forced_to_run_when_chat_revision_present(project_dir):
         now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
         rng=_ZeroRng(),
     )
+    # Pre-roll ran (not skipped) because chat-revision forced it
     assert out["skipped"] is False
     assert client.messages.create.call_count == 1
+    # Event has pending_resolution (pre-rolled, not yet stamped)
+    sched = load_schedule(project_dir)
+    ev = sched["events"][0]
+    assert ev["status"] == "planned"  # not stamped yet — event_end > now
+    assert isinstance(ev.get("pending_resolution"), dict)
 
 
 # ── run_daily_resolver: outcome roll honored ─────────────────────────
 
 def test_resolver_overrides_model_outcome_with_rolled_bucket(project_dir):
     """Even if the model emits a different outcome than the backend rolled,
-    the rolled bucket wins. Trust the dice, not the narration."""
+    the rolled bucket wins. Trust the dice. Now the rolled outcome lands
+    in pending_resolution at pre-roll time — pending.outcome must equal
+    the backend roll, not what the model emitted."""
+    # Upcoming event in next-cron window (now=1pm, next=6pm; event ends 5pm)
     _seed_schedule(project_dir, [
-        _planned_event("sch-1", "2026-05-09T08:00:00-04:00", kind="self_care", duration_min=60),
+        _planned_event("sch-1", "2026-05-09T16:00:00-04:00", kind="self_care", duration_min=60),
     ])
 
-    # Use a fixed RNG so we can predict the rolled outcome deterministically
-    # Set up so that after the skip-roll random.random() (which we want > 0.35),
-    # the next random.random() falls in the cancelled bucket for self_care (0.30).
     class _SeqRng:
         def __init__(self, vals):
             self.vals = list(vals)
@@ -454,103 +453,245 @@ def test_resolver_overrides_model_outcome_with_rolled_bucket(project_dir):
             return v
         def seed(self, *a, **k): pass
 
-    # First random: 0.99 (not skip; > SKIP_RATE 0.35)
-    # Second: 0.10 (outcome: < 0.30 cancelled bucket for self_care)
-    # Third: 0.10 (poisson: 0.10 <= e^-1.5 ≈ 0.223 → returns 0 unplanned)
+    # Sequence: skip-roll, outcome roll (lands in cancelled for self_care since
+    # 0.10 < 0.30 cancelled), then poisson (0.10 < ~0.223 = exits at k=0)
     rng = _SeqRng([0.99, 0.10, 0.10])
 
-    # Model says as_planned but we rolled cancelled → backend should override to cancelled
     client = _mock_client(_mock_resolver_response(
-        resolutions=[{"event_id": "sch-1", "outcome": "as_planned",
+        resolutions=[{"event_id": "sch-1", "outcome": "as_planned",  # model says as_planned
                       "what_happened": "model said it happened", "how_it_went": "even",
                       "mood_delta": 1}],
         unplanned=[],
     ))
-    run_daily_resolver(client, project_dir,
-                      now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
-                      rng=rng)
+    run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
+        rng=rng,
+    )
     sched = load_schedule(project_dir)
     ev = sched["events"][0]
-    assert ev["status"] == "cancelled"  # backend's rolled outcome, not model's
-    assert ev["resolution"]["outcome"] == "cancelled"
+    # Status remains planned (event hasn't ended yet at now=1pm)
+    assert ev["status"] == "planned"
+    # Pending resolution has the BACKEND's rolled outcome, not the model's
+    assert ev["pending_resolution"]["outcome"] == "cancelled"
 
 
 # ── run_daily_resolver: idempotence ──────────────────────────────────
 
-def test_resolver_double_run_no_double_resolve(project_dir):
-    """Running the resolver twice in quick succession should not re-resolve
-    events that already got resolved on the first pass (their status is no
-    longer 'planned' so they fall out of the elapsed filter)."""
+def test_resolver_double_run_no_double_pre_roll(project_dir):
+    """First pass pre-rolls an upcoming event into pending_resolution.
+    Second pass with same now_dt should NOT re-roll that event (it has
+    pending already). Idempotence guard for forward-rolling."""
+    # Upcoming event in next-cron window
     _seed_schedule(project_dir, [
-        _planned_event("sch-1", "2026-05-09T08:00:00-04:00", kind="work", duration_min=60),
+        _planned_event("sch-1", "2026-05-09T16:00:00-04:00", kind="work", duration_min=60),
     ])
 
     client = _mock_client(_mock_resolver_response(
         resolutions=[{"event_id": "sch-1", "outcome": "as_planned",
-                      "what_happened": "morning rush", "how_it_went": "even", "mood_delta": 0}],
+                      "what_happened": "afternoon shift", "how_it_went": "even", "mood_delta": 0}],
         unplanned=[],
     ))
 
-    # First pass — RNG forces run (no skip)
-    class _NoSkipRng:
-        def __init__(self):
+    class _Rng:
+        def __init__(self, vals):
             self.i = 0
-            self.vals = [0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99]  # never skip, never weird outcomes
+            self.vals = list(vals)
         def random(self):
-            v = self.vals[self.i % len(self.vals)]; self.i += 1
+            v = self.vals[min(self.i, len(self.vals) - 1)]; self.i += 1
             return v
 
+    # First pass: not skip, outcome=as_planned (≥0.05 cancelled+modified for work),
+    # poisson exits at k=1 returning 0 (0.10 ≤ e^-1.5 ≈ 0.223)
     out1 = run_daily_resolver(
         client, project_dir,
         now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
-        rng=_NoSkipRng(),
+        rng=_Rng([0.99, 0.99, 0.10]),
     )
     assert out1["skipped"] is False
-    assert out1["resolutions"] == 1
+    assert out1["preroll_events"] == 1
 
-    # Second pass — same window. Should find no elapsed events to re-resolve
+    # Second pass: not skip, no upcoming events to roll, poisson 0 → empty-bail
     out2 = run_daily_resolver(
         client, project_dir,
         now_dt=datetime(2026, 5, 9, 13, 1).astimezone(),
-        rng=_NoSkipRng(),
+        rng=_Rng([0.99, 0.10]),
     )
-    assert out2["elapsed_count"] == 0
+    assert out2["preroll_events"] == 0  # already pre-rolled, no re-roll
+    assert out2.get("reason") == "empty preroll"
+    # Only one API call total — the second pass had nothing to do
+    assert client.messages.create.call_count == 1
 
 
 # ── run_daily_resolver: mood delta accumulation ──────────────────────
 
-def test_mood_deltas_accumulate_and_clamp(project_dir):
-    """Multiple resolutions with mood_deltas should sum into wb_mod, clamped at ±2."""
+def test_mood_deltas_apply_at_stamp_time_clamped(project_dir):
+    """Mood deltas are stored on pending_resolution at pre-roll time but only
+    applied to wb_mod when the event is STAMPED (next cron, after event_end
+    has passed). Two stamped +2 deltas should clamp at +WB_MOD_CAP."""
+    # Pre-set events with pending_resolution already in place. Event_ends
+    # in the past so STAGE 1 stamps them in this run.
     _seed_schedule(project_dir, [
-        _planned_event("sch-1", "2026-05-09T08:00:00-04:00", kind="work"),
-        _planned_event("sch-2", "2026-05-09T09:00:00-04:00", kind="work"),
+        {"id": "sch-1", "kind": "work", "title": "shift1",
+         "when_local": "2026-05-09T08:00:00-04:00", "duration_min": 60,
+         "with": [], "location": "", "anticipation": "neutral", "magnitude": "normal",
+         "status": "planned", "resolution": None, "revision_history": [],
+         "pending_resolution": {
+             "outcome": "as_planned", "what_happened": "great", "how_it_went": "buoyant",
+             "mood_delta": 2,
+         }},
+        {"id": "sch-2", "kind": "work", "title": "shift2",
+         "when_local": "2026-05-09T09:00:00-04:00", "duration_min": 60,
+         "with": [], "location": "", "anticipation": "neutral", "magnitude": "normal",
+         "status": "planned", "resolution": None, "revision_history": [],
+         "pending_resolution": {
+             "outcome": "as_planned", "what_happened": "great", "how_it_went": "buoyant",
+             "mood_delta": 2,
+         }},
     ])
 
     class _NoSkipRng:
         def __init__(self):
             self.i = 0
-            self.vals = [0.99, 0.99, 0.99, 0.99, 0.99, 0.99]
+            self.vals = [0.99] * 10
         def random(self):
             v = self.vals[self.i % len(self.vals)]; self.i += 1
             return v
 
-    client = _mock_client(_mock_resolver_response(
-        resolutions=[
-            {"event_id": "sch-1", "outcome": "as_planned", "what_happened": "x", "how_it_went": "buoyant", "mood_delta": 2},
-            {"event_id": "sch-2", "outcome": "as_planned", "what_happened": "y", "how_it_went": "buoyant", "mood_delta": 2},
-        ],
-        unplanned=[],
-    ))
-    out = run_daily_resolver(
+    client = _mock_client(_mock_resolver_response(resolutions=[], unplanned=[]))
+    run_daily_resolver(
         client, project_dir,
         now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
         rng=_NoSkipRng(),
     )
-    # Two +2 deltas would sum to +4 but clamped to +2
-    assert out["wb_mod_after"] == WB_MOD_CAP
+    from character_project_state import load_project_state
+    state = load_project_state(project_dir)
+    # +2 + +2 = +4, clamped to +2
+    assert state["wellbeing"]["wb_mod"] == WB_MOD_CAP
+    # Both events stamped
+    sched = load_schedule(project_dir)
+    statuses = {e["id"]: e["status"] for e in sched["events"]}
+    assert statuses == {"sch-1": "as_planned", "sch-2": "as_planned"}
 
 
 # ── run_daily_resolver: API failure soft-fails events ────────────────
+
+def test_full_lifecycle_pre_roll_then_stamp_at_next_cron(project_dir):
+    """End-to-end forward-rolling lifecycle:
+    1. Cron at 1pm pre-rolls an event ending 5pm (in 1pm-6pm window).
+       Stores pending_resolution. life_stream still empty.
+    2. Cron at 6pm sees the event with pending_resolution + event_end <= now.
+       STAMPS it: status flips, life_stream entry written, mood_delta applied.
+    """
+    save_project_state(project_dir, {
+        "wellbeing": {"state": "Even", "wb_mod": 0},
+        "flakiness_bands": ZARA_BANDS,
+        "scheduler_state": {"last_resolver_run_at": "2026-05-09T08:00:00-04:00"},
+        "callbacks": {"open": []},
+    })
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T16:00:00-04:00", kind="work", duration_min=60),
+    ])
+
+    class _Rng:
+        def __init__(self, vals):
+            self.i = 0
+            self.vals = list(vals)
+        def random(self):
+            v = self.vals[min(self.i, len(self.vals) - 1)]; self.i += 1
+            return v
+
+    # ── Step 1: 1pm pre-rolls sch-1 (window 1pm-6pm) ──
+    client = _mock_client(_mock_resolver_response(
+        resolutions=[{"event_id": "sch-1", "outcome": "as_planned",
+                      "what_happened": "afternoon was steady", "how_it_went": "even", "mood_delta": 1}],
+        unplanned=[],
+    ))
+    out_1pm = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
+        rng=_Rng([0.99, 0.99, 0.10]),  # not skip, outcome ok, poisson 0
+    )
+    assert out_1pm["preroll_events"] == 1
+    sched = load_schedule(project_dir)
+    ev = sched["events"][0]
+    assert ev["status"] == "planned"  # not yet stamped
+    assert ev["pending_resolution"]["outcome"] == "as_planned"
+    assert ev["pending_resolution"]["mood_delta"] == 1
+    assert read_life_stream_all(project_dir) == []  # not yet in ledger
+
+    # ── Step 2: 6pm cron stamps sch-1 (event_end=5pm < now=6pm) ──
+    out_6pm = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 18, 0).astimezone(),
+        rng=_Rng([0.99, 0.10]),  # not skip, no upcoming, poisson 0
+    )
+    assert out_6pm["stamped_events"] == 1
+    sched = load_schedule(project_dir)
+    ev = sched["events"][0]
+    assert ev["status"] == "as_planned"
+    assert "pending_resolution" not in ev
+    assert ev["resolution"]["what_happened"] == "afternoon was steady"
+    assert ev["resolution"]["mood_delta"] == 1
+    # Life stream now has the entry, timestamped at event_end (5pm)
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 1
+    assert stream[0]["ref"] == "sch-1"
+    assert stream[0]["summary"] == "afternoon was steady"
+    assert stream[0]["at_local"].startswith("2026-05-09T17:00")
+    # Wellbeing wb_mod bumped by +1 from the stamped mood_delta
+    from character_project_state import load_project_state
+    state = load_project_state(project_dir)
+    assert state["wellbeing"]["wb_mod"] == 1
+
+
+def test_chat_mutation_invalidates_pending_resolution(project_dir):
+    """When an event has pending_resolution and chat cancels/modifies it,
+    pending must clear so the next cron re-rolls based on current state."""
+    save_project_state(project_dir, {
+        "wellbeing": {"state": "Even", "wb_mod": 0},
+        "flakiness_bands": ZARA_BANDS,
+        "scheduler_state": {"last_resolver_run_at": "2026-05-09T08:00:00-04:00"},
+        "callbacks": {"open": []},
+    })
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T16:00:00-04:00", kind="social", duration_min=120),
+    ])
+
+    # Step 1: cron pre-rolls
+    class _Rng:
+        def __init__(self, vals):
+            self.i = 0
+            self.vals = list(vals)
+        def random(self):
+            v = self.vals[min(self.i, len(self.vals) - 1)]; self.i += 1
+            return v
+
+    client = _mock_client(_mock_resolver_response(
+        resolutions=[{"event_id": "sch-1", "outcome": "as_planned",
+                      "what_happened": "fun night", "how_it_went": "buoyant", "mood_delta": 1}],
+        unplanned=[],
+    ))
+    run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 13, 0).astimezone(),
+        rng=_Rng([0.99, 0.99, 0.10]),
+    )
+    sched = load_schedule(project_dir)
+    assert sched["events"][0].get("pending_resolution") is not None
+
+    # Step 2: chat mutates the event (cancel)
+    from character_schedule import apply_schedule_ops
+    apply_schedule_ops(project_dir, [
+        {"op": "cancel", "event_id": "sch-1", "reason": "tired, bailing"}
+    ], source="chat", now_iso="2026-05-09T15:00:00-04:00")
+
+    # Pending should be cleared, status now cancelled
+    sched = load_schedule(project_dir)
+    ev = sched["events"][0]
+    assert ev["status"] == "cancelled"
+    assert ev.get("pending_resolution") is None
+
 
 def test_api_failure_does_not_strand_elapsed_events(project_dir):
     """If the model call fails, we still need to make progress on elapsed events
