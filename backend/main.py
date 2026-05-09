@@ -6383,9 +6383,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # character can reference what she was thinking — "I was just
                 # thinking that") AND to the inner-state pre-pass below (so
                 # Sonnet generates emotional continuity instead of independent
-                # samples per turn). Cap: 3 most recent non-empty payloads,
-                # scanning back up to 10 assistant turns. ~420 tokens worst
-                # case, volatile (uncached) on Opus's call.
+                # samples per turn).
+                #
+                # Throttling: 2hr time window + 3-payload cap + 10-turn lookback.
+                # The time window matters most — emotional state from 6hr ago
+                # is genuinely stale, and the gap+non-sequitur rule already
+                # treats long gaps as new conversation threads. 2hr is wide
+                # enough to survive normal conversation pauses (lunch, errand,
+                # work call) but tight enough to exclude "earlier today."
+                from datetime import datetime as _dt, timedelta as _td
+                _PRIOR_STATE_MAX_AGE = _td(hours=2)
+                _now = _dt.now().astimezone()
                 _prior_inner_states_list = []
                 _assistant_seen_count = 0
                 for _hist_msg in reversed(branch_path):
@@ -6394,6 +6402,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     _assistant_seen_count += 1
                     if _assistant_seen_count > 10:
                         break
+                    # Time-window filter: skip and BREAK if this message is older
+                    # than the threshold. Anything before this is older still, so
+                    # no point continuing the walk.
+                    _hist_ts_str = _hist_msg.get("timestamp")
+                    if isinstance(_hist_ts_str, str):
+                        try:
+                            _hist_ts = _dt.fromisoformat(_hist_ts_str)
+                            # Make timezone-aware if needed for the subtraction
+                            if _hist_ts.tzinfo is None:
+                                _hist_ts = _hist_ts.astimezone()
+                            if (_now - _hist_ts) > _PRIOR_STATE_MAX_AGE:
+                                break
+                        except (ValueError, TypeError):
+                            # Unparseable timestamp — keep going rather than
+                            # nuking the whole feature on a single bad row.
+                            pass
                     _hist_payload = _hist_msg.get("inner_state_payload")
                     if isinstance(_hist_payload, dict) and _hist_payload:
                         _prior_inner_states_list.append({
