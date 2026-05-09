@@ -31,6 +31,8 @@
 !backend/tests/test_character_panel.py
 !backend/tests/test_character_inner_state.py
 !backend/tests/test_character_project_state.py
+!backend/tests/test_character_schedule.py
+!backend/tests/test_character_resolver.py
 !backend/tests/test_sync_manager.py
 !backend/combat_state.py
 !backend/fix_total_tokens.py
@@ -47,7 +49,14 @@
 !backend/character_fetch_url.py
 !backend/character_inner_state.py
 !backend/character_project_state.py
+!backend/character_schedule.py
+!backend/character_resolver.py
 !backend/characters_runtime.py
+!backend/scheduler.py
+!backend/scripts/
+!backend/scripts/bootstrap_zara_schedule.py
+!backend/scripts/measure_injections.py
+!backend/scripts/strip_printed_hud.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_e2e.py

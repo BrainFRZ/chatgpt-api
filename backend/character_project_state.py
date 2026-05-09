@@ -43,7 +43,15 @@ PROJECT_STATE_FILENAME = "character_state.json"
 # last_ripeness_rolled_date tracks the daily ripe-callback roll so all chats in
 # the project share one roll per ET day rather than each chat re-rolling on its
 # own first-message-of-day.
-PROJECT_LEVEL_FIELDS = ("callbacks", "wellbeing", "arc_state", "life_events", "last_ripeness_rolled_date")
+PROJECT_LEVEL_FIELDS = (
+    "callbacks",
+    "wellbeing",
+    "arc_state",
+    "life_events",
+    "flakiness_bands",
+    "scheduler_state",
+    "last_ripeness_rolled_date",
+)
 
 
 @contextlib.contextmanager

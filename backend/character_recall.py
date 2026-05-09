@@ -129,6 +129,16 @@ def build_recall_tool() -> dict:
                     "items": {"type": "integer"},
                     "description": f"Growth ids to surface this turn ({0}-{RECALL_MAX_PER_KIND}).",
                 },
+                "life_stream_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        f"Life-stream entry ids to surface this turn ({0}-{RECALL_MAX_PER_KIND}). "
+                        "These are recent lived moments (resolved planned events, unplanned moments, schedule changes). "
+                        "Pick when the current dialogue would naturally connect — e.g. user mentions yesterday "
+                        "and the character has a stream entry from yesterday worth referencing."
+                    ),
+                },
             },
         },
     }
@@ -166,6 +176,11 @@ def _build_index_text(entries: list, kind: str, exclude_ids: Optional[set] = Non
                 continue  # skip obsolete from recall consideration
             cat = f"[{e.get('category')}] " if e.get('category') else ""
             lines.append(f"  id={eid} | {cat}{e.get('text', '')[:140]}")
+        elif kind == "life_stream":
+            ts = e.get("at_local", "?")
+            stream_kind = e.get("kind", "?")
+            tone = e.get("tone", "?")
+            lines.append(f"  id={eid} | {ts} | [{stream_kind}, {tone}] {e.get('summary', '')[:140]}")
         count += 1
     return "\n".join(lines) if lines else "(none)"
 
@@ -236,7 +251,10 @@ def run_recall(
     Within an hour, most turns pay cache-read rates ($0.10/MTok) instead of
     input rates ($1/MTok).
     """
-    empty: dict = {"recalled_memories": [], "recalled_profile": [], "recalled_growth": []}
+    empty: dict = {
+        "recalled_memories": [], "recalled_profile": [],
+        "recalled_growth": [], "recalled_life_stream": [],
+    }
     if not user_input or not user_input.strip():
         return empty, {}
     if not project_dir:
@@ -255,7 +273,18 @@ def run_recall(
     profile = store.read_filtered(KIND_USER_PROFILE, branch_msg_ids)
     growth = store.read_filtered(KIND_GROWTH, branch_msg_ids)
 
-    if not memories and not profile and not growth:
+    # life_stream: pull recent entries (last 7 days) as a candidate pool. The
+    # stream is project-level (not branch-filtered — same as memories now).
+    life_stream_entries: list = []
+    try:
+        from character_schedule import read_life_stream_tail
+        from datetime import datetime, timedelta
+        since = (datetime.now().astimezone() - timedelta(days=7)).isoformat(timespec="seconds")
+        life_stream_entries = read_life_stream_tail(project_dir, since_iso=since)
+    except Exception as e:
+        logger.warning(f"character_recall: life_stream read failed: {e}")
+
+    if not memories and not profile and not growth and not life_stream_entries:
         # Nothing to recall — fresh chat
         return empty, {}
 
@@ -276,6 +305,12 @@ def run_recall(
     preamble_parts.append("")
     preamble_parts.append("[GROWTH INDEX — core excluded; obsolete excluded]")
     preamble_parts.append(_build_index_text(growth, "growth", exclude_ids=core_growth_ids or set()))
+    preamble_parts.append("")
+    preamble_parts.append(
+        "[LIFE STREAM INDEX — recent lived moments (last 7 days). Pick ids when "
+        "the current dialogue would naturally connect to one of these.]"
+    )
+    preamble_parts.append(_build_index_text(life_stream_entries, "life_stream"))
     preamble_text = "\n".join(preamble_parts)
 
     # Volatile: the current user message + the decision instruction. Changes
@@ -326,6 +361,7 @@ def run_recall(
     memory_ids = ops.get("memory_ids") or []
     profile_ids = ops.get("profile_ids") or []
     growth_ids = ops.get("growth_ids") or []
+    life_stream_ids = ops.get("life_stream_ids") or []
 
     # Cap each list
     if not isinstance(memory_ids, list):
@@ -334,14 +370,24 @@ def run_recall(
         profile_ids = []
     if not isinstance(growth_ids, list):
         growth_ids = []
+    if not isinstance(life_stream_ids, list):
+        life_stream_ids = []
     memory_ids = [int(i) for i in memory_ids[:RECALL_MAX_PER_KIND] if isinstance(i, (int, str)) and str(i).lstrip("-").isdigit()]
     profile_ids = [int(i) for i in profile_ids[:RECALL_MAX_PER_KIND] if isinstance(i, (int, str)) and str(i).lstrip("-").isdigit()]
     growth_ids = [int(i) for i in growth_ids[:RECALL_MAX_PER_KIND] if isinstance(i, (int, str)) and str(i).lstrip("-").isdigit()]
+    life_stream_ids = [str(i) for i in life_stream_ids[:RECALL_MAX_PER_KIND] if isinstance(i, str) and i.startswith("ls-")]
 
     # Fetch full entries (re-apply branch filter for safety)
     recalled_memories = store.fetch_by_ids(KIND_MEMORIES, memory_ids, branch_msg_ids)
     recalled_profile = store.fetch_by_ids(KIND_USER_PROFILE, profile_ids, branch_msg_ids)
     recalled_growth = store.fetch_by_ids(KIND_GROWTH, growth_ids, branch_msg_ids)
+    # Life stream: filter the candidate pool by chosen ids (no branch filter —
+    # life_stream is project-level like memories)
+    ls_id_set = set(life_stream_ids)
+    recalled_life_stream = [
+        e for e in life_stream_entries
+        if isinstance(e, dict) and e.get("id") in ls_id_set
+    ]
 
     # Bump last_referenced_date on surfaced memories. Keeps frequently-recalled
     # entries alive through the hygiene pass — even a 1★ memory that the
@@ -365,10 +411,11 @@ def run_recall(
         "output_tokens": ru.output_tokens,
     }
 
-    if memory_ids or profile_ids or growth_ids:
+    if memory_ids or profile_ids or growth_ids or life_stream_ids:
         logger.info(
             f"character_recall: surfaced "
-            f"memories={memory_ids}, profile={profile_ids}, growth={growth_ids}"
+            f"memories={memory_ids}, profile={profile_ids}, "
+            f"growth={growth_ids}, life_stream={life_stream_ids}"
         )
 
     return (
@@ -376,10 +423,12 @@ def run_recall(
             "recalled_memories": recalled_memories,
             "recalled_profile": recalled_profile,
             "recalled_growth": recalled_growth,
+            "recalled_life_stream": recalled_life_stream,
             "ids_recalled": {
                 "memory_ids": memory_ids,
                 "profile_ids": profile_ids,
                 "growth_ids": growth_ids,
+                "life_stream_ids": life_stream_ids,
             },
         },
         usage,

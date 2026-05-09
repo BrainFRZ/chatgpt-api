@@ -194,6 +194,86 @@ def should_generate_off_screen(wall_clock: dict, now_dt: Optional[datetime] = No
     return len(_build_day_list((wall_clock or {}).get("last_user_message_at"), now_dt)) > 0
 
 
+def _build_log_from_life_stream(
+    project_dir: str,
+    day_list: list,
+    wc: dict,
+) -> Optional[dict]:
+    """Phase 2 path: deterministically transform life_stream entries into the
+    days/events log shape. The resolver already wrote life_stream entries in
+    character voice; off-screen just groups them by date and formats.
+
+    Returns None if life_stream is empty for the gap window — caller falls
+    back to the legacy Sonnet-invents path (until Phase 3 folds life_events
+    into the schedule and the legacy path can be retired).
+    """
+    from character_schedule import read_life_stream_tail
+    last_user_iso = wc.get("last_user_message_at")
+    if not last_user_iso:
+        return None
+
+    entries = read_life_stream_tail(project_dir, since_iso=last_user_iso)
+    if not entries:
+        return None
+
+    # Build a date → entries map; align with the day_list dates so we only
+    # surface days the off-screen pipeline expected.
+    by_date: dict[str, list[str]] = {}
+    portion_by_date = {d["date"]: d.get("portion", "") for d in day_list}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        at_iso = e.get("at_local")
+        if not isinstance(at_iso, str) or len(at_iso) < 10:
+            continue
+        date = at_iso[:10]
+        if date not in portion_by_date:
+            continue  # outside the gap window's day_list
+        summary = (e.get("summary") or "").strip()
+        if not summary:
+            continue
+        # Resolver-narrated summaries are already in character voice; pass through.
+        # Cap at OFF_SCREEN_EVENTS_PER_DAY entries per date by impact-ordering
+        # (newer first since stream is chronological — keep most-recent N).
+        by_date.setdefault(date, []).append(summary)
+
+    if not by_date:
+        return None
+
+    cleaned = []
+    for d in day_list:
+        date = d["date"]
+        events = by_date.get(date, [])
+        if not events:
+            continue
+        # Cap and dedupe (cheap dedupe — life_stream shouldn't have duplicates
+        # but defensive against the resolver double-firing on misfire-recovery)
+        seen = set()
+        kept = []
+        for ev in events[:OFF_SCREEN_EVENTS_PER_DAY * 2]:  # raw cap before dedupe
+            if ev in seen:
+                continue
+            seen.add(ev)
+            kept.append(ev[:240])
+            if len(kept) >= OFF_SCREEN_EVENTS_PER_DAY:
+                break
+        if kept:
+            cleaned.append({
+                "date": date,
+                "weekday": d.get("weekday") or "",
+                "portion": d.get("portion", ""),
+                "events": kept,
+            })
+
+    if not cleaned:
+        return None
+    return {
+        "generated_at_iso": now_et().isoformat(),
+        "days": cleaned,
+        "source": "life_stream",  # diagnostic — distinguishes from legacy Sonnet path
+    }
+
+
 def generate_off_screen_log(
     client,
     project_dir: Optional[str],
@@ -203,11 +283,28 @@ def generate_off_screen_log(
     """Generate the off_screen_log for the current gap. Returns (log_dict, usage_dict).
 
     Returns (None, {}) when no full days to fill or on error.
+
+    Phase 2: tries the deterministic life_stream → days/events transform first.
+    Falls back to the legacy Sonnet-invents path when life_stream is empty for
+    the gap window (e.g., character has no resolver runs yet, or it's a brand
+    new project). The legacy path is the only place life_events.pending_seed
+    gets woven in; Phase 3 will fold seeds into the schedule and retire it.
     """
     wc = (characters_state or {}).get("wall_clock") or {}
     day_list = _build_day_list(wc.get("last_user_message_at"), now_dt)
     if not day_list:
         return None, {}
+
+    # Phase 2 fast path: deterministic from life_stream
+    if project_dir:
+        life_stream_log = _build_log_from_life_stream(project_dir, day_list, wc)
+        if life_stream_log:
+            logger.info(
+                f"off_screen: built log from life_stream ({len(life_stream_log['days'])} day(s), no API call)"
+            )
+            return life_stream_log, {}
+
+    # Legacy fallback: Sonnet invents (kept until Phase 3 folds life_events into schedule)
 
     profile_doc = _read_file(os.path.join(project_dir or "", "character_profile.di"))
     user_life_doc = _read_file(os.path.join(project_dir or "", "user_life.di"))

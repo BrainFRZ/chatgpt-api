@@ -206,6 +206,18 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
                 cat = f"[{g.get('category')}] " if g.get('category') else ""
                 parts.append(f"  {cat}{g.get('text', '')[:200]}")
 
+        life_stream_recalled = payload.get("life_stream_recalled") or []
+        if life_stream_recalled:
+            parts.append("[RECENT LIFE — things that happened to her recently, recall-filtered]:")
+            for e in life_stream_recalled:
+                if not isinstance(e, dict):
+                    continue
+                ts = e.get("at_local", "?")
+                summary = (e.get("summary") or "")[:200]
+                tone = e.get("tone")
+                tone_part = f" [{tone}]" if tone and tone != "even" else ""
+                parts.append(f"  ({ts}){tone_part} {summary}")
+
     cbs = (characters_state.get("callbacks") or {}).get("open") or []
     if cbs:
         parts.append("[OPEN CALLBACKS — unresolved threads pulling at her]:")

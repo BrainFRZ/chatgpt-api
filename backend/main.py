@@ -308,6 +308,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def _startup_scheduler():
+    """Boot the APScheduler on app startup and register resolver jobs for
+    every Characters-enabled project. No-op if apscheduler isn't installed
+    (graceful degrade — the rest of the app keeps working without crons)."""
+    try:
+        from scheduler import init_scheduler, register_all_projects
+        sched = init_scheduler()
+        if sched is not None:
+            register_all_projects()
+    except Exception as e:
+        logger.error(f"startup: scheduler init failed: {type(e).__name__}: {e}")
+
+
+@app.on_event("shutdown")
+async def _shutdown_scheduler():
+    try:
+        from scheduler import shutdown_scheduler
+        shutdown_scheduler()
+    except Exception as e:
+        logger.error(f"shutdown: scheduler stop failed: {type(e).__name__}: {e}")
+
 # ============================================================
 # Helper Functions
 # ============================================================

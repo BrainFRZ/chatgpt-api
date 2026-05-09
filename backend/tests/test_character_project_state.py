@@ -58,6 +58,14 @@ def test_save_then_load_round_trip(project_dir):
             "pending_seed": None,
             "history": [],
         },
+        "flakiness_bands": {
+            "work":   {"as_planned": 0.99, "modified": 0.0,  "cancelled": 0.01},
+            "social": {"as_planned": 0.80, "modified": 0.15, "cancelled": 0.05},
+        },
+        "scheduler_state": {
+            "last_resolver_run_at": "2026-05-09T08:00:00-04:00",
+            "last_planner_run_week_of": "2026-05-04",
+        },
         "last_ripeness_rolled_date": "2026-05-09",
         # Chat-level field that should NOT be saved
         "channel": "text",

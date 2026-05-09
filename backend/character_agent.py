@@ -102,6 +102,12 @@ You are NOT writing the character. You are reading what was written and updating
    Do NOT emit consume on the same turn the seed was first injected unless the character actually surfaced it. Do NOT emit consume if the event hasn't been touched at all yet — let it stay in context for the next turn so the model has another chance.
    Once consumed, you may also emit a corresponding memory_op or growth_op so the event lives on as a memory or a durable change (e.g. "Nora's cat ran away" → memory at impact 4; "Nora started a new job" → growth entry under "milestone").
 
+8) **schedule_ops** — mutate the character's planned schedule when this turn implied a change. The character's [SCHEDULE] is shown to you below; each event has an `id` (e.g. `sch-3`).
+   - **cancel**: emit when a planned event is no longer happening. `{op: "cancel", event_id: "sch-N", reason: "..."}`. Reasons: "Kira bailed", "too tired", "rescheduled to next week".
+   - **modify**: emit when a planned event is moving, shrinking, swapping participants, etc. `{op: "modify", event_id: "sch-N", fields: {when_local?: "...", with?: [...], location?: "...", duration_min?: N, anticipation?: "..."}, reason: "..."}`. Only include the fields that changed.
+   - **add**: emit when this turn introduces a NEW planned event the character or user committed to. `{op: "add", fields: {kind: "social|family|self_care|admin|anticipated", title: "...", with: [...], when_local: "ISO8601", duration_min: N, location: "...", anticipation: "looking_forward|dreading|neutral"}, reason: "..."}`. Use add only for things they explicitly commit to in this turn — not for floated ideas, not for things already on the schedule.
+   Do NOT emit schedule_ops for events that were merely *mentioned* without changing — referencing "we're still on for Friday" with no change does NOT need an op. Do NOT emit ops for events outside the visible [SCHEDULE]. Most turns: no schedule_ops.
+
 HARD RULES:
 - Restraint. Most turns will have empty arrays. The signal of a good extractor is *not* logging too much.
 - Memories must be SPECIFIC and FUTURE-USEFUL. "They had a nice chat" is not a memory. "The user said her mom called drunk again" is.
@@ -221,6 +227,32 @@ def build_character_agent_tool() -> dict:
                         "action": {"type": "string", "enum": ["consume"]},
                     },
                 },
+                "schedule_ops": {
+                    "type": "array",
+                    "description": "Schedule mutations implied by this turn (cancel / modify / add). Empty when no planned events changed.",
+                    "items": {
+                        "type": "object",
+                        "required": ["op", "reason"],
+                        "properties": {
+                            "op": {"type": "string", "enum": ["cancel", "modify", "add"]},
+                            "event_id": {"type": "string", "description": "Required for cancel/modify. The event's `sch-N` id from [SCHEDULE]."},
+                            "fields": {
+                                "type": "object",
+                                "description": "For modify: the fields that changed (when_local, with, location, duration_min, anticipation, title). For add: the full event (kind, title, when_local, etc).",
+                                "properties": {
+                                    "kind": {"type": "string", "enum": ["work", "social", "family", "self_care", "admin", "anticipated"]},
+                                    "title": {"type": "string"},
+                                    "with": {"type": "array", "items": {"type": "string"}},
+                                    "when_local": {"type": "string", "description": "ISO 8601 with timezone."},
+                                    "duration_min": {"type": "integer"},
+                                    "location": {"type": "string"},
+                                    "anticipation": {"type": "string", "enum": ["looking_forward", "dreading", "neutral"]},
+                                },
+                            },
+                            "reason": {"type": "string", "description": "1-line why (\"Kira bailed\", \"moved to Saturday\", etc)."},
+                        },
+                    },
+                },
             },
         },
     }
@@ -303,6 +335,27 @@ def _summarize_state(
     arc = characters_state.get("arc_state") or ""
     if arc:
         parts.append(f"[ARC] {arc}")
+
+    # Schedule — only the planned events the character could affect this turn
+    if project_dir:
+        try:
+            from character_schedule import load_schedule
+            schedule = load_schedule(project_dir)
+        except Exception:
+            schedule = None
+        if isinstance(schedule, dict):
+            planned = [e for e in (schedule.get("events") or [])
+                       if isinstance(e, dict) and e.get("status") == "planned"]
+            if planned:
+                parts.append("[SCHEDULE] (planned events you can mutate via schedule_ops):")
+                for ev in planned:
+                    when = ev.get("when_local") or "?"
+                    title = ev.get("title") or "(untitled)"
+                    kind = ev.get("kind") or "?"
+                    with_who = ev.get("with") or []
+                    with_part = f" with {', '.join(with_who)}" if with_who else ""
+                    parts.append(f"  {ev.get('id')} [{kind}] {when}: {title}{with_part}")
+
     return "\n".join(parts) if parts else "(state is empty — first turn)"
 
 

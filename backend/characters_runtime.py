@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from game_systems.characters import (
@@ -139,6 +139,9 @@ def populate_render_payload(
         "profile_recalled": [],
         "growth_active": [],
         "growth_obsolete": [],
+        # Life-stream entries recall surfaced. Read by build_life_stream_injection
+        # and by the inner_state pre-pass for emotional context.
+        "life_stream_recalled": [],
         # Populated by run_inner_state AFTER this function runs (in main.py).
         # Default empty so build_inner_state_injection never KeyErrors when the
         # pre-pass soft-fails or hasn't fired yet on a given code path.
@@ -148,6 +151,9 @@ def populate_render_payload(
         # Lets the character reference what she was carrying internally on
         # recent turns ("I was just thinking that"). Default empty list.
         "prior_inner_states": [],
+        # Slice of schedule.json events visible to Opus this turn (planned-status
+        # events in the current+near-future window). Loaded below from disk.
+        "schedule": [],
     }
     if project_dir:
         try:
@@ -160,9 +166,47 @@ def populate_render_payload(
             payload["growth_obsolete"] = [g for g in growth_all if g.get("obsolete")]
         except Exception as e:
             logger.warning(f"populate_render_payload: store read failed: {e}")
+
+        # Schedule: load schedule.json and slice to events overlapping the visible
+        # window (now through 4 days out). Includes in-progress events (start in
+        # the past, end in the future). Hides resolved/cancelled events — those
+        # flow through life_stream → recall instead.
+        try:
+            from character_schedule import load_schedule
+            schedule = load_schedule(project_dir)
+            if isinstance(schedule, dict):
+                events_all = schedule.get("events") or []
+                now_dt = datetime.now().astimezone()
+                window_end = now_dt + timedelta(days=4)
+                planned_in_window = []
+                for ev in events_all:
+                    if not isinstance(ev, dict):
+                        continue
+                    if ev.get("status") != "planned":
+                        continue
+                    when_str = ev.get("when_local")
+                    if not isinstance(when_str, str) or not when_str:
+                        continue
+                    try:
+                        ev_start = datetime.fromisoformat(when_str)
+                        if ev_start.tzinfo is None:
+                            ev_start = ev_start.astimezone()
+                        ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
+                        # Include if the event's window overlaps with [now, now+4d]:
+                        # event is still in progress (end > now) AND starts within window.
+                        if ev_end > now_dt and ev_start <= window_end:
+                            planned_in_window.append(ev)
+                    except (ValueError, TypeError):
+                        continue
+                # Sort chronologically
+                planned_in_window.sort(key=lambda e: e.get("when_local") or "")
+                payload["schedule"] = planned_in_window
+        except Exception as e:
+            logger.warning(f"populate_render_payload: schedule load failed: {e}")
     if isinstance(recall, dict):
         payload["memories_recalled"] = recall.get("recalled_memories") or []
         payload["profile_recalled"] = recall.get("recalled_profile") or []
+        payload["life_stream_recalled"] = recall.get("recalled_life_stream") or []
         # Growth: recall may add to active set (Haiku might surface obsolete entries
         # that are still narratively relevant — but in practice the recall agent
         # avoids these per its prompt; safe to ignore here).
@@ -700,6 +744,16 @@ def run_post_stream_extraction(
         # any side-agent ops that touched them propagate across all chats.
         persist_project_state_from(characters_state, project_dir)
 
+        # Dispatch schedule_ops to schedule.json (separate file with its own
+        # lock+atomic-rewrite pattern, so it doesn't ride on persist_project_state_from).
+        sched_ops = ops.get("schedule_ops") if isinstance(ops, dict) else None
+        if sched_ops and project_dir:
+            try:
+                from character_schedule import apply_schedule_ops
+                apply_schedule_ops(project_dir, sched_ops, source="chat")
+            except Exception as e:
+                logger.warning(f"character_agent: schedule_ops dispatch failed: {e}")
+
     # Stamp the wall_clock with assistant message timestamp
     characters_state["wall_clock"] = update_wall_clock(
         characters_state.get("wall_clock") or {}, user_message=False
@@ -852,6 +906,18 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
         }
 
     data["_characters_interview_mode"] = False
+
+    # Register the resolver job for this newly-completed character. Without
+    # this, scheduler.register_all_projects() only runs at app startup, so a
+    # character interviewed mid-session wouldn't get scheduled jobs until the
+    # next restart. Soft-fail: if the scheduler isn't running (apscheduler not
+    # installed, or test context), this is a no-op.
+    try:
+        from scheduler import register_resolver_for_project
+        register_resolver_for_project(project_dir)
+    except Exception as e:
+        logger.warning(f"finalize_interview: failed to register resolver job: {e}")
+
     return {
         "ok": True,
         "path": path,

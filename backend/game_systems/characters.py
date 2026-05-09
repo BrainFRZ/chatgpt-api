@@ -229,6 +229,8 @@ def init_characters_state() -> dict:
             "pending_seed": None,           # {magnitude, category, hint, planted_date, source} — consumed by off-screen agent
             "history": [],                  # rolled events for diagnostics + future "don't pile on" heuristics
         },
+        "flakiness_bands": None,            # per-category {as_planned, modified, cancelled}; set by interview or bootstrap
+        "scheduler_state": {},              # {last_resolver_run_at, last_planner_run_week_of}; updated by cron jobs
         "off_screen_log": None,             # set by off-screen agent on resume
         "wall_clock": {
             "first_message_at": None,
@@ -1153,6 +1155,121 @@ def build_off_screen_injection(state: dict) -> str:
     return "\n".join(lines)
 
 
+def build_life_stream_injection(state: dict) -> str:
+    """Render the recall-filtered life_stream entries as recent-life context.
+
+    Reads from state["_render_payload"]["life_stream_recalled"] — a list of
+    stream dicts the recall agent picked from the last-7-days candidate pool.
+
+    Format: chronological, with weekday + time + summary. Header tells the
+    model these are things that *happened to her* and to reference naturally
+    rather than narrate as exposition.
+
+    Position: between off_screen and prior_inner_states. Off-screen captures
+    "what happened in the gap"; this captures "what's been on her mind from
+    earlier this week" — adjacent emotional surfaces.
+    """
+    payload = state.get("_render_payload") or {}
+    entries = payload.get("life_stream_recalled") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return ""
+
+    lines = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        summary = (e.get("summary") or "").strip()
+        if not summary:
+            continue
+        ts_str = e.get("at_local")
+        ts_part = ""
+        if isinstance(ts_str, str) and ts_str:
+            try:
+                _ts_dt = datetime.fromisoformat(ts_str)
+                wd = _ts_dt.strftime("%a")
+                date_part = f"{_ts_dt.month}/{_ts_dt.day}"
+                time_part = _ts_dt.strftime("%I:%M%p").lstrip("0").lower()
+                if ":00" in time_part:
+                    time_part = time_part.replace(":00", "")
+                ts_part = f"{wd} {date_part} {time_part}"
+            except (ValueError, TypeError):
+                ts_part = ts_str
+        kind = e.get("kind") or ""
+        kind_part = f" [{kind}]" if kind and kind != "resolved_planned" else ""
+        lines.append(f"  - {ts_part}{kind_part} {summary}")
+
+    if not lines:
+        return ""
+
+    header = "[RECENT LIFE — things that happened to you recently; reference naturally if it connects, don't recite]"
+    return header + "\n" + "\n".join(lines)
+
+
+def build_schedule_injection(state: dict) -> str:
+    """Render the planned-schedule slice for the current+near-future window.
+
+    Reads from state["_render_payload"]["schedule"] — a list of event dicts
+    populated by characters_runtime.populate_render_payload at turn-start.
+    Only events with status="planned" surface here; resolved/cancelled events
+    flow through the life_stream → recall path instead.
+
+    Format: relative day + compact time + title + (kind/anticipation hints).
+    The header tells the model to reference plans naturally without reciting.
+    """
+    payload = state.get("_render_payload") or {}
+    events = payload.get("schedule") if isinstance(payload, dict) else None
+    if not isinstance(events, list) or not events:
+        return ""
+
+    lines = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("status") != "planned":
+            continue
+        title = ev.get("title") or "(untitled)"
+        kind = ev.get("kind") or ""
+        anticipation = ev.get("anticipation") or ""
+        with_who = ev.get("with") or []
+        location = ev.get("location") or ""
+
+        when_str = "?"
+        when_local = ev.get("when_local")
+        if isinstance(when_local, str) and when_local:
+            try:
+                dt = datetime.fromisoformat(when_local)
+                wd = dt.strftime("%a")
+                date_part = f"{dt.month}/{dt.day}"
+                # %I gives 12-hour with leading zero (always 2 chars), so
+                # lstrip("0") just removes the single-digit-hour leading zero.
+                time_part = dt.strftime("%I:%M%p").lstrip("0").lower()
+                if ":00" in time_part:
+                    time_part = time_part.replace(":00", "")
+                when_str = f"{wd} {date_part} {time_part}"
+            except (ValueError, TypeError):
+                when_str = when_local
+
+        with_part = f" with {', '.join(with_who)}" if with_who else ""
+        loc_part = f" at {location}" if location else ""
+
+        tail_bits = []
+        if kind:
+            tail_bits.append(kind)
+        if anticipation == "looking_forward":
+            tail_bits.append("looking forward")
+        elif anticipation == "dreading":
+            tail_bits.append("dreading")
+        tail = f" ({', '.join(tail_bits)})" if tail_bits else ""
+
+        lines.append(f"  - {when_str}: {title}{with_part}{loc_part}{tail}")
+
+    if not lines:
+        return ""
+
+    header = "[SCHEDULE — your plans this week; reference naturally, don't recite]"
+    return header + "\n" + "\n".join(lines)
+
+
 def build_prior_inner_states_injection(state: dict) -> str:
     """Render the recent past inner-state payloads as a hidden timeline block.
 
@@ -1274,9 +1391,11 @@ def build_characters_injections(state: dict) -> str:
         build_life_event_injection,
         build_character_growth_injection,
         build_off_screen_injection,
+        build_life_stream_injection,
         build_user_profile_injection,
         build_memories_injection,
         build_callbacks_injection,
+        build_schedule_injection,
         build_prior_inner_states_injection,
         build_inner_state_injection,
     ):
