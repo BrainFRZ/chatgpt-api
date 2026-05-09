@@ -29,6 +29,7 @@
 !frontend/package.json
 !frontend/tsconfig.json
 !backend/tests/test_character_panel.py
+!backend/tests/test_character_inner_state.py
 !backend/tests/test_character_project_state.py
 !backend/tests/test_sync_manager.py
 !backend/combat_state.py
@@ -44,6 +45,7 @@
 !backend/character_storage.py
 !backend/character_recall.py
 !backend/character_fetch_url.py
+!backend/character_inner_state.py
 !backend/character_project_state.py
 !backend/characters_runtime.py
 !backend/migrate_to_branching.py

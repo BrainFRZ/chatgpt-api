@@ -1153,6 +1153,43 @@ def build_off_screen_injection(state: dict) -> str:
     return "\n".join(lines)
 
 
+def build_inner_state_injection(state: dict) -> str:
+    """Render the inner-state pre-pass output as a final hidden-ground-truth block.
+
+    Reads from state["_render_payload"]["inner_state"] which is populated by
+    backend.character_inner_state.run_inner_state right before injection assembly.
+    The four fields (feeling, wanting, noticing, holding_back) are all optional;
+    the block is omitted entirely when none are populated.
+
+    Position is LAST in the injection order on purpose: the inner-state pass is
+    the most-recent computation in the pipeline (computed THIS turn from THIS
+    user message) and benefits from recency-bias proximity to the user message
+    Opus is about to read. The header explicitly tells Opus to weave it into
+    voice rather than narrate it as text.
+    """
+    payload = state.get("_render_payload") or {}
+    inner = payload.get("inner_state") if isinstance(payload, dict) else None
+    if not isinstance(inner, dict) or not inner:
+        return ""
+
+    field_order = (
+        ("feeling", "feeling"),
+        ("wanting", "wanting"),
+        ("noticing", "noticing"),
+        ("holding_back", "holding back"),
+    )
+    body_lines = []
+    for key, label in field_order:
+        v = inner.get(key)
+        if isinstance(v, str) and v.strip():
+            body_lines.append(f"- {label}: {v.strip()}")
+    if not body_lines:
+        return ""
+
+    header = "[INNER STATE — your private weather right now; weave into voice, do not announce]"
+    return header + "\n" + "\n".join(body_lines)
+
+
 def build_characters_injections(state: dict) -> str:
     """Compose the full Characters injection block. Order matters — most-load-bearing first.
 
@@ -1162,6 +1199,9 @@ def build_characters_injections(state: dict) -> str:
 
     Character growth follows because it's identity-level material and should weight
     close to the canonical profile.
+
+    [INNER STATE] is placed LAST — it's the most-recent computation (this turn,
+    this message) and gets recency-bias proximity to the user message Opus reads.
     """
     parts = []
     for builder in (
@@ -1175,6 +1215,7 @@ def build_characters_injections(state: dict) -> str:
         build_user_profile_injection,
         build_memories_injection,
         build_callbacks_injection,
+        build_inner_state_injection,
     ):
         block = builder(state)
         if block:

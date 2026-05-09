@@ -139,6 +139,10 @@ def populate_render_payload(
         "profile_recalled": [],
         "growth_active": [],
         "growth_obsolete": [],
+        # Populated by run_inner_state AFTER this function runs (in main.py).
+        # Default empty so build_inner_state_injection never KeyErrors when the
+        # pre-pass soft-fails or hasn't fired yet on a given code path.
+        "inner_state": {},
     }
     if project_dir:
         try:

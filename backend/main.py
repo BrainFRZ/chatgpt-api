@@ -6378,6 +6378,35 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     recall=_recall_payload if isinstance(_recall_payload, dict) else None,
                 )
 
+                # Inner-state pre-pass — Sonnet 4.6 produces hidden emotional ground
+                # truth for Opus to voice from. SEQUENTIAL after recall (not parallel)
+                # because it depends on recall's filtered memory set as part of its
+                # context: a character's feelings about THIS moment are colored by
+                # which past memories are currently active, not by raw mood.
+                # +1-2s real latency on top of current pipeline; cost ~$0.005/turn.
+                from character_inner_state import run_inner_state, compute_inner_state_cost
+                try:
+                    _inner_state_payload, _inner_state_usage = await asyncio.to_thread(
+                        run_inner_state,
+                        client, _project_dir, characters_state, _user_input_text,
+                        recent_dialogue=_recent_dialogue,
+                        branch_msg_ids=_branch_msg_ids,
+                    )
+                except Exception as e:
+                    logger.warning(f"Characters inner_state failed: {e}")
+                    _inner_state_payload, _inner_state_usage = {}, {}
+
+                # Stash inner-state result on the render payload so build_inner_state_injection
+                # finds it. populate_render_payload already initialized the slot to {}.
+                if isinstance(characters_state.get("_render_payload"), dict):
+                    characters_state["_render_payload"]["inner_state"] = _inner_state_payload or {}
+
+                # Inner-state telemetry — mirrors recall block above.
+                if _inner_state_usage:
+                    data["inner_state_usage"] = _inner_state_usage
+                    data["inner_state_cost"] = compute_inner_state_cost(_inner_state_usage)
+                    data["inner_state_model"] = "claude-sonnet-4-6"
+
                 _system_full = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=False)
                 system_msg = {"role": branch_path[0]["role"], "content": _system_full}
 
@@ -10575,10 +10604,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # computed separately and added rather than mixed into `parsed`.
                         flag_agent_cost = float(data.get("flag_agent_cost", 0.0) or 0.0)
                         total_cost += flag_agent_cost
-                        # Same fold-in for Characters' side agents (Sonnet extraction + Opus 4.5 off-screen + Haiku recall).
+                        # Same fold-in for Characters' side agents (Sonnet extraction + Opus 4.5 off-screen + Haiku recall + Sonnet inner-state pre-pass).
                         total_cost += float(data.get("character_agent_cost", 0.0) or 0.0)
                         total_cost += float(data.get("off_screen_cost", 0.0) or 0.0)
                         total_cost += float(data.get("recall_cost", 0.0) or 0.0)
+                        total_cost += float(data.get("inner_state_cost", 0.0) or 0.0)
                         # Sonar search cost (Perplexity returns dollars directly via usage.cost.total_cost).
                         total_cost += float(data.get("search_cost", 0.0) or 0.0)
 
@@ -10664,6 +10694,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["recall_model"] = data.get("recall_model", "claude-haiku-4-5")
                             if data.get("recall_ids"):
                                 assistant_msg_data["recall_ids"] = data["recall_ids"]
+                        if data.get("inner_state_usage"):
+                            assistant_msg_data["inner_state_usage"] = data["inner_state_usage"]
+                            assistant_msg_data["inner_state_cost"] = float(data.get("inner_state_cost", 0.0) or 0.0)
+                            assistant_msg_data["inner_state_model"] = data.get("inner_state_model", "claude-sonnet-4-6")
                         if data.get("search_calls"):
                             assistant_msg_data["search_usage"] = data.get("search_usage", {})
                             assistant_msg_data["search_cost"] = float(data.get("search_cost", 0.0) or 0.0)

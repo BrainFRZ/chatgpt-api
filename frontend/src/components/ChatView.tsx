@@ -807,6 +807,13 @@ export default function ChatView({
                         {' '}(Opus 4.5)
                       </span>
                     )}
+                    {(msg as any).inner_state_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        Inner: {formatUsageString((msg as any).inner_state_usage)}
+                        {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
+                        {' '}(Sonnet)
+                      </span>
+                    )}
                     {/* Branch navigation - show only for user messages with siblings */}
                     {msg.role === 'user' && (() => {
                       if (!msg.id) return null;
