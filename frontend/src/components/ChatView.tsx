@@ -847,6 +847,36 @@ export default function ChatView({
                         {' '}(Sonnet)
                       </span>
                     )}
+                    {(msg as any).search_usage && (
+                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
+                        Search: {(msg as any).search_calls || 0} call{((msg as any).search_calls || 0) === 1 ? '' : 's'}
+                        {typeof (msg as any).search_cost === 'number' && ` | $${(msg as any).search_cost.toFixed(6)}`}
+                        {' '}({(msg as any).search_model || 'Sonar'})
+                      </span>
+                    )}
+                    {/* Aggregate Total: sums every per-agent cost displayed above plus
+                        the main reply's cost (which is msg.cost minus all the side-agent
+                        costs). Confirms what your turn actually cost — the main line's
+                        cost field is technically the total too, but its position next to
+                        the model name makes it ambiguous. */}
+                    {msg.role === 'assistant' && msg.cost && (() => {
+                      const agentCosts =
+                        ((msg as any).flag_agent_cost || 0) +
+                        ((msg as any).recall_cost || 0) +
+                        ((msg as any).character_agent_cost || 0) +
+                        ((msg as any).off_screen_cost || 0) +
+                        ((msg as any).inner_state_cost || 0) +
+                        ((msg as any).search_cost || 0);
+                      // Parse msg.cost (e.g. "$0.001234") to a number — that's already total
+                      const totalNum = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
+                      // If no side-agents fired, suppress (Total == main, redundant)
+                      if (agentCosts < 1e-9) return null;
+                      return (
+                        <span style={{ ...styles.messageTokens, marginLeft: 8, fontWeight: 600 }}>
+                          Total: ${totalNum.toFixed(6)}
+                        </span>
+                      );
+                    })()}
                     {/* Branch navigation - show only for user messages with siblings */}
                     {msg.role === 'user' && (() => {
                       if (!msg.id) return null;
