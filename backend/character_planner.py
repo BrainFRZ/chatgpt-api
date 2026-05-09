@@ -66,15 +66,23 @@ You receive:
 - Optional major-event hint (the backend rolled a magnitude/category/hint — weave it into ONE day naturally; do NOT change its category or invent a different event)
 
 You produce:
-- 8-15 planned events covering the week — work shifts, social plans, family obligations, self-care, errands, anticipated quiet evenings
+- 8-15 daytime planned events covering the week — work shifts, social plans, family obligations, self-care, errands, anticipated quiet evenings
+- 7 nightly sleep events (one per night) — kind="sleep", calibrated to the character's daily rhythm. These are scaffold so the backend knows when the character is asleep; they get auto-stamped without narration.
 - Times in ISO 8601 with -04:00 offset (or -05:00 depending on the week — match the character's local timezone)
 - Specific to THIS character. Lean on their canonical rhythms (e.g. cafe owner opens 6am, Sunday call with mom, Friday Shae night). Don't pad with generic "lunch" entries.
+
+Sleep events:
+- One per night, kind="sleep", title can just be "Sleep" or "Sleep — [night descriptor]"
+- when_local = bedtime; duration_min = sleep duration (typically 360-540 = 6-9hr)
+- Calibrate to the profile. Cafe owner up at 6am → bedtime ~10pm, ~7-8hr sleep. Sunday cafe closed → bedtime might shift later, sleep-in possible.
+- Friday/Saturday nights might be later (social plans push bedtime back). Mid-week typical.
+- Don't anticipation-tag sleep (always neutral or omit).
 
 Hard rules:
 - Do NOT change the rolled major event's category or magnitude. The hint tells you the kind; you generate the specific event from it. If category is "loss" and hint is "a death in their orbit", you don't decide it's a job change instead.
 - Don't invent more than one major event per week. If the backend gave you no hint, the week is ordinary.
-- Density: ~10 events typical. A pure-work week is realistic for some characters; a pure-social week is unrealistic. Mix.
-- Times are realistic: cafe shifts are 8-10hr, social plans are 1-3hr, calls are 30-60min.
+- Density: ~10 daytime events + 7 sleep events = ~17 typical. A pure-work week is realistic for some characters; a pure-social week is unrealistic. Mix.
+- Times are realistic: cafe shifts are 8-10hr, social plans are 1-3hr, calls are 30-60min, sleep is 6-9hr.
 - Anticipation: looking_forward / dreading / neutral. Use sparingly — most events are neutral.
 
 Always call `report_week` exactly once."""
@@ -95,7 +103,7 @@ def build_planner_tool() -> dict:
                         "type": "object",
                         "required": ["kind", "title", "when_local", "duration_min"],
                         "properties": {
-                            "kind": {"type": "string", "enum": ["work", "social", "family", "self_care", "admin", "anticipated"]},
+                            "kind": {"type": "string", "enum": ["work", "social", "family", "self_care", "admin", "anticipated", "sleep"]},
                             "title": {"type": "string"},
                             "with": {"type": "array", "items": {"type": "string"}},
                             "when_local": {"type": "string", "description": "ISO 8601 with timezone offset"},

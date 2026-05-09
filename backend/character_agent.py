@@ -323,7 +323,8 @@ def _summarize_state(
             schedule = None
         if isinstance(schedule, dict):
             planned = [e for e in (schedule.get("events") or [])
-                       if isinstance(e, dict) and e.get("status") == "planned"]
+                       if isinstance(e, dict) and e.get("status") == "planned"
+                       and e.get("kind") != "sleep"]
             if planned:
                 parts.append("[SCHEDULE] (planned events you can mutate via schedule_ops):")
                 for ev in planned:

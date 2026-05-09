@@ -1089,6 +1089,12 @@ def build_schedule_injection(state: dict) -> str:
     for ev in events:
         if not isinstance(ev, dict):
             continue
+        # Sleep events are scaffold for the resolver — skip from chat-facing
+        # schedule rendering. The wall_clock injection already tells the
+        # model what time it is; sleep events would just clutter the
+        # [SCHEDULE — RECENT/UPCOMING] blocks.
+        if ev.get("kind") == "sleep":
+            continue
         status = ev.get("status")
         if status not in PAST_STATUSES and status != "planned":
             continue

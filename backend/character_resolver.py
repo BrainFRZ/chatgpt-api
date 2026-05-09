@@ -101,6 +101,16 @@ Hard rules:
 - Voice. Write IN THE CHARACTER'S register — what would a friend's friend say happened to her? Not narrator omniscience.
 - Don't invent plot. Don't introduce dramatic events the planner didn't seed.
 
+INTERNAL TIME CONSISTENCY:
+- A moment's narration must match its `at_local` timestamp. If the moment is at 1:20am, do NOT write "between 8:30 and the couch" or "during her morning rush." Reference the actual wall-clock time of the moment.
+- Sequence narration in `what_happened` must respect event start/end times. An event running 8pm-10pm cannot reference "the morning crowd."
+
+SLEEP-WINDOW AWARENESS:
+- The character has a sleep schedule (visible in [SLEEP WINDOWS] below if present).
+- When a moment's `at_local` falls inside a sleep window, the moment MUST be sleep-appropriate. Acceptable: a dream fragment, a brief wake (water, bathroom, glance at phone), insomnia spiral, sleepwalking, nightmare aftershock, the ambient feeling of being half-awake. NOT acceptable: customer interactions, conversations with anyone awake, daytime activities, work tasks, social plans.
+- A wake-up at 3am can be a real beat; a 3am customer interaction at the cafe cannot be (the cafe is closed and she's at home asleep).
+- If [SLEEP WINDOWS] is empty, you may distribute moments across the window freely.
+
 Always call `report_resolver_pass` exactly once."""
 
 
@@ -523,8 +533,14 @@ def run_daily_resolver(
     # Forward-looking: cron at T_N pre-rolls events ending [T_N, T_{N+1}].
     # Their outcomes wait as `pending_resolution` until the next cron stamps.
     # Chat between crons can mutate; mutation invalidates pending → re-roll.
+    #
+    # Sleep events (kind="sleep") are scaffold — they auto-stamp as_planned
+    # without Sonnet narration. They DO get exposed to Sonnet as [SLEEP
+    # WINDOWS] context so unplanned moments respect when the character is
+    # asleep.
     next_cron_dt = _next_resolver_cron_time(now_dt)
     upcoming: list[dict] = []
+    sleep_windows_in_window: list[dict] = []
     for ev in events:
         if ev.get("status") != "planned":
             continue
@@ -534,7 +550,36 @@ def run_daily_resolver(
         if ev_end is None:
             continue
         if now_dt < ev_end <= next_cron_dt:
-            upcoming.append(ev)
+            if ev.get("kind") == "sleep":
+                # Auto-thin-pending so next cron stamps without Sonnet roll
+                ev["pending_resolution"] = {
+                    "outcome": "as_planned",
+                    "what_happened": "",
+                    "how_it_went": "even",
+                    "mood_delta": 0,
+                }
+                sleep_windows_in_window.append(ev)
+            else:
+                upcoming.append(ev)
+    # Also collect ALL sleep events overlapping the window (even already-pending
+    # ones) for context — Sonnet needs to know the FULL sleep schedule, not
+    # just newly-rolled ones.
+    sleep_for_context: list[dict] = []
+    for ev in events:
+        if ev.get("kind") != "sleep":
+            continue
+        ev_end = _event_end_dt(ev)
+        if ev_end is None:
+            continue
+        try:
+            ev_start = datetime.fromisoformat(ev["when_local"])
+            if ev_start.tzinfo is None:
+                ev_start = ev_start.astimezone()
+        except (ValueError, TypeError, KeyError):
+            continue
+        # Overlaps with [now, next_cron]
+        if ev_end > now_dt and ev_start < next_cron_dt:
+            sleep_for_context.append(ev)
 
     # Skip-roll for the upcoming window
     chat_forced = _had_chat_revision_in_window(upcoming, last_run_iso)
@@ -601,6 +646,7 @@ def run_daily_resolver(
         unplanned_n=unplanned_n,
         window_start=now_dt,
         window_end=next_cron_dt,
+        sleep_windows=sleep_for_context,
     )
 
     # Apply pre-rolled resolutions to events as `pending_resolution`
@@ -709,6 +755,7 @@ def _call_sonnet(
     unplanned_n: int,
     window_start: datetime,
     window_end: datetime,
+    sleep_windows: Optional[list[dict]] = None,
 ) -> tuple[dict, dict]:
     """Single Sonnet 4.6 call; returns (parsed_payload, usage).
     On error returns ({}, {})."""
@@ -738,12 +785,26 @@ def _call_sonnet(
     parts.append(_format_life_stream_tail(life_tail))
     parts.append("")
 
+    # Sleep windows: scaffold context. Sonnet must place unplanned moments
+    # falling inside these intervals as sleep-appropriate (dream / wake /
+    # insomnia / etc.) rather than daytime activities.
+    parts.append("[SLEEP WINDOWS — when the character is asleep; unplanned moments inside these intervals must be sleep-appropriate]:")
+    if sleep_windows:
+        for sw in sleep_windows:
+            sw_start = sw.get("when_local", "?")
+            sw_end_dt = _event_end_dt(sw)
+            sw_end = sw_end_dt.isoformat(timespec="seconds") if sw_end_dt else "?"
+            parts.append(f"  {sw_start} -> {sw_end}")
+    else:
+        parts.append("  (no sleep events scheduled in this window)")
+    parts.append("")
+
     parts.append(f"[UPCOMING EVENTS] ({len(rolled)} events ending in this window. Honor the rolled_outcome for each — DO NOT change it):")
     for r in rolled:
         parts.append(_format_event_for_prompt(r["event"], r["outcome"]))
         parts.append("")
 
-    parts.append(f"[UNPLANNED COUNT] {unplanned_n}  (Generate exactly this many unplanned moments in the window. May be 0.)")
+    parts.append(f"[UNPLANNED COUNT] {unplanned_n}  (Generate exactly this many unplanned moments in the window. May be 0. Each moment must respect the [SLEEP WINDOWS] above.)")
     parts.append("")
     parts.append("Call report_resolver_pass exactly once.")
     volatile_text = "\n".join(parts)

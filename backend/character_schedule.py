@@ -45,7 +45,7 @@ LIFE_STREAM_FILENAME = "life_stream.jsonl"
 # Reuse character_state.json's lock file so writes to either file serialize.
 _LOCK_FILENAME = ".character_state.lock"
 
-EVENT_KINDS = ("work", "social", "family", "self_care", "admin", "anticipated")
+EVENT_KINDS = ("work", "social", "family", "self_care", "admin", "anticipated", "sleep")
 EVENT_STATUSES = ("planned", "as_planned", "modified", "cancelled")
 
 # Forward-rolling lifecycle: events get a `pending_resolution` field set by
