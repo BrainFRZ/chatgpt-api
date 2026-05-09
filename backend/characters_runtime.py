@@ -905,7 +905,7 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
         return {"ok": False, "feedback": "Cannot finalize: no project directory."}
 
     existing_profile = _read_file(os.path.join(project_dir, "character_profile.di")) or None
-    profile, usage = finalize_profile(client, transcript, existing_profile=existing_profile)
+    profile, bands_proposal, usage = finalize_profile(client, transcript, existing_profile=existing_profile)
     cost = compute_interview_cost(usage) if usage else 0.0
 
     if not profile:
@@ -915,6 +915,26 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
             "cost": cost,
             "feedback": "Finalization failed — the interview agent did not produce a usable profile. Try again or continue the interview.",
         }
+
+    # Auto-commit the bands proposal to character_state.json so the resolver
+    # has something to work with even if the user never opens the modal. The
+    # modal becomes a "review and adjust" surface; dismissing leaves the
+    # auto-committed values in place. Defaults to None if the model didn't
+    # emit a valid proposal — in that case the planner's seed call will
+    # generate a week without major events (resolver bails on no bands per
+    # Phase 2 P1 fix), and the user gets prompted to review anyway.
+    if bands_proposal:
+        try:
+            from character_project_state import load_project_state, save_project_state
+            existing_state = load_project_state(project_dir) or {}
+            existing_state["flakiness_bands"] = bands_proposal
+            save_project_state(project_dir, existing_state)
+            logger.info(
+                f"finalize_interview: auto-committed flakiness_bands proposal "
+                f"({len(bands_proposal)} categories) for {os.path.basename(project_dir)}"
+            )
+        except Exception as e:
+            logger.warning(f"finalize_interview: failed to auto-commit bands: {e}")
 
     try:
         path = write_profile_file(project_dir, profile)
@@ -964,11 +984,16 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
     except Exception as e:
         logger.warning(f"finalize_interview: initial planner seed failed: {e}")
 
+    feedback = "Interview finalized. character_profile.di has been written. Send your next message to begin correspondence."
+    if bands_proposal:
+        feedback += " Click 'Review follow-through' below to adjust how reliable the character is across work, social plans, and other commitments."
+
     return {
         "ok": True,
         "path": path,
         "profile": profile,
+        "flakiness_bands_proposal": bands_proposal,  # surfaced to ChatView for the modal
         "usage": usage,
         "cost": cost,
-        "feedback": "Interview finalized. character_profile.di has been written. Send your next message to begin correspondence.",
+        "feedback": feedback,
     }

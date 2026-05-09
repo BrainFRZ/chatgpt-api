@@ -110,8 +110,9 @@ PLUS: the character's default register (most are Even, some tilt).
 - 3-5 current threads — actively going on right now
 - What's at stake for them — the under-the-surface thing
 - 3-5 named people in their life, briefly
+- **How they handle commitments** — feed them six categories (work obligations / plans with the user specifically / other family obligations / non-user social plans / self-care things like gym or yoga / admin and errands) and ask: "How reliable is this character on each of those? Does she always show up to work even if she's sick, or call out? Does she flake on yoga but never on Sunday calls with mom? Where's the inconsistency?" The answer doesn't need to be exhaustive — get a feel for which categories she's rock-solid on, which she lets slide, and HOW she communicates a flake (cold-text cancel, ghosts, makes a real apology, deflects?). This shapes the backend's follow-through dice.
 
-**Floor:** daily rhythm + weekly rhythm + 3 threads + 3 named people.
+**Floor:** daily rhythm + weekly rhythm + 3 threads + 3 named people + general follow-through pattern.
 
 ## 6. Relationship with the user — the second-most important section
 - How they know each other (origin, duration, defining shared experience)
@@ -347,6 +348,19 @@ Use this structure (omit any section the interview did not cover; do not pad):
 - **What's at stake:** {the under-the-surface thing}
 - **People in their life:** {3-5 named, one line each}
 
+## Follow-through
+{One-paragraph prose summary of HOW they handle commitments — drawn from the
+interview. What they're rock-solid on, what they let slide, how they
+communicate a flake. Then a per-category breakdown:}
+- **Default reliability:** {one sentence on the overall posture}
+- **Work / on-the-clock:** {how reliable, anything notable}
+- **Plans with {user}:** {their specific posture toward the user}
+- **Family obligations:** {how they treat family commitments}
+- **Other social plans:** {non-user, non-family — friends, dating, parties}
+- **Self-care (gym, yoga, runs, therapy):** {how consistent}
+- **Admin / errands (bills, inventory, paperwork):** {follow-through on dull stuff}
+- **How they communicate a cancel:** {direct + apology / ghost / deflect / blow-off / vague}
+
 ## Relationship with {user name}
 - **How we know each other:** {origin + duration}
 - **What we call each other:** {names, nicknames}
@@ -418,7 +432,40 @@ Rules:
 - The Voice section is load-bearing — make sure signature phrases, never-says, and voice samples are filled with the actual examples from the interview.
 - Write in third person describing the character. The "Voice samples" section uses block quotes containing first-person dialogue.
 - For sections 9-14, omit entirely if not covered (light or complete pass).
-- No filler. If a bullet doesn't add specific information, leave it out."""
+- No filler. If a bullet doesn't add specific information, leave it out.
+
+## After the markdown profile — emit a flakiness-bands proposal
+
+After the LAST line of the markdown profile, on a fresh line, emit EXACTLY this block (replacing the angle-bracketed values with floats):
+
+<<<FLAKINESS_BANDS_PROPOSAL>>>
+{
+  "work":      {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>},
+  "shae":      {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>},
+  "family":    {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>},
+  "social":    {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>},
+  "self_care": {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>},
+  "admin":     {"as_planned": <0..1>, "modified": <0..1>, "cancelled": <0..1>}
+}
+<<<END_PROPOSAL>>>
+
+The `shae` key is the user-relationship band — keep the field name literally
+"shae" regardless of the user's actual name. That's a backend convention.
+
+Each row must sum to 1.0 (±0.01). Calibrate to the Follow-through prose you just
+wrote:
+- Reliable defaults: 0.95-1.0 as_planned, 0.0-0.05 cancelled
+- Inconsistent self-care: ~0.5 as_planned / 0.2 modified / 0.3 cancelled
+- Work for someone whose job is non-negotiable: 0.99 / 0 / 0.01
+- Work for someone who calls out frequently: 0.80 / 0.10 / 0.10
+- Sunday call with mom (family) for someone who never misses: 0.98 / 0.02 / 0.0
+
+DO NOT include any text after the closing `<<<END_PROPOSAL>>>` marker. The backend
+extracts the JSON between the markers and strips them from the saved profile.
+
+If the interview didn't cover follow-through at all (light pass that skipped it),
+emit the block with a sensible default (0.85 / 0.10 / 0.05 across all categories)
+so the backend has something to seed; the user can review and adjust afterward."""
 
 
 def build_finalize_user_message(transcript: list, existing_profile: Optional[str] = None) -> str:
@@ -445,12 +492,73 @@ def build_finalize_user_message(transcript: list, existing_profile: Optional[str
     return "\n".join(lines)
 
 
-def finalize_profile(client, transcript: list, existing_profile: Optional[str] = None) -> tuple[Optional[str], dict]:
-    """Run the finalization call. Returns (profile_markdown, usage_dict).
+# Match the markers and capture everything between, even if malformed. We then
+# try to parse the inner content as JSON — if that fails, the proposal is
+# dropped but the markers still get stripped from the profile.
+_FLAKINESS_BANDS_RE = re.compile(
+    r"<<<FLAKINESS_BANDS_PROPOSAL>>>\s*(.*?)\s*<<<END_PROPOSAL>>>",
+    re.DOTALL,
+)
+_REQUIRED_BAND_KEYS = ("work", "shae", "family", "social", "self_care", "admin")
+_REQUIRED_BUCKETS = ("as_planned", "modified", "cancelled")
+
+
+def _extract_flakiness_bands(profile_with_marker: str) -> tuple[str, Optional[dict]]:
+    """Pull the <<<FLAKINESS_BANDS_PROPOSAL>>> block out of the model's output.
+
+    Returns (profile_without_marker, parsed_proposal_dict_or_None). Profile is
+    unchanged if no marker found or JSON parse fails. Proposal is None when
+    the block is missing, malformed, or fails shape validation.
+
+    Shape validation: 6 expected keys × 3 buckets, each bucket float in [0,1],
+    each row sums to 1.0 ± 0.01. If validation fails, the proposal is dropped
+    (returns None) so the modal won't render with bad data.
+    """
+    import json as _json
+    m = _FLAKINESS_BANDS_RE.search(profile_with_marker)
+    if not m:
+        return profile_with_marker, None
+    json_blob = m.group(1)
+    # Strip the entire marker block (including markers) from the profile
+    cleaned = profile_with_marker[:m.start()] + profile_with_marker[m.end():]
+    cleaned = cleaned.rstrip()
+    try:
+        proposal = _json.loads(json_blob)
+    except _json.JSONDecodeError as e:
+        logger.warning(f"finalize_profile: bands JSON parse failed: {e}")
+        return cleaned, None
+    if not isinstance(proposal, dict):
+        return cleaned, None
+    # Validate shape
+    for key in _REQUIRED_BAND_KEYS:
+        bucket = proposal.get(key)
+        if not isinstance(bucket, dict):
+            logger.warning(f"finalize_profile: bands missing/wrong-type key {key!r}")
+            return cleaned, None
+        total = 0.0
+        for b in _REQUIRED_BUCKETS:
+            v = bucket.get(b)
+            if not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
+                logger.warning(f"finalize_profile: bands {key}.{b} out of range: {v!r}")
+                return cleaned, None
+            total += float(v)
+        if abs(total - 1.0) > 0.01:
+            logger.warning(f"finalize_profile: bands {key} sums to {total} (must be ~1.0)")
+            return cleaned, None
+    return cleaned, proposal
+
+
+def finalize_profile(
+    client, transcript: list, existing_profile: Optional[str] = None,
+) -> tuple[Optional[str], Optional[dict], dict]:
+    """Run the finalization call. Returns (profile_markdown, bands_proposal, usage_dict).
 
     transcript: list of {role, content} dicts from the interview session.
     existing_profile: current character_profile.di content if this is a re-interview;
         the finalize agent will merge changes into it rather than rewriting from scratch.
+    bands_proposal: structured flakiness bands the model recommended (6 categories
+        × 3 buckets, each row sums to ~1.0). None if extraction or shape validation
+        failed; the caller should fall back to defaults in that case.
 
     Uses streaming. The finalize call generates up to ~8K tokens of profile —
     a non-streaming request often exceeds the SDK's request-level timeout.
@@ -458,7 +566,7 @@ def finalize_profile(client, transcript: list, existing_profile: Optional[str] =
     generations correctly. We accumulate the full text before returning.
     """
     if not transcript:
-        return None, {}
+        return None, None, {}
 
     user_msg = build_finalize_user_message(transcript, existing_profile=existing_profile)
     text_parts: list = []
@@ -477,9 +585,12 @@ def finalize_profile(client, transcript: list, existing_profile: Optional[str] =
             final_message = stream.get_final_message()
     except Exception as e:
         logger.error(f"character_interview finalize: API call failed: {type(e).__name__}: {e}")
-        return None, {}
+        return None, None, {}
 
-    profile = "".join(text_parts).strip()
+    raw_output = "".join(text_parts).strip()
+
+    # Extract and strip the bands-proposal block before further processing
+    profile, bands_proposal = _extract_flakiness_bands(raw_output)
 
     # Strip any wrapping code fences if the model added them
     profile = re.sub(r"^```(?:markdown|md)?\s*\n", "", profile)
@@ -500,9 +611,9 @@ def finalize_profile(client, transcript: list, existing_profile: Optional[str] =
 
     if not profile or len(profile) < 200:
         logger.warning(f"character_interview finalize: profile output suspiciously short ({len(profile)} chars)")
-        return None, usage
+        return None, bands_proposal, usage
 
-    return profile, usage
+    return profile, bands_proposal, usage
 
 
 def write_profile_file(project_dir: str, profile_markdown: str) -> str:

@@ -30,6 +30,7 @@
 !frontend/tsconfig.json
 !backend/tests/test_character_panel.py
 !backend/tests/test_character_inner_state.py
+!backend/tests/test_character_interview_bands.py
 !backend/tests/test_character_planner.py
 !backend/tests/test_character_project_state.py
 !backend/tests/test_character_schedule.py

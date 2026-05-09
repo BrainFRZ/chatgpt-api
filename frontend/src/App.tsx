@@ -2596,6 +2596,7 @@ function App() {
             currentChat ? (
               <ChatView
                 isMobile={isMobile}
+                username={username}
                 currentChat={currentChat}
                 currentProject={currentProject}
                 viewerCount={sync.viewerCount}

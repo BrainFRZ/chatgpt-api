@@ -1737,6 +1737,12 @@ class CreateProjectRequest(BaseModel):
     username: str
     project_name: str
 
+
+class CommitFlakinessBandsRequest(BaseModel):
+    username: str
+    project: str
+    flakiness_bands: dict  # {category: {as_planned, modified, cancelled}} × 6 categories
+
 class ProjectChatsResponse(BaseModel):
     chats: list[str]
     total: int
@@ -6915,6 +6921,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             }
             if _ok and _result.get("path"):
                 _assistant_msg["characters_profile_path"] = _result["path"]
+            # Surface the bands proposal to the frontend so ChatView can offer
+            # the "Review follow-through" button. Auto-committed to character_state
+            # already (see characters_runtime.finalize_interview); this is the
+            # review-and-adjust handle.
+            if _ok and _result.get("flakiness_bands_proposal"):
+                _assistant_msg["flakiness_bands_proposal"] = _result["flakiness_bands_proposal"]
             data["messages"].append(_assistant_msg)
             data["current_leaf_id"] = _assistant_msg_id
 
@@ -11982,6 +11994,59 @@ def delete_project(request: DeleteProjectRequest):
     # Delete the entire project directory (including all chats, uploads, etc.)
     shutil.rmtree(project_dir)
     return {"status": "ok"}
+
+@app.post("/api/characters/commit-flakiness-bands")
+def commit_flakiness_bands(request: CommitFlakinessBandsRequest):
+    """Persist user-edited flakiness bands to character_state.json.
+
+    The bands are auto-committed by finalize_interview when the model emits a
+    valid proposal; this endpoint exists so the FlakinessBandsModal can let
+    the user adjust the proposal before the resolver starts using it.
+
+    Validates 6 expected categories (work / shae / family / social / self_care /
+    admin), each with 3 buckets summing to 1.0 (±0.01).
+    """
+    username = request.username.strip().lower()
+    project_dir = get_project_dir(username, request.project)
+    if not os.path.isdir(project_dir):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    bands = request.flakiness_bands
+    if not isinstance(bands, dict):
+        raise HTTPException(status_code=400, detail="flakiness_bands must be an object")
+
+    REQUIRED_KEYS = ("work", "shae", "family", "social", "self_care", "admin")
+    REQUIRED_BUCKETS = ("as_planned", "modified", "cancelled")
+    cleaned: dict = {}
+    for key in REQUIRED_KEYS:
+        bucket = bands.get(key)
+        if not isinstance(bucket, dict):
+            raise HTTPException(status_code=400, detail=f"Missing or invalid category: {key}")
+        clean_bucket = {}
+        total = 0.0
+        for b in REQUIRED_BUCKETS:
+            v = bucket.get(b)
+            if not isinstance(v, (int, float)):
+                raise HTTPException(status_code=400, detail=f"{key}.{b} must be a number")
+            v = float(v)
+            if not (0.0 <= v <= 1.0):
+                raise HTTPException(status_code=400, detail=f"{key}.{b} out of range [0,1]: {v}")
+            clean_bucket[b] = v
+            total += v
+        if abs(total - 1.0) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} buckets must sum to 1.0 (got {total:.3f})",
+            )
+        cleaned[key] = clean_bucket
+
+    from character_project_state import load_project_state, save_project_state
+    state = load_project_state(project_dir) or {}
+    state["flakiness_bands"] = cleaned
+    if not save_project_state(project_dir, state):
+        raise HTTPException(status_code=500, detail="Failed to write character_state.json")
+    return {"status": "ok", "flakiness_bands": cleaned}
+
 
 @app.post("/api/create-project")
 def create_project(request: CreateProjectRequest):

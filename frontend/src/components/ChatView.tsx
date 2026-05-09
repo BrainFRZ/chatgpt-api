@@ -5,6 +5,7 @@ import rehypeKatex from 'rehype-katex';
 import { styles } from '../styles';
 import { ChatMessage, ModelInfo, convertMathDelimiters, formatTimestamp } from '../types';
 import { SlashCommandPicker, SlashCommand, useSlashPickerState } from './SlashCommandPicker';
+import { FlakinessBandsModal } from './Modals';
 
 /** Format the in-fiction time/date/location HUD line for an assistant
  * message.  Reads from msg.pipeline_state_after.hud_state — the
@@ -94,6 +95,7 @@ function getMessageHudLine(msg: any, allMessages: any[], index: number): string 
 
 interface ChatViewProps {
   isMobile: boolean;
+  username: string;
   currentChat: string;
   currentProject: string | null;
   viewerCount: number;
@@ -163,6 +165,7 @@ interface ChatViewProps {
 
 export default function ChatView({
   isMobile,
+  username,
   currentChat,
   currentProject,
   viewerCount,
@@ -231,6 +234,12 @@ export default function ChatView({
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Flakiness-bands review modal — opened from a "Review follow-through" button
+  // on the interview-finalize assistant message. Bands are auto-committed
+  // server-side already; this is the review-and-adjust surface.
+  const [bandsModalOpen, setBandsModalOpen] = useState(false);
+  const [bandsModalProposal, setBandsModalProposal] = useState<any>(null);
 
   // Slash command picker — pulls the per-gamesystem command list from
   // availableGameSystems (backend SSOT) and shows a filtered list when the
@@ -735,6 +744,30 @@ export default function ChatView({
                   <div style={styles.messageContent} className="messageContent">
                     <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
                   </div>
+                  {/* Interview-finalize review-bands button. Surfaces when the
+                      finalize message includes flakiness_bands_proposal — the
+                      bands have been auto-committed already; this is the
+                      adjust-if-you-want handle. */}
+                  {msg.role === 'assistant' && (msg as any).characters_finalize && (msg as any).flakiness_bands_proposal && (
+                    <button
+                      onClick={() => {
+                        setBandsModalProposal((msg as any).flakiness_bands_proposal);
+                        setBandsModalOpen(true);
+                      }}
+                      style={{
+                        marginTop: 8,
+                        padding: '6px 12px',
+                        fontSize: 13,
+                        backgroundColor: '#2a2a4e',
+                        color: '#cfcfff',
+                        border: '1px solid #4a4a7e',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Review follow-through
+                    </button>
+                  )}
                   {/* Inline artifact cards */}
                   {msg.artifact_ops && msg.artifact_ops.length > 0 && (
                     <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '6px', marginTop: '8px', marginBottom: '4px' }}>
@@ -1237,6 +1270,14 @@ export default function ChatView({
           {messages[bookmarkTooltip.index].bookmark}
         </div>
       )}
+      {/* Flakiness-bands review modal — opened from interview-finalize messages. */}
+      <FlakinessBandsModal
+        isOpen={bandsModalOpen}
+        username={username}
+        project={currentProject || ''}
+        proposal={bandsModalProposal || {}}
+        onClose={() => setBandsModalOpen(false)}
+      />
     </>
   );
 }
