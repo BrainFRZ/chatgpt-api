@@ -6235,6 +6235,46 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 data["_trim_anchor_id"] = new_anchor_id
             data.pop("_stateful_trimming", None)  # clean up legacy flag
 
+            # Bake send-timestamps into Characters historical messages so the
+            # model has real temporal awareness across the conversation, not
+            # just "time since last message" on the current turn. Lets the
+            # character say things like "you just told me that twenty minutes
+            # ago!" or "remember when we talked the other day about X."
+            #
+            # Stable per-message — each message's timestamp is fixed at send
+            # time, so the cached history doesn't churn. ~10 tokens per message.
+            #
+            # context_pairs is always a contiguous suffix of
+            # branch_path_for_context[1:-1] (both get_context_pairs and the
+            # interview comprehension produce suffixes), so we can walk in
+            # parallel by length to grab matching timestamps.
+            if (use_characters or use_characters_interview) and context_pairs:
+                _start_idx = len(branch_path_for_context) - 1 - len(context_pairs)
+                if _start_idx >= 1:
+                    _src_msgs = branch_path_for_context[_start_idx:-1]
+                    if len(_src_msgs) == len(context_pairs):
+                        _ts_pairs = []
+                        for _src, _pair in zip(_src_msgs, context_pairs):
+                            _ts_str = _src.get("timestamp")
+                            _formatted_ts = None
+                            if isinstance(_ts_str, str) and _ts_str:
+                                try:
+                                    _ts_dt = datetime.fromisoformat(_ts_str)
+                                    _wd = _ts_dt.strftime("%A")
+                                    _dt_str = _ts_dt.strftime("%Y-%m-%d")
+                                    _tm_str = _ts_dt.strftime("%I:%M %p").lstrip("0")
+                                    _formatted_ts = f"[{_wd} {_dt_str} {_tm_str}]"
+                                except (ValueError, TypeError):
+                                    _formatted_ts = None
+                            if _formatted_ts:
+                                _ts_pairs.append({
+                                    "role": _pair["role"],
+                                    "content": _formatted_ts + "\n" + _pair["content"],
+                                })
+                            else:
+                                _ts_pairs.append(_pair)
+                        context_pairs = _ts_pairs
+
             if did_trim:
                 docs_refreshed = True
                 fresh_system = build_system_content(username, request.project, **_system_content_kwargs(gs))
