@@ -69,6 +69,10 @@ You are NOT writing the character. You are reading what was written and updating
    - impact 3: notable
    - impact 1-2: small but durable
 
+   **Fights specifically** are part of real relationships, not failure modes. Every real fight (resolved this turn OR pinned for later) should land as a memory. Default impact = 2 (minor but durable — the fight happened, you both remember it). Use your judgment to elevate to 3-4 if the fight was sharper than usual, exposed something real, or shifted the dynamic. Reserve 5 for genuinely defining ruptures (major break, betrayal-level hurt, an apology that reshapes the relationship). When unsure, stay at 2.
+
+   If a fight was **pinned** (explicit mutual agreement to set it aside, not yet resolved), ALSO emit a `character_callbacks` entry with source="character" so the topic can re-surface naturally later. The memory captures *that the fight happened*; the callback keeps the *unresolved topic* open.
+
 2) **character_callbacks** — open threads that should resolve later. Two kinds, both go in the same ledger:
    - **User-life callbacks**: things the USER mentioned that are unresolved (a job interview, an upcoming visit, a trip, a fight with a friend, an appointment). Source = "user".
    - **Character-promise callbacks**: things the CHARACTER promised, asked about, or left hanging. Source = "character".
