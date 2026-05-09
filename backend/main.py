@@ -6406,6 +6406,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     data["inner_state_usage"] = _inner_state_usage
                     data["inner_state_cost"] = compute_inner_state_cost(_inner_state_usage)
                     data["inner_state_model"] = "claude-sonnet-4-6"
+                # Persist the actual {feeling/wanting/noticing/holding_back} payload
+                # on the assistant message so it can be inspected from the chat
+                # JSON later. Parallels how character_agent_ops are persisted.
+                # Empty payload still saved (so the absence of fields is visible)
+                # as long as the model was actually called.
+                if _inner_state_usage:
+                    data["inner_state_payload"] = _inner_state_payload or {}
 
                 _system_full = _characters_build_system(gs, _project_dir, branch_path[0]["content"], interview_mode=False)
                 system_msg = {"role": branch_path[0]["role"], "content": _system_full}
@@ -10698,6 +10705,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["inner_state_usage"] = data["inner_state_usage"]
                             assistant_msg_data["inner_state_cost"] = float(data.get("inner_state_cost", 0.0) or 0.0)
                             assistant_msg_data["inner_state_model"] = data.get("inner_state_model", "claude-sonnet-4-6")
+                            # Per-turn snapshot of the four-field inner state so you
+                            # can inspect "what was Zara feeling on this turn" from
+                            # the chat JSON. Hidden from the rendered chat — design
+                            # is "private weather, not for display" — but persisted
+                            # for debugging / curiosity / pattern-checking later.
+                            assistant_msg_data["inner_state_payload"] = data.get("inner_state_payload") or {}
                         if data.get("search_calls"):
                             assistant_msg_data["search_usage"] = data.get("search_usage", {})
                             assistant_msg_data["search_cost"] = float(data.get("search_cost", 0.0) or 0.0)
