@@ -143,6 +143,11 @@ def populate_render_payload(
         # Default empty so build_inner_state_injection never KeyErrors when the
         # pre-pass soft-fails or hasn't fired yet on a given code path.
         "inner_state": {},
+        # Populated in main.py by walking back through branch_path's recent
+        # assistant messages and extracting their inner_state_payload entries.
+        # Lets the character reference what she was carrying internally on
+        # recent turns ("I was just thinking that"). Default empty list.
+        "prior_inner_states": [],
     }
     if project_dir:
         try:

@@ -213,6 +213,34 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
     if arc:
         parts.append(f"[ARC — where the relationship sits] {arc}")
 
+    # Recent prior inner-state payloads from past turns, surfaced so Sonnet
+    # can produce continuity ("she was stung 3 turns ago, has been warming
+    # since") rather than treating each turn as an independent emotional
+    # sample. Populated in main.py from branch_path before run_inner_state.
+    prior_states = payload.get("prior_inner_states") if isinstance(payload, dict) else None
+    if isinstance(prior_states, list) and prior_states:
+        parts.append("[YOUR RECENT INNER STATES — emotional continuity, oldest first]:")
+        for entry in prior_states:
+            if not isinstance(entry, dict):
+                continue
+            p = entry.get("payload") or {}
+            if not isinstance(p, dict) or not p:
+                continue
+            turns_ago = entry.get("turns_ago")
+            if turns_ago == 1:
+                label = "last turn"
+            elif isinstance(turns_ago, int) and turns_ago >= 2:
+                label = f"{turns_ago} turns ago"
+            else:
+                label = "recent"
+            field_parts = []
+            for key in ("feeling", "wanting", "noticing", "holding_back"):
+                v = p.get(key)
+                if isinstance(v, str) and v.strip():
+                    field_parts.append(f"{key}: {v.strip()}")
+            if field_parts:
+                parts.append(f"  {label} — {' / '.join(field_parts)}")
+
     off_screen_log = characters_state.get("off_screen_log")
     if isinstance(off_screen_log, dict):
         # Keep this brief — the inner-state pass cares about the headline of

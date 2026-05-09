@@ -27,6 +27,7 @@ from character_inner_state import (  # noqa: E402
 from game_systems.characters import (  # noqa: E402
     build_characters_injections,
     build_inner_state_injection,
+    build_prior_inner_states_injection,
 )
 
 
@@ -364,6 +365,108 @@ def test_format_recent_dialogue_empty_returns_marker():
     """Empty dialogue list returns the no-prior-dialogue marker."""
     assert _format_recent_dialogue([]) == "(no prior dialogue)"
     assert _format_recent_dialogue(None) == "(no prior dialogue)"
+
+
+# ── build_prior_inner_states_injection ──────────────────────────────
+
+
+def test_prior_states_empty_for_no_payload():
+    assert build_prior_inner_states_injection({}) == ""
+
+
+def test_prior_states_empty_for_empty_list():
+    state = {"_render_payload": {"prior_inner_states": []}}
+    assert build_prior_inner_states_injection(state) == ""
+
+
+def test_prior_states_renders_with_turn_labels():
+    """Last-turn / N-turns-ago labels render correctly, oldest-first."""
+    state = {
+        "_render_payload": {
+            "prior_inner_states": [
+                {"turns_ago": 3, "payload": {"feeling": "stung that he forgot"}},
+                {"turns_ago": 2, "payload": {"feeling": "warming", "noticing": "he's softening"}},
+                {"turns_ago": 1, "payload": {"feeling": "relieved"}},
+            ]
+        }
+    }
+    block = build_prior_inner_states_injection(state)
+    assert block.startswith("[PRIOR INNER STATES")
+    # Turn labels
+    assert "3 turns ago" in block
+    assert "2 turns ago" in block
+    assert "last turn" in block
+    # Field content
+    assert "stung that he forgot" in block
+    assert "warming" in block
+    assert "relieved" in block
+    # Order preserved (oldest first → 3 ago appears before last turn)
+    assert block.index("3 turns ago") < block.index("2 turns ago") < block.index("last turn")
+
+
+def test_prior_states_skips_empty_payloads():
+    """Entries with empty payload dicts are skipped, not rendered as blank lines."""
+    state = {
+        "_render_payload": {
+            "prior_inner_states": [
+                {"turns_ago": 3, "payload": {}},
+                {"turns_ago": 2, "payload": {"feeling": "real"}},
+                {"turns_ago": 1, "payload": {"feeling": "  "}},  # whitespace-only filtered
+            ]
+        }
+    }
+    block = build_prior_inner_states_injection(state)
+    # Only the turn-2 entry has substantive content
+    assert "2 turns ago" in block
+    assert "real" in block
+    # The empty-payload entries should not appear as bullet lines
+    assert "3 turns ago" not in block
+    assert "last turn" not in block
+
+
+def test_prior_states_in_injection_assembly():
+    """Regression guard: build_prior_inner_states_injection is in the assembly list."""
+    state = {
+        "_render_payload": {
+            "inner_state": {},
+            "memories_core": [], "memories_recalled": [],
+            "profile_core": [], "profile_recalled": [],
+            "growth_active": [], "growth_obsolete": [],
+            "prior_inner_states": [
+                {"turns_ago": 1, "payload": {"feeling": "TEST_PRIOR_MARKER_abc"}},
+            ],
+        },
+        "wellbeing": {"state": "Even"},
+        "callbacks": {"next_id": 1, "open": [], "resolved": [], "dismissed": []},
+    }
+    full_block = build_characters_injections(state)
+    assert "TEST_PRIOR_MARKER_abc" in full_block
+    assert "[PRIOR INNER STATES" in full_block
+    # Assembly order: PRIOR INNER STATES appears BEFORE current INNER STATE
+    # (we don't have a current inner state in this fixture, so just verify
+    # the prior block exists)
+
+
+def test_prior_states_assembly_order_prior_before_current():
+    """[PRIOR INNER STATES] must render BEFORE [INNER STATE] (current turn)."""
+    state = {
+        "_render_payload": {
+            "inner_state": {"feeling": "CURRENT_TURN_MARKER"},
+            "memories_core": [], "memories_recalled": [],
+            "profile_core": [], "profile_recalled": [],
+            "growth_active": [], "growth_obsolete": [],
+            "prior_inner_states": [
+                {"turns_ago": 1, "payload": {"feeling": "PRIOR_TURN_MARKER"}},
+            ],
+        },
+        "wellbeing": {"state": "Even"},
+        "callbacks": {"next_id": 1, "open": [], "resolved": [], "dismissed": []},
+    }
+    full_block = build_characters_injections(state)
+    assert "PRIOR_TURN_MARKER" in full_block
+    assert "CURRENT_TURN_MARKER" in full_block
+    # Prior states (older) render before current inner state (now)
+    assert full_block.index("PRIOR_TURN_MARKER") < full_block.index("CURRENT_TURN_MARKER")
 
 
 def test_format_recent_dialogue_skips_invalid_entries():

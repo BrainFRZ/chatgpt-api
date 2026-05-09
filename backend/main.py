@@ -6378,6 +6378,35 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     recall=_recall_payload if isinstance(_recall_payload, dict) else None,
                 )
 
+                # Pull recent prior inner-state payloads from past assistant
+                # messages on this branch. Surfaced both to Opus (so the
+                # character can reference what she was thinking — "I was just
+                # thinking that") AND to the inner-state pre-pass below (so
+                # Sonnet generates emotional continuity instead of independent
+                # samples per turn). Cap: 3 most recent non-empty payloads,
+                # scanning back up to 10 assistant turns. ~420 tokens worst
+                # case, volatile (uncached) on Opus's call.
+                _prior_inner_states_list = []
+                _assistant_seen_count = 0
+                for _hist_msg in reversed(branch_path):
+                    if not isinstance(_hist_msg, dict) or _hist_msg.get("role") != "assistant":
+                        continue
+                    _assistant_seen_count += 1
+                    if _assistant_seen_count > 10:
+                        break
+                    _hist_payload = _hist_msg.get("inner_state_payload")
+                    if isinstance(_hist_payload, dict) and _hist_payload:
+                        _prior_inner_states_list.append({
+                            "turns_ago": _assistant_seen_count,
+                            "payload": _hist_payload,
+                        })
+                    if len(_prior_inner_states_list) >= 3:
+                        break
+                # Reverse so oldest-first reads naturally as a timeline
+                _prior_inner_states_list.reverse()
+                if isinstance(characters_state.get("_render_payload"), dict):
+                    characters_state["_render_payload"]["prior_inner_states"] = _prior_inner_states_list
+
                 # Inner-state pre-pass — Sonnet 4.6 produces hidden emotional ground
                 # truth for Opus to voice from. SEQUENTIAL after recall (not parallel)
                 # because it depends on recall's filtered memory set as part of its

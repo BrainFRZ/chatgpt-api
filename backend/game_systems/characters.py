@@ -1153,6 +1153,53 @@ def build_off_screen_injection(state: dict) -> str:
     return "\n".join(lines)
 
 
+def build_prior_inner_states_injection(state: dict) -> str:
+    """Render the recent past inner-state payloads as a hidden timeline block.
+
+    Reads from state["_render_payload"]["prior_inner_states"], a list of
+    {turns_ago: int, payload: {feeling/wanting/noticing/holding_back}} entries
+    populated in main.py from the branch_path's recent assistant messages.
+    Lets the character reference what she was carrying internally on recent
+    turns ("I was just thinking that") instead of treating each turn's inner
+    state as an independent sample.
+
+    Position: directly before [INNER STATE] (current turn). The two together
+    read as "where your head has been recently → where it is right now."
+    """
+    payload = state.get("_render_payload") or {}
+    prior = payload.get("prior_inner_states") if isinstance(payload, dict) else None
+    if not isinstance(prior, list) or not prior:
+        return ""
+
+    lines = []
+    for entry in prior:
+        if not isinstance(entry, dict):
+            continue
+        p = entry.get("payload") or {}
+        if not isinstance(p, dict) or not p:
+            continue
+        turns_ago = entry.get("turns_ago")
+        if turns_ago == 1:
+            label = "last turn"
+        elif isinstance(turns_ago, int) and turns_ago >= 2:
+            label = f"{turns_ago} turns ago"
+        else:
+            label = "recent"
+        field_parts = []
+        for key, friendly in (("feeling", "feeling"), ("wanting", "wanting"), ("noticing", "noticing"), ("holding_back", "holding back")):
+            v = p.get(key)
+            if isinstance(v, str) and v.strip():
+                field_parts.append(f"{friendly}: {v.strip()}")
+        if field_parts:
+            lines.append(f"- {label} — {' / '.join(field_parts)}")
+
+    if not lines:
+        return ""
+
+    header = "[PRIOR INNER STATES — what you were carrying through recent turns; reference naturally if it connects to what's being said now]"
+    return header + "\n" + "\n".join(lines)
+
+
 def build_inner_state_injection(state: dict) -> str:
     """Render the inner-state pre-pass output as a final hidden-ground-truth block.
 
@@ -1215,6 +1262,7 @@ def build_characters_injections(state: dict) -> str:
         build_user_profile_injection,
         build_memories_injection,
         build_callbacks_injection,
+        build_prior_inner_states_injection,
         build_inner_state_injection,
     ):
         block = builder(state)
