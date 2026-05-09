@@ -9,7 +9,15 @@ Top-level entry points used by main.py:
 - finalize_interview(...) — writes character_profile.di
 - handle_local_slash(...) — slash commands that don't hit the model
 
-All Characters-specific state lives in pipeline_state["characters_state"].
+Characters-specific state is split between two locations:
+- Per-chat state (channel, wall_clock) lives in pipeline_state["characters_state"]
+  on the chat itself.
+- Project-wide state (callbacks, wellbeing, arc, life_events,
+  last_ripeness_rolled_date) lives in `<project>/character_state.json`,
+  managed by character_project_state. The runtime dict from
+  get_characters_state() reflects the merged view.
+File-backed kinds (memories, user_profile, character_growth) live in
+their own jsonl files; see character_storage.py.
 """
 from __future__ import annotations
 
@@ -476,26 +484,35 @@ def prepare_state_for_turn(
     cs = get_characters_state(data, project_dir=project_dir)
     wc = cs.get("wall_clock") or {}
     project_state_dirty = False
+    today_iso = today_et_iso()
 
+    # Wellbeing + life-event rolls already self-gate (rolled_date / last_rolled_year_week).
+    # Ripeness needs an explicit project-level gate (last_ripeness_rolled_date) since the
+    # roll function itself doesn't track date — without this, every chat's first-message-
+    # of-ET-day rerolls the ripeness from the same callback pool, giving each chat a
+    # different "ripe today" set for the same character. See bug review P1.2.
     if is_first_message_of_et_day(wc):
         rng = random.Random(rng_seed) if rng_seed is not None else random.Random()
-        cs["wellbeing"] = maybe_roll_wellbeing(cs.get("wellbeing") or {}, today_et_iso(), rng=rng)
-        cs["ripe_callbacks"] = roll_callback_ripeness(cs.get("callbacks") or {}, today_et_iso(), rng=rng)
+        cs["wellbeing"] = maybe_roll_wellbeing(cs.get("wellbeing") or {}, today_iso, rng=rng)
+        # Project-wide ripeness gate
+        if cs.get("last_ripeness_rolled_date") != today_iso:
+            cs["ripe_callbacks"] = roll_callback_ripeness(cs.get("callbacks") or {}, today_iso, rng=rng)
+            cs["last_ripeness_rolled_date"] = today_iso
         # Daily prune of resolved/dismissed callbacks (30-day retention) — runs even if
         # no callback_ops are emitted today, otherwise old resolved entries can linger
         # indefinitely on quiet days.
-        cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [], 0, today_et_iso())
+        cs["callbacks"] = apply_callback_ops(cs.get("callbacks") or {}, [], 0, today_iso)
         # Weekly life-event roll. Self-gates internally to fire once per ISO week
         # past the grace period.
-        cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_et_iso(), rng=rng)
-        project_state_dirty = True  # wellbeing/callbacks/life_events all touched
+        cs["life_events"] = maybe_roll_life_event(cs.get("life_events") or {}, today_iso, rng=rng)
+        project_state_dirty = True  # wellbeing/callbacks/life_events/ripeness-date all touched
         # Hygiene: archive stale low-impact memories. Cheap (file rewrite, no
         # model calls). Memories with impact >= 3 are permanent; impact 1-2
         # memories untouched for 12+ months get soft-archived.
         if project_dir:
             try:
                 from character_storage import CharacterStore, prune_stale_memories
-                report = prune_stale_memories(CharacterStore(project_dir), today_et_iso())
+                report = prune_stale_memories(CharacterStore(project_dir), today_iso)
                 if report.get("archived"):
                     logger.info(f"prepare_state_for_turn: archived {report['archived']} stale memories")
             except Exception as e:
@@ -648,6 +665,14 @@ def run_post_stream_extraction(
         apply_character_ops_to_state,
         compute_character_agent_cost,
     )
+    from character_project_state import overlay_project_state_into, persist_project_state_from
+
+    # Refresh project-level fields from disk before applying ops. The main
+    # turn loaded these at turn-start, but Opus 3 streaming + recall + off-screen
+    # took 30-180s in the meantime — another chat in the same project could
+    # have updated callbacks/wellbeing/etc during that window. Re-overlaying
+    # closes the staleness gap so our ops layer onto the freshest state.
+    overlay_project_state_into(characters_state, project_dir)
 
     ops, usage = determine_character_ops(
         client,
@@ -664,7 +689,6 @@ def run_post_stream_extraction(
         )
         # Persist project-level fields (callbacks/wellbeing/arc/life_events) so
         # any side-agent ops that touched them propagate across all chats.
-        from character_project_state import persist_project_state_from
         persist_project_state_from(characters_state, project_dir)
 
     # Stamp the wall_clock with assistant message timestamp

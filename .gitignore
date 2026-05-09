@@ -29,6 +29,7 @@
 !frontend/package.json
 !frontend/tsconfig.json
 !backend/tests/test_character_panel.py
+!backend/tests/test_character_project_state.py
 !backend/tests/test_sync_manager.py
 !backend/combat_state.py
 !backend/fix_total_tokens.py
