@@ -106,6 +106,25 @@ def test_extract_strips_trailing_whitespace_from_profile():
     assert cleaned == cleaned.rstrip() + ""  # no trailing whitespace
 
 
+def test_extract_drops_text_after_end_marker():
+    """Regression: if the model violates instructions and adds chatter after
+    the closing END_PROPOSAL marker, that text must NOT survive into the
+    saved profile.di — it'd otherwise pollute the canonical character file
+    with model drift content."""
+    raw = (
+        _wrap_with_proposal(PROFILE_BASE, VALID_PROPOSAL_JSON)
+        + "\n\nOh and one more thing the character also has a dog named Rex.\n"
+    )
+    cleaned, proposal = _extract_flakiness_bands(raw)
+    assert proposal is not None
+    assert "dog named Rex" not in cleaned
+    assert "<<<FLAKINESS_BANDS_PROPOSAL>>>" not in cleaned
+    assert "<<<END_PROPOSAL>>>" not in cleaned
+    # Profile content before the marker is preserved
+    assert "# Test Character" in cleaned
+    assert "## Voice" in cleaned
+
+
 # ── commit endpoint validation logic ─────────────────────────────────
 # The endpoint itself requires FastAPI; instead we directly exercise the
 # validation rules to keep tests fast.

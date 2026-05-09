@@ -919,20 +919,31 @@ def finalize_interview(client, data: dict, project_dir: Optional[str], transcrip
     # Auto-commit the bands proposal to character_state.json so the resolver
     # has something to work with even if the user never opens the modal. The
     # modal becomes a "review and adjust" surface; dismissing leaves the
-    # auto-committed values in place. Defaults to None if the model didn't
-    # emit a valid proposal — in that case the planner's seed call will
-    # generate a week without major events (resolver bails on no bands per
-    # Phase 2 P1 fix), and the user gets prompted to review anyway.
+    # auto-committed values in place.
+    #
+    # IMPORTANT: only auto-commit when no bands have been set yet (None or
+    # absent). On re-interview, the user may have manually tuned bands via
+    # the modal previously — overwriting them with a fresh model proposal
+    # would silently wipe their work. Re-interview still surfaces the
+    # proposal in the return dict so the user can open the modal and
+    # explicitly apply it if they want.
     if bands_proposal:
         try:
             from character_project_state import load_project_state, save_project_state
             existing_state = load_project_state(project_dir) or {}
-            existing_state["flakiness_bands"] = bands_proposal
-            save_project_state(project_dir, existing_state)
-            logger.info(
-                f"finalize_interview: auto-committed flakiness_bands proposal "
-                f"({len(bands_proposal)} categories) for {os.path.basename(project_dir)}"
-            )
+            existing_bands = existing_state.get("flakiness_bands")
+            if not existing_bands:
+                existing_state["flakiness_bands"] = bands_proposal
+                save_project_state(project_dir, existing_state)
+                logger.info(
+                    f"finalize_interview: auto-committed flakiness_bands proposal "
+                    f"({len(bands_proposal)} categories) for {os.path.basename(project_dir)}"
+                )
+            else:
+                logger.info(
+                    f"finalize_interview: bands already set for {os.path.basename(project_dir)} "
+                    f"— surfacing fresh proposal in modal but not auto-committing"
+                )
         except Exception as e:
             logger.warning(f"finalize_interview: failed to auto-commit bands: {e}")
 

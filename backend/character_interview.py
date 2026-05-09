@@ -519,9 +519,11 @@ def _extract_flakiness_bands(profile_with_marker: str) -> tuple[str, Optional[di
     if not m:
         return profile_with_marker, None
     json_blob = m.group(1)
-    # Strip the entire marker block (including markers) from the profile
-    cleaned = profile_with_marker[:m.start()] + profile_with_marker[m.end():]
-    cleaned = cleaned.rstrip()
+    # Truncate at the START of the marker block. Anything after END_PROPOSAL
+    # is dropped — the prompt instructs the model not to add trailing text,
+    # but if it does anyway (drift / hallucination), we don't want it
+    # polluting the saved character_profile.di.
+    cleaned = profile_with_marker[:m.start()].rstrip()
     try:
         proposal = _json.loads(json_blob)
     except _json.JSONDecodeError as e:
