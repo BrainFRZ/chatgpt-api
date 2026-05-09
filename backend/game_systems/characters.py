@@ -1171,7 +1171,6 @@ def build_prior_inner_states_injection(state: dict) -> str:
     if not isinstance(prior, list) or not prior:
         return ""
 
-    from datetime import datetime as _dt
     lines = []
     for entry in prior:
         if not isinstance(entry, dict):
@@ -1194,7 +1193,7 @@ def build_prior_inner_states_injection(state: dict) -> str:
         ts_part = ""
         if isinstance(ts_str, str) and ts_str:
             try:
-                _ts_dt = _dt.fromisoformat(ts_str)
+                _ts_dt = datetime.fromisoformat(ts_str)
                 _wd = _ts_dt.strftime("%A")
                 _date = _ts_dt.strftime("%Y-%m-%d")
                 _time = _ts_dt.strftime("%I:%M %p").lstrip("0")

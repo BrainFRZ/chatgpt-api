@@ -14,7 +14,7 @@ import os
 import json
 import re
 import shutil
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 import tiktoken
 import logging
@@ -6431,9 +6431,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # treats long gaps as new conversation threads. 2hr is wide
                 # enough to survive normal conversation pauses (lunch, errand,
                 # work call) but tight enough to exclude "earlier today."
-                from datetime import datetime as _dt, timedelta as _td
-                _PRIOR_STATE_MAX_AGE = _td(hours=2)
-                _now = _dt.now().astimezone()
+                _PRIOR_STATE_MAX_AGE = timedelta(hours=2)
+                _now = datetime.now().astimezone()
                 _prior_inner_states_list = []
                 _assistant_seen_count = 0
                 for _hist_msg in reversed(branch_path):
@@ -6448,7 +6447,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     _hist_ts_str = _hist_msg.get("timestamp")
                     if isinstance(_hist_ts_str, str):
                         try:
-                            _hist_ts = _dt.fromisoformat(_hist_ts_str)
+                            _hist_ts = datetime.fromisoformat(_hist_ts_str)
                             # Make timezone-aware if needed for the subtraction
                             if _hist_ts.tzinfo is None:
                                 _hist_ts = _hist_ts.astimezone()

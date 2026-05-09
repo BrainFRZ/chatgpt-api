@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -235,7 +236,6 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
     prior_states = payload.get("prior_inner_states") if isinstance(payload, dict) else None
     if isinstance(prior_states, list) and prior_states:
         parts.append("[YOUR RECENT INNER STATES — emotional continuity, oldest first]:")
-        from datetime import datetime as _dt
         for entry in prior_states:
             if not isinstance(entry, dict):
                 continue
@@ -255,7 +255,7 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
             ts_part = ""
             if isinstance(ts_str, str) and ts_str:
                 try:
-                    _ts_dt = _dt.fromisoformat(ts_str)
+                    _ts_dt = datetime.fromisoformat(ts_str)
                     _wd = _ts_dt.strftime("%A")
                     _date = _ts_dt.strftime("%Y-%m-%d")
                     _time = _ts_dt.strftime("%I:%M %p").lstrip("0")
