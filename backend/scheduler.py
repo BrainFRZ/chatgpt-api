@@ -42,6 +42,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBSTORE_DIR = os.path.join(_REPO_ROOT, "var")
 JOBSTORE_PATH = os.path.join(JOBSTORE_DIR, "scheduler.db")
 
+# Absolute path to the data root, anchored relative to scheduler.py. Avoids
+# cwd-dependent behavior — FastAPI runs from backend/ on the VPS, so a
+# relative "data/" would resolve to backend/data/ which doesn't exist.
+_DEFAULT_DATA_ROOT = os.path.join(_REPO_ROOT, "data")
+
 
 def _scheduler_instance():
     return _SCHEDULER
@@ -84,14 +89,17 @@ def shutdown_scheduler() -> None:
     _SCHEDULER = None
 
 
-def discover_characters_projects(data_root: str = "data") -> list[str]:
+def discover_characters_projects(data_root: Optional[str] = None) -> list[str]:
     """Walk data/users/*/projects/* and return paths to projects that have a
     `character_profile.di` (i.e. completed Characters interview). Used to
     enumerate which projects need scheduled jobs.
     """
     out: list[str] = []
+    if not data_root:
+        data_root = _DEFAULT_DATA_ROOT
     users_root = os.path.join(data_root, "users")
     if not os.path.isdir(users_root):
+        logger.warning(f"scheduler: users root not found at {users_root}")
         return out
     for user in os.listdir(users_root):
         proj_root = os.path.join(users_root, user, "projects")
@@ -144,7 +152,7 @@ def register_resolver_for_project(project_dir: str) -> bool:
     return True
 
 
-def register_all_projects(data_root: str = "data") -> int:
+def register_all_projects(data_root: Optional[str] = None) -> int:
     """Walk all Characters-enabled projects and register their resolver jobs.
     Returns the number registered.
     """
