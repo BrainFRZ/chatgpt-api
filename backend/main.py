@@ -6418,7 +6418,36 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         logger.warning(f"Characters recall failed: {e}")
                         return ({}, {})
 
-                _osc_meta, _recall_result = await asyncio.gather(_run_off_screen(), _run_recall())
+                # Image-reading pre-pass — current-gen vision (Opus 4.5 by default)
+                # reads attached/inline images and produces a structured text reading
+                # that goes into Opus 3's context, since Opus 3's vision is the older
+                # stack. Build the image blocks here so we have them for the pre-pass
+                # AND for the fallback (attach raw to Opus 3) if the reading fails.
+                _character_image_blocks = build_image_content_blocks(branch_path[-1])
+                _slots_left_pre = _MAX_IMAGES_PER_MESSAGE - len(_character_image_blocks)
+                if _slots_left_pre > 0:
+                    _user_text_pre = (branch_path[-1].get("content") or "")
+                    for _u_pre in extract_image_urls_from_text(_user_text_pre)[:_slots_left_pre]:
+                        _b_pre = fetch_image_url_as_block(_u_pre)
+                        if _b_pre:
+                            _character_image_blocks.append(_b_pre)
+
+                async def _run_image_reading():
+                    if not _character_image_blocks:
+                        return [], {}
+                    try:
+                        from character_image_reading import read_images
+                        _ank = get_api_key(username, "anthropic") or ""
+                        return await asyncio.to_thread(
+                            read_images, _ank, _character_image_blocks
+                        )
+                    except Exception as e:
+                        logger.warning(f"Characters image-reading failed: {e}")
+                        return [], {"error": f"{type(e).__name__}: {e}"}
+
+                _osc_meta, _recall_result, _image_reading_result = await asyncio.gather(
+                    _run_off_screen(), _run_recall(), _run_image_reading()
+                )
 
                 # Off-screen telemetry
                 if isinstance(_osc_meta, dict) and _osc_meta.get("usage"):
@@ -6436,6 +6465,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     if isinstance(_recall_payload, dict) and _recall_payload.get("ids_recalled"):
                         data["recall_ids"] = _recall_payload["ids_recalled"]
 
+                # Image-reading telemetry + render-payload stash
+                _image_readings, _image_reading_usage = (
+                    _image_reading_result if isinstance(_image_reading_result, tuple) else ([], {})
+                )
+                if _image_reading_usage:
+                    from character_image_reading import compute_reading_cost, IMAGE_READING_MODEL
+                    data["image_reading_usage"] = _image_reading_usage
+                    data["image_reading_cost"] = compute_reading_cost(_image_reading_usage)
+                    data["image_reading_model"] = IMAGE_READING_MODEL
+                    data["image_reading_count"] = len(_image_readings)
+
                 # Daily rolls (does NOT touch wall_clock — stamp_user_turn after injection build)
                 prepare_state_for_turn(data, _project_dir)
                 characters_state = get_characters_state(data, project_dir=_project_dir)
@@ -6448,6 +6488,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     branch_msg_ids=_branch_msg_ids,
                     recall=_recall_payload if isinstance(_recall_payload, dict) else None,
                 )
+
+                # Stash image readings on the payload so build_image_reading_injection
+                # finds them. Empty list when there were no images or the read failed
+                # — the injection builder returns "" in either case.
+                if isinstance(characters_state.get("_render_payload"), dict):
+                    characters_state["_render_payload"]["image_readings"] = _image_readings or []
 
                 # Pull recent prior inner-state payloads from past assistant
                 # messages on this branch. Surfaced both to Opus (so the
@@ -6543,7 +6589,23 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                 user_content = build_message_content(branch_path[-1])
                 user_content = _characters_build_user(characters_state, user_content)
-                new_user_msg = {"role": "user", "content": user_content}
+
+                # Image handling for Characters: the voice slot is Opus 3, whose
+                # vision is older. The pre-pass above (Opus 4.5 by default) already
+                # produced a structured reading which is in the [IMAGES …] injection
+                # block. So normally we attach NO image blocks to Opus 3.
+                #
+                # Fallback: if the reading failed (network error, API error) but we
+                # have raw image blocks, attach them so Opus 3 at least sees
+                # something — older vision is better than nothing.
+                _readings_succeeded = isinstance(_image_readings, list) and len(_image_readings) > 0
+                if _character_image_blocks and not _readings_succeeded:
+                    new_user_msg = {
+                        "role": "user",
+                        "content": _character_image_blocks + [{"type": "text", "text": user_content}],
+                    }
+                else:
+                    new_user_msg = {"role": "user", "content": user_content}
 
                 # Stamp wall_clock and clear the render payload (transient, don't persist)
                 from characters_runtime import stamp_user_turn as _characters_stamp

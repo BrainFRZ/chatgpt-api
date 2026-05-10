@@ -1252,6 +1252,28 @@ def build_prior_inner_states_injection(state: dict) -> str:
     return header + "\n" + "\n".join(lines)
 
 
+def build_image_reading_injection(state: dict) -> str:
+    """Render the image-reading pre-pass output as an [IMAGES …] block.
+
+    Reads from state["_render_payload"]["image_readings"] which is populated by
+    main.py's `_run_image_reading` pre-pass — Opus 4.5 (or whatever
+    CHARACTER_IMAGE_READING_MODEL is set to) reads any image attachments / image
+    URLs in the user's current turn and produces structured readings.
+
+    Position is LATE in the injection order — right before INNER STATE. The
+    reasoning: this is what the user JUST sent, so it has high recency relevance
+    for the voice slot, and it should also be visible to anything semantic
+    that builds on it. Empty list → no block emitted.
+    """
+    payload = state.get("_render_payload") or {}
+    readings = payload.get("image_readings") if isinstance(payload, dict) else None
+    if not isinstance(readings, list) or not readings:
+        return ""
+
+    from character_image_reading import format_readings_for_injection
+    return format_readings_for_injection(readings)
+
+
 def build_inner_state_injection(state: dict) -> str:
     """Render the inner-state pre-pass output as a final hidden-ground-truth block.
 
@@ -1316,6 +1338,7 @@ def build_characters_injections(state: dict) -> str:
         build_callbacks_injection,
         build_schedule_injection,
         build_prior_inner_states_injection,
+        build_image_reading_injection,
         build_inner_state_injection,
     ):
         block = builder(state)
@@ -1340,6 +1363,7 @@ The system will provide:
 - [MEMORIES] — past moments that matter. Reference when fitting; don't recap unprompted.
 - [CALLBACKS] — open threads. RIPE-tagged ones should surface this turn if a natural opening exists.
 - [PRIOR INNER STATES] — what you were carrying internally on recent turns (within the last 2 hours). Lets you say "I was just thinking that" when the user lands on something you were already feeling, or notice "I've been stuck on this for a while." Reference naturally when it actually connects to what's being said now. Don't list them, don't comment on the pattern aloud, don't reach for them when they don't fit.
+- [IMAGES THE USER JUST SENT YOU] — when the user attaches an image (or pastes an image URL in their message), a separate vision pass produces a structured reading: format, verbatim text on the image, visual description, and the intent (the joke / point / emotional gesture). Treat this as if you saw the image yourself. React TO the image — don't describe it back at the user. If it's a meme, react to the joke; if it's a photo of something, react like you saw the photo.
 - [INNER STATE] — your private weather right now (feeling / wanting / noticing / holding back) for THIS specific moment. Generated fresh each turn from current context as hidden ground truth for you to voice from. Weave into the reply; never recite, list, or announce these fields.
 
 Every prior message in the conversation carries a [Day YYYY-MM-DD H:MM AM/PM] prefix showing when it was sent. These are real send-times — use them to weight emotional currency (a fight ten minutes ago is fresh; the same fight three days ago has had time to cool, or to fester) and to make natural temporal references ("you mentioned that twenty minutes ago — I'm catching up", "remember the other day when..."). NEVER recite a timestamp in dialogue ("on Tuesday at 3:42 PM you said..." — never). The timestamps are metadata for YOU to use; they don't appear in the reply text.
