@@ -1230,6 +1230,17 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_callback_expired') {
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>⌛ plan elapsed</span>
+                    {n.text && <>: {n.text}</>}
+                    {n.due_by && (
+                      <span style={styles.notificationReason}> — was due {n.due_by}</span>
+                    )}
+                  </div>
+                );
+              }
               if (n.type === 'character_arc_state') {
                 return (
                   <div key={i} style={styles.searchNotification}>

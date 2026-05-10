@@ -338,13 +338,14 @@ def apply_memory_ops(memories: list, ops: list, current_turn: int, today_iso: Op
 
 def apply_callback_ops(callbacks: dict, ops: list, current_turn: int, today_iso: str) -> dict:
     """Apply callback ops. Operations:
-      {action: "add", original_text, source?: "user"|"character", resolutions?: [...]}
+      {action: "add", original_text, source?: "user"|"character", resolutions?: [...], due_by?: "YYYY-MM-DD"}
       {action: "checkin", id: int}                    — character mentioned the callback this turn
-      {action: "resolve", id: int, resolution_text?}  — user-marked resolved
+      {action: "resolve", id: int, resolution_text?}  — agent OR user can mark resolved
       {action: "dismiss", id: int, reason?}           — user-marked no-longer-important
 
-    Note: characters cannot drop callbacks. Only `add` and `checkin` are emitted by the model;
-    `resolve` and `dismiss` come from user slash commands.
+    The agent emits add / checkin / resolve. Dismiss is user-only via slash command.
+    Past-due open callbacks auto-expire via expire_overdue_callbacks() — they don't
+    need to be dismissed by the agent.
     """
     if not isinstance(callbacks, dict):
         callbacks = {"next_id": 1, "open": [], "resolved": [], "dismissed": []}
@@ -381,6 +382,9 @@ def apply_callback_ops(callbacks: dict, ops: list, current_turn: int, today_iso:
                 "source": op.get("source") if op.get("source") in ("user", "character") else "user",
                 "resolutions": resolutions,
             }
+            due_by_raw = op.get("due_by")
+            if isinstance(due_by_raw, str) and len(due_by_raw) == 10 and due_by_raw[4] == "-" and due_by_raw[7] == "-":
+                entry["due_by"] = due_by_raw
             open_by_id[next_id] = entry
             next_id += 1
 
@@ -422,6 +426,45 @@ def apply_callback_ops(callbacks: dict, ops: list, current_turn: int, today_iso:
         "resolved": resolved_list,
         "dismissed": dismissed_list,
     }
+
+
+def expire_overdue_callbacks(callbacks: dict, today_iso: str) -> list:
+    """Move open callbacks whose due_by is strictly before today into dismissed
+    with reason "elapsed without happening". Returns the list of newly-expired
+    entries (so the caller can surface them as banners). Mutates callbacks
+    in place.
+
+    Logic: due_by is end-of-day on that date. So a callback with due_by=2026-05-15
+    expires the moment today_iso becomes 2026-05-16. today_iso == due_by means
+    "still has today to happen".
+    """
+    if not isinstance(callbacks, dict):
+        return []
+    open_list = callbacks.setdefault("open", [])
+    dismissed_list = callbacks.setdefault("dismissed", [])
+
+    expired = []
+    still_open = []
+    for cb in open_list:
+        if not isinstance(cb, dict):
+            continue
+        due_by = cb.get("due_by")
+        if isinstance(due_by, str) and due_by < today_iso:
+            cb["dismissed_date"] = today_iso
+            cb["dismiss_reason"] = "elapsed without happening"
+            cb["auto_expired"] = True
+            dismissed_list.append(cb)
+            expired.append(cb)
+        else:
+            still_open.append(cb)
+    callbacks["open"] = still_open
+
+    # Re-prune dismissed list past retention (mirrors apply_callback_ops behavior)
+    callbacks["dismissed"] = [
+        d for d in dismissed_list
+        if isinstance(d, dict) and days_between_dates(d.get("dismissed_date"), today_iso) <= CALLBACK_DISMISSED_RETENTION_DAYS
+    ]
+    return expired
 
 
 def roll_callback_ripeness(callbacks: dict, today_iso: str, rng: Optional[random.Random] = None) -> list:

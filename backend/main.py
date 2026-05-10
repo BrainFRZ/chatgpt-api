@@ -10534,6 +10534,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 # State was mutated in place; persist back
                                 stateful_pipeline_state["characters_state"] = _characters_state
                                 data["pipeline_state"] = stateful_pipeline_state
+                                # Auto-expire any callbacks whose due_by has passed
+                                # without the conversation resolving them. Captured
+                                # plans like "Friday chili at Shae's" silently roll
+                                # into the dismissed bin once Friday's over.
+                                from game_systems.characters import expire_overdue_callbacks, today_et_iso
+                                _expired_cbs = expire_overdue_callbacks(
+                                    _characters_state.get("callbacks") or {},
+                                    today_et_iso(),
+                                )
                                 # Surface meaningful character_agent ops (memory adds,
                                 # new callbacks, arc shifts, user_profile/growth adds)
                                 # as banner notifications so the user sees what got
@@ -10541,6 +10550,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _ca_notifs = extract_character_agent_notifications(
                                     _ca_meta.get("character_agent_ops") or {}
                                 )
+                                for _cb in _expired_cbs:
+                                    _ca_notifs.append({
+                                        "type": "character_callback_expired",
+                                        "id": _cb.get("id"),
+                                        "text": _cb.get("original_text"),
+                                        "due_by": _cb.get("due_by"),
+                                    })
                                 if _ca_notifs:
                                     yield f"event: state_notifications\ndata: {json.dumps(_ca_notifs)}\n\n"
                                     try:

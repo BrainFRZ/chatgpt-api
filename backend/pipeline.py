@@ -5172,14 +5172,15 @@ def extract_character_agent_notifications(ops: dict) -> list:
         if action == "add":
             notifications.append({
                 "type": "character_callback_added",
-                "text": op.get("text"),
+                "text": op.get("original_text") or op.get("text"),
                 "due_by": op.get("due_by"),
+                "source": op.get("source"),
             })
         elif action == "resolve":
             notifications.append({
                 "type": "character_callback_resolved",
                 "id": op.get("id"),
-                "reason": op.get("reason"),
+                "reason": op.get("resolution_text") or op.get("reason"),
             })
 
     arc_op = ops.get("arc_state_op")
