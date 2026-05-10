@@ -11038,99 +11038,20 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 )
                                 assistant_message = _stripped
 
-                        # Defensive: detect 'reply went missing' — Opus 3 sometimes
-                        # emits ONLY a <thinking> block (where it talks itself
-                        # through what to do) and then stops without producing
-                        # either a wrapped <reply> or a tool_use. The filter's
-                        # fallback ends up routing the thinking text into
-                        # assistant_message, but it renders as empty bubble in
-                        # ReactMarkdown. Detect this and run one retry call
-                        # asking the model to actually produce the reply.
-                        if (use_characters and not use_characters_interview
-                                and not _meme_calls_total
-                                and not (usage.get('tool_uses') or [])
-                                and accumulated_thinking == ""):
-                            # Strip <thinking>...</thinking> blocks; if what's
-                            # left is empty/whitespace, the visible reply is
-                            # missing. (We do this on assistant_message not
-                            # accumulated_thinking because the inline filter's
-                            # fallback puts everything in content when no
-                            # <reply> tag was seen.)
-                            _no_thinking = re.sub(
-                                r"<thinking>.*?</thinking>", "",
-                                assistant_message or "", flags=re.DOTALL
-                            )
-                            _has_visible_reply = bool(_no_thinking.strip())
-                            if not _has_visible_reply:
-                                logger.warning(
-                                    f"Characters: model produced thinking-only response, no <reply> "
-                                    f"or tool_use. Retrying once with explicit reply prompt."
-                                )
-                                try:
-                                    _retry_messages = list(messages_for_api)
-                                    # Add the model's first attempt + an OOC nudge
-                                    _retry_messages.append({
-                                        "role": "assistant",
-                                        "content": assistant_message or "(empty)",
-                                    })
-                                    _retry_messages.append({
-                                        "role": "user",
-                                        "content": (
-                                            "[OOC: your previous response was empty — only "
-                                            "thinking, no actual reply text and no tool call. "
-                                            "Please produce the actual visible reply now, "
-                                            "wrapped in <reply>...</reply> tags as the contract "
-                                            "specifies. Stay in your voice. Don't restart the "
-                                            "thinking — just write the reply. Match the channel "
-                                            "(text = brief and fragmented).]"
-                                        ),
-                                    })
-                                    _retry_params = provider.build_request(
-                                        messages=_retry_messages,
-                                        username=username,
-                                        project=request.project,
-                                        chat_name=request.chat_name,
-                                        is_free_chat=is_free_chat,
-                                        use_cache=True,
-                                    )
-                                    _retry_params.pop("thinking", None)
-                                    _retry_params.pop("output_config", None)
-                                    _retry_params.pop("tools", None)  # no tools on retry
-                                    _retry_params.pop("tool_choice", None)
-                                    _retry_resp = await asyncio.to_thread(
-                                        client.messages.create, **_retry_params
-                                    )
-                                    # Filter through a fresh InlineThinkingFilter
-                                    from inline_thinking_filter import InlineThinkingFilter
-                                    _retry_filter = InlineThinkingFilter(narration_tag="reply")
-                                    _retry_visible_parts = []
-                                    for _block in _retry_resp.content:
-                                        if getattr(_block, 'type', None) == 'text':
-                                            _ct, _tt = _retry_filter.feed(_block.text)
-                                            if _ct:
-                                                _retry_visible_parts.append(_ct)
-                                                if not client_disconnected:
-                                                    yield f"event: content\ndata: {json.dumps({'delta': _ct})}\n\n"
-                                    _fc, _ft = _retry_filter.flush()
-                                    if _fc:
-                                        _retry_visible_parts.append(_fc)
-                                        if not client_disconnected:
-                                            yield f"event: content\ndata: {json.dumps({'delta': _fc})}\n\n"
-                                    _retry_visible = "".join(_retry_visible_parts).strip()
-                                    if _retry_visible:
-                                        # Replace the broken assistant_message with the retry result
-                                        assistant_message = _retry_visible
-                                        logger.info(f"Characters: empty-reply retry produced {len(_retry_visible)} chars")
-                                    else:
-                                        logger.warning("Characters: empty-reply retry ALSO produced no visible content; leaving as-is")
-                                    # Account for retry tokens
-                                    _ru = _retry_resp.usage
-                                    usage['input_tokens'] = usage.get('input_tokens', 0) + (getattr(_ru, 'input_tokens', 0) or 0)
-                                    usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + (getattr(_ru, 'cache_read_input_tokens', 0) or 0)
-                                    usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + (getattr(_ru, 'cache_creation_input_tokens', 0) or 0)
-                                    usage['output_tokens'] = usage.get('output_tokens', 0) + (getattr(_ru, 'output_tokens', 0) or 0)
-                                except Exception as _retry_err:
-                                    logger.error(f"Characters empty-reply retry failed: {_retry_err}")
+                        # NOTE: an empty-reply retry was attempted here briefly
+                        # (commit b7b383a) — the idea was that if the model
+                        # emitted only <thinking> with no <reply> or tool_use,
+                        # we'd auto-retry. It introduced a regression where the
+                        # post-stream code raised an exception that killed
+                        # successful turns and triggered the catch-all
+                        # 'Failed to get response from AI' path with
+                        # tokens='unknown'/cost='unknown' partial saves. The
+                        # cure was worse than the disease — empty replies are
+                        # rare, but message-eating regressions are not OK.
+                        # Removed. Will revisit with a safer approach (probably
+                        # client-side retry button rather than server-side
+                        # auto-retry, since the server-side path has too many
+                        # interactions with the streaming + save pipeline).
 
                         # ── Sex mode: detect [SCENE COMPLETE] and [SCENE HANDOFF] ──
                         sex_scene_complete = False
