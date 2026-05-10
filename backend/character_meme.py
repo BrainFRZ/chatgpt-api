@@ -566,8 +566,13 @@ def _vision_pick_meme(
             messages=[{"role": "user", "content": blocks}],
         )
     except Exception as e:
-        logger.warning(f"vision pick failed: {type(e).__name__}: {e}")
-        return None, f"vision call error: {type(e).__name__}"
+        # Vision can fail when Anthropic can't fetch one of the candidate URLs
+        # (deleted/private Reddit posts, hotlink-protected hosts, etc.). Better
+        # to ship a less-perfectly-picked meme than to abandon the turn — fall
+        # back to the top-scored candidate. Candidates are pre-sorted by score
+        # in _fetch_reddit_candidates.
+        logger.warning(f"vision pick failed, falling back to top-scored candidate: {type(e).__name__}: {e}")
+        return 0, f"vision unavailable ({type(e).__name__}); picked top-scored candidate"
 
     try:
         for block in (msg.content or []):
