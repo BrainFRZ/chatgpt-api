@@ -11321,6 +11321,27 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             assistant_msg_data["fetch_url_calls"] = int(data.get("fetch_url_calls", 0) or 0)
                             if data.get("fetch_url_log"):
                                 assistant_msg_data["fetch_url_log"] = data["fetch_url_log"]
+                        # Image-reading pre-pass (Opus 4.5 vision reads attached images
+                        # before the voice agent runs). Cost varies with image size +
+                        # how many were attached.
+                        if data.get("image_reading_usage"):
+                            assistant_msg_data["image_reading_usage"] = data["image_reading_usage"]
+                            assistant_msg_data["image_reading_cost"] = float(data.get("image_reading_cost", 0.0) or 0.0)
+                            assistant_msg_data["image_reading_model"] = data.get("image_reading_model", "claude-opus-4-5")
+                            if data.get("image_reading_count") is not None:
+                                assistant_msg_data["image_reading_count"] = int(data.get("image_reading_count") or 0)
+                        # Meme tools (make_meme + find_meme_post). meme_cost reflects
+                        # the Sonnet vision-pick cost from find_meme_post calls
+                        # (Imgflip + pullpush themselves are free).
+                        if data.get("meme_calls"):
+                            assistant_msg_data["meme_calls"] = int(data.get("meme_calls", 0) or 0)
+                            assistant_msg_data["meme_cost"] = float(data.get("meme_cost", 0.0) or 0.0)
+                            if data.get("meme_log"):
+                                assistant_msg_data["meme_log"] = data["meme_log"]
+                            if data.get("meme_vision_usage"):
+                                assistant_msg_data["meme_vision_usage"] = data["meme_vision_usage"]
+                            if data.get("meme_vision_model"):
+                                assistant_msg_data["meme_vision_model"] = data["meme_vision_model"]
                         if use_stateful and stateful_after_snapshot is not None:
                             assistant_msg_data["pipeline_state_after"] = stateful_after_snapshot
 
@@ -11636,6 +11657,28 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             'model': model_id,
                             'hud_state': _hud_for_done_event(assistant_msg_data, data.get('pipeline_state')),
                         }
+                        # Mirror every side-agent cost/usage field into done_data so
+                        # the frontend's per-message render has the full breakdown
+                        # IMMEDIATELY at end-of-stream (without it the breakdown
+                        # only appears after page reload, when the saved chat is
+                        # re-fetched). The fields here parallel what gets saved
+                        # onto assistant_msg_data above.
+                        for _k in (
+                            "flag_agent_usage", "flag_agent_cost", "flag_agent_model",
+                            "character_agent_usage", "character_agent_cost", "character_agent_model",
+                            "off_screen_usage", "off_screen_cost", "off_screen_model",
+                            "recall_usage", "recall_cost", "recall_model", "recall_ids",
+                            "inner_state_usage", "inner_state_cost", "inner_state_model",
+                            "inner_state_payload",
+                            "search_usage", "search_cost", "search_calls", "search_model", "search_log",
+                            "fetch_url_calls", "fetch_url_log",
+                            "image_reading_usage", "image_reading_cost", "image_reading_model",
+                            "image_reading_count",
+                            "meme_calls", "meme_cost", "meme_log",
+                            "meme_vision_usage", "meme_vision_model",
+                        ):
+                            if _k in assistant_msg_data:
+                                done_data[_k] = assistant_msg_data[_k]
                         if service_tier:
                             done_data['service_tier'] = service_tier
                         if use_hack_mode:

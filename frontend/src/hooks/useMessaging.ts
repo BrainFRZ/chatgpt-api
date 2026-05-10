@@ -1,6 +1,30 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ChatMessage, ChatStats, Artifact } from '../types';
 
+// Side-agent cost / usage / metadata fields that the backend mirrors into
+// the `done` event payload. We copy them onto the assistant message so the
+// per-message cost breakdown (Recall / State / Inner / Vision / Meme / etc.)
+// renders IMMEDIATELY at end-of-stream, not just after a page reload.
+const SIDE_AGENT_DONE_FIELDS = [
+  'flag_agent_usage', 'flag_agent_cost', 'flag_agent_model',
+  'character_agent_usage', 'character_agent_cost', 'character_agent_model', 'character_agent_ops',
+  'off_screen_usage', 'off_screen_cost', 'off_screen_model',
+  'recall_usage', 'recall_cost', 'recall_model', 'recall_ids',
+  'inner_state_usage', 'inner_state_cost', 'inner_state_model', 'inner_state_payload',
+  'search_usage', 'search_cost', 'search_calls', 'search_model', 'search_log',
+  'fetch_url_calls', 'fetch_url_log',
+  'image_reading_usage', 'image_reading_cost', 'image_reading_model', 'image_reading_count',
+  'meme_calls', 'meme_cost', 'meme_log', 'meme_vision_usage', 'meme_vision_model',
+] as const;
+
+function mergeSideAgentFields(target: any, data: any): void {
+  for (const k of SIDE_AGENT_DONE_FIELDS) {
+    if (k in data) {
+      target[k] = (data as any)[k];
+    }
+  }
+}
+
 interface UseMessagingDeps {
   user: { username: string } | null;
   currentChat: string | null;
@@ -329,6 +353,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             if (data.hud_state) (assistantMessage as any).pipeline_state_after = { hud_state: data.hud_state };
             if (data.artifact_ops) assistantMessage.artifact_ops = data.artifact_ops;
             if (data.artifacts) deps.setArtifacts(data.artifacts);
+            // Per-agent cost / usage breakdown — render breakdown immediately
+            mergeSideAgentFields(assistantMessage, data);
             const hiddenInitMessage = (data.ship_combat_init_message && (data.ship_combat_init_message as any).ship_combat_hidden_init)
               ? (data.ship_combat_init_message as ChatMessage)
               : null;
@@ -725,6 +751,8 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
             if (data.artifact_ops) assistantMessage.artifact_ops = data.artifact_ops;
             if (data.artifacts) deps.setArtifacts(data.artifacts);
+            // Per-agent cost / usage breakdown — render breakdown immediately
+            mergeSideAgentFields(assistantMessage, data);
             if (data.hack_mode) {
               userMsgWithId.hack_mode = true;
             }
