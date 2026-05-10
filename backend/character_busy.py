@@ -18,23 +18,55 @@ Routing decisions live in main.py.
 """
 from __future__ import annotations
 
+import random
 import re
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
-# Event kinds that take the character's full attention. When the current
-# wall-clock falls inside one of these events, the character is "busy" and
-# won't reply unless an SOS breaks through.
+# Probability the character is too busy to reply at any given moment during
+# a work shift. Rolled FRESH per incoming message — most messages mid-shift
+# get through (slow-shift moments), some don't (rush moments). Realistic:
+# a barista isn't either fully-blocked or fully-free for an entire 8-hour
+# block; busyness pulses moment-to-moment.
 #
-# - sleep: obvious; the character is unconscious
-# - work:  the cafe shift; she's on the floor, hands full, can't text
-#
-# Other kinds (social, self_care, family, admin, anticipated) are NOT
-# auto-busy by default. Some of them might warrant it (Sunday mom call,
-# yoga class) but those are case-by-case and can be added as a per-event
-# `busy: True` flag on the schedule event later if needed.
-BUSY_EVENT_KINDS = frozenset({"sleep", "work"})
+# Tunable. 0.25 = ~1 in 4 messages mid-shift get the silent treatment until
+# she has a slow moment. Bump up to ~0.4 if production feels too responsive
+# during shifts.
+WORK_BUSY_PROBABILITY = 0.25
+
+
+def _is_event_busy_now(event: dict, now_dt: datetime, rng: Optional[random.Random] = None) -> bool:
+    """Decide whether THIS active event makes the character unable to reply
+    RIGHT NOW. Layered logic:
+
+    1. Explicit per-event `busy: True` / `busy: False` always wins. Lets the
+       planner (or the user manually) hard-flag specific events as phone-
+       down (movies, mom-on-the-phone, doctor's appointment, important
+       date) or always-reachable (slow-known shift, low-key social).
+
+    2. Sleep is unconditionally busy (she's unconscious — no roll).
+
+    3. Work shifts roll WORK_BUSY_PROBABILITY per call. Most of the shift
+       she can text between customers; sometimes she's in the weeds.
+
+    4. Everything else (social, self_care, family, admin, anticipated)
+       is NOT busy by default — only the explicit override path makes
+       them busy. This matches the design: most events should let the
+       model use its judgment via the planner contract.
+    """
+    explicit = event.get("busy")
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    kind = event.get("kind")
+    if kind == "sleep":
+        return True
+    if kind == "work":
+        r = (rng if rng is not None else random).random()
+        return r < WORK_BUSY_PROBABILITY
+    return False
 
 
 def _parse_iso(s: Any) -> Optional[datetime]:
@@ -53,16 +85,24 @@ def current_busy_event(
     schedule: Optional[dict],
     now_dt: datetime,
     *,
-    kinds: frozenset[str] = BUSY_EVENT_KINDS,
+    rng: Optional[random.Random] = None,
 ) -> Optional[dict]:
-    """Return the schedule event whose [when_local, when_local + duration_min)
-    window currently contains `now_dt`, IF that event's kind is busy-flagged
-    (or has explicit `busy: True`). Otherwise None.
+    """Return the schedule event whose window contains `now_dt` AND whose
+    busy-status logic resolves to busy. Otherwise None.
 
-    A schedule shape from character_schedule.py: {events: [{kind, when_local,
-    duration_min, status, ...}], ...}. We skip cancelled/replaced events —
-    the character is bound by what they're actually doing right now, not
-    by what was originally planned.
+    Overlap precedence — important for the middle-of-the-night case: if a
+    non-sleep event overlaps the sleep window (a 2am unplanned moment, a
+    middle-of-night phone call, an emergency event), prefer the non-sleep
+    event for the busy decision. She's awake for THAT — sleep is interrupted.
+    Without this rule, an in-window sleep event would trump a real wake-up
+    moment and the user would get a 'she's asleep' notification while she
+    was clearly up doing something.
+
+    Busy logic: see _is_event_busy_now. Sleep is always busy in window;
+    work rolls a per-message probability (most messages get through);
+    other kinds need explicit busy: True; explicit busy: False overrides.
+
+    rng: pass an injected random.Random for deterministic tests.
     """
     if not isinstance(schedule, dict):
         return None
@@ -70,30 +110,17 @@ def current_busy_event(
     if not isinstance(events, list):
         return None
 
+    # First pass: collect all events whose window contains now_dt
+    in_window: list[dict] = []
     for ev in events:
         if not isinstance(ev, dict):
             continue
         kind = ev.get("kind")
         if not isinstance(kind, str):
             continue
-        # Per-event override beats kind-based default. If `busy` is explicitly
-        # set, honor it. Otherwise fall back to the BUSY_EVENT_KINDS check.
-        explicit_busy = ev.get("busy")
-        if explicit_busy is True:
-            is_busy_kind = True
-        elif explicit_busy is False:
-            is_busy_kind = False
-        else:
-            is_busy_kind = kind in kinds
-        if not is_busy_kind:
-            continue
-        # Skip non-active events. Sleep events are typically auto-stamped
-        # at planning time; checking for status in the active set keeps us
-        # from treating a cancelled shift as still happening.
         status = ev.get("status") or "planned"
         if status in ("cancelled", "replaced"):
             continue
-
         start = _parse_iso(ev.get("when_local"))
         if start is None:
             continue
@@ -105,6 +132,18 @@ def current_busy_event(
             continue
         end = start + timedelta(minutes=duration_min)
         if start <= now_dt < end:
+            in_window.append(ev)
+
+    if not in_window:
+        return None
+
+    # Middle-of-the-night exception: if any non-sleep event overlaps, the
+    # character is awake for THAT, not asleep. Sleep is implicitly interrupted.
+    non_sleep = [e for e in in_window if e.get("kind") != "sleep"]
+    candidates = non_sleep if non_sleep else in_window
+
+    for ev in candidates:
+        if _is_event_busy_now(ev, now_dt, rng=rng):
             return ev
     return None
 

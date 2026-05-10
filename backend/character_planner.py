@@ -85,6 +85,24 @@ Hard rules:
 - Times are realistic: cafe shifts are 8-10hr, social plans are 1-3hr, calls are 30-60min, sleep is 6-9hr.
 - Anticipation: looking_forward / dreading / neutral. Use sparingly — most events are neutral.
 
+Busy flag (judgment call — most events should NOT have it):
+The schedule has an optional `busy` boolean per event. When set true, the character can't reply to chat messages during that event window (the user gets a "she's busy" status and her responses queue up until she's free again). When set false, she stays reachable through the event. When omitted, sensible defaults apply (see below).
+
+Set busy: true ONLY on events that would realistically prevent replying:
+- Movies / theater / concerts (she's in a dark room, phone down)
+- Phone calls (she can't text and talk on a non-smartphone, and even on a smartphone, replying mid-call is rude; the Sunday call with mom in particular)
+- Doctor's appointments, dentist, therapy
+- Dates where she'd be rude to text-friend through (not casual hangouts — first dates, important dates, anniversaries)
+- Anything the character profile clearly establishes as phone-down
+
+Do NOT set busy on:
+- Work shifts. The backend rolls per-message busyness during shifts (most moments are slow, some are rush). Setting busy: true on a shift forces ALL messages during that shift to queue. Only set busy: true on a shift if you have specific narrative reason it'll definitely be slammed (e.g., "Saturday before a holiday weekend").
+- Sleep — the backend already treats sleep as always-busy regardless.
+- Casual social events where she'd realistically text under the table (dinner with friends, low-key hangouts, errands).
+- Self-care unless it's a class with a no-phone rule (most yoga classes, gym sessions, runs — leave busy unset).
+
+Default behavior (busy field omitted): work shifts roll per-message; sleep always busy; everything else stays reachable. This is the right default for most events — let the backend handle the texture.
+
 Always call `report_week` exactly once."""
 
 
@@ -111,6 +129,7 @@ def build_planner_tool() -> dict:
                             "location": {"type": "string"},
                             "anticipation": {"type": "string", "enum": ["looking_forward", "dreading", "neutral"]},
                             "is_major_event": {"type": "boolean", "description": "Set true ONLY for the event derived from the rolled major-event hint."},
+                            "busy": {"type": "boolean", "description": "Optional. Set true for phone-down events (movies, phone calls, doctor visits, important dates, etc.) where the character can't reply to chat. OMIT for work shifts (backend rolls per-message busyness automatically) and most other events. See system prompt for full guidance."},
                             "resolver_hints": {"type": "string"},
                         },
                     },
@@ -353,6 +372,12 @@ def run_weekly_planner(
                 "diff": {"status": {"from": None, "to": "planned"}},
             }],
         }
+        # Optional `busy` flag — only persist when the model explicitly set it.
+        # Omitting lets the per-kind defaults apply (work rolls per-message;
+        # sleep always; everything else stays reachable).
+        raw_busy = raw.get("busy")
+        if isinstance(raw_busy, bool):
+            event["busy"] = raw_busy
         new_events.append(event)
         if event["magnitude"] == "major" and major_event_idx is None:
             major_event_idx = len(new_events) - 1

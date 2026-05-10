@@ -1,5 +1,6 @@
 """Tests for character_busy — schedule-driven busy detection + SOS detection."""
 import os
+import random
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +9,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from character_busy import (  # noqa: E402
-    BUSY_EVENT_KINDS,
+    WORK_BUSY_PROBABILITY,
+    _is_event_busy_now,
     collapse_busy_placeholders_in_history,
     current_busy_event,
     describe_busy_event,
@@ -16,6 +18,17 @@ from character_busy import (  # noqa: E402
     busy_status_for_notification,
     strip_sos_slash_command,
 )
+
+
+# Deterministic RNGs for tests
+class _AlwaysBusyRNG:
+    def random(self):
+        return 0.0  # < WORK_BUSY_PROBABILITY → busy
+
+
+class _NeverBusyRNG:
+    def random(self):
+        return 0.99  # >= WORK_BUSY_PROBABILITY → not busy
 
 
 # Test schedule with a sleep block, a work shift, and a social event
@@ -71,13 +84,21 @@ class TestCurrentBusyEvent:
         assert ev is not None
         assert ev["kind"] == "sleep"
 
-    def test_returns_work_event_when_in_window(self):
+    def test_returns_work_event_when_in_window_and_rng_says_busy(self):
+        # Work shifts are now PROBABILISTIC — only busy when the RNG roll
+        # lands under WORK_BUSY_PROBABILITY. Force busy via injected RNG.
         sched = _make_schedule()
-        # 10am — mid-shift
         now = datetime(2026, 5, 10, 10, 0, tzinfo=timezone.utc)
-        ev = current_busy_event(sched, now)
+        ev = current_busy_event(sched, now, rng=_AlwaysBusyRNG())
         assert ev is not None
         assert ev["kind"] == "work"
+
+    def test_work_event_not_busy_when_rng_rolls_high(self):
+        # Most messages mid-shift get through (slow shift moments)
+        sched = _make_schedule()
+        now = datetime(2026, 5, 10, 10, 0, tzinfo=timezone.utc)
+        ev = current_busy_event(sched, now, rng=_NeverBusyRNG())
+        assert ev is None  # she's reachable mid-shift on a slow moment
 
     def test_returns_none_during_non_busy_event(self):
         # Yoga is self_care, not in BUSY_EVENT_KINDS by default
@@ -100,7 +121,7 @@ class TestCurrentBusyEvent:
         # we should still get a busy event (work). Verify the active one
         # is returned, not the cancelled one.
         now = datetime(2026, 5, 10, 10, 0, tzinfo=timezone.utc)
-        ev = current_busy_event(sched, now)
+        ev = current_busy_event(sched, now, rng=_AlwaysBusyRNG())
         assert ev is not None
         assert ev["status"] != "cancelled"
 
@@ -122,18 +143,21 @@ class TestCurrentBusyEvent:
         assert ev["title"] == "important"
 
     def test_explicit_busy_false_overrides_kind(self):
+        # Explicit busy: False on a work event makes it never busy regardless
+        # of the per-message roll. Use AlwaysBusy RNG to prove the override
+        # short-circuits the dice.
         sched = {
             "events": [{
                 "id": "sch-1",
-                "kind": "work",   # busy by default
-                "busy": False,     # explicit override
+                "kind": "work",
+                "busy": False,
                 "when_local": datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc).isoformat(),
                 "duration_min": 60,
                 "status": "planned",
             }]
         }
         now = datetime(2026, 5, 10, 12, 30, tzinfo=timezone.utc)
-        assert current_busy_event(sched, now) is None
+        assert current_busy_event(sched, now, rng=_AlwaysBusyRNG()) is None
 
     def test_none_schedule_returns_none(self):
         assert current_busy_event(None, datetime.now(timezone.utc)) is None
@@ -154,6 +178,7 @@ class TestCurrentBusyEvent:
         sched = _make_schedule()
         now = datetime(2026, 5, 9, 23, 0, tzinfo=timezone.utc)  # exact start of sleep
         ev = current_busy_event(sched, now)
+        # Sleep is unconditionally busy — no RNG injection needed
         assert ev is not None
         assert ev["kind"] == "sleep"
 
@@ -161,10 +186,70 @@ class TestCurrentBusyEvent:
         # End is exclusive: at exactly the boundary, the event has just ended
         sched = _make_schedule()
         now = datetime(2026, 5, 10, 7, 0, tzinfo=timezone.utc)  # exact end of sleep
-        ev = current_busy_event(sched, now)
+        ev = current_busy_event(sched, now, rng=_AlwaysBusyRNG())
         # At 7am sleep just ended AND work just started — should return work
         assert ev is not None
         assert ev["kind"] == "work"
+
+    def test_middle_of_night_event_overrides_sleep(self):
+        # Sleep window is 11pm-7am UTC. An emergency phone call at 3am
+        # overlaps sleep. The non-sleep event takes precedence — she's
+        # awake for the call, not asleep.
+        sched = {
+            "events": [
+                {
+                    "id": "sch-sleep",
+                    "kind": "sleep",
+                    "when_local": datetime(2026, 5, 9, 23, 0, tzinfo=timezone.utc).isoformat(),
+                    "duration_min": 480,
+                    "status": "planned",
+                },
+                {
+                    "id": "sch-emergency-call",
+                    "kind": "family",
+                    "title": "mom emergency call",
+                    "busy": True,  # phone call → can't text
+                    "when_local": datetime(2026, 5, 10, 3, 0, tzinfo=timezone.utc).isoformat(),
+                    "duration_min": 30,
+                    "status": "planned",
+                },
+            ]
+        }
+        now = datetime(2026, 5, 10, 3, 15, tzinfo=timezone.utc)
+        ev = current_busy_event(sched, now)
+        # Should return the family event (phone call), not sleep
+        assert ev is not None
+        assert ev["kind"] == "family"
+        assert ev["title"] == "mom emergency call"
+
+    def test_middle_of_night_non_busy_event_makes_her_reachable(self):
+        # Same setup but the overlapping event is NOT busy (e.g., she's up
+        # reading). Sleep is interrupted; the reading event isn't busy →
+        # overall result: she's reachable.
+        sched = {
+            "events": [
+                {
+                    "id": "sch-sleep",
+                    "kind": "sleep",
+                    "when_local": datetime(2026, 5, 9, 23, 0, tzinfo=timezone.utc).isoformat(),
+                    "duration_min": 480,
+                    "status": "planned",
+                },
+                {
+                    "id": "sch-reading",
+                    "kind": "self_care",
+                    "title": "couldn't sleep, reading",
+                    "when_local": datetime(2026, 5, 10, 2, 0, tzinfo=timezone.utc).isoformat(),
+                    "duration_min": 60,
+                    "status": "planned",
+                },
+            ]
+        }
+        now = datetime(2026, 5, 10, 2, 30, tzinfo=timezone.utc)
+        ev = current_busy_event(sched, now)
+        # Reading isn't busy. Sleep would be busy on its own, but is
+        # overridden by the overlapping event. Result: not busy.
+        assert ev is None
 
 
 # ── is_sos_message ────────────────────────────────────────────────────────
@@ -233,6 +318,61 @@ class TestDescribeBusyEvent:
 
 
 # ── busy_status_for_notification ──────────────────────────────────────────
+
+class TestIsEventBusyNow:
+    """The per-event busy resolver — sleep always, work probabilistic, others
+    only when explicitly flagged. Explicit busy: True/False overrides everything.
+    """
+    _now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+
+    def test_sleep_always_busy(self):
+        assert _is_event_busy_now({"kind": "sleep"}, self._now) is True
+
+    def test_sleep_explicit_false_overrides(self):
+        # Power-user override — if you set busy: False on sleep, honor it
+        assert _is_event_busy_now({"kind": "sleep", "busy": False}, self._now) is False
+
+    def test_work_busy_when_rng_under_probability(self):
+        assert _is_event_busy_now({"kind": "work"}, self._now, rng=_AlwaysBusyRNG()) is True
+
+    def test_work_not_busy_when_rng_over_probability(self):
+        assert _is_event_busy_now({"kind": "work"}, self._now, rng=_NeverBusyRNG()) is False
+
+    def test_work_explicit_true_overrides_rng(self):
+        # busy: True hard-flag — known-busy shift, no roll
+        ev = {"kind": "work", "busy": True}
+        assert _is_event_busy_now(ev, self._now, rng=_NeverBusyRNG()) is True
+
+    def test_work_explicit_false_overrides_rng(self):
+        # busy: False — known-slow shift, never blocks
+        ev = {"kind": "work", "busy": False}
+        assert _is_event_busy_now(ev, self._now, rng=_AlwaysBusyRNG()) is False
+
+    def test_other_kinds_default_not_busy(self):
+        # social, self_care, family, admin, anticipated all default to NOT busy
+        for kind in ("social", "self_care", "family", "admin", "anticipated"):
+            assert _is_event_busy_now({"kind": kind}, self._now) is False, kind
+
+    def test_other_kinds_busy_when_explicit(self):
+        # Movie, mom call, doctor, etc. — planner sets busy: True
+        for kind in ("social", "self_care", "family", "admin", "anticipated"):
+            assert _is_event_busy_now({"kind": kind, "busy": True}, self._now) is True, kind
+
+    def test_unknown_kind_not_busy(self):
+        assert _is_event_busy_now({"kind": "unknown"}, self._now) is False
+
+    def test_work_probability_distribution(self):
+        # Empirical sanity: over many trials, busy rate is near WORK_BUSY_PROBABILITY
+        rng = random.Random(42)
+        ev = {"kind": "work"}
+        n = 10_000
+        busy_count = sum(1 for _ in range(n) if _is_event_busy_now(ev, self._now, rng=rng))
+        actual_rate = busy_count / n
+        # Allow ±2 percentage points — large enough for 10k trials with seed 42
+        assert abs(actual_rate - WORK_BUSY_PROBABILITY) < 0.02, (
+            f"work busy rate {actual_rate:.3f} too far from {WORK_BUSY_PROBABILITY}"
+        )
+
 
 class TestStripSosSlashCommand:
     def test_basic_strip(self):
