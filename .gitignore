@@ -35,6 +35,7 @@
 !backend/tests/test_character_project_state.py
 !backend/tests/test_character_schedule.py
 !backend/tests/test_character_resolver.py
+!backend/tests/test_character_meme.py
 !backend/tests/test_sync_manager.py
 !backend/combat_state.py
 !backend/fix_total_tokens.py

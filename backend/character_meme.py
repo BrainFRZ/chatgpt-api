@@ -30,7 +30,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
+import threading
 import time
 from typing import Optional
 from urllib.parse import quote_plus
@@ -42,7 +44,10 @@ logger = logging.getLogger(__name__)
 USER_AGENT = "web:chorus-characters:v1.0 (meme search; per-character)"
 HTTP_TIMEOUT_S = 8
 
-VISION_MODEL = "claude-sonnet-4-6"  # vision-capable Sonnet for the pick pass
+# Vision-capable Sonnet for the pick pass. Override via MEME_VISION_MODEL env var
+# if Anthropic deprecates this name or you want to swap to a cheaper/faster tier
+# (e.g. claude-haiku-4-5-20251001 for ~3x cost reduction).
+VISION_MODEL = os.environ.get("MEME_VISION_MODEL", "claude-sonnet-4-6")
 VISION_MAX_TOKENS = 256
 VISION_CANDIDATE_CAP = 8             # max candidates shown to the vision picker
 
@@ -164,36 +169,43 @@ FIND_MEME_POST_TOOL = {
 
 _IMGFLIP_CACHE: dict = {"templates": None, "fetched_at": 0.0}
 _IMGFLIP_CACHE_TTL_S = 3600  # 1 hour — template list is slow-changing
+_IMGFLIP_CACHE_LOCK = threading.Lock()
 
 
 def _get_imgflip_templates() -> list[dict]:
-    """Fetch Imgflip's top-100 popular templates, with simple in-memory cache."""
+    """Fetch Imgflip's top-100 popular templates, with simple in-memory cache.
+
+    The lock prevents two concurrent turns from both issuing the get_memes
+    fetch when the cache is cold — under the GIL the dict assignment itself is
+    atomic, but the read-fetch-write sequence isn't, and double-fetching wastes
+    a network round-trip.
+    """
     import requests
     now = time.time()
-    if _IMGFLIP_CACHE["templates"] and (now - _IMGFLIP_CACHE["fetched_at"]) < _IMGFLIP_CACHE_TTL_S:
-        return _IMGFLIP_CACHE["templates"]
-    try:
-        r = requests.get(
-            "https://api.imgflip.com/get_memes",
-            timeout=HTTP_TIMEOUT_S,
-            headers={"User-Agent": USER_AGENT},
-        )
-        r.raise_for_status()
-        data = r.json()
-        memes = (data.get("data") or {}).get("memes") or []
-        # Keep just what we need: id, name, box_count, url (preview)
-        pruned = [{
-            "id": str(m.get("id") or ""),
-            "name": str(m.get("name") or ""),
-            "box_count": int(m.get("box_count") or 2),
-            "url": str(m.get("url") or ""),
-        } for m in memes if m.get("id") and m.get("name")]
-        _IMGFLIP_CACHE["templates"] = pruned
-        _IMGFLIP_CACHE["fetched_at"] = now
-        return pruned
-    except Exception as e:
-        logger.warning(f"imgflip get_memes failed: {type(e).__name__}: {e}")
-        return _IMGFLIP_CACHE.get("templates") or []
+    with _IMGFLIP_CACHE_LOCK:
+        if _IMGFLIP_CACHE["templates"] and (now - _IMGFLIP_CACHE["fetched_at"]) < _IMGFLIP_CACHE_TTL_S:
+            return _IMGFLIP_CACHE["templates"]
+        try:
+            r = requests.get(
+                "https://api.imgflip.com/get_memes",
+                timeout=HTTP_TIMEOUT_S,
+                headers={"User-Agent": USER_AGENT},
+            )
+            r.raise_for_status()
+            data = r.json()
+            memes = (data.get("data") or {}).get("memes") or []
+            pruned = [{
+                "id": str(m.get("id") or ""),
+                "name": str(m.get("name") or ""),
+                "box_count": int(m.get("box_count") or 2),
+                "url": str(m.get("url") or ""),
+            } for m in memes if m.get("id") and m.get("name")]
+            _IMGFLIP_CACHE["templates"] = pruned
+            _IMGFLIP_CACHE["fetched_at"] = now
+            return pruned
+        except Exception as e:
+            logger.warning(f"imgflip get_memes failed: {type(e).__name__}: {e}")
+            return _IMGFLIP_CACHE.get("templates") or []
 
 
 def _fuzzy_match_template(query: str, templates: list[dict]) -> tuple[Optional[dict], list[dict]]:
@@ -384,7 +396,10 @@ def format_make_meme_result(result: dict, top_text: str, bottom_text: str) -> st
 
 _DEFAULT_SUBREDDITS = ["memes", "me_irl", "AdviceAnimals", "wholesomememes"]
 _IMG_URL_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp)(\?|$)", re.IGNORECASE)
-_BLOCKED_HOSTS = ("v.redd.it", "redgifs.com", "youtube.com", "youtu.be", "gallery.")
+# Hosts whose URLs we shouldn't try to embed as images. Reddit gallery POSTS are
+# filtered separately via post_data["is_gallery"] — we don't substring-match
+# "gallery" in URLs because it false-positives on legitimate filenames.
+_BLOCKED_HOSTS = ("v.redd.it", "redgifs.com", "youtube.com", "youtu.be")
 _PULLPUSH_BASE = "https://api.pullpush.io/reddit/search/submission"
 
 

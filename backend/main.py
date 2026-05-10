@@ -10451,8 +10451,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         if not _result.get("ok") and _result.get("error"):
                                             _notif["error"] = str(_result.get("error"))[:200]
                                         _content = _format_make_meme_result(_result, _top, _bot)
-                                    else:
-                                        # find_meme_post
+                                    elif _name == _find_meme_post_tool_name:
                                         _query = str(_input.get("query") or "").strip()
                                         _sub = str(_input.get("subreddit") or "").strip() or None
                                         _intent = str(_input.get("intent") or "").strip()
@@ -10489,6 +10488,15 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         if not _result.get("ok") and _result.get("error"):
                                             _notif["error"] = str(_result.get("error"))[:200]
                                         _content = _format_find_meme_post_result(_result)
+                                    else:
+                                        # Unreachable: _character_tool_names already filters tool_calls
+                                        # to the four expected names. This branch only fires if the set
+                                        # gets out of sync with the if/elif chain — log and skip rather
+                                        # than crash the turn.
+                                        logger.warning(f"character tool dispatch: unhandled tool name {_name!r}")
+                                        _result = {"ok": False, "error": f"unhandled tool: {_name}"}
+                                        _notif = {"type": "character_tool_unknown", "name": _name, "ok": False}
+                                        _content = f"Unknown tool {_name!r} — continue your reply without it."
                                     if not client_disconnected:
                                         yield f"event: state_notifications\ndata: {json.dumps([_notif])}\n\n"
                                         await sync_manager.broadcast_to_chat(
