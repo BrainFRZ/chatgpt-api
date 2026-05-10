@@ -465,6 +465,7 @@ export default function ChatView({
           const isCombatMode = !!(msg as any).combat_mode;
           const isNetCombatMode = !!(msg as any).net_combat_mode;
           const isInterviewMode = !!(msg as any)._characters_interview_mode;
+          const isSosUser = msg.role === 'user' && !!(msg as any).is_sos;
           // Check if this message pair is manually unstaged (Novels)
           const isUnstaged = msg.role === 'user' ? msg.staged === false
             : (i > 0 && messages[i - 1]?.role === 'user' && messages[i - 1]?.staged === false);
@@ -524,6 +525,7 @@ export default function ChatView({
                 isChaseMode ? {borderLeft: '3px solid #00d4ff', paddingLeft: '8px'} :
                 isSexMode ? {borderLeft: '3px solid #e88fa5', paddingLeft: '8px'} :
                 isInterviewMode ? {borderLeft: '3px solid #6b4a23', paddingLeft: '8px', color: '#3a2818'} :
+                isSosUser ? {borderLeft: '3px solid #ef4444', paddingLeft: '8px'} :
                 {}
               )}}>
                 {isNetCombatMode && <span style={{color: '#a855f7', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>NET+MEAT</span>}
@@ -532,6 +534,7 @@ export default function ChatView({
                 {!isNetCombatMode && !isHackMode && !isCombatMode && isShipCombatMode && <span style={{color: '#f59e0b', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>SHIP</span>}
                 {!isNetCombatMode && !isHackMode && !isCombatMode && !isShipCombatMode && isChaseMode && <span style={{color: '#00d4ff', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>CHASE</span>}
                 {!isNetCombatMode && !isHackMode && !isCombatMode && !isShipCombatMode && !isChaseMode && isSexMode && <span style={{color: '#e88fa5', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px'}}>XXX</span>}
+                {isSosUser && <span style={{color: '#ef4444', marginRight: '6px', fontFamily: 'monospace', fontSize: '11px', fontWeight: 'bold'}}>🚨 SOS</span>}
                 {msg.role === 'user' ? 'You' : 'Assistant'}
                 {msg.role === 'user' && editingMessageIndex !== i && (
                   <button

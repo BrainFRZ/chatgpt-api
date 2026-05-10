@@ -6416,16 +6416,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _stripped_sos, _was_sos_command = strip_sos_slash_command(_raw_input_text)
                 if _was_sos_command:
                     branch_path[-1]["content"] = _stripped_sos
-                    branch_path[-1]["is_sos"] = True
                     _user_input_text = build_message_content(branch_path[-1])
 
+                # Set is_sos metadata for ANY recognized SOS marker (slash
+                # command OR naked keyword like "911" / "emergency" / "SOS"
+                # mid-sentence). The frontend renders is_sos messages with a
+                # subtle accent so urgency reads at a glance in chat history.
+                _is_sos_user_message = _was_sos_command or is_sos_message(_user_input_text)
+                if _is_sos_user_message:
+                    branch_path[-1]["is_sos"] = True
+
                 _busy_event = current_busy_event(_current_schedule, _now_for_busy)
-                # SOS check still works on the stripped text — keyword detection
-                # (SOS, 911, emergency) catches non-prefix urgency markers, and
-                # the slash-command flag we just set covers /sos
-                _busy_sos_break = bool(_busy_event) and (
-                    _was_sos_command or is_sos_message(_user_input_text)
-                )
+                _busy_sos_break = bool(_busy_event) and _is_sos_user_message
                 _pending_sos_break_notif = None  # populated below if SOS-break
 
                 # Hard-skip path: she's busy and there's no SOS. Don't run any
