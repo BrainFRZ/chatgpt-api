@@ -10967,6 +10967,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         assistant_message = accumulated_content or usage.get('content') or ''
                         reasoning_summary = accumulated_thinking or usage.get('reasoning')
 
+                        # Defensive: strip BROKEN markdown image syntax from
+                        # Characters assistant content. Pattern: `![alt]` with
+                        # NO `(url)` after it. Opus 3 occasionally hallucinates
+                        # this when it imagines a meme without calling the
+                        # make_meme/find_meme_post tool. The contract forbids
+                        # it but defense in depth — a phantom `![alt]` in saved
+                        # content renders as nothing in ReactMarkdown and looks
+                        # broken on chat reload. Strip it post-stream so the
+                        # persisted message at least reads as text-only.
+                        if use_characters and not use_characters_interview and assistant_message:
+                            _broken_md_re = re.compile(r"!\[[^\]\n]*\](?!\()")
+                            _stripped = _broken_md_re.sub("", assistant_message)
+                            if _stripped != assistant_message:
+                                logger.warning(
+                                    f"Characters: stripped {len(assistant_message) - len(_stripped)} chars of "
+                                    f"broken markdown image syntax (no URL) from saved content"
+                                )
+                                assistant_message = _stripped
+
                         # ── Sex mode: detect [SCENE COMPLETE] and [SCENE HANDOFF] ──
                         sex_scene_complete = False
                         _sex_handoff_summary_for_log = None
