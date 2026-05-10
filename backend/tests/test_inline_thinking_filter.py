@@ -380,16 +380,51 @@ class TestNarrationMode:
         assert (t + t_f) == ""
 
     def test_no_reply_tag_with_other_xml_still_falls_back(self):
-        # If the model emitted <thinking> but no <reply>, fallback still kicks
-        # in — all content (including the thinking markers) goes to message.
-        # Acceptable failure mode — the tags will look weird but the user
-        # at least sees the actual reply text.
+        # If the model emitted <thinking> but no <reply>, fallback now runs
+        # the buffer through denylist parsing so the thinking still gets
+        # routed to reasoning. Only the bare text outside the thinking tags
+        # ends up in the message — no leak.
         f = InlineThinkingFilter(narration_tag="reply")
         c, t = f.feed("<thinking>just thinking</thinking>plain reply text")
         c_f, t_f = f.flush()
-        full = c + c_f
-        assert "plain reply text" in full
-        assert (t + t_f) == ""
+        full_content = c + c_f
+        full_thinking = t + t_f
+        assert full_content == "plain reply text"
+        assert full_thinking == "just thinking"
+        assert "<thinking>" not in full_content
+        assert "</thinking>" not in full_content
+
+    def test_no_reply_tag_real_opus3_failure(self):
+        # Regression test for the actual failure mode caught in chat: Opus 3
+        # emitted its reasoning in <thinking>...</thinking>, then bare reply
+        # text below. Before the denylist-in-fallback fix, the entire raw
+        # output (thinking tags + reply) went into content. Now thinking is
+        # routed to reasoning, leaving only the visible reply.
+        raw = (
+            "<thinking>\n"
+            "The update from Shae is short and sweet. Let me think about how to reply.\n"
+            "Goals: be warm, joke about cheese, gently refute apology.\n"
+            "</thinking>\n\n"
+            "cheese in the noodles?? kait remains undefeated. never change\n\n"
+            "thanks for the update babe"
+        )
+        f = InlineThinkingFilter(narration_tag="reply")
+        content_acc = ""
+        thinking_acc = ""
+        # Stream in 50-char chunks to exercise the boundary-buffering logic
+        for i in range(0, len(raw), 50):
+            c, t = f.feed(raw[i:i+50])
+            content_acc += c
+            thinking_acc += t
+        c, t = f.flush()
+        content_acc += c
+        thinking_acc += t
+        assert "<thinking>" not in content_acc
+        assert "</thinking>" not in content_acc
+        assert "cheese in the noodles" in content_acc
+        assert "thanks for the update babe" in content_acc
+        assert "The update from Shae" in thinking_acc
+        assert "Goals: be warm" in thinking_acc
 
     def test_pre_tag_content_buffered_until_reply_arrives(self):
         # Real-time streaming behavior: pre-tag thinking content is held in

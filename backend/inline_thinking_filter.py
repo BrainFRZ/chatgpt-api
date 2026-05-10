@@ -235,13 +235,18 @@ class InlineThinkingFilter:
             if self._saw_narration_tag:
                 # Already saw narration tag, post-narration → leftover is thinking
                 return ("", leftover)
-            # Fallback: no narration tag was ever seen across the whole stream.
-            # Treat ALL accumulated outside-tag content as the message instead
-            # of silently routing it to reasoning. This handles the failure
-            # mode where the model forgets to wrap entirely.
+            # Fallback: no <reply> tag was ever seen across the whole stream.
+            # The model emitted bare text (probably with some <thinking>...
+            # </thinking> blocks mixed in). Run the accumulated buffer through
+            # denylist parsing so <thinking>/<search_quality_*>/etc. still get
+            # routed to reasoning — without this we'd dump the whole thing
+            # (thinking AND reply) into content.
             buffer_total = self._pre_tag_buffer + leftover
             self._pre_tag_buffer = ""
-            return (buffer_total, "")
+            denylist = InlineThinkingFilter()  # DEFAULT_THINKING_TAGS
+            content, thinking = denylist.feed(buffer_total)
+            tail_content, tail_thinking = denylist.flush()
+            return (content + tail_content, thinking + tail_thinking)
         # Denylist mode unchanged
         if not leftover:
             return "", ""
