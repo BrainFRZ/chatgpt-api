@@ -39,6 +39,7 @@
 !backend/tests/test_character_image_reading.py
 !backend/tests/test_inline_thinking_filter.py
 !backend/tests/test_character_busy.py
+!backend/tests/test_character_holidays.py
 !backend/tests/test_sync_manager.py
 !backend/combat_state.py
 !backend/fix_total_tokens.py
@@ -58,6 +59,7 @@
 !backend/character_inner_state.py
 !backend/inline_thinking_filter.py
 !backend/character_busy.py
+!backend/character_holidays.py
 !backend/character_planner.py
 !backend/character_project_state.py
 !backend/character_schedule.py

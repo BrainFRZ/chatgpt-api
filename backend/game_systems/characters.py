@@ -785,6 +785,27 @@ def build_wall_clock_injection(state: dict) -> str:
     return "\n".join(parts)
 
 
+def build_holiday_injection(state: dict) -> str:
+    """When today is a recognized US holiday, surface it explicitly so the
+    voice model doesn't have to derive it from the [NOW] date. Empty when
+    not a holiday.
+
+    Why explicit: Opus 3 derives major holidays from the date inconsistently —
+    sometimes catches Mother's Day from 'Sunday May 10', sometimes doesn't.
+    A direct '[HOLIDAY] Today is Mother's Day.' line makes it deterministic.
+    """
+    from character_holidays import holiday_for_date
+    today = now_et().date()
+    name = holiday_for_date(today)
+    if not name:
+        return ""
+    return (
+        f"[HOLIDAY] Today is {name}. Use this naturally if it fits the "
+        f"moment — most replies still won't mention it; some will. Don't "
+        f"force it into every turn."
+    )
+
+
 def build_channel_injection(state: dict) -> str:
     channel = state.get("channel") or DEFAULT_CHANNEL
     descriptions = {
@@ -1445,6 +1466,7 @@ def build_characters_injections(state: dict) -> str:
     for builder in (
         build_busy_interrupt_injection,    # FIRST — overrides everything else
         build_wall_clock_injection,
+        build_holiday_injection,
         build_channel_injection,
         build_wellbeing_injection,
         build_arc_state_injection,
