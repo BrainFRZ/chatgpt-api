@@ -43,6 +43,7 @@ from pipeline import (
     generate_dice_pool, generate_name_dice,
     migrate_pipeline_state,
     get_context_pairs, _filter_unstaged_pairs, extract_state_notifications, extract_ship_combat_notifications,
+    extract_character_agent_notifications,
     collapse_hack_messages,
     collapse_combat_messages,
     collapse_ship_combat_messages,
@@ -10533,6 +10534,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 # State was mutated in place; persist back
                                 stateful_pipeline_state["characters_state"] = _characters_state
                                 data["pipeline_state"] = stateful_pipeline_state
+                                # Surface meaningful character_agent ops (memory adds,
+                                # new callbacks, arc shifts, user_profile/growth adds)
+                                # as banner notifications so the user sees what got
+                                # captured this turn instead of digging through JSON.
+                                _ca_notifs = extract_character_agent_notifications(
+                                    _ca_meta.get("character_agent_ops") or {}
+                                )
+                                if _ca_notifs:
+                                    yield f"event: state_notifications\ndata: {json.dumps(_ca_notifs)}\n\n"
+                                    try:
+                                        await sync_manager.broadcast_to_chat(
+                                            chat_key,
+                                            SyncEvent(
+                                                type=SyncEventType.STATE_NOTIFICATIONS,
+                                                data={"notifications": _ca_notifs},
+                                            ),
+                                        )
+                                    except Exception as _ca_bc_err:
+                                        logger.warning(f"character_agent notif broadcast failed: {_ca_bc_err}")
                             except Exception as _ca_err:
                                 logger.error(f"character_agent: error for {username}: {_ca_err}")
 

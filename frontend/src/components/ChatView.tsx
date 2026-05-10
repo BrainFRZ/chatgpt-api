@@ -1197,6 +1197,68 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_memory') {
+                return (
+                  <div key={i} style={styles.memoryNotification}>
+                    <span style={styles.notificationLabel}>📌 memory saved</span>
+                    {n.impact ? ` (impact ${n.impact})` : ''}
+                    {': '}
+                    {n.text}
+                    {n.quote && (
+                      <div style={styles.notificationQuote}>Quote: "{n.quote}"</div>
+                    )}
+                  </div>
+                );
+              }
+              if (n.type === 'character_callback_added') {
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>📅 new plan / callback</span>
+                    {n.text && <>: {n.text}</>}
+                    {n.due_by && (
+                      <span style={styles.notificationReason}> — due {n.due_by}</span>
+                    )}
+                  </div>
+                );
+              }
+              if (n.type === 'character_callback_resolved') {
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>✅ callback resolved</span>
+                    {n.id != null && <span style={styles.notificationReason}> #{n.id}</span>}
+                    {n.reason && <>: {n.reason}</>}
+                  </div>
+                );
+              }
+              if (n.type === 'character_arc_state') {
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>💞 arc shift</span>
+                    {': '}
+                    <span style={styles.notificationReason}>{n.value}</span>
+                  </div>
+                );
+              }
+              if (n.type === 'character_user_profile') {
+                return (
+                  <div key={i} style={styles.memoryNotification}>
+                    <span style={styles.notificationLabel}>👤 learned about you</span>
+                    {n.category && <span style={styles.notificationReason}> [{n.category}]</span>}
+                    {': '}
+                    {n.text}
+                  </div>
+                );
+              }
+              if (n.type === 'character_growth') {
+                return (
+                  <div key={i} style={styles.memoryNotification}>
+                    <span style={styles.notificationLabel}>🌱 growth note</span>
+                    {n.category && <span style={styles.notificationReason}> [{n.category}]</span>}
+                    {': '}
+                    {n.text}
+                  </div>
+                );
+              }
               if (n.type === 'character_find_meme_post') {
                 const failed = n.ok === false;
                 return (

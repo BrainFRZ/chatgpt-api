@@ -5142,6 +5142,76 @@ def extract_state_notifications(ops_source: dict, npcs_present: set = None,
     return notifications
 
 
+def extract_character_agent_notifications(ops: dict) -> list:
+    """Surface Characters character_agent ops as user-visible banners.
+
+    The character_agent silently mutates state (memory file, callbacks,
+    arc_state, user_profile, growth) on most turns. Without these banners
+    the user has no way to see what the agent captured — they have to
+    refresh and dig through the JSON. We notify on the meaningful ADD
+    actions and arc_state shifts; quieter ops (checkin, update timestamps,
+    obsolete marks) stay silent so we don't spam the chat.
+    """
+    if not isinstance(ops, dict):
+        return []
+    notifications = []
+
+    for op in ops.get("memory_ops", []) or []:
+        if op.get("action") != "add":
+            continue
+        notifications.append({
+            "type": "character_memory",
+            "text": op.get("text"),
+            "quote": op.get("quote"),
+            "impact": op.get("impact"),
+            "focus": op.get("focus"),
+        })
+
+    for op in ops.get("callback_ops", []) or []:
+        action = op.get("action")
+        if action == "add":
+            notifications.append({
+                "type": "character_callback_added",
+                "text": op.get("text"),
+                "due_by": op.get("due_by"),
+            })
+        elif action == "resolve":
+            notifications.append({
+                "type": "character_callback_resolved",
+                "id": op.get("id"),
+                "reason": op.get("reason"),
+            })
+
+    arc_op = ops.get("arc_state_op")
+    if isinstance(arc_op, dict) and arc_op.get("action") == "set":
+        value = (arc_op.get("value") or "").strip()
+        if value:
+            notifications.append({
+                "type": "character_arc_state",
+                "value": value,
+            })
+
+    for op in ops.get("profile_ops", []) or []:
+        if op.get("action") != "add":
+            continue
+        notifications.append({
+            "type": "character_user_profile",
+            "text": op.get("text"),
+            "category": op.get("category"),
+        })
+
+    for op in ops.get("growth_ops", []) or []:
+        if op.get("action") != "add":
+            continue
+        notifications.append({
+            "type": "character_growth",
+            "text": op.get("text"),
+            "category": op.get("category"),
+        })
+
+    return notifications
+
+
 def extract_ship_combat_notifications(ship_combat_tool_input: dict) -> list:
     """Convert ship combat npc_actions into user-visible state notification entries."""
     notifications = []
