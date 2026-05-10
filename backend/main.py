@@ -6207,6 +6207,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             trim_anchor_id = data.get("_trim_anchor_id")
             # Collapse hack and combat messages into summary pairs before context trimming
             branch_path_for_context = collapse_sex_messages(collapse_chase_messages(collapse_net_combat_messages(collapse_ship_combat_messages(collapse_combat_messages(collapse_hack_messages(branch_path))))))
+            # Characters: also collapse busy_placeholder runs so the model sees
+            # one gap marker instead of N (overnight messages while she was
+            # asleep). No-op for non-Characters paths since they don't produce
+            # busy_placeholder messages.
+            if use_characters or use_characters_interview:
+                from character_busy import collapse_busy_placeholders_in_history
+                branch_path_for_context = collapse_busy_placeholders_in_history(branch_path_for_context)
             # Characters: each mode gets its own fresh context view of the chat —
             # correspondence sees only correspondence turns; the interviewer sees only
             # the current interview session (since the most recent /reinterview, or
@@ -6374,6 +6381,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     is_sos_message,
                     describe_busy_event,
                     busy_status_for_notification,
+                    strip_sos_slash_command,
+                    collapse_busy_placeholders_in_history,
                 )
                 from character_schedule import load_schedule
 
@@ -6398,8 +6407,25 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 except Exception as _bs_err:
                     logger.warning(f"Characters busy check: load_schedule failed: {_bs_err}")
                     _current_schedule = None
+                # Strip the /sos prefix from the user message if present, before
+                # any further processing. This way the saved + displayed message
+                # is the actual urgent content, not "/sos help me". An is_sos
+                # metadata flag on the user message records the fact for any
+                # downstream code that wants to know.
+                _raw_input_text = _user_input_text
+                _stripped_sos, _was_sos_command = strip_sos_slash_command(_raw_input_text)
+                if _was_sos_command:
+                    branch_path[-1]["content"] = _stripped_sos
+                    branch_path[-1]["is_sos"] = True
+                    _user_input_text = build_message_content(branch_path[-1])
+
                 _busy_event = current_busy_event(_current_schedule, _now_for_busy)
-                _busy_sos_break = bool(_busy_event) and is_sos_message(_user_input_text)
+                # SOS check still works on the stripped text — keyword detection
+                # (SOS, 911, emergency) catches non-prefix urgency markers, and
+                # the slash-command flag we just set covers /sos
+                _busy_sos_break = bool(_busy_event) and (
+                    _was_sos_command or is_sos_message(_user_input_text)
+                )
                 _pending_sos_break_notif = None  # populated below if SOS-break
 
                 # Hard-skip path: she's busy and there's no SOS. Don't run any
@@ -6414,11 +6440,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     _busy_notif = busy_status_for_notification(_busy_event, _now_for_busy)
                     _busy_desc = describe_busy_event(_busy_event)
                     _placeholder_id = generate_message_id()
+                    _placeholder_content = f"[no reply — {_busy_desc}]"
                     _busy_assistant_msg = {
                         "id": _placeholder_id,
                         "parent_id": user_msg_id,
                         "role": "assistant",
-                        "content": f"[no reply — {_busy_desc}]",
+                        "content": _placeholder_content,
                         "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
                         "busy_placeholder": True,
                         "busy_event": {
@@ -6427,7 +6454,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             "description": _busy_desc,
                             "ends_at": _busy_notif.get("ends_at"),
                         },
-                        "total_tokens": 0,
+                        "total_tokens": count_tokens(_placeholder_content),
                     }
                     data["messages"].append(_busy_assistant_msg)
                     save_chat(username, request.chat_name, data, request.project)

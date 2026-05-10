@@ -9,10 +9,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from character_busy import (  # noqa: E402
     BUSY_EVENT_KINDS,
+    collapse_busy_placeholders_in_history,
     current_busy_event,
     describe_busy_event,
     is_sos_message,
     busy_status_for_notification,
+    strip_sos_slash_command,
 )
 
 
@@ -231,6 +233,169 @@ class TestDescribeBusyEvent:
 
 
 # ── busy_status_for_notification ──────────────────────────────────────────
+
+class TestStripSosSlashCommand:
+    def test_basic_strip(self):
+        cleaned, was = strip_sos_slash_command("/sos help me")
+        assert cleaned == "help me"
+        assert was is True
+
+    def test_uppercase_command(self):
+        cleaned, was = strip_sos_slash_command("/SOS something is wrong")
+        assert cleaned == "something is wrong"
+        assert was is True
+
+    def test_with_leading_whitespace(self):
+        cleaned, was = strip_sos_slash_command("   /sos urgent")
+        assert cleaned == "urgent"
+        assert was is True
+
+    def test_no_command_passes_through(self):
+        cleaned, was = strip_sos_slash_command("hi how are you")
+        assert cleaned == "hi how are you"
+        assert was is False
+
+    def test_command_only_no_args(self):
+        cleaned, was = strip_sos_slash_command("/sos")
+        assert cleaned == ""
+        assert was is True
+
+    def test_keyword_alone_doesnt_strip(self):
+        # Plain "SOS shae help" — the keyword detector triggers SOS via
+        # is_sos_message, but the strip helper only handles the literal /sos
+        # slash-command prefix
+        cleaned, was = strip_sos_slash_command("SOS shae help")
+        assert cleaned == "SOS shae help"
+        assert was is False
+
+    def test_non_string(self):
+        cleaned, was = strip_sos_slash_command(None)  # type: ignore
+        assert cleaned == ""
+        assert was is False
+
+
+class TestCollapseBusyPlaceholders:
+    def _ph(self, content="[no reply — asleep]", kind="sleep", desc="asleep", id_="ph-x"):
+        return {
+            "id": id_,
+            "role": "assistant",
+            "content": content,
+            "busy_placeholder": True,
+            "busy_event": {"kind": kind, "description": desc},
+        }
+
+    def _user(self, content, id_="u-x", timestamp=None):
+        msg = {"id": id_, "role": "user", "content": content}
+        if timestamp:
+            msg["timestamp"] = timestamp
+        return msg
+
+    def _asst(self, content, id_="a-x"):
+        return {"id": id_, "role": "assistant", "content": content}
+
+    def test_no_placeholders_passes_through(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            self._user("hi", id_="u1"),
+            self._asst("hello", id_="a1"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        assert len(out) == 3
+        assert out[1]["id"] == "u1"
+        assert out[2]["id"] == "a1"
+
+    def test_single_busy_gap_filtered_when_followed_by_real_assistant(self):
+        # user → busy_placeholder → real_assistant should drop the placeholder
+        msgs = [
+            self._user("u1 you up", id_="u1"),
+            self._ph(id_="ph1"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        # After flush, just the user remains
+        assert len(out) == 1
+        assert out[0]["id"] == "u1"
+
+    def test_multiple_overnight_messages_merge(self):
+        msgs = [
+            self._user("u1 you up", id_="u1"),
+            self._ph(id_="ph1"),
+            self._user("u2 you home from work", id_="u2"),
+            self._ph(id_="ph2"),
+            self._user("u3 still you up", id_="u3"),
+            self._ph(id_="ph3"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        # Should collapse to a single merged user message
+        assert len(out) == 1
+        merged = out[0]
+        assert merged["role"] == "user"
+        assert "[gap" in merged["content"]
+        assert "u1 you up" in merged["content"]
+        assert "u2 you home from work" in merged["content"]
+        assert "u3 still you up" in merged["content"]
+        # merged_from preserves origin IDs
+        assert set(merged["merged_from"]) == {"u1", "u2", "u3"}
+
+    def test_merged_user_inherits_latest_timestamp(self):
+        msgs = [
+            self._user("u1", id_="u1", timestamp="2026-05-09T22:00:00-04:00"),
+            self._ph(id_="ph1"),
+            self._user("u2", id_="u2", timestamp="2026-05-09T23:30:00-04:00"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        assert len(out) == 1
+        # Should base on the latest user (u2)
+        assert out[0]["timestamp"] == "2026-05-09T23:30:00-04:00"
+
+    def test_distinct_gap_descriptions_combined(self):
+        # Work → sleep crossover, two different busy descriptions
+        msgs = [
+            self._user("during work", id_="u1"),
+            self._ph(kind="work", desc="at work", id_="ph1"),
+            self._user("after work, during sleep", id_="u2"),
+            self._ph(kind="sleep", desc="asleep", id_="ph2"),
+            self._user("morning", id_="u3"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        assert len(out) == 1
+        marker = out[0]["content"]
+        assert "at work" in marker
+        assert "asleep" in marker
+
+    def test_assistant_response_breaks_merge(self):
+        # user1 -> placeholder -> user2 -> real_assistant -> user3 -> placeholder -> user4
+        msgs = [
+            self._user("u1", id_="u1"),
+            self._ph(id_="ph1"),
+            self._user("u2", id_="u2"),
+            self._asst("hey i replied", id_="a1"),
+            self._user("u3", id_="u3"),
+            self._ph(id_="ph2"),
+            self._user("u4", id_="u4"),
+        ]
+        out = collapse_busy_placeholders_in_history(msgs)
+        # Expect: merged(u1+u2) -> a1 -> merged(u3+u4)
+        assert len(out) == 3
+        assert out[0]["role"] == "user"
+        assert "u1" in out[0]["content"]
+        assert "u2" in out[0]["content"]
+        assert out[1]["id"] == "a1"
+        assert out[2]["role"] == "user"
+        assert "u3" in out[2]["content"]
+        assert "u4" in out[2]["content"]
+
+    def test_input_not_mutated(self):
+        msgs = [
+            self._user("u1", id_="u1"),
+            self._ph(id_="ph1"),
+            self._user("u2", id_="u2"),
+        ]
+        original_u1_content = msgs[0]["content"]
+        out = collapse_busy_placeholders_in_history(msgs)
+        assert msgs[0]["content"] == original_u1_content
+        # Output is a different list
+        assert out is not msgs
+
 
 class TestBusyStatusForNotification:
     def test_includes_end_time(self):

@@ -158,6 +158,89 @@ def describe_busy_event(event: dict) -> str:
     return kind or "busy"
 
 
+def strip_sos_slash_command(text: str) -> tuple[str, bool]:
+    """If `text` begins with the /sos slash command, strip it and return
+    (cleaned, True). Otherwise return (text, False).
+
+    Used so the saved user message + chat display don't show the literal
+    '/sos help me' but the SOS context is still tracked via metadata.
+    """
+    if not isinstance(text, str):
+        return ("", False)
+    m = _SOS_SLASH_COMMAND.search(text)
+    if not m:
+        return (text, False)
+    # Remove "/sos" plus any following whitespace
+    rest = text[m.end():].lstrip()
+    return (rest, True)
+
+
+def collapse_busy_placeholders_in_history(messages: list) -> list:
+    """Compact busy_placeholder assistant turns out of a chat-history list
+    before sending it to the model. Consecutive user-busy-user-busy-user
+    runs (5 messages overnight while she was asleep) collapse to a single
+    user message with a gap marker, so the model sees the gap once instead
+    of N times.
+
+    Operates on full message dicts (with id, parent_id, role, content,
+    timestamp, busy_placeholder, busy_event, ...) and returns full dicts —
+    the merged user message is based on the LATEST of the merged ones so
+    its timestamp + attached_files reflect the most recent activity. The
+    merged message gets a `merged_from` field for debug.
+
+    Pure function; doesn't mutate input messages.
+    """
+    out: list[dict] = []
+    accumulated: list[dict] = []
+    pending_gap_descs: list[str] = []
+
+    def _flush_user() -> None:
+        if not accumulated:
+            return
+        if len(accumulated) == 1 and not pending_gap_descs:
+            out.append(accumulated[0])
+        else:
+            base = dict(accumulated[-1])  # newest, preserves timestamp + attached_files
+            content_parts: list[str] = []
+            if pending_gap_descs:
+                seen: list[str] = []
+                for d in pending_gap_descs:
+                    if d not in seen:
+                        seen.append(d)
+                marker = "; ".join(seen)
+                content_parts.append(
+                    f"[gap — Zara was {marker}; she didn't reply to the messages between]"
+                )
+            for m in accumulated:
+                c = m.get("content")
+                if isinstance(c, str) and c.strip():
+                    content_parts.append(c)
+            base["content"] = "\n\n".join(content_parts)
+            base["merged_from"] = [m.get("id") for m in accumulated if m.get("id")]
+            out.append(base)
+        accumulated.clear()
+        pending_gap_descs.clear()
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "user":
+            accumulated.append(msg)
+        elif role == "assistant":
+            if msg.get("busy_placeholder"):
+                ev = msg.get("busy_event") or {}
+                pending_gap_descs.append(ev.get("description") or "unreachable")
+                continue
+            _flush_user()
+            out.append(msg)
+        else:
+            _flush_user()
+            out.append(msg)
+    _flush_user()
+    return out
+
+
 def busy_status_for_notification(event: dict, now_dt: datetime) -> dict:
     """Frontend-shaped notification dict for a busy state."""
     end_dt = None

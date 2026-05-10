@@ -421,6 +421,33 @@ export default function ChatView({
             );
           }
 
+          // Busy placeholder — render as a centered dim status row, NOT as a
+          // chat bubble. The character was asleep / at work and didn't reply;
+          // showing this as her message would read as her saying "[no reply
+          // — asleep]" which is nonsense.
+          const busyPlaceholder = !!(msg as any).busy_placeholder;
+          if (busyPlaceholder && msg.role === 'assistant') {
+            const ev = (msg as any).busy_event || {};
+            const desc = ev.description || ev.kind || 'unreachable';
+            return (
+              <div key={i} style={{
+                textAlign: 'center',
+                color: '#888',
+                fontSize: '12px',
+                padding: '8px 16px',
+                fontStyle: 'italic',
+                opacity: 0.75,
+              }}>
+                💤 no reply — {desc}
+                {ev.ends_at && (
+                  <span style={{ marginLeft: '8px', fontSize: '11px', color: '#666' }}>
+                    (until {new Date(ev.ends_at).toLocaleString()})
+                  </span>
+                )}
+              </div>
+            );
+          }
+
           // Determine if this message is in context
           // Map display index to actual backend index
           // totalMessages includes system message, messages.length does not
