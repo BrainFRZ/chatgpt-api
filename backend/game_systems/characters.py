@@ -1061,6 +1061,49 @@ def build_life_stream_injection(state: dict) -> str:
     return header + "\n" + "\n".join(lines)
 
 
+def _relative_time_label(event_dt: datetime, now_dt: datetime) -> str:
+    """Render a human-readable 'in 5 min' / '3 hours ago' / 'tomorrow' /
+    'yesterday' / 'in 3 days' label for an event time relative to now.
+
+    Makes future-vs-past UNAMBIGUOUS for the model. Without this, the
+    schedule injection just shows wall-time strings like 'Sun 5/10 11am'
+    and the model has to do its own subtraction against [NOW] — which it
+    sometimes gets wrong (notably: pattern-matching 'Sunday morning + mom
+    call routine' and assuming the call already happened when it's
+    actually 5 minutes in the future).
+    """
+    delta = event_dt - now_dt
+    total_secs = delta.total_seconds()
+    if total_secs >= 0:
+        secs = total_secs
+        if secs < 60:
+            return "starting now"
+        if secs < 3600:
+            mins = int(secs / 60)
+            return f"in {mins} min"
+        if secs < 86400:
+            hrs = round(secs / 3600)
+            return f"in {hrs} hour{'s' if hrs != 1 else ''}"
+        # Cross-day comparison via calendar dates
+        if event_dt.date() == (now_dt.date() + timedelta(days=1)):
+            return "tomorrow"
+        days = (event_dt.date() - now_dt.date()).days
+        return f"in {days} days"
+    secs = abs(total_secs)
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        mins = int(secs / 60)
+        return f"{mins} min ago"
+    if secs < 86400:
+        hrs = round(secs / 3600)
+        return f"{hrs} hour{'s' if hrs != 1 else ''} ago"
+    if event_dt.date() == (now_dt.date() - timedelta(days=1)):
+        return "yesterday"
+    days = (now_dt.date() - event_dt.date()).days
+    return f"{days} days ago"
+
+
 def build_schedule_injection(state: dict) -> str:
     """Render the schedule slice — recent elapsed events + upcoming planned ones.
 
@@ -1128,9 +1171,13 @@ def build_schedule_injection(state: dict) -> str:
 
         when_str = "?"
         when_local = ev.get("when_local")
+        event_dt: Optional[datetime] = None
         if isinstance(when_local, str) and when_local:
             try:
                 dt = datetime.fromisoformat(when_local)
+                if dt.tzinfo is None:
+                    dt = dt.astimezone()
+                event_dt = dt
                 wd = dt.strftime("%a")
                 date_part = f"{dt.month}/{dt.day}"
                 time_part = dt.strftime("%I:%M%p").lstrip("0").lower()
@@ -1146,6 +1193,10 @@ def build_schedule_injection(state: dict) -> str:
         tail_bits = []
         if kind:
             tail_bits.append(kind)
+        # Relative time marker — UNAMBIGUOUS future-vs-past so the model can't
+        # confuse upcoming events with completed ones.
+        if event_dt is not None:
+            tail_bits.append(_relative_time_label(event_dt, now_dt))
         if effective_status == "planned":
             if anticipation == "looking_forward":
                 tail_bits.append("looking forward")
