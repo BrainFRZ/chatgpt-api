@@ -9460,16 +9460,18 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 client_disconnected = False
                 resolve_mechanics_extra_usage = None  # Track usage from resolve_mechanics round-trip (cpred)
                 # Inline-thinking filter: Opus 3 (and other pre-extended-thinking
-                # models) emit chain-of-thought as inline <thinking>...</thinking>
-                # XML tags in regular content. Without filtering, those leak into
-                # the visible reply. The filter splits them out into the same
-                # thinking-stream other models use natively. Stateful so it can
-                # handle tags split across stream chunks; reused across the
-                # tool-followup loop below so a single turn's thinking is
-                # consistent.
+                # models) emit chain-of-thought as inline XML tags. We instruct
+                # them via the contract to wrap the actual visible reply in
+                # <reply>...</reply> tags; the filter routes everything OUTSIDE
+                # those tags to the thinking stream and strips the tag markers
+                # from visible content. Robust to any reasoning-tag pattern the
+                # model invents — only what's inside <reply> is shown.
                 from inline_thinking_filter import InlineThinkingFilter, model_id_uses_inline_thinking
                 _use_inline_thinking_filter = model_id_uses_inline_thinking(model_id)
-                _inline_thinking_filter = InlineThinkingFilter() if _use_inline_thinking_filter else None
+                _inline_thinking_filter = (
+                    InlineThinkingFilter(narration_tag="reply")
+                    if _use_inline_thinking_filter else None
+                )
                 if model_id.startswith("gpt"):
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
                 else:

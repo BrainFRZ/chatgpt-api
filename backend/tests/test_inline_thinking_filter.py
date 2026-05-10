@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from inline_thinking_filter import (  # noqa: E402
+    DEFAULT_THINKING_TAGS,
     InlineThinkingFilter,
     model_id_uses_inline_thinking,
 )
@@ -200,6 +201,215 @@ class TestRealisticTraces:
         c, t = f.feed("<thinking>first thought</thinking>visible<thinking>second</thinking>more")
         assert c == "visiblemore"
         assert t == "first thoughtsecond"
+
+
+# ── Multi-tag behavior ─────────────────────────────────────────────────────
+
+class TestMultiTag:
+    def test_default_tags_include_search_quality(self):
+        # The default config catches the Opus 3 search-related leaks
+        assert "thinking" in DEFAULT_THINKING_TAGS
+        assert "search_quality_reflection" in DEFAULT_THINKING_TAGS
+        assert "search_quality_score" in DEFAULT_THINKING_TAGS
+
+    def test_search_quality_reflection_stripped(self):
+        f = InlineThinkingFilter()
+        c, t = f.feed(
+            "<search_quality_reflection>good results</search_quality_reflection>"
+            "lmao here's the answer"
+        )
+        assert c == "lmao here's the answer"
+        assert t == "good results"
+
+    def test_search_quality_score_stripped(self):
+        f = InlineThinkingFilter()
+        c, t = f.feed(
+            "<search_quality_score>4</search_quality_score>"
+            "actually informative"
+        )
+        assert c == "actually informative"
+        assert t == "4"
+
+    def test_multiple_different_tags_in_sequence(self):
+        f = InlineThinkingFilter()
+        c, t = f.feed(
+            "<thinking>let me think</thinking>"
+            "<search_quality_reflection>solid sources</search_quality_reflection>"
+            "<search_quality_score>4</search_quality_score>"
+            "\n\nokay so here's the deal"
+        )
+        assert c == "\n\nokay so here's the deal"
+        assert "let me think" in t
+        assert "solid sources" in t
+        assert "4" in t
+
+    def test_real_opus3_search_trace(self):
+        """The exact pattern Opus 3 emitted in the production search test —
+        thinking block first, then search_quality_reflection + score, then
+        the visible reply."""
+        f = InlineThinkingFilter()
+        chunks = [
+            "<thinking>\nTo answer the question I'd search the web.\n</thinking>",
+            "\n\n<search_quality_reflection>\nThe results look ",
+            "comprehensive enough.\n</search_quality_reflection>",
+            "\n<search_quality_score>4</search_quality_score>",
+            "\n\nlmao of course you don't trust your weather app",
+        ]
+        content_total = []
+        thinking_total = []
+        for ch in chunks:
+            c, t = f.feed(ch)
+            content_total.append(c)
+            thinking_total.append(t)
+        c_f, t_f = f.flush()
+        content_total.append(c_f)
+        thinking_total.append(t_f)
+
+        full_content = "".join(content_total)
+        full_thinking = "".join(thinking_total)
+        assert "lmao of course" in full_content
+        # No tag remnants in visible content
+        assert "<thinking>" not in full_content
+        assert "<search_quality" not in full_content
+        # Reasoning captured all three blocks
+        assert "search the web" in full_thinking
+        assert "comprehensive" in full_thinking
+        assert "4" in full_thinking
+
+    def test_custom_tag_list(self):
+        f = InlineThinkingFilter(tag_names=["scratchpad"])
+        c, t = f.feed("<scratchpad>working</scratchpad>visible")
+        assert c == "visible"
+        assert t == "working"
+        # Default tags are NOT applied when custom list given
+        f2 = InlineThinkingFilter(tag_names=["scratchpad"])
+        c2, t2 = f2.feed("<thinking>this should NOT be stripped</thinking>visible")
+        assert "<thinking>" in c2
+        assert "visible" in c2
+
+    def test_partial_open_held_for_any_tag(self):
+        # "<search" could be the start of "<search_quality_reflection>" so it's held
+        f = InlineThinkingFilter()
+        c, t = f.feed("intro <search")
+        assert c == "intro "
+        assert t == ""
+        c2, t2 = f.feed("_quality_reflection>x</search_quality_reflection>tail")
+        assert c2 == "tail"
+        assert t2 == "x"
+
+
+# ── Reply-wrap (narration) mode ────────────────────────────────────────────
+
+class TestNarrationMode:
+    def test_basic_reply_extraction(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("<reply>hello world</reply>")
+        assert c == "hello world"
+        assert t == ""
+
+    def test_thinking_before_reply_routed_to_thinking(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("let me think about this<reply>actual response</reply>")
+        assert c == "actual response"
+        assert t == "let me think about this"
+
+    def test_text_after_reply_also_routed_to_thinking(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("<reply>visible</reply>some afterthought")
+        assert c == "visible"
+        assert t == "some afterthought"
+
+    def test_xml_tags_outside_reply_treated_as_thinking(self):
+        # Whatever XML pattern the model emits outside <reply>, it's all reasoning
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed(
+            "<thinking>step 1</thinking>"
+            "<search_quality_reflection>good</search_quality_reflection>"
+            "<some_random_tag>whatever</some_random_tag>"
+            "<reply>the actual reply</reply>"
+        )
+        assert c == "the actual reply"
+        # All the outside-tag content (including the tag markers themselves) goes to thinking
+        assert "step 1" in t
+        assert "good" in t
+        assert "whatever" in t
+        # The reasoning markers themselves appear in thinking output (we don't strip them)
+        assert "<thinking>" in t
+
+    def test_chunk_split_across_reply_open_tag(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c1, t1 = f.feed("planning... <rep")
+        # "<rep" held back as possible <reply> start; "planning... " emitted as thinking
+        assert c1 == ""
+        assert t1 == "planning... "
+        c2, t2 = f.feed("ly>visible</reply>more thinking")
+        assert c2 == "visible"
+        assert t2 == "more thinking"
+
+    def test_chunk_split_across_reply_close_tag(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c1, t1 = f.feed("<reply>part one and part two</rep")
+        assert c1 == "part one and part two"
+        assert t1 == ""
+        c2, t2 = f.feed("ly>after thoughts")
+        assert c2 == ""
+        assert t2 == "after thoughts"
+
+    def test_no_reply_tag_at_all_everything_is_thinking(self):
+        # Strict mode — if the model forgot to wrap, everything is reasoning.
+        # The contract is firm; this is a contract failure.
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("the model just wrote a reply with no wrap tags")
+        c_f, t_f = f.flush()
+        assert (c + c_f) == ""
+        assert (t + t_f) == "the model just wrote a reply with no wrap tags"
+
+    def test_flush_inside_reply_emits_as_content(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("<reply>truncated mid-reply")
+        # Stream cuts off without close — flush emits as content
+        c2, t2 = f.flush()
+        assert c == "truncated mid-reply"
+        assert (c + c2) == "truncated mid-reply"
+
+    def test_in_thinking_property_inverted_for_narration_mode(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        # Initially outside reply → in_thinking should be True
+        assert f.in_thinking is True
+        f.feed("<reply>")
+        # Now inside reply → in_thinking should be False
+        assert f.in_thinking is False
+        f.feed("</reply>")
+        # Outside again
+        assert f.in_thinking is True
+
+    def test_realistic_opus3_with_wrap(self):
+        f = InlineThinkingFilter(narration_tag="reply")
+        chunks = [
+            "<thinking>\nThe user sent a meme. ",
+            "I should react to the joke.\n</thinking>\n\n",
+            "<search_quality_reflection>\nN/A\n</search_quality_reflection>\n",
+            "<reply>\nlmao that's exactly my whole day\n",
+            "i need a vacation from humans\n</reply>",
+        ]
+        content_total = []
+        thinking_total = []
+        for ch in chunks:
+            c, t = f.feed(ch)
+            content_total.append(c)
+            thinking_total.append(t)
+        c_f, t_f = f.flush()
+        content_total.append(c_f)
+        thinking_total.append(t_f)
+        full_content = "".join(content_total).strip()
+        full_thinking = "".join(thinking_total)
+        assert "lmao that's exactly my whole day" in full_content
+        assert "i need a vacation from humans" in full_content
+        # No tag markers leaked
+        assert "<reply>" not in full_content
+        assert "<thinking>" not in full_content
+        # Reasoning captured the chain-of-thought
+        assert "user sent a meme" in full_thinking
 
 
 # ── model_id_uses_inline_thinking ──────────────────────────────────────────
