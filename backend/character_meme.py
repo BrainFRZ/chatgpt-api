@@ -522,15 +522,19 @@ def _vision_pick_meme(
     candidates: list[dict],
     intent: str,
     voice_hint: str,
-) -> tuple[Optional[int], str]:
-    """Use Sonnet vision to pick the candidate that fits. Returns (index, why) or (None, why)."""
+) -> tuple[Optional[int], str, dict]:
+    """Use Sonnet vision to pick the candidate that fits. Returns
+    (index, why, usage). `usage` is the Anthropic tokens-by-kind dict for
+    the vision call; empty when no API call was made (missing key, no
+    candidates) or when the call raised before usage could be extracted.
+    """
     if not anthropic_key or not candidates:
-        return None, "missing key or no candidates"
+        return None, "missing key or no candidates", {}
 
     try:
         import anthropic
     except ImportError:
-        return None, "anthropic SDK not installed"
+        return None, "anthropic SDK not installed", {}
 
     # Cap candidates and build content
     cands = candidates[:VISION_CANDIDATE_CAP]
@@ -587,7 +591,22 @@ def _vision_pick_meme(
         # back to the top-scored candidate. Candidates are pre-sorted by score
         # in _fetch_reddit_candidates.
         logger.warning(f"vision pick failed, falling back to top-scored candidate: {type(e).__name__}: {e}")
-        return 0, f"vision unavailable ({type(e).__name__}); picked top-scored candidate"
+        return 0, f"vision unavailable ({type(e).__name__}); picked top-scored candidate", {}
+
+    # Extract usage for billing/telemetry — this is the part of meme cost
+    # that's NOT free (Imgflip + pullpush are free, but the Sonnet vision
+    # pick is real money: ~$0.04 per find_meme_post call).
+    vision_usage: dict = {}
+    try:
+        u = msg.usage
+        vision_usage = {
+            "input_tokens": getattr(u, "input_tokens", 0) or 0,
+            "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
+            "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+            "output_tokens": getattr(u, "output_tokens", 0) or 0,
+        }
+    except Exception:
+        pass
 
     try:
         for block in (msg.content or []):
@@ -596,14 +615,30 @@ def _vision_pick_meme(
                 idx = inp.get("index")
                 why = str(inp.get("why") or "")[:240]
                 if idx is None:
-                    return None, why or "none fit"
+                    return None, why or "none fit", vision_usage
                 if isinstance(idx, int) and 0 <= idx < len(cands):
-                    return idx, why
-                return None, "model returned out-of-range index"
+                    return idx, why, vision_usage
+                return None, "model returned out-of-range index", vision_usage
     except Exception as e:
         logger.warning(f"vision pick parse failed: {e}")
 
-    return None, "no pick_meme tool_use in response"
+    return None, "no pick_meme tool_use in response", vision_usage
+
+
+def compute_vision_pick_cost(usage: dict) -> float:
+    """Dollars for one vision-pick call (Sonnet 4.6 at $3/M input, $15/M output;
+    cache-read $0.30/M, cache-creation $3.75/M). Mirrors compute_reading_cost
+    in character_image_reading; kept inline here so callers don't need both
+    modules.
+    """
+    if not isinstance(usage, dict):
+        return 0.0
+    return (
+        (usage.get("input_tokens", 0) or 0) * 3.0
+        + (usage.get("cache_read_input_tokens", 0) or 0) * 0.3
+        + (usage.get("cache_creation_input_tokens", 0) or 0) * 3.75
+        + (usage.get("output_tokens", 0) or 0) * 15.0
+    ) / 1_000_000
 
 
 def run_find_meme_post(
@@ -615,25 +650,31 @@ def run_find_meme_post(
     voice_hint: str,
 ) -> dict:
     """Search Reddit (via pullpush.io archive), vision-pick a candidate. Returns:
-      {ok, url, title, permalink, subreddit, why, error}
+      {ok, url, title, permalink, subreddit, why, vision_usage, vision_cost, error}
+
+    vision_usage / vision_cost cover the Sonnet pick step (Imgflip and pullpush
+    themselves are free, so the meme tool's only real-money component is here).
     """
     candidates, fetch_err = _fetch_reddit_candidates(query, subreddit, limit=25)
     if fetch_err:
         return {"ok": False, "url": "", "title": "", "permalink": "", "subreddit": "",
-                "why": "", "error": fetch_err}
+                "why": "", "vision_usage": {}, "vision_cost": 0.0, "error": fetch_err}
     if not candidates:
         return {"ok": False, "url": "", "title": "", "permalink": "", "subreddit": "",
-                "why": "", "error": "No image candidates returned from Reddit."}
+                "why": "", "vision_usage": {}, "vision_cost": 0.0,
+                "error": "No image candidates returned from Reddit."}
 
-    idx, why = _vision_pick_meme(
+    idx, why, vision_usage = _vision_pick_meme(
         anthropic_key=anthropic_key,
         candidates=candidates,
         intent=intent or query,
         voice_hint=voice_hint or "deadpan, warm under the snark, working-class realist",
     )
+    vision_cost = compute_vision_pick_cost(vision_usage)
     if idx is None:
         return {"ok": False, "url": "", "title": "", "permalink": "", "subreddit": "",
-                "why": why, "error": f"no_match — {why}"}
+                "why": why, "vision_usage": vision_usage, "vision_cost": vision_cost,
+                "error": f"no_match — {why}"}
     chosen = candidates[idx]
     return {
         "ok": True,
@@ -642,6 +683,8 @@ def run_find_meme_post(
         "permalink": chosen["permalink"],
         "subreddit": chosen["subreddit"],
         "why": why,
+        "vision_usage": vision_usage,
+        "vision_cost": vision_cost,
         "error": None,
     }
 

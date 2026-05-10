@@ -939,7 +939,8 @@ export default function ChatView({
                       {(msg as any).meme_calls > 0 && (
                         <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
                           Meme: {(msg as any).meme_calls} call{(msg as any).meme_calls === 1 ? '' : 's'}
-                          {' '}(Imgflip + Reddit + vision-pick)
+                          {typeof (msg as any).meme_cost === 'number' && ` | $${(msg as any).meme_cost.toFixed(6)}`}
+                          {' '}(Imgflip free + Reddit free + Sonnet vision-pick)
                         </span>
                       )}
                       {(msg as any).fetch_url_calls > 0 && (
@@ -947,10 +948,11 @@ export default function ChatView({
                           URL fetch: {(msg as any).fetch_url_calls} call{(msg as any).fetch_url_calls === 1 ? '' : 's'}
                         </span>
                       )}
-                      {/* Aggregate Total: sums every per-agent cost displayed above
-                          plus the main reply's cost. Confirms what your turn actually
-                          cost. Suppressed when no side-agents fired (would just
-                          duplicate the main line's cost). */}
+                      {/* Aggregate Total: msg.cost is just the voice agent's cost
+                          (Opus 3 reply); the side-agent costs are billed separately
+                          and tracked on their own fields. We sum them here so the
+                          Total row is the actual money spent on this turn.
+                          Suppressed when no side-agents fired (would equal main). */}
                       {msg.role === 'assistant' && msg.cost && (() => {
                         const agentCosts =
                           ((msg as any).flag_agent_cost || 0) +
@@ -959,8 +961,10 @@ export default function ChatView({
                           ((msg as any).off_screen_cost || 0) +
                           ((msg as any).inner_state_cost || 0) +
                           ((msg as any).image_reading_cost || 0) +
-                          ((msg as any).search_cost || 0);
-                        const totalNum = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
+                          ((msg as any).search_cost || 0) +
+                          ((msg as any).meme_cost || 0);
+                        const voiceCost = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
+                        const totalNum = voiceCost + agentCosts;
                         if (agentCosts < 1e-9) return null;
                         return (
                           <span style={{ ...styles.messageTokens, fontWeight: 600, marginTop: '2px' }}>

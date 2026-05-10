@@ -10638,6 +10638,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             _fetch_calls_total = 0
                             _fetch_log: list = []   # [{url, reason, ok, title, error}] per call
                             _meme_calls_total = 0
+                            _meme_cost_total = 0.0  # Sonnet vision-pick cost across all find_meme_post calls
+                            _meme_vision_usage_total = {"input_tokens": 0, "cache_read_input_tokens": 0,
+                                                         "cache_creation_input_tokens": 0, "output_tokens": 0}
                             _meme_log: list = []    # [{kind, ok, url, reason, error}] per call
                             _max_search_hops = 2
                             _hop = 0
@@ -10753,6 +10756,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             voice_hint=_voice_hint,
                                         )
                                         _meme_calls_total += 1
+                                        _vc = float(_result.get("vision_cost") or 0.0)
+                                        _meme_cost_total += _vc
+                                        _vu = _result.get("vision_usage") or {}
+                                        for _k in ("input_tokens", "cache_read_input_tokens",
+                                                   "cache_creation_input_tokens", "output_tokens"):
+                                            _meme_vision_usage_total[_k] = _meme_vision_usage_total.get(_k, 0) + (_vu.get(_k, 0) or 0)
                                         _meme_log.append({
                                             "kind": "find_meme_post",
                                             "query": _query,
@@ -10764,6 +10773,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                             "title": _result.get("title") or "",
                                             "permalink": _result.get("permalink") or "",
                                             "why": _result.get("why") or "",
+                                            "vision_cost": _vc,
                                             "error": _result.get("error") if not _result.get("ok") else None,
                                         })
                                         _notif = {
@@ -10888,6 +10898,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if _meme_calls_total > 0:
                                 data["meme_calls"] = _meme_calls_total
                                 data["meme_log"] = _meme_log
+                                data["meme_cost"] = _meme_cost_total
+                                data["meme_vision_usage"] = _meme_vision_usage_total
+                                data["meme_vision_model"] = "claude-sonnet-4-6"
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
