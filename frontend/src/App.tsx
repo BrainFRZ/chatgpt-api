@@ -551,7 +551,7 @@ function App() {
 
       if (ctx.isStale()) return;
 
-      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
+      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system' || (m as any).channel_switch);
       setMessages(loadedMessages);
       setAllMessages(chatData.all_messages || chatData.messages);  // Full tree for branch navigation
       setTotalMessages(chatData.total_messages);
@@ -621,7 +621,7 @@ function App() {
 
       if (ctx.isStale()) return;
 
-      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system');
+      const loadedMessages = chatData.messages.filter((m: ChatMessage) => m.role !== 'system' || (m as any).channel_switch);
       setMessages(loadedMessages);
       setAllMessages(chatData.all_messages || chatData.messages);
       setTotalMessages(chatData.total_messages);
@@ -1777,7 +1777,7 @@ function App() {
         current_leaf_id: data.current_leaf_id
       });
 
-      const loadedMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
+      const loadedMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system' || (m as any).channel_switch);
       setMessages(loadedMessages);
       setAllMessages(data.all_messages || data.messages);  // Full tree for branch navigation
       setCurrentLeafId(data.current_leaf_id || null);  // Track current branch
@@ -1972,7 +1972,7 @@ function App() {
         return;
       }
 
-      const olderMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system');
+      const olderMessages = data.messages.filter((m: ChatMessage) => m.role !== 'system' || (m as any).channel_switch);
 
       const container = messagesContainerRef.current;
       const oldScrollHeight = container?.scrollHeight || 0;
