@@ -296,6 +296,8 @@ export function useMessaging(deps: UseMessagingDeps) {
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
           } else if (event.type === 'channel_changed') {
+            // State update only — the inline marker rides on the done event
+            // so it stays paired with the optimistic-placeholder cleanup.
             deps.setPipelineState((prev: any) => prev
               ? { ...prev, characters_state: { ...(prev.characters_state || {}), channel: event.data.channel } }
               : { characters_state: { channel: event.data.channel } });
@@ -318,8 +320,12 @@ export function useMessaging(deps: UseMessagingDeps) {
 
             if (data.channel_only) {
               // Pure channel switch on an edit-resubmit (rare). Roll the chat
-              // back to before the edit fired — no message was saved backend-side.
-              deps.setMessages(truncatedMessages);
+              // back to before the edit fired, then drop in the stand-in
+              // marker so the switch is visible in scroll-back.
+              const marker = data.marker;
+              const finalMessages = marker ? [...truncatedMessages, marker] : truncatedMessages;
+              deps.setMessages(finalMessages);
+              if (marker) deps.setAllMessages(prev => [...prev, marker]);
               deps.fetchUserStats();
               deps.fetchFreeTokens();
               continue;
@@ -703,8 +709,9 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setStateNotifications(event.data);
           } else if (event.type === 'channel_changed') {
             // Pure channel switch (Characters /text /phone /inperson /video).
-            // Backend short-circuited — no model call, no message saved.
-            // Just update the channel chip so the user can see the new mode.
+            // Backend short-circuited — no model call, no chat-bubble reply.
+            // State update only here; the inline marker rides on the done
+            // event so it stays paired with the optimistic-placeholder cleanup.
             deps.setPipelineState((prev: any) => prev
               ? { ...prev, characters_state: { ...(prev.characters_state || {}), channel: event.data.channel } }
               : { characters_state: { channel: event.data.channel } });
@@ -727,10 +734,20 @@ export function useMessaging(deps: UseMessagingDeps) {
 
             if (data.channel_only) {
               // Pure channel switch: backend rolled back the user message and
-              // saved no assistant reply. Strip the optimistic user msg + the
-              // streaming-assistant placeholder we eagerly appended.
-              deps.setMessages(prev => prev.slice(0, -2));
-              deps.setTotalMessages(prev => Math.max(0, prev - 1));
+              // wrote a stand-in marker instead. Strip the optimistic user msg
+              // + streaming placeholder we appended, then drop in the marker
+              // so scroll-back shows WHERE the switch happened.
+              const marker = data.marker;
+              deps.setMessages(prev => marker
+                ? [...prev.slice(0, -2), marker]
+                : prev.slice(0, -2));
+              if (marker) {
+                deps.setAllMessages(prev => [...prev, marker]);
+                // Net change: -1 (user opt) -1 (streaming placeholder) +1 (marker) = -1
+                deps.setTotalMessages(prev => Math.max(0, prev - 1));
+              } else {
+                deps.setTotalMessages(prev => Math.max(0, prev - 1));
+              }
               deps.fetchUserStats();
               deps.fetchFreeTokens();
             } else if (data.sex_mode_handoff) {

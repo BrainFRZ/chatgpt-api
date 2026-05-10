@@ -442,6 +442,34 @@ export default function ChatView({
             );
           }
 
+          // Channel-switch marker — render as a centered dim row showing
+          // WHERE in the scroll-back the channel changed. The header chip
+          // only shows current mode; without this marker, /phone or /text
+          // switches are invisible in chat history.
+          const channelSwitch = !!(msg as any).channel_switch;
+          if (channelSwitch) {
+            const newCh = (msg as any).channel || 'unknown';
+            const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
+            return (
+              <div key={i} style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '6px 16px',
+                color: '#7a8aa8',
+                fontSize: '11px',
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase' as const,
+                userSelect: 'none' as const,
+              }}>
+                <span style={{ flex: 1, height: '1px', background: '#34466e', opacity: 0.5 }} />
+                <span>switched to {newCh}</span>
+                {ts && <span style={{ color: '#5a6680', textTransform: 'none', letterSpacing: 0 }}>· {ts}</span>}
+                <span style={{ flex: 1, height: '1px', background: '#34466e', opacity: 0.5 }} />
+              </div>
+            );
+          }
+
           // Busy placeholder — render as a centered dim status row, NOT as a
           // chat bubble. The character was asleep / at work and didn't reply;
           // showing this as her message would read as her saying "[no reply

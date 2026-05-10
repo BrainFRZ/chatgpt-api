@@ -5085,21 +5085,40 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # in the user content was burning Opus 3 tokens for nothing.
                 _remaining = (_pf.local_slash.get("remaining_content") or "").strip()
                 if not _remaining:
-                    # Pure channel switch: no model call, no chat message saved.
-                    # Roll back the user-message append, persist state, return
-                    # a tiny SSE stream so the frontend can update its banner.
+                    # Pure channel switch: no model call, no real user/assistant
+                    # message saved. Drop the /text user message and write a
+                    # stand-in marker so scroll-back shows WHERE the channel
+                    # changed — without it, a /phone switch is invisible in the
+                    # chat history (only the header chip changes).
                     if data["messages"] and data["messages"][-1].get("id") == user_msg_id:
                         data["messages"].pop()
-                    save_chat(username, request.chat_name, data, request.project)
                     _new_channel = _pf.local_slash.get("channel")
+                    _marker_id = generate_message_id()
+                    _marker_parent = data["messages"][-1].get("id") if data["messages"] else None
+                    _marker_msg = {
+                        "id": _marker_id,
+                        "parent_id": _marker_parent,
+                        "role": "system",
+                        "content": f"[channel switched to {_new_channel.upper()}]",
+                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                        "channel_switch": True,
+                        "channel": _new_channel,
+                    }
+                    data["messages"].append(_marker_msg)
+                    save_chat(username, request.chat_name, data, request.project)
                     _channel_payload = {
                         "channel": _new_channel,
                         "feedback": characters_slash_feedback,
                     }
+                    _done_payload = {
+                        "channel_only": True,
+                        "channel": _new_channel,
+                        "marker": _marker_msg,
+                    }
 
                     async def _channel_only_stream():
                         yield f"event: channel_changed\ndata: {json.dumps(_channel_payload)}\n\n"
-                        yield f"event: done\ndata: {json.dumps({'channel_only': True, 'channel': _new_channel})}\n\n"
+                        yield f"event: done\ndata: {json.dumps(_done_payload)}\n\n"
 
                     return StreamingResponse(_channel_only_stream(), media_type="text/event-stream")
                 # Channel + content: strip the slash, skip the OOC line, proceed.
