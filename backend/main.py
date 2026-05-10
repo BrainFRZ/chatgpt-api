@@ -9459,6 +9459,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 event_count = 0
                 client_disconnected = False
                 resolve_mechanics_extra_usage = None  # Track usage from resolve_mechanics round-trip (cpred)
+                # Inline-thinking filter: Opus 3 (and other pre-extended-thinking
+                # models) emit chain-of-thought as inline <thinking>...</thinking>
+                # XML tags in regular content. Without filtering, those leak into
+                # the visible reply. The filter splits them out into the same
+                # thinking-stream other models use natively. Stateful so it can
+                # handle tags split across stream chunks; reused across the
+                # tool-followup loop below so a single turn's thinking is
+                # consistent.
+                from inline_thinking_filter import InlineThinkingFilter, model_id_uses_inline_thinking
+                _use_inline_thinking_filter = model_id_uses_inline_thinking(model_id)
+                _inline_thinking_filter = InlineThinkingFilter() if _use_inline_thinking_filter else None
                 if model_id.startswith("gpt"):
                     stream_iter = provider.send_request_stream_with_fallback(client, request_params)
                 else:
@@ -9472,16 +9483,35 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                     if stream_event.event_type == 'content_delta':
                         # With forced tool_use, all text deltas are narrative (tool_use deltas are partial_json, not text)
-                        accumulated_content += stream_event.content
-                        if not client_disconnected:
-                            yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
-                        await sync_manager.broadcast_to_chat(
-                            chat_key,
-                            SyncEvent(
-                                type=SyncEventType.STREAM_CONTENT,
-                                data={"delta": stream_event.content}
+                        if _inline_thinking_filter is not None:
+                            _ct, _tt = _inline_thinking_filter.feed(stream_event.content)
+                            if _ct:
+                                accumulated_content += _ct
+                                if not client_disconnected:
+                                    yield f"event: content\ndata: {json.dumps({'delta': _ct})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(type=SyncEventType.STREAM_CONTENT, data={"delta": _ct})
+                                )
+                            if _tt:
+                                accumulated_thinking += _tt
+                                if not client_disconnected:
+                                    yield f"event: thinking\ndata: {json.dumps({'delta': _tt})}\n\n"
+                                await sync_manager.broadcast_to_chat(
+                                    chat_key,
+                                    SyncEvent(type=SyncEventType.STREAM_THINKING, data={"delta": _tt})
+                                )
+                        else:
+                            accumulated_content += stream_event.content
+                            if not client_disconnected:
+                                yield f"event: content\ndata: {json.dumps({'delta': stream_event.content})}\n\n"
+                            await sync_manager.broadcast_to_chat(
+                                chat_key,
+                                SyncEvent(
+                                    type=SyncEventType.STREAM_CONTENT,
+                                    data={"delta": stream_event.content}
+                                )
                             )
-                        )
 
                     elif stream_event.event_type == 'thinking_delta':
                         accumulated_thinking += stream_event.content
@@ -10620,8 +10650,17 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     _next_content_blocks: list = []
                                     for _ev in _followup_stream:
                                         if _ev.event_type == 'content_delta' and not client_disconnected:
-                                            accumulated_content += _ev.content
-                                            yield f"event: content\ndata: {json.dumps({'delta': _ev.content})}\n\n"
+                                            if _inline_thinking_filter is not None:
+                                                _fct, _ftt = _inline_thinking_filter.feed(_ev.content)
+                                                if _fct:
+                                                    accumulated_content += _fct
+                                                    yield f"event: content\ndata: {json.dumps({'delta': _fct})}\n\n"
+                                                if _ftt:
+                                                    accumulated_thinking += _ftt
+                                                    yield f"event: thinking\ndata: {json.dumps({'delta': _ftt})}\n\n"
+                                            else:
+                                                accumulated_content += _ev.content
+                                                yield f"event: content\ndata: {json.dumps({'delta': _ev.content})}\n\n"
                                         elif _ev.event_type == 'thinking_delta' and not client_disconnected:
                                             accumulated_thinking += _ev.content
                                             yield f"event: thinking\ndata: {json.dumps({'delta': _ev.content})}\n\n"
@@ -10743,6 +10782,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                                                 yield f"event: artifact_update\ndata: {json.dumps(doc)}\n\n"
                                     except Exception as followup_err:
                                         logger.error(f"Doc tool follow-up error for {username}: {followup_err}")
+
+                        # Flush any remaining buffer in the inline-thinking filter
+                        # (held-back chars that could have been a partial tag start).
+                        # If we stopped mid-tag, give the leftover to whichever side
+                        # we were last in; this gets streamed too so the user sees
+                        # the tail of the message instead of it vanishing.
+                        if _inline_thinking_filter is not None:
+                            _ftc, _ftt = _inline_thinking_filter.flush()
+                            if _ftc:
+                                accumulated_content += _ftc
+                                if not client_disconnected:
+                                    yield f"event: content\ndata: {json.dumps({'delta': _ftc})}\n\n"
+                            if _ftt:
+                                accumulated_thinking += _ftt
+                                if not client_disconnected:
+                                    yield f"event: thinking\ndata: {json.dumps({'delta': _ftt})}\n\n"
 
                         # Use accumulated content as primary (we streamed it), fallback to usage content
                         assistant_message = accumulated_content or usage.get('content') or ''
