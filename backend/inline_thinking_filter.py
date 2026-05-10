@@ -63,8 +63,6 @@ class InlineThinkingFilter:
         if self._narration_mode:
             self._narration_open = f"<{narration_tag}>"
             self._narration_close = f"</{narration_tag}>"
-            # In narration mode we still expose _opens/_closes for partial-match
-            # holdback, but they only contain the narration tag.
             self._opens = (self._narration_open,)
             self._closes = (self._narration_close,)
         else:
@@ -76,6 +74,17 @@ class InlineThinkingFilter:
         # Narration mode: True when currently inside <narration_tag>...</narration_tag>
         self._in_narration = False
         self._buffer = ""
+        # Narration-mode fallback: if the model never emits the narration tag
+        # at all, the entire response should be treated as the message (not
+        # silently routed to reasoning). We buffer outside-tag content until
+        # we see the first narration open tag — at that point we know
+        # narration mode is real, the buffer flushes as thinking, and live
+        # mode kicks in. If end-of-stream hits first without the tag, the
+        # buffer flushes as CONTENT instead. Streaming consequence: thinking
+        # output is delayed slightly until the first <reply> arrives, but
+        # the model never gets to disappear because it forgot to wrap.
+        self._pre_tag_buffer = ""
+        self._saw_narration_tag = False
 
     @staticmethod
     def _safe_emit_end(s: str, tag: str) -> int:
@@ -125,8 +134,13 @@ class InlineThinkingFilter:
 
     def _feed_narration_mode(self) -> tuple[str, str]:
         """Reply-wrap mode: only content inside <narration_tag>...</narration_tag>
-        is visible; everything else (including the tag markers themselves) is
-        routed to thinking.
+        is visible. Fallback: if the narration tag is NEVER seen by end of
+        stream, emit accumulated outside-tag content as the message.
+
+        Pre-tag content is buffered (not emitted) until either:
+        - first <narration_tag> arrives → buffer flushes as thinking, then
+          the model is in real narration mode going forward
+        - end of stream → flush() emits buffer as CONTENT (fallback path)
         """
         content_out: list[str] = []
         thinking_out: list[str] = []
@@ -146,15 +160,34 @@ class InlineThinkingFilter:
             else:
                 idx = self._buffer.find(self._narration_open)
                 if idx >= 0:
-                    # Pre-tag content goes to thinking; tag itself is stripped
-                    if idx > 0:
-                        thinking_out.append(self._buffer[:idx])
+                    # Pre-tag content for THIS chunk
+                    pre_tag = self._buffer[:idx]
+                    if not self._saw_narration_tag:
+                        # First narration open ever — flush pre-tag buffer as
+                        # thinking (now we know we're in real narration mode)
+                        if self._pre_tag_buffer:
+                            thinking_out.append(self._pre_tag_buffer)
+                            self._pre_tag_buffer = ""
+                        if pre_tag:
+                            thinking_out.append(pre_tag)
+                        self._saw_narration_tag = True
+                    else:
+                        if pre_tag:
+                            thinking_out.append(pre_tag)
                     self._buffer = self._buffer[idx + len(self._narration_open):]
                     self._in_narration = True
                 else:
                     safe = self._safe_emit_end(self._buffer, self._narration_open)
                     if safe > 0:
-                        thinking_out.append(self._buffer[:safe])
+                        chunk = self._buffer[:safe]
+                        if self._saw_narration_tag:
+                            # We've already seen the narration tag — outside-
+                            # tag content is real reasoning, emit live
+                            thinking_out.append(chunk)
+                        else:
+                            # No narration tag seen yet — buffer in case the
+                            # model never wraps and we need fallback
+                            self._pre_tag_buffer += chunk
                         self._buffer = self._buffer[safe:]
                     break
         return "".join(content_out), "".join(thinking_out)
@@ -193,13 +226,25 @@ class InlineThinkingFilter:
     def flush(self) -> tuple[str, str]:
         """Drain any remaining buffered text after the stream ends. Routing
         depends on what state we ended in — see mode comments."""
-        if not self._buffer:
-            return "", ""
         leftover = self._buffer
         self._buffer = ""
         if self._narration_mode:
-            # Inside narration → leftover is content; outside → leftover is thinking
-            return (leftover, "") if self._in_narration else ("", leftover)
+            if self._in_narration:
+                # Mid-reply truncation — leftover is content
+                return (leftover, "")
+            if self._saw_narration_tag:
+                # Already saw narration tag, post-narration → leftover is thinking
+                return ("", leftover)
+            # Fallback: no narration tag was ever seen across the whole stream.
+            # Treat ALL accumulated outside-tag content as the message instead
+            # of silently routing it to reasoning. This handles the failure
+            # mode where the model forgets to wrap entirely.
+            buffer_total = self._pre_tag_buffer + leftover
+            self._pre_tag_buffer = ""
+            return (buffer_total, "")
+        # Denylist mode unchanged
+        if not leftover:
+            return "", ""
         return ("", leftover) if self._in_tag_index >= 0 else (leftover, "")
 
     @property

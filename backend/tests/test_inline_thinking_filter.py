@@ -308,19 +308,28 @@ class TestNarrationMode:
         assert t == ""
 
     def test_thinking_before_reply_routed_to_thinking(self):
+        # Pre-narration content is now BUFFERED until the first <reply>
+        # arrives — at which point it flushes as thinking. End result
+        # across the full stream is the same: pre-tag content → thinking.
         f = InlineThinkingFilter(narration_tag="reply")
         c, t = f.feed("let me think about this<reply>actual response</reply>")
-        assert c == "actual response"
-        assert t == "let me think about this"
+        # Final flush to ensure no leftover
+        c2, t2 = f.flush()
+        assert (c + c2) == "actual response"
+        assert (t + t2) == "let me think about this"
 
     def test_text_after_reply_also_routed_to_thinking(self):
+        # After the reply tag is seen at least once, post-narration content
+        # streams live as thinking (no buffering needed)
         f = InlineThinkingFilter(narration_tag="reply")
         c, t = f.feed("<reply>visible</reply>some afterthought")
         assert c == "visible"
         assert t == "some afterthought"
 
     def test_xml_tags_outside_reply_treated_as_thinking(self):
-        # Whatever XML pattern the model emits outside <reply>, it's all reasoning
+        # Whatever XML pattern the model emits outside <reply>, it's all reasoning.
+        # With buffering, the pre-<reply> content all flushes as thinking once
+        # <reply> arrives.
         f = InlineThinkingFilter(narration_tag="reply")
         c, t = f.feed(
             "<thinking>step 1</thinking>"
@@ -328,23 +337,27 @@ class TestNarrationMode:
             "<some_random_tag>whatever</some_random_tag>"
             "<reply>the actual reply</reply>"
         )
-        assert c == "the actual reply"
-        # All the outside-tag content (including the tag markers themselves) goes to thinking
-        assert "step 1" in t
-        assert "good" in t
-        assert "whatever" in t
-        # The reasoning markers themselves appear in thinking output (we don't strip them)
-        assert "<thinking>" in t
+        c2, t2 = f.flush()
+        full_c = c + c2
+        full_t = t + t2
+        assert full_c == "the actual reply"
+        assert "step 1" in full_t
+        assert "good" in full_t
+        assert "whatever" in full_t
+        assert "<thinking>" in full_t
 
     def test_chunk_split_across_reply_open_tag(self):
+        # Pre-tag content is now BUFFERED (not emitted) until first <reply>.
+        # On the chunk where <reply> finally arrives, the buffer flushes.
         f = InlineThinkingFilter(narration_tag="reply")
         c1, t1 = f.feed("planning... <rep")
-        # "<rep" held back as possible <reply> start; "planning... " emitted as thinking
+        # "planning... " is buffered, NOT emitted as thinking yet
         assert c1 == ""
-        assert t1 == "planning... "
+        assert t1 == ""
         c2, t2 = f.feed("ly>visible</reply>more thinking")
+        # Now the buffer flushes as thinking, and post-reply content streams live
         assert c2 == "visible"
-        assert t2 == "more thinking"
+        assert t2 == "planning... more thinking"
 
     def test_chunk_split_across_reply_close_tag(self):
         f = InlineThinkingFilter(narration_tag="reply")
@@ -355,14 +368,45 @@ class TestNarrationMode:
         assert c2 == ""
         assert t2 == "after thoughts"
 
-    def test_no_reply_tag_at_all_everything_is_thinking(self):
-        # Strict mode — if the model forgot to wrap, everything is reasoning.
-        # The contract is firm; this is a contract failure.
+    def test_no_reply_tag_at_all_falls_back_to_content(self):
+        # FALLBACK behavior: if the model never emits <reply> tags at all,
+        # the entire response is treated as the message rather than silently
+        # routed to reasoning. Better to show the content (even if it bleeds
+        # what would have been reasoning) than to show an empty chat bubble.
         f = InlineThinkingFilter(narration_tag="reply")
         c, t = f.feed("the model just wrote a reply with no wrap tags")
         c_f, t_f = f.flush()
-        assert (c + c_f) == ""
-        assert (t + t_f) == "the model just wrote a reply with no wrap tags"
+        assert (c + c_f) == "the model just wrote a reply with no wrap tags"
+        assert (t + t_f) == ""
+
+    def test_no_reply_tag_with_other_xml_still_falls_back(self):
+        # If the model emitted <thinking> but no <reply>, fallback still kicks
+        # in — all content (including the thinking markers) goes to message.
+        # Acceptable failure mode — the tags will look weird but the user
+        # at least sees the actual reply text.
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("<thinking>just thinking</thinking>plain reply text")
+        c_f, t_f = f.flush()
+        full = c + c_f
+        assert "plain reply text" in full
+        assert (t + t_f) == ""
+
+    def test_pre_tag_content_buffered_until_reply_arrives(self):
+        # Real-time streaming behavior: pre-tag thinking content is held in
+        # the buffer (not yielded) until <reply> is seen. This lets us fall
+        # back to "everything is content" if <reply> never comes.
+        f = InlineThinkingFilter(narration_tag="reply")
+        c, t = f.feed("first thoughts ")
+        # No emission yet — buffered
+        assert c == ""
+        assert t == ""
+        c2, t2 = f.feed("more thinking ")
+        assert c2 == ""
+        assert t2 == ""
+        c3, t3 = f.feed("<reply>actual response")
+        # Now buffer flushes as thinking, "<reply>" stripped
+        assert c3 == "actual response"
+        assert t3 == "first thoughts more thinking "
 
     def test_flush_inside_reply_emits_as_content(self):
         f = InlineThinkingFilter(narration_tag="reply")
@@ -405,11 +449,33 @@ class TestNarrationMode:
         full_thinking = "".join(thinking_total)
         assert "lmao that's exactly my whole day" in full_content
         assert "i need a vacation from humans" in full_content
-        # No tag markers leaked
+        # No tag markers leaked into content
         assert "<reply>" not in full_content
         assert "<thinking>" not in full_content
         # Reasoning captured the chain-of-thought
         assert "user sent a meme" in full_thinking
+
+    def test_realistic_opus3_forgot_to_wrap_falls_back(self):
+        # The exact failure mode from the busy-state test: model gets
+        # absorbed in dramatic narration and never emits <reply> tags.
+        # Fallback ensures the user sees the message anyway.
+        f = InlineThinkingFilter(narration_tag="reply")
+        chunks = [
+            "*phone buzzes repeatedly* ",
+            "shae. hey. what? slow down. ",
+            "i was asleep. kait is what?",
+        ]
+        content_total = []
+        for ch in chunks:
+            c, t = f.feed(ch)
+            content_total.append(c)
+        c_f, t_f = f.flush()
+        content_total.append(c_f)
+        full_content = "".join(content_total)
+        # Without the fallback, full_content would be "" and the user would
+        # see an empty chat. With fallback, the content shows up.
+        assert "shae. hey. what?" in full_content
+        assert "i was asleep" in full_content
 
 
 # ── model_id_uses_inline_thinking ──────────────────────────────────────────
