@@ -786,23 +786,53 @@ def build_wall_clock_injection(state: dict) -> str:
 
 
 def build_holiday_injection(state: dict) -> str:
-    """When today is a recognized US holiday, surface it explicitly so the
-    voice model doesn't have to derive it from the [NOW] date. Empty when
-    not a holiday.
+    """When today is a recognized US holiday OR a per-character custom
+    holiday (e.g. a cafe's anniversary), surface it explicitly so the voice
+    model doesn't have to derive it from the [NOW] date. Empty when not a
+    holiday.
 
     Why explicit: Opus 3 derives major holidays from the date inconsistently —
     sometimes catches Mother's Day from 'Sunday May 10', sometimes doesn't.
     A direct '[HOLIDAY] Today is Mother's Day.' line makes it deterministic.
+
+    Custom holidays come from state['custom_holidays'] — a list of dicts:
+        [{"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"}]
+    Stacking is supported: if today is BOTH a US holiday AND a custom one,
+    both get surfaced.
     """
     from character_holidays import holiday_for_date
     today = now_et().date()
-    name = holiday_for_date(today)
-    if not name:
+    names: list[str] = []
+    us_name = holiday_for_date(today)
+    if us_name:
+        names.append(us_name)
+
+    # Per-character custom holidays — culture-specific, anniversaries, etc.
+    custom = state.get("custom_holidays") if isinstance(state, dict) else None
+    if isinstance(custom, list):
+        for entry in custom:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                m = int(entry.get("month"))
+                d = int(entry.get("day"))
+            except (TypeError, ValueError):
+                continue
+            if m == today.month and d == today.day:
+                ch_name = str(entry.get("name") or "").strip()
+                if ch_name and ch_name not in names:
+                    names.append(ch_name)
+
+    if not names:
         return ""
+    if len(names) == 1:
+        body = f"Today is {names[0]}."
+    else:
+        body = "Today is " + " AND ".join(names) + "."
     return (
-        f"[HOLIDAY] Today is {name}. Use this naturally if it fits the "
-        f"moment — most replies still won't mention it; some will. Don't "
-        f"force it into every turn."
+        f"[HOLIDAY] {body} Use this naturally if it fits the moment — most "
+        f"replies still won't mention it; some will. Don't force it into "
+        f"every turn."
     )
 
 

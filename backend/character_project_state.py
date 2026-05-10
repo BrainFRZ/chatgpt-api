@@ -50,6 +50,7 @@ PROJECT_LEVEL_FIELDS = (
     "flakiness_bands",
     "scheduler_state",
     "last_ripeness_rolled_date",
+    "custom_holidays",
 )
 
 

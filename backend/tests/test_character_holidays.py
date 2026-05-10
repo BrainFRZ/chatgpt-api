@@ -175,6 +175,97 @@ class TestHolidayForDate:
 
 # ── Spot check a few well-known historical Easters ────────────────────────
 
+class TestBuildHolidayInjection:
+    """Integration: the injection function reads custom holidays from the
+    state dict in addition to running the universal US holiday detector.
+    """
+
+    def _state_with(self, custom):
+        return {"custom_holidays": custom}
+
+    def test_universal_holiday_emits_block(self, monkeypatch):
+        # Force "today" to a known holiday
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        # Mother's Day 2026 = May 10
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        out = ch.build_holiday_injection({})
+        assert "[HOLIDAY]" in out
+        assert "Mother's Day" in out
+
+    def test_custom_holiday_emits_block_on_match(self, monkeypatch):
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        # Pretend today is Sep 6 2026 (random non-US-holiday day)
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 9, 6, 8, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([{"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"}])
+        out = ch.build_holiday_injection(state)
+        assert "[HOLIDAY]" in out
+        assert "Brewing Day" in out
+
+    def test_custom_holiday_no_match_emits_nothing(self, monkeypatch):
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        # Sep 8 — Tue after Labor Day, no US holiday
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 9, 8, 8, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([{"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"}])
+        out = ch.build_holiday_injection(state)
+        assert out == ""
+
+    def test_universal_AND_custom_stack(self, monkeypatch):
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        # Pretend Mother's Day 2026 + a custom holiday on the same day
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([{"month": 5, "day": 10, "name": "Some Personal Anniversary"}])
+        out = ch.build_holiday_injection(state)
+        assert "Mother's Day" in out
+        assert "Some Personal Anniversary" in out
+        assert " AND " in out
+
+    def test_no_holiday_no_custom_emits_nothing(self, monkeypatch):
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        # Random non-holiday Tuesday
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        out = ch.build_holiday_injection({})
+        assert out == ""
+
+    def test_malformed_custom_entries_ignored(self, monkeypatch):
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 9, 6, 8, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([
+            "not a dict",
+            {"month": "not int", "day": 6, "name": "x"},
+            {"month": 9, "day": "not int", "name": "y"},
+            {"month": 9, "day": 6},  # missing name
+            {"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"},
+        ])
+        out = ch.build_holiday_injection(state)
+        assert "Brewing Day" in out
+        # No malformed names leaked through
+        assert "not int" not in out
+
+
 class TestHistoricalEaster:
     def test_easter_2000(self):
         assert _easter_sunday(2000) == date(2000, 4, 23)
