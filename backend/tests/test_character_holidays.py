@@ -12,6 +12,7 @@ from character_holidays import (  # noqa: E402
     _last_weekday,
     _nth_weekday,
     holiday_for_date,
+    resolve_custom_holiday,
 )
 
 
@@ -175,6 +176,53 @@ class TestHolidayForDate:
 
 # ── Spot check a few well-known historical Easters ────────────────────────
 
+class TestResolveCustomHoliday:
+    """The resolver supports both fixed dates and named floating rules."""
+
+    def test_fixed_date_form(self):
+        entry = {"month": 9, "day": 6, "name": "x"}
+        assert resolve_custom_holiday(entry, 2026) == date(2026, 9, 6)
+        assert resolve_custom_holiday(entry, 2027) == date(2027, 9, 6)
+
+    def test_day_after_labor_day_2016(self):
+        # Labor Day 2016 = Mon Sept 5 → Tue Sept 6
+        entry = {"rule": "day_after_labor_day", "name": "Brewing Day"}
+        assert resolve_custom_holiday(entry, 2016) == date(2016, 9, 6)
+
+    def test_day_after_labor_day_2026(self):
+        # Labor Day 2026 = Mon Sept 7 → Tue Sept 8
+        entry = {"rule": "day_after_labor_day", "name": "Brewing Day"}
+        assert resolve_custom_holiday(entry, 2026) == date(2026, 9, 8)
+
+    def test_day_after_labor_day_2027(self):
+        # Labor Day 2027 = Mon Sept 6 → Tue Sept 7
+        entry = {"rule": "day_after_labor_day", "name": "Brewing Day"}
+        assert resolve_custom_holiday(entry, 2027) == date(2027, 9, 7)
+
+    def test_brewing_day_always_falls_on_tuesday(self):
+        # The whole point of the rule — Brewing Day is always a Tuesday
+        entry = {"rule": "day_after_labor_day", "name": "Brewing Day"}
+        for y in range(2016, 2050):
+            d = resolve_custom_holiday(entry, y)
+            assert d.weekday() == 1, f"Brewing Day {y} on {d} is weekday {d.weekday()}, not Tuesday(1)"
+
+    def test_other_named_rules(self):
+        # Quick sanity that the other rules resolve too
+        assert resolve_custom_holiday({"rule": "easter", "name": "x"}, 2026) == date(2026, 4, 5)
+        assert resolve_custom_holiday({"rule": "memorial_day", "name": "x"}, 2026) == date(2026, 5, 25)
+        assert resolve_custom_holiday({"rule": "thanksgiving", "name": "x"}, 2026) == date(2026, 11, 26)
+        assert resolve_custom_holiday({"rule": "labor_day", "name": "x"}, 2026) == date(2026, 9, 7)
+
+    def test_unknown_rule_returns_none(self):
+        assert resolve_custom_holiday({"rule": "not_a_real_rule", "name": "x"}, 2026) is None
+
+    def test_malformed_returns_none(self):
+        assert resolve_custom_holiday(None, 2026) is None  # type: ignore
+        assert resolve_custom_holiday({}, 2026) is None
+        assert resolve_custom_holiday({"name": "x"}, 2026) is None  # no rule, no fixed date
+        assert resolve_custom_holiday({"month": "nope", "day": 6}, 2026) is None
+
+
 class TestBuildHolidayInjection:
     """Integration: the injection function reads custom holidays from the
     state dict in addition to running the universal US holiday detector.
@@ -196,30 +244,43 @@ class TestBuildHolidayInjection:
         assert "[HOLIDAY]" in out
         assert "Mother's Day" in out
 
-    def test_custom_holiday_emits_block_on_match(self, monkeypatch):
+    def test_custom_holiday_floating_rule_match(self, monkeypatch):
+        # 2026: Labor Day = Mon Sept 7, Brewing Day = Tue Sept 8
         from datetime import datetime, timezone
         import game_systems.characters as ch
-        # Pretend today is Sep 6 2026 (random non-US-holiday day)
-        monkeypatch.setattr(
-            ch, "now_et",
-            lambda: datetime(2026, 9, 6, 8, 0, tzinfo=timezone.utc),
-        )
-        state = self._state_with([{"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"}])
-        out = ch.build_holiday_injection(state)
-        assert "[HOLIDAY]" in out
-        assert "Brewing Day" in out
-
-    def test_custom_holiday_no_match_emits_nothing(self, monkeypatch):
-        from datetime import datetime, timezone
-        import game_systems.characters as ch
-        # Sep 8 — Tue after Labor Day, no US holiday
         monkeypatch.setattr(
             ch, "now_et",
             lambda: datetime(2026, 9, 8, 8, 0, tzinfo=timezone.utc),
         )
-        state = self._state_with([{"month": 9, "day": 6, "name": "The Back Booth's Brewing Day"}])
+        state = self._state_with([{"rule": "day_after_labor_day", "name": "The Back Booth's Brewing Day"}])
         out = ch.build_holiday_injection(state)
+        assert "[HOLIDAY]" in out
+        assert "Brewing Day" in out
+
+    def test_custom_holiday_floating_no_match_on_old_fixed_date(self, monkeypatch):
+        # In 2026 Sept 6 is a Sunday — Brewing Day is Sept 8, NOT Sept 6
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 9, 6, 8, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([{"rule": "day_after_labor_day", "name": "The Back Booth's Brewing Day"}])
+        out = ch.build_holiday_injection(state)
+        # Sept 6 2026 isn't any US holiday and isn't Brewing Day under the rule
         assert out == ""
+
+    def test_fixed_custom_holiday_still_works(self, monkeypatch):
+        # Fixed-date entries continue to work (backward-compat)
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 8, 15, 8, 0, tzinfo=timezone.utc),
+        )
+        state = self._state_with([{"month": 8, "day": 15, "name": "Some Anniversary"}])
+        out = ch.build_holiday_injection(state)
+        assert "Some Anniversary" in out
 
     def test_universal_AND_custom_stack(self, monkeypatch):
         from datetime import datetime, timezone

@@ -93,6 +93,64 @@ _FIXED_HOLIDAYS = {
 }
 
 
+def resolve_custom_holiday(entry: dict, year: int) -> Optional[date]:
+    """Resolve a custom_holidays entry to its date for the given year.
+
+    Two supported forms — entries can use either:
+      - Fixed: {"month": int, "day": int, "name": str}
+      - Floating rule: {"rule": "named_rule", "name": str}
+
+    Named rules currently supported:
+      - "day_after_labor_day": Tue after 1st Mon of Sept
+      - "day_after_thanksgiving": Fri after 4th Thu of Nov (= Black Friday)
+      - "good_friday": Easter - 2 days
+      - "easter": Easter Sunday for the year
+      - "memorial_day": Last Mon of May
+      - "mothers_day": 2nd Sun of May
+      - "fathers_day": 3rd Sun of Jun
+      - "labor_day": 1st Mon of Sep
+      - "thanksgiving": 4th Thu of Nov
+
+    Returns None for malformed entries (silently skipped by callers).
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    rule = entry.get("rule")
+    if isinstance(rule, str) and rule.strip():
+        return _resolve_named_rule(rule.strip().lower(), year)
+
+    # Fixed-date form
+    try:
+        m = int(entry.get("month"))
+        d = int(entry.get("day"))
+        return date(year, m, d)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_named_rule(name: str, year: int) -> Optional[date]:
+    if name == "day_after_labor_day":
+        return _nth_weekday(year, 9, 0, 1) + timedelta(days=1)
+    if name == "day_after_thanksgiving" or name == "black_friday":
+        return _nth_weekday(year, 11, 3, 4) + timedelta(days=1)
+    if name == "easter":
+        return _easter_sunday(year)
+    if name == "good_friday":
+        return _easter_sunday(year) - timedelta(days=2)
+    if name == "memorial_day":
+        return _last_weekday(year, 5, 0)
+    if name == "mothers_day":
+        return _nth_weekday(year, 5, 6, 2)
+    if name == "fathers_day":
+        return _nth_weekday(year, 6, 6, 3)
+    if name == "labor_day":
+        return _nth_weekday(year, 9, 0, 1)
+    if name == "thanksgiving":
+        return _nth_weekday(year, 11, 3, 4)
+    return None
+
+
 def holiday_for_date(d: date) -> Optional[str]:
     """Return the US holiday name for date `d`, or None if it's not a
     recognized holiday. First match wins; we order to prefer the more

@@ -808,17 +808,16 @@ def build_holiday_injection(state: dict) -> str:
         names.append(us_name)
 
     # Per-character custom holidays — culture-specific, anniversaries, etc.
+    # Each entry can be a fixed date OR a named floating rule (e.g.
+    # "day_after_labor_day"). resolve_custom_holiday handles both.
     custom = state.get("custom_holidays") if isinstance(state, dict) else None
     if isinstance(custom, list):
+        from character_holidays import resolve_custom_holiday
         for entry in custom:
-            if not isinstance(entry, dict):
+            resolved = resolve_custom_holiday(entry, today.year)
+            if resolved is None:
                 continue
-            try:
-                m = int(entry.get("month"))
-                d = int(entry.get("day"))
-            except (TypeError, ValueError):
-                continue
-            if m == today.month and d == today.day:
+            if resolved == today:
                 ch_name = str(entry.get("name") or "").strip()
                 if ch_name and ch_name not in names:
                     names.append(ch_name)
