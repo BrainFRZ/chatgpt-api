@@ -281,6 +281,19 @@ def _summarize_state(
         return ""
     parts = []
 
+    # Wall clock: today's date + day of week. The system prompt tells the agent
+    # to compute due_by from [WALL CLOCK]; without this it had nothing to anchor
+    # to and would hallucinate dates (e.g. picking a Friday in 2025 for a plan
+    # made in 2026).
+    from datetime import date as _date
+    try:
+        from game_systems.characters import today_et_iso
+        _today = today_et_iso()
+        _today_dow = _date.fromisoformat(_today).strftime("%A")
+        parts.append(f"[WALL CLOCK] today is {_today_dow}, {_today}")
+    except Exception:
+        pass
+
     # File-backed: memories / user_profile / growth
     if project_dir:
         from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
