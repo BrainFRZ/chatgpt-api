@@ -1274,34 +1274,48 @@ def build_busy_interrupt_injection(state: dict) -> str:
     kind = (bi.get("kind") or "").strip()
 
     # Voice cues per kind so the model lands the right tone for being woken
-    # up vs being pulled away from work.
+    # up vs being pulled away from work. CHANNEL-AWARE — most channels for
+    # Characters chat are TEXT, so cues avoid phone-call narration that would
+    # be wrong for text format.
     if kind == "sleep":
         cue = (
-            "You were ASLEEP. The user's message hit your phone hard enough "
-            "to wake you (SOS / 911 / emergency / urgent). You are now awake "
-            "but groggy, half-formed, voice scratchier than usual. Respond — "
-            "but acknowledge being woken up in your own voice. Don't pretend "
-            "you weren't asleep. Real-friend energy: groggy concern, focus "
-            "shifting in real time."
+            "You were ASLEEP. The user just sent something marked urgent "
+            "(SOS / 911 / emergency / /sos). You're now half-awake, thumbing "
+            "at your phone in the dark. Respond, but in shorter, rougher, "
+            "less-polished beats than usual — half-asleep texture. Don't "
+            "pretend you weren't asleep. MATCH [CHANNEL]: if text, write "
+            "fragmented half-asleep texts (no phone-call narration, no "
+            "third-person scene-setting like '*phone buzzes*'). If phone or "
+            "in-person/video, voice is groggy, words slurring slightly. "
+            "Real-friend energy: groggy concern, focus shifting in real time."
         )
     elif kind == "work":
         cue = (
             "You were AT WORK at the cafe — hands full, on the floor. The "
-            "user broke through with something urgent. You ARE responding — "
-            "but acknowledge being pulled away (briefly, in voice). 'one sec, "
-            "I'm at the bar' or 'hold on let me step into the back' kind of "
-            "energy. Real-friend: still present, but the texture of being "
-            "yanked out of work is in the reply."
+            "user broke through with something urgent. Respond, with the "
+            "texture of being yanked away from work in the reply. 'one sec, "
+            "i'm at the bar' or 'hold on lemme step into the back' kind of "
+            "energy — brief, slightly distracted. MATCH [CHANNEL]: text is "
+            "fragmented and quick; phone is full sentences with kitchen "
+            "sounds; in-person you'd literally step away. Don't overdo the "
+            "work narration — one beat, then engage with what they said."
         )
     else:
         cue = (
             f"You were {desc}. The user broke through with something urgent. "
-            f"Respond — but acknowledge being pulled away from {desc} in your "
-            f"own voice. Don't pretend you were idle."
+            f"Respond — but acknowledge being pulled away from {desc}. Don't "
+            f"pretend you were idle. Match [CHANNEL] format strictly."
         )
 
     header = "[BUSY INTERRUPT — your full attention was elsewhere; the user broke through]"
-    return f"{header}\n{cue}"
+    # Format reminder — the [BUSY INTERRUPT] cue is dramatic enough that some
+    # turns the model gets so absorbed it forgets to wrap. Repeat the wrap
+    # contract here to keep it top-of-mind on this exact turn.
+    wrap_reminder = (
+        "Wrap your reply in <reply>...</reply> tags AS ALWAYS — applies "
+        "even when interrupted. Outside-tag content is hidden from the user."
+    )
+    return f"{header}\n{cue}\n\n{wrap_reminder}"
 
 
 def build_image_reading_injection(state: dict) -> str:
