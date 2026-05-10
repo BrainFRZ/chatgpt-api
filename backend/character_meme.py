@@ -131,7 +131,17 @@ FIND_MEME_POST_TOOL = {
         "properties": {
             "query": {
                 "type": "string",
-                "description": "What to search Reddit for — short search phrase, like you'd type in the Reddit search bar. Examples: 'tired but here for you', 'monday morning coffee', 'cant stop wont stop', 'overthinking everything'.",
+                "description": (
+                    "1-3 keyword search terms that match words likely to appear in a "
+                    "meme post's TITLE — Reddit titles, not abstract concept phrases. "
+                    "The backend does title-only full-text search (no semantic match), "
+                    "so 'tired' or 'monday' or 'cat' or 'brain' or 'work' will hit; "
+                    "'something genuinely dumb and funny for when your brain is fried' "
+                    "will not. Pass empty string ('') to get top recent posts from the "
+                    "subreddit blend without filtering — often a fine choice when you "
+                    "don't have a specific keyword in mind. Examples: '', 'monday', "
+                    "'work', 'cat', 'tired', 'cereal', 'sock', 'brain'."
+                ),
             },
             "subreddit": {
                 "type": "string",
@@ -431,7 +441,15 @@ def _fetch_reddit_candidates(
     """Search Reddit-via-pullpush.io and return image-post candidates.
 
     pullpush takes ONE subreddit per request, so when no specific sub is given
-    we round-robin across the default blend and merge. Returns (candidates, error).
+    we round-robin across the default blend and merge.
+
+    Fallback: pullpush does title-only full-text search and returns nothing for
+    conversational/concept queries that don't match real post-title tokens. If
+    the specific query produces zero usable images, we retry with no query
+    (top recent posts from the same sub blend) so the model still gets candidates
+    to pick from instead of failing the turn.
+
+    Returns (candidates, error).
     """
     if subreddit:
         subs = [subreddit.strip().lstrip("r/")]
@@ -440,24 +458,38 @@ def _fetch_reddit_candidates(
         subs = list(_DEFAULT_SUBREDDITS)
         per_sub = max(8, (limit + len(subs) - 1) // len(subs))
 
-    raw_posts: list[dict] = []
-    errors: list[str] = []
-    for sub in subs:
-        if not sub:
-            continue
-        posts, err = _query_pullpush_sub(sub, query, per_sub)
-        if err:
-            errors.append(f"r/{sub}: {err}")
-            continue
-        raw_posts.extend(posts)
+    def _do_pass(q: str) -> tuple[list[dict], list[str]]:
+        raw: list[dict] = []
+        errs: list[str] = []
+        for sub in subs:
+            if not sub:
+                continue
+            posts, err = _query_pullpush_sub(sub, q, per_sub)
+            if err:
+                errs.append(f"r/{sub}: {err}")
+                continue
+            raw.extend(posts)
+        return raw, errs
 
-    if not raw_posts and errors:
+    def _images(raw: list[dict]) -> list[dict]:
+        return [d for d in raw if _reddit_post_is_image(d)]
+
+    # Pass 1: with query (if any)
+    raw_posts, errors = _do_pass(query or "")
+    images = _images(raw_posts)
+
+    # Pass 2 (fallback): if query was non-empty and produced no images, drop
+    # the query and pull top recent from the sub blend.
+    if not images and query and query.strip():
+        raw2, errs2 = _do_pass("")
+        errors.extend(errs2)
+        images.extend(_images(raw2))
+
+    if not images and errors:
         return [], f"reddit-archive search failed — {'; '.join(errors[:3])}"
 
     out = []
-    for d in raw_posts:
-        if not _reddit_post_is_image(d):
-            continue
+    for d in images:
         out.append({
             "url": d.get("url") or "",
             "title": (d.get("title") or "")[:200],
@@ -465,7 +497,6 @@ def _fetch_reddit_candidates(
             "score": int(d.get("score") or 0),
             "subreddit": d.get("subreddit") or "",
         })
-    # Sort by score descending so the best/most-upvoted candidates come first
     out.sort(key=lambda c: c.get("score", 0), reverse=True)
     return out[:limit], None
 
