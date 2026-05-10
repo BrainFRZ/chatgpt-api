@@ -1073,6 +1073,55 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_make_meme') {
+                const failed = n.ok === false;
+                const isNoMatch = failed && n.kind === 'no_match';
+                let label: string;
+                if (!failed) label = '🎭 making a meme';
+                else if (isNoMatch) label = '🎭 template not in library';
+                else label = '🎭 meme failed';
+                return (
+                  <div key={i} style={{
+                    ...styles.searchNotification,
+                    ...(failed ? styles.searchNotificationError : {}),
+                  }}>
+                    <span style={styles.notificationLabel}>{label}</span>
+                    {n.reason && <>: {n.reason}</>}
+                    {(isNoMatch ? n.requested_template : n.template) && (
+                      <span style={styles.notificationReason}>
+                        {' '}— {isNoMatch ? n.requested_template : n.template}
+                      </span>
+                    )}
+                    {failed && n.error && !isNoMatch && (
+                      <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                        {n.error}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              if (n.type === 'character_find_meme_post') {
+                const failed = n.ok === false;
+                return (
+                  <div key={i} style={{
+                    ...styles.searchNotification,
+                    ...(failed ? styles.searchNotificationError : {}),
+                  }}>
+                    <span style={styles.notificationLabel}>
+                      {failed ? '🖼 meme search: no match' : '🖼 finding a meme'}
+                    </span>
+                    {n.reason && <>: {n.reason}</>}
+                    {n.query && (
+                      <span style={styles.notificationReason}> — "{n.query}"</span>
+                    )}
+                    {failed && n.error && (
+                      <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                        {n.error}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
               if (n.type === 'voice_update') {
                 return (
                   <div key={i} style={styles.voiceNotification}>

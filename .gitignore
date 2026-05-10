@@ -49,6 +49,7 @@
 !backend/character_storage.py
 !backend/character_recall.py
 !backend/character_fetch_url.py
+!backend/character_meme.py
 !backend/character_inner_state.py
 !backend/character_planner.py
 !backend/character_project_state.py

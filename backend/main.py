@@ -6824,12 +6824,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
         elif use_characters and not use_characters_interview and gs.get("search_tool_enabled"):
-            # Characters correspondence: expose Sonar search + fetch_url. Auto choice —
-            # the model decides per turn. Interview mode does not get the tools (interview
-            # is about defining the character, not pulling external info).
+            # Characters correspondence: expose Sonar search + fetch_url + meme tools.
+            # Auto choice — the model decides per turn. Interview mode does not get the
+            # tools (interview is about defining the character, not pulling external info).
             from character_search import SONAR_SEARCH_TOOL
             from character_fetch_url import FETCH_URL_TOOL
-            request_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL]
+            from character_meme import MAKE_MEME_TOOL, FIND_MEME_POST_TOOL
+            request_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL, MAKE_MEME_TOOL, FIND_MEME_POST_TOOL]
             request_params["tool_choice"] = {"type": "auto"}
             # Opus 3 doesn't support extended thinking; explicit pop is harmless on other models.
             request_params.pop("thinking", None)
@@ -10327,21 +10328,39 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 run_fetch_url,
                                 format_tool_result_text as _format_fetch_result,
                             )
+                            from character_meme import (
+                                MAKE_MEME_TOOL,
+                                FIND_MEME_POST_TOOL,
+                                run_make_meme,
+                                run_find_meme_post,
+                                format_make_meme_result as _format_make_meme_result,
+                                format_find_meme_post_result as _format_find_meme_post_result,
+                            )
                             _search_tool_name = SONAR_SEARCH_TOOL["name"]
                             _fetch_tool_name = FETCH_URL_TOOL["name"]
-                            _character_tool_names = {_search_tool_name, _fetch_tool_name}
+                            _make_meme_tool_name = MAKE_MEME_TOOL["name"]
+                            _find_meme_post_tool_name = FIND_MEME_POST_TOOL["name"]
+                            _character_tool_names = {
+                                _search_tool_name, _fetch_tool_name,
+                                _make_meme_tool_name, _find_meme_post_tool_name,
+                            }
                             _search_calls_total = 0
                             _search_cost_total = 0.0
                             _search_usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "num_search_queries": 0}
                             _search_log: list = []  # [{query, reason, ok, sources_count}] per call — surfaced to UI + persisted
                             _fetch_calls_total = 0
                             _fetch_log: list = []   # [{url, reason, ok, title, error}] per call
+                            _meme_calls_total = 0
+                            _meme_log: list = []    # [{kind, ok, url, reason, error}] per call
                             _max_search_hops = 2
                             _hop = 0
                             _current_tool_uses = usage.get('tool_uses') or []
                             _current_content_blocks = usage.get('content_blocks') or []
                             _followup_messages_base = list(messages_for_api)
                             _perplexity_key = get_api_key(username, "perplexity")
+                            _anthropic_key = get_api_key(username, "anthropic")
+                            _imgflip_user = get_api_key(username, "imgflip_username") or ""
+                            _imgflip_pw = get_api_key(username, "imgflip_password") or ""
 
                             while _hop < _max_search_hops:
                                 _tool_calls = [t for t in _current_tool_uses if t.get("name") in _character_tool_names]
@@ -10375,8 +10394,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         if not _result.get("ok") and _result.get("error"):
                                             _notif["error"] = str(_result.get("error"))[:200]
                                         _content = _format_search_result(_result)
-                                    else:
-                                        # fetch_url
+                                    elif _name == _fetch_tool_name:
                                         _url = str(_input.get("url") or "").strip()
                                         _reason = str(_input.get("reason") or "").strip()[:80]
                                         _result = await asyncio.to_thread(run_fetch_url, _url)
@@ -10398,6 +10416,79 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         if not _result.get("ok") and _result.get("error"):
                                             _notif["error"] = str(_result.get("error"))[:200]
                                         _content = _format_fetch_result(_result)
+                                    elif _name == _make_meme_tool_name:
+                                        _template = str(_input.get("template") or "").strip()
+                                        _top = str(_input.get("top_text") or "")
+                                        _bot = str(_input.get("bottom_text") or "")
+                                        _reason = str(_input.get("reason") or "").strip()[:80]
+                                        _result = await asyncio.to_thread(
+                                            run_make_meme,
+                                            imgflip_username=_imgflip_user,
+                                            imgflip_password=_imgflip_pw,
+                                            template_query=_template,
+                                            top_text=_top,
+                                            bottom_text=_bot,
+                                        )
+                                        _meme_calls_total += 1
+                                        _meme_log.append({
+                                            "kind": "make_meme",
+                                            "template": _template,
+                                            "top_text": _top,
+                                            "bottom_text": _bot,
+                                            "reason": _reason,
+                                            "ok": bool(_result.get("ok")),
+                                            "url": _result.get("url") or "",
+                                            "error": _result.get("error") if not _result.get("ok") else None,
+                                        })
+                                        _notif = {
+                                            "type": "character_make_meme",
+                                            "reason": _reason,
+                                            "template": _result.get("template_name") or _template,
+                                            "requested_template": _template,
+                                            "kind": _result.get("kind") or ("ok" if _result.get("ok") else "api_error"),
+                                            "ok": bool(_result.get("ok")),
+                                        }
+                                        if not _result.get("ok") and _result.get("error"):
+                                            _notif["error"] = str(_result.get("error"))[:200]
+                                        _content = _format_make_meme_result(_result, _top, _bot)
+                                    else:
+                                        # find_meme_post
+                                        _query = str(_input.get("query") or "").strip()
+                                        _sub = str(_input.get("subreddit") or "").strip() or None
+                                        _intent = str(_input.get("intent") or "").strip()
+                                        _reason = str(_input.get("reason") or "").strip()[:80]
+                                        _voice_hint = "deadpan, warm under the snark, working-class realist, 'no but seriously' energy"
+                                        _result = await asyncio.to_thread(
+                                            run_find_meme_post,
+                                            anthropic_key=_anthropic_key,
+                                            query=_query,
+                                            subreddit=_sub,
+                                            intent=_intent,
+                                            voice_hint=_voice_hint,
+                                        )
+                                        _meme_calls_total += 1
+                                        _meme_log.append({
+                                            "kind": "find_meme_post",
+                                            "query": _query,
+                                            "subreddit": _sub or "",
+                                            "intent": _intent,
+                                            "reason": _reason,
+                                            "ok": bool(_result.get("ok")),
+                                            "url": _result.get("url") or "",
+                                            "title": _result.get("title") or "",
+                                            "permalink": _result.get("permalink") or "",
+                                            "why": _result.get("why") or "",
+                                            "error": _result.get("error") if not _result.get("ok") else None,
+                                        })
+                                        _notif = {
+                                            "type": "character_find_meme_post",
+                                            "reason": _reason,
+                                            "query": _query,
+                                            "ok": bool(_result.get("ok")),
+                                        }
+                                        if not _result.get("ok") and _result.get("error"):
+                                            _notif["error"] = str(_result.get("error"))[:200]
+                                        _content = _format_find_meme_post_result(_result)
                                     if not client_disconnected:
                                         yield f"event: state_notifications\ndata: {json.dumps([_notif])}\n\n"
                                         await sync_manager.broadcast_to_chat(
@@ -10450,7 +10541,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                         is_free_chat=is_free_chat,
                                         use_cache=False,
                                     )
-                                    _followup_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL]
+                                    _followup_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL, MAKE_MEME_TOOL, FIND_MEME_POST_TOOL]
                                     _followup_params["tool_choice"] = {"type": "auto"}
                                     _followup_params.pop("thinking", None)
                                     _followup_params.pop("output_config", None)
@@ -10490,6 +10581,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             if _fetch_calls_total > 0:
                                 data["fetch_url_calls"] = _fetch_calls_total
                                 data["fetch_url_log"] = _fetch_log
+                            if _meme_calls_total > 0:
+                                data["meme_calls"] = _meme_calls_total
+                                data["meme_log"] = _meme_log
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
