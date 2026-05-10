@@ -4877,6 +4877,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     # Prepare request parameters before starting the generator
     branch_path = get_path_to_root(data["messages"], user_msg_id)
 
+    # Default for the Characters SOS-break banner. The Characters branch sets
+    # this when an SOS message broke through a busy event; event_generator
+    # below emits it as the first notification so the user sees the break.
+    _pending_sos_break_notif = None
+
     # /beat and /session slash-command consumers — fire BEFORE mode dispatch
     # so they work in any mode.  Beat advancement is recorded on the chat's
     # pipeline_state.beat_state and an OOC confirmation line is appended to
@@ -6364,12 +6369,106 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # use the *pre-turn* state, so we can run them in parallel.
                 from character_recall import run_recall, compute_recall_cost
                 from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
+                from character_busy import (
+                    current_busy_event,
+                    is_sos_message,
+                    describe_busy_event,
+                    busy_status_for_notification,
+                )
+                from character_schedule import load_schedule
+
                 _store = CharacterStore(_project_dir)
                 _core_memory_ids = {m.get("id") for m in _store.core(KIND_MEMORIES, branch_msg_ids=_branch_msg_ids, n=8) if isinstance(m.get("id"), int)}
                 _core_profile_ids = {m.get("id") for m in _store.core(KIND_USER_PROFILE, branch_msg_ids=_branch_msg_ids, n=12) if isinstance(m.get("id"), int)}
                 _core_growth_ids = {m.get("id") for m in _store.core(KIND_GROWTH, branch_msg_ids=_branch_msg_ids) if isinstance(m.get("id"), int)}
 
                 _user_input_text = build_message_content(branch_path[-1])
+
+                # ── Busy-state check ──────────────────────────────────────
+                # If the schedule says the character is asleep / on shift right
+                # NOW, hold the message unless the user flagged it urgent. We
+                # compute these here (cheap; just schedule iteration) and use
+                # them later: _busy_event != None and not _busy_sos_break →
+                # skip the model call entirely and emit a status notification.
+                # Either way the [BUSY INTERRUPT] injection is built downstream
+                # so the model knows to acknowledge being roused if it does run.
+                _now_for_busy = datetime.now().astimezone()
+                try:
+                    _current_schedule = load_schedule(_project_dir)
+                except Exception as _bs_err:
+                    logger.warning(f"Characters busy check: load_schedule failed: {_bs_err}")
+                    _current_schedule = None
+                _busy_event = current_busy_event(_current_schedule, _now_for_busy)
+                _busy_sos_break = bool(_busy_event) and is_sos_message(_user_input_text)
+                _pending_sos_break_notif = None  # populated below if SOS-break
+
+                # Hard-skip path: she's busy and there's no SOS. Don't run any
+                # of the pre-passes (off-screen, recall, image-reading, inner-
+                # state) — they'd be wasted work and money. Save a placeholder
+                # assistant message so the chat history stays well-formed and
+                # Opus 3 sees "she didn't reply during this gap" on the next
+                # turn. Then return a tiny StreamingResponse that just emits
+                # the busy notification + done event. Bypasses event_generator
+                # entirely.
+                if _busy_event and not _busy_sos_break:
+                    _busy_notif = busy_status_for_notification(_busy_event, _now_for_busy)
+                    _busy_desc = describe_busy_event(_busy_event)
+                    _placeholder_id = generate_message_id()
+                    _busy_assistant_msg = {
+                        "id": _placeholder_id,
+                        "parent_id": user_msg_id,
+                        "role": "assistant",
+                        "content": f"[no reply — {_busy_desc}]",
+                        "timestamp": datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                        "busy_placeholder": True,
+                        "busy_event": {
+                            "kind": _busy_event.get("kind"),
+                            "title": _busy_event.get("title"),
+                            "description": _busy_desc,
+                            "ends_at": _busy_notif.get("ends_at"),
+                        },
+                        "total_tokens": 0,
+                    }
+                    data["messages"].append(_busy_assistant_msg)
+                    save_chat(username, request.chat_name, data, request.project)
+                    _busy_done_data = {
+                        "context_start_index": 1,
+                        "reasoning": None,
+                        "user_message_id": user_msg_id,
+                        "assistant_message_id": _placeholder_id,
+                        "current_leaf_id": _placeholder_id,
+                        "total_messages": len(data["messages"]),
+                        "model": None,
+                        "busy_placeholder": True,
+                        "busy_event": _busy_assistant_msg["busy_event"],
+                    }
+                    _chat_key_busy = sync_manager.make_chat_key(username, request.project, request.chat_name)
+
+                    async def _busy_event_generator():
+                        yield f"event: state_notifications\ndata: {json.dumps([_busy_notif])}\n\n"
+                        try:
+                            await sync_manager.broadcast_to_chat(
+                                _chat_key_busy,
+                                SyncEvent(type=SyncEventType.STATE_NOTIFICATIONS, data={"notifications": [_busy_notif]})
+                            )
+                        except Exception as _bs_bc_err:
+                            logger.warning(f"busy notification broadcast failed: {_bs_bc_err}")
+                        yield f"event: done\ndata: {json.dumps(_busy_done_data)}\n\n"
+
+                    return StreamingResponse(
+                        _busy_event_generator(),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "X-Accel-Buffering": "no",
+                            "Connection": "keep-alive",
+                        },
+                    )
+
+                # Either she's not busy OR an SOS is breaking through. Continue
+                # to the normal pre-pass path. If SOS-break, the busy event is
+                # stashed on the render payload below so the [BUSY INTERRUPT]
+                # injection tells the voice agent to acknowledge being roused.
                 # Recall sees a SMALL dialogue window (last few exchanges) — just
                 # enough to understand the immediate topic. Cross-turn references
                 # ("did you finish that book you mentioned?") are handled by the
@@ -6494,6 +6593,24 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # — the injection builder returns "" in either case.
                 if isinstance(characters_state.get("_render_payload"), dict):
                     characters_state["_render_payload"]["image_readings"] = _image_readings or []
+
+                # If we got here AND there's a busy event AND it's an SOS break,
+                # stash the busy context so build_busy_interrupt_injection tells
+                # the voice agent to acknowledge being roused. No-op otherwise.
+                if _busy_sos_break and _busy_event:
+                    if isinstance(characters_state.get("_render_payload"), dict):
+                        characters_state["_render_payload"]["busy_interrupt"] = {
+                            "kind": _busy_event.get("kind"),
+                            "title": _busy_event.get("title"),
+                            "description": describe_busy_event(_busy_event),
+                        }
+                    # Stash the SOS-break notification to be emitted from inside
+                    # event_generator (this outer function is sync from the SSE
+                    # perspective; yields belong to event_generator).
+                    _pending_sos_break_notif = {
+                        "type": "character_sos_break",
+                        "description": describe_busy_event(_busy_event),
+                    }
 
                 # Pull recent prior inner-state payloads from past assistant
                 # messages on this branch. Surfaced both to Opus (so the
@@ -6906,6 +7023,22 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         context_start_index = _outer_context_start_index
         accumulated_content = ""
         accumulated_thinking = ""
+
+        # SOS-break banner — Characters chat where the user's SOS message
+        # broke through a busy state. Emitted before any model-call output so
+        # the user sees the break-through happen.
+        if _pending_sos_break_notif is not None:
+            yield f"event: state_notifications\ndata: {json.dumps([_pending_sos_break_notif])}\n\n"
+            try:
+                await sync_manager.broadcast_to_chat(
+                    chat_key,
+                    SyncEvent(
+                        type=SyncEventType.STATE_NOTIFICATIONS,
+                        data={"notifications": [_pending_sos_break_notif]},
+                    ),
+                )
+            except Exception as _sos_bc_err:
+                logger.warning(f"SOS break notification broadcast failed: {_sos_bc_err}")
 
         # Characters /finalize: write character_profile.di from interview transcript,
         # exit interview mode, and yield a synthetic assistant message. Bypasses the

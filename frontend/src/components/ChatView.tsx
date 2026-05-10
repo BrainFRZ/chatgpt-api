@@ -1100,6 +1100,29 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_busy') {
+                const desc = n.description || n.kind || 'busy';
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>💤 message held</span>
+                    <span style={styles.notificationReason}> — {desc}; she'll see it later</span>
+                    {n.ends_at && (
+                      <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+                        until {new Date(n.ends_at).toLocaleString()}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              if (n.type === 'character_sos_break') {
+                const desc = n.description || 'busy';
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>🚨 SOS broke through</span>
+                    <span style={styles.notificationReason}> — interrupting from {desc}</span>
+                  </div>
+                );
+              }
               if (n.type === 'character_find_meme_post') {
                 const failed = n.ok === false;
                 return (

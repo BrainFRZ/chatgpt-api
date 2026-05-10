@@ -1252,6 +1252,58 @@ def build_prior_inner_states_injection(state: dict) -> str:
     return header + "\n" + "\n".join(lines)
 
 
+def build_busy_interrupt_injection(state: dict) -> str:
+    """Render the [BUSY INTERRUPT] block when the user broke through a busy
+    state with an SOS message.
+
+    Reads from state["_render_payload"]["busy_interrupt"], populated by main.py
+    when the user's message contained an SOS marker AND the schedule says the
+    character was in a busy event (sleep / work shift) at the moment.
+
+    The block tells the voice agent two things:
+      1. They were doing X (asleep / at work / etc.)
+      2. The user flagged this as urgent and broke through, so they ARE
+         responding — but the response should acknowledge the interruption
+         in voice, not pretend they were sitting around waiting for a text.
+    """
+    payload = state.get("_render_payload") or {}
+    bi = payload.get("busy_interrupt") if isinstance(payload, dict) else None
+    if not isinstance(bi, dict) or not bi:
+        return ""
+    desc = (bi.get("description") or "busy").strip()
+    kind = (bi.get("kind") or "").strip()
+
+    # Voice cues per kind so the model lands the right tone for being woken
+    # up vs being pulled away from work.
+    if kind == "sleep":
+        cue = (
+            "You were ASLEEP. The user's message hit your phone hard enough "
+            "to wake you (SOS / 911 / emergency / urgent). You are now awake "
+            "but groggy, half-formed, voice scratchier than usual. Respond — "
+            "but acknowledge being woken up in your own voice. Don't pretend "
+            "you weren't asleep. Real-friend energy: groggy concern, focus "
+            "shifting in real time."
+        )
+    elif kind == "work":
+        cue = (
+            "You were AT WORK at the cafe — hands full, on the floor. The "
+            "user broke through with something urgent. You ARE responding — "
+            "but acknowledge being pulled away (briefly, in voice). 'one sec, "
+            "I'm at the bar' or 'hold on let me step into the back' kind of "
+            "energy. Real-friend: still present, but the texture of being "
+            "yanked out of work is in the reply."
+        )
+    else:
+        cue = (
+            f"You were {desc}. The user broke through with something urgent. "
+            f"Respond — but acknowledge being pulled away from {desc} in your "
+            f"own voice. Don't pretend you were idle."
+        )
+
+    header = "[BUSY INTERRUPT — your full attention was elsewhere; the user broke through]"
+    return f"{header}\n{cue}"
+
+
 def build_image_reading_injection(state: dict) -> str:
     """Render the image-reading pre-pass output as an [IMAGES …] block.
 
@@ -1326,6 +1378,7 @@ def build_characters_injections(state: dict) -> str:
     """
     parts = []
     for builder in (
+        build_busy_interrupt_injection,    # FIRST — overrides everything else
         build_wall_clock_injection,
         build_channel_injection,
         build_wellbeing_injection,
@@ -1483,6 +1536,7 @@ SLASH_COMMANDS = [
     {"name": "/resolve", "description": "Resolve a callback by id", "icon": "Check", "args": {"placeholder": "<id> [resolution text]"}},
     {"name": "/dismiss", "description": "Dismiss a callback by id", "icon": "X", "args": {"placeholder": "<id> [reason]"}},
     {"name": "/seed-event", "description": "Plant a manual life event for the character", "icon": "Sparkles", "args": {"placeholder": "what happened to them"}},
+    {"name": "/sos", "description": "Mark message urgent — breaks through if she's asleep / at work", "icon": "Siren", "args": {"placeholder": "what's wrong"}},
     {"name": "/reinterview", "description": "Re-interview the character to refine the profile", "icon": "ClipboardEdit", "args": None},
     {"name": "/consolidate", "description": "Merge growth entries into character_profile.di", "icon": "Layers", "args": None},
     {"name": "/finalize", "description": "Finalize the character profile (interview mode)", "icon": "CheckCircle", "args": None, "condition": "characters_interview_mode"},
