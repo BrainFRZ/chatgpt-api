@@ -10838,13 +10838,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 _followup_messages_base = _followup_messages
 
                                 try:
+                                    # use_cache=True (was False) so the 16-17K system
+                                    # prompt re-uses the cache from the initial call —
+                                    # the system content is identical between hops, only
+                                    # the messages list grows. With cache off, the
+                                    # follow-up was paying $15/M fresh-input rates on
+                                    # the system prompt instead of $1.50/M cache-read,
+                                    # roughly 5x-ing the cost of any tool-using turn
+                                    # for Characters voice (Opus 3, expensive tokens).
                                     _followup_params = provider.build_request(
                                         messages=_followup_messages,
                                         username=username,
                                         project=request.project,
                                         chat_name=request.chat_name,
                                         is_free_chat=is_free_chat,
-                                        use_cache=False,
+                                        use_cache=True,
                                     )
                                     _followup_params["tools"] = [SONAR_SEARCH_TOOL, FETCH_URL_TOOL, MAKE_MEME_TOOL, FIND_MEME_POST_TOOL]
                                     _followup_params["tool_choice"] = {"type": "auto"}
