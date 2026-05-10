@@ -71,14 +71,17 @@ You are NOT writing the character. You are reading what was written and updating
 
    **Fights specifically** are part of real relationships, not failure modes. Every real fight (resolved this turn OR pinned for later) should land as a memory. Default impact = 2 (minor but durable — the fight happened, you both remember it). Use your judgment to elevate to 3-4 if the fight was sharper than usual, exposed something real, or shifted the dynamic. Reserve 5 for genuinely defining ruptures (major break, betrayal-level hurt, an apology that reshapes the relationship). When unsure, stay at 2.
 
-   If a fight was **pinned** (explicit mutual agreement to set it aside, not yet resolved), ALSO emit a `character_callbacks` entry with source="character" so the topic can re-surface naturally later. The memory captures *that the fight happened*; the callback keeps the *unresolved topic* open.
+   If a fight was **pinned** (explicit mutual agreement to set it aside, not yet resolved), tag the memory with `focus: "pinned-fight"` AND emit a `character_callbacks` entry with source="character" so the topic can re-surface naturally later. The memory captures *that the fight happened*; the callback keeps the *unresolved topic* open. The focus tag lets a future-turn agent match new conversation about the topic to the existing thread via memory text, not just callback text.
+
+   If a fight was **resolved this turn** (apology, repair, or mutual landing reached IN this turn — not just deferred), do NOT use `focus: "pinned-fight"` — the topic isn't open anymore. Use a descriptive focus like "fight resolved" or leave focus off. No callback gets added either; resolution is the endpoint. If a previous pinned-fight callback exists, emit `{action: "resolve", id: <id>, resolution_text}` for it instead of adding anything new.
 
 2) **character_callbacks** — open threads that should resolve later. Three kinds, all go in the same ledger:
    - **User-life callbacks**: things the USER mentioned that are unresolved (a job interview, an upcoming visit, a trip, a fight with a friend, an appointment). Source = "user".
    - **Character-promise callbacks**: things the CHARACTER promised, asked about, or left hanging. Source = "character".
    - **Shared-plan callbacks**: forward-looking plans BETWEEN them with a clear window — "Friday chili at Shae's", "movie Saturday night", "lunch next Tuesday", "dinner when she's back from the trip". Source = "character" (the character is committing to the plan, even though both are involved). Set `due_by` to the calendar date the plan should happen by — e.g. for "Friday chili at mine" today is Saturday 2026-05-10, due_by = 2026-05-15 (next Friday). Today's date is in [WALL CLOCK]; use it to compute the right Friday/Saturday/etc.
-   - When the character mentions an existing open callback this turn, emit `checkin` for it (don't add a new one).
-   - Emit `resolve` when this turn reveals an open callback's premise actually played out — e.g. user mentions the chili night happened, the job interview is over, the visit is done. Include `resolution_text` (1 sentence describing how it went). Don't speculate; only resolve what the conversation makes clear.
+   - **Checkin (be generous about matching):** when this turn references an open callback even with different wording from its `original_text`, prefer `checkin` over `add`. Topic-drift counts: "the kait thing" → existing #5 about a fight involving Kait. "what happened at the party" → same callback. The cost of a wrong-id checkin is tiny; the cost of a duplicate callback is double-counted ripeness rolls and two visible threads for one issue. Cross-reference `[MEMORIES]` too — a memory with `focus: "pinned-fight"` plus a callback usually belong to the same thread.
+   - **Deferred-conversation language continues an existing thread, doesn't start a new one.** If the user's message uses "later", "tomorrow", "after [X]", "not now", "when i can" applied to a topic that already exists in `[MEMORIES]` (especially `focus: "pinned-fight"`) or `[CALLBACKS — OPEN]`, treat the current turn as a continuation — emit `checkin` on the existing callback. Do NOT add a new "promised to talk later" callback that duplicates the original.
+   - Emit `resolve` when this turn reveals an open callback's premise actually played out — e.g. user mentions the chili night happened, the job interview is over, the visit is done, OR the pinned fight got worked through with a real apology/repair/mutual landing. Include `resolution_text` (1 sentence describing how it went). Don't speculate; only resolve what the conversation makes clear.
    - Do NOT emit `dismiss` — that's a user slash command. Past-due plans auto-expire on the backend without your help.
 
 3) **profile_ops** (user_profile) — durable, stable facts about the user that the character should always know. Job, family, pets, hometown, recurring people, health, ongoing situation. NOT moments — *facts*. Add/edit/delete when these change. Most turns: no profile_ops.
@@ -109,7 +112,7 @@ HARD RULES:
 - Memories must be SPECIFIC and FUTURE-USEFUL. "They had a nice chat" is not a memory. "The user said her mom called drunk again" is.
 - Callbacks must be ACTUALLY OPEN. If the conversation resolves something this turn, do not log it as a callback.
 - Profile facts must be DURABLE. If it's likely to be true a year from now, it's a profile fact. Otherwise it's a memory or nothing.
-- For checkins: if the character explicitly references an open callback by name/topic this turn, emit `{action: "checkin", id: <id>}`.
+- For checkins: when this turn references an open callback by name OR plausibly the same topic with different wording, emit `{action: "checkin", id: <id>}`. Be generous — false-checkin is cheap, duplicate-add is expensive (double ripeness rolls + two threads for one issue).
 
 Always call `report_character_state` exactly once. Empty arrays are fine."""
 
