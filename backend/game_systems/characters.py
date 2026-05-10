@@ -807,13 +807,20 @@ def build_holiday_injection(state: dict) -> str:
     if us_name:
         names.append(us_name)
 
-    # Per-character custom holidays — culture-specific, anniversaries, etc.
-    # Each entry can be a fixed date OR a named floating rule (e.g.
-    # "day_after_labor_day"). resolve_custom_holiday handles both.
-    custom = state.get("custom_holidays") if isinstance(state, dict) else None
-    if isinstance(custom, list):
-        from character_holidays import resolve_custom_holiday
-        for entry in custom:
+    # Two layered sources of personal holidays beyond the universal US set:
+    #   1. Project-level (state['custom_holidays']) — per-character, e.g.
+    #      a cafe's anniversary or a character-significant date.
+    #   2. User-level (state['user_calendar']) — the user's own dates
+    #      surfaced across ALL their character chats (their birthday,
+    #      anniversaries with people who matter, etc.).
+    # Both lists use the same entry shape and resolve through the same
+    # helper. main.py populates user_calendar from the user's calendar.json.
+    from character_holidays import resolve_custom_holiday
+    for source_key in ("custom_holidays", "user_calendar"):
+        source = state.get(source_key) if isinstance(state, dict) else None
+        if not isinstance(source, list):
+            continue
+        for entry in source:
             resolved = resolve_custom_holiday(entry, today.year)
             if resolved is None:
                 continue

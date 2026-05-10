@@ -270,6 +270,37 @@ class TestBuildHolidayInjection:
         # Sept 6 2026 isn't any US holiday and isn't Brewing Day under the rule
         assert out == ""
 
+    def test_user_level_calendar_emits(self, monkeypatch):
+        # Shae's birthday Feb 19 — user-level, should fire in any character chat
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 2, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        state = {
+            "user_calendar": [{"month": 2, "day": 19, "name": "Shae's birthday"}],
+        }
+        out = ch.build_holiday_injection(state)
+        assert "Shae's birthday" in out
+
+    def test_user_level_AND_project_level_stack(self, monkeypatch):
+        # If user-level AND project-level land on the same day, both surface
+        from datetime import datetime, timezone
+        import game_systems.characters as ch
+        monkeypatch.setattr(
+            ch, "now_et",
+            lambda: datetime(2026, 2, 19, 8, 0, tzinfo=timezone.utc),
+        )
+        state = {
+            "custom_holidays": [{"month": 2, "day": 19, "name": "Some Project Anniversary"}],
+            "user_calendar": [{"month": 2, "day": 19, "name": "Shae's birthday"}],
+        }
+        out = ch.build_holiday_injection(state)
+        assert "Shae's birthday" in out
+        assert "Some Project Anniversary" in out
+        assert " AND " in out
+
     def test_fixed_custom_holiday_still_works(self, monkeypatch):
         # Fixed-date entries continue to work (backward-compat)
         from datetime import datetime, timezone

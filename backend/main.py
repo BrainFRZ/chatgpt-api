@@ -403,6 +403,30 @@ def save_api_key(username: str, api_key: str):
     keys["openai"] = api_key
     save_api_keys(username, keys)
 
+def get_user_calendar_path(username: str) -> str:
+    return os.path.join(get_user_dir(username), "calendar.json")
+
+
+def load_user_calendar(username: str) -> list[dict]:
+    """Load user-level personal holidays/anniversaries (the user's own
+    birthday, important personal dates, etc.) — surface in EVERY character
+    chat for this user, not just one project. Returns a list of custom-
+    holiday entries (same shape as project-level custom_holidays:
+    fixed-date or named-rule). Empty list when missing or malformed.
+    """
+    path = get_user_calendar_path(username)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"failed to load user calendar for {username}: {e}")
+        return []
+    entries = data.get("custom_holidays") if isinstance(data, dict) else None
+    return entries if isinstance(entries, list) else []
+
+
 def get_persistent_stats_path(username: str) -> str:
     return os.path.join(get_user_dir(username), "lifetime_stats.json")
 
@@ -6622,6 +6646,13 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # — the injection builder returns "" in either case.
                 if isinstance(characters_state.get("_render_payload"), dict):
                     characters_state["_render_payload"]["image_readings"] = _image_readings or []
+
+                # User-level calendar (Shae's birthday + any other personal dates
+                # that should surface in EVERY character chat, not just one
+                # project). Project-level custom_holidays already lives on
+                # characters_state directly; this is the additive user-level
+                # layer build_holiday_injection reads alongside it.
+                characters_state["user_calendar"] = load_user_calendar(username)
 
                 # If we got here AND there's a busy event AND it's an SOS break,
                 # stash the busy context so build_busy_interrupt_injection tells
