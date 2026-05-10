@@ -2603,6 +2603,7 @@ function App() {
                 projectGameSystem={projectGameSystem}
                 availableGameSystems={availableGameSystems}
                 handleProjectGameSystemChange={handleProjectGameSystemChange}
+                pipelineState={pipelineState}
                 availableModels={availableModels}
                 selectedModel={selectedModel}
                 handleModelChange={handleModelChange}

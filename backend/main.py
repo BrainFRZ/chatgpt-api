@@ -5075,24 +5075,53 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 },
             )
         if _pf.local_slash is not None:
-            # Channel/resolve/dismiss/reinterview applied state. Prepend OOC feedback
-            # to the user message so the character can acknowledge naturally.
+            _slash_kind = _pf.local_slash.get("kind")
             characters_slash_feedback = _pf.local_slash.get("feedback") or ""
-            if characters_slash_feedback:
-                _existing = branch_path[-1].get("content") or ""
-                ooc_line = f"[OOC: {characters_slash_feedback}]"
-                branch_path[-1]["content"] = (
-                    ooc_line + ("\n\n" + _existing if isinstance(_existing, str) and _existing.strip() else "")
-                )
-            # Reinterview slash flips us into interview mode for the rest of this turn
-            if _pf.local_slash.get("kind") == "reinterview_started":
-                use_characters_interview = True
-                use_characters = False
-                # Mark this message as the start of a fresh interview session so
-                # the interview-mode context filter scopes to "since this point."
-                branch_path[-1]["_characters_reinterview_boundary"] = True
-            else:
+            if _slash_kind == "channel_set":
+                # Channel commands are pure state changes — the [CHANNEL]
+                # injection already tells the model the current channel on
+                # every turn, so an OOC acknowledgement + a literal "/text"
+                # in the user content was burning Opus 3 tokens for nothing.
+                _remaining = (_pf.local_slash.get("remaining_content") or "").strip()
+                if not _remaining:
+                    # Pure channel switch: no model call, no chat message saved.
+                    # Roll back the user-message append, persist state, return
+                    # a tiny SSE stream so the frontend can update its banner.
+                    if data["messages"] and data["messages"][-1].get("id") == user_msg_id:
+                        data["messages"].pop()
+                    save_chat(username, request.chat_name, data, request.project)
+                    _new_channel = _pf.local_slash.get("channel")
+                    _channel_payload = {
+                        "channel": _new_channel,
+                        "feedback": characters_slash_feedback,
+                    }
+
+                    async def _channel_only_stream():
+                        yield f"event: channel_changed\ndata: {json.dumps(_channel_payload)}\n\n"
+                        yield f"event: done\ndata: {json.dumps({'channel_only': True, 'channel': _new_channel})}\n\n"
+
+                    return StreamingResponse(_channel_only_stream(), media_type="text/event-stream")
+                # Channel + content: strip the slash, skip the OOC line, proceed.
+                branch_path[-1]["content"] = _remaining
                 use_characters = True
+            else:
+                # Other slash commands (resolve/dismiss/seed-event/reinterview)
+                # do need OOC acknowledgement so the character can respond in
+                # voice to the state change.
+                if characters_slash_feedback:
+                    _existing = branch_path[-1].get("content") or ""
+                    ooc_line = f"[OOC: {characters_slash_feedback}]"
+                    branch_path[-1]["content"] = (
+                        ooc_line + ("\n\n" + _existing if isinstance(_existing, str) and _existing.strip() else "")
+                    )
+                if _slash_kind == "reinterview_started":
+                    use_characters_interview = True
+                    use_characters = False
+                    # Mark this message as the start of a fresh interview session so
+                    # the interview-mode context filter scopes to "since this point."
+                    branch_path[-1]["_characters_reinterview_boundary"] = True
+                else:
+                    use_characters = True
         elif _pf.finalize:
             characters_finalize_pending = True
             use_characters_interview = True  # we're still in interview mode until finalize succeeds

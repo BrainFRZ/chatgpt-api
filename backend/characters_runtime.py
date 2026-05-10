@@ -295,7 +295,12 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
     cs = get_characters_state(data, project_dir=project_dir)
     today = today_et_iso()
 
-    # Channel commands
+    # Channel commands. Pure channel switches are state-only — the model gets
+    # the channel via the [CHANNEL] injection on every turn, so re-stating it
+    # via [OOC] + sending the literal '/text' to Opus 3 was burning tokens for
+    # nothing. Return remaining_content so main.py can either short-circuit
+    # (no content = no model call, just state change) or strip the slash from
+    # what gets sent (content = use the cleaned content).
     channel_aliases = {"/text": "text", "/phone": "phone", "/inperson": "inperson", "/video": "video"}
     if cmd in channel_aliases:
         new_channel = channel_aliases[cmd]
@@ -303,10 +308,13 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
         return {
             "kind": "channel_set",
             "channel": new_channel,
+            "remaining_content": arg,
             "feedback": f"Channel set to {new_channel.upper()}.",
         }
 
     if cmd == "/channel":
+        # /channel <name> — explicit form. The arg holds the channel name,
+        # so there's no remaining_content (the channel name IS the arg).
         new_channel = arg.lower().strip()
         if new_channel not in VALID_CHANNELS:
             return {
@@ -317,6 +325,7 @@ def handle_local_slash(message: str, data: dict, project_dir: Optional[str]) -> 
         return {
             "kind": "channel_set",
             "channel": new_channel,
+            "remaining_content": "",
             "feedback": f"Channel set to {new_channel.upper()}.",
         }
 

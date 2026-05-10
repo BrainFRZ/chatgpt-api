@@ -161,6 +161,7 @@ interface ChatViewProps {
   onToggleMessageStaged?: (messageId: string, staged: boolean) => void;
   onUnstageAll?: () => void;
   chatGameSystem?: string | null;
+  pipelineState?: any;
 }
 
 export default function ChatView({
@@ -231,6 +232,7 @@ export default function ChatView({
   onToggleMessageStaged,
   onUnstageAll,
   chatGameSystem,
+  pipelineState,
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -323,6 +325,25 @@ export default function ChatView({
             ) : null;
           })()}
         </h2>
+        {chatGameSystem === 'characters' && pipelineState?.characters_state?.channel && (
+          <span
+            style={{
+              fontSize: '0.7rem',
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              padding: '3px 8px',
+              borderRadius: '10px',
+              background: '#1f2a44',
+              color: '#9ec5ff',
+              border: '1px solid #34466e',
+              textTransform: 'uppercase' as const,
+              flexShrink: 0,
+            }}
+            title="Current channel — change with /text, /phone, /inperson, or /video"
+          >
+            {pipelineState.characters_state.channel}
+          </span>
+        )}
         {viewerCount > 1 && (
           <span style={styles.viewerCount} title={`${viewerCount} viewers connected`}>
             {viewerCount} viewing

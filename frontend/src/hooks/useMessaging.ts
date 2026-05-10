@@ -295,6 +295,10 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'channel_changed') {
+            deps.setPipelineState((prev: any) => prev
+              ? { ...prev, characters_state: { ...(prev.characters_state || {}), channel: event.data.channel } }
+              : { characters_state: { channel: event.data.channel } });
           } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
@@ -311,6 +315,15 @@ export function useMessaging(deps: UseMessagingDeps) {
             }
           } else if (event.type === 'done') {
             const data = event.data;
+
+            if (data.channel_only) {
+              // Pure channel switch on an edit-resubmit (rare). Roll the chat
+              // back to before the edit fired — no message was saved backend-side.
+              deps.setMessages(truncatedMessages);
+              deps.fetchUserStats();
+              deps.fetchFreeTokens();
+              continue;
+            }
 
             const newUserMessage: ChatMessage = {
               id: data.user_message_id,
@@ -688,6 +701,13 @@ export function useMessaging(deps: UseMessagingDeps) {
             deps.setPipelineState(event.data);
           } else if (event.type === 'state_notifications') {
             deps.setStateNotifications(event.data);
+          } else if (event.type === 'channel_changed') {
+            // Pure channel switch (Characters /text /phone /inperson /video).
+            // Backend short-circuited — no model call, no message saved.
+            // Just update the channel chip so the user can see the new mode.
+            deps.setPipelineState((prev: any) => prev
+              ? { ...prev, characters_state: { ...(prev.characters_state || {}), channel: event.data.channel } }
+              : { characters_state: { channel: event.data.channel } });
           } else if (event.type === 'hack_mode_start' || event.type === 'hack_state_update') {
             deps.setHackState(event.data);
           } else if (event.type === 'hack_complete') {
@@ -705,7 +725,15 @@ export function useMessaging(deps: UseMessagingDeps) {
           } else if (event.type === 'done') {
             const data = event.data;
 
-            if (data.sex_mode_handoff) {
+            if (data.channel_only) {
+              // Pure channel switch: backend rolled back the user message and
+              // saved no assistant reply. Strip the optimistic user msg + the
+              // streaming-assistant placeholder we eagerly appended.
+              deps.setMessages(prev => prev.slice(0, -2));
+              deps.setTotalMessages(prev => Math.max(0, prev - 1));
+              deps.fetchUserStats();
+              deps.fetchFreeTokens();
+            } else if (data.sex_mode_handoff) {
               // Sex handoff: messages were deleted backend-side — remove optimistic messages, update state only
               deps.setMessages(prev => prev.slice(0, -2));
               deps.setTotalMessages(prev => prev - 1); // reverse optimistic +1 from submission
