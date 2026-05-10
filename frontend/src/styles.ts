@@ -405,9 +405,20 @@ export const styles: { [key: string]: React.CSSProperties } = {
   },
   messageFooter: {
     display: 'flex',
+    flexDirection: 'column' as const,
+    marginTop: '8px',
+    gap: '2px',
+  },
+  messageFooterMainRow: {
+    display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: '8px',
+  },
+  messageFooterBreakdown: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'flex-start',
+    gap: '1px',
   },
   messageTimestamp: {
     fontSize: '0.75rem',

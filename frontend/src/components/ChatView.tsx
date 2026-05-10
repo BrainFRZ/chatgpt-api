@@ -835,121 +835,140 @@ export default function ChatView({
                     </div>
                   )}
                   <div style={styles.messageFooter}>
-                    {msg.tokens && (
-                      <span style={styles.messageTokens}>
-                        {msg.tokens}{msg.cost && ` | ${msg.cost}`}
-                        {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
-                        {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
-                      </span>
-                    )}
-                    {(msg as any).flag_agent_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Flags: {formatUsageString((msg as any).flag_agent_usage)}
-                        {typeof (msg as any).flag_agent_cost === 'number' && ` | $${(msg as any).flag_agent_cost.toFixed(6)}`}
-                        {' '}(Haiku)
-                      </span>
-                    )}
-                    {(msg as any).recall_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Recall: {formatUsageString((msg as any).recall_usage)}
-                        {typeof (msg as any).recall_cost === 'number' && ` | $${(msg as any).recall_cost.toFixed(6)}`}
-                        {' '}(Haiku)
-                      </span>
-                    )}
-                    {(msg as any).character_agent_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        State: {formatUsageString((msg as any).character_agent_usage)}
-                        {typeof (msg as any).character_agent_cost === 'number' && ` | $${(msg as any).character_agent_cost.toFixed(6)}`}
-                        {' '}(Sonnet)
-                      </span>
-                    )}
-                    {(msg as any).off_screen_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Off-screen: {formatUsageString((msg as any).off_screen_usage)}
-                        {typeof (msg as any).off_screen_cost === 'number' && ` | $${(msg as any).off_screen_cost.toFixed(6)}`}
-                        {' '}(Opus 4.5)
-                      </span>
-                    )}
-                    {(msg as any).inner_state_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Inner: {formatUsageString((msg as any).inner_state_usage)}
-                        {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
-                        {' '}(Sonnet)
-                      </span>
-                    )}
-                    {(msg as any).search_usage && (
-                      <span style={{ ...styles.messageTokens, marginLeft: 8, opacity: 0.75 }}>
-                        Search: {(msg as any).search_calls || 0} call{((msg as any).search_calls || 0) === 1 ? '' : 's'}
-                        {typeof (msg as any).search_cost === 'number' && ` | $${(msg as any).search_cost.toFixed(6)}`}
-                        {' '}({(msg as any).search_model || 'Sonar'})
-                      </span>
-                    )}
-                    {/* Aggregate Total: sums every per-agent cost displayed above plus
-                        the main reply's cost (which is msg.cost minus all the side-agent
-                        costs). Confirms what your turn actually cost — the main line's
-                        cost field is technically the total too, but its position next to
-                        the model name makes it ambiguous. */}
-                    {msg.role === 'assistant' && msg.cost && (() => {
-                      const agentCosts =
-                        ((msg as any).flag_agent_cost || 0) +
-                        ((msg as any).recall_cost || 0) +
-                        ((msg as any).character_agent_cost || 0) +
-                        ((msg as any).off_screen_cost || 0) +
-                        ((msg as any).inner_state_cost || 0) +
-                        ((msg as any).search_cost || 0);
-                      // Parse msg.cost (e.g. "$0.001234") to a number — that's already total
-                      const totalNum = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
-                      // If no side-agents fired, suppress (Total == main, redundant)
-                      if (agentCosts < 1e-9) return null;
-                      return (
-                        <span style={{ ...styles.messageTokens, marginLeft: 8, fontWeight: 600 }}>
-                          Total: ${totalNum.toFixed(6)}
+                    <div style={styles.messageFooterMainRow}>
+                      {msg.tokens ? (
+                        <span style={styles.messageTokens}>
+                          {msg.tokens}{msg.cost && ` | ${msg.cost}`}
+                          {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
+                          {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
                         </span>
-                      );
-                    })()}
-                    {/* Branch navigation - show only for user messages with siblings */}
-                    {msg.role === 'user' && (() => {
-                      if (!msg.id) return null;
-                      const siblings = getSiblings(allMessages, msg.id);
-                      if (siblings.length <= 1) return null;
-                      const currentIndex = siblings.findIndex(s => s.id === msg.id);
-                      const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
-                      const nextSibling = currentIndex < siblings.length - 1 ? siblings[currentIndex + 1] : null;
-                      return (
-                        <span style={styles.branchNav}>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); if (prevSibling?.id) switchBranch(prevSibling.id); }}
-                            disabled={!prevSibling}
-                            style={{
-                              ...styles.branchNavButton,
-                              opacity: prevSibling ? 1 : 0.3,
-                              cursor: prevSibling ? 'pointer' : 'default'
-                            }}
-                            title="Previous edit"
-                          >
-                            ◀
-                          </button>
-                          <span style={styles.branchNavText}>{currentIndex + 1}/{siblings.length}</span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); if (nextSibling?.id) switchBranch(nextSibling.id); }}
-                            disabled={!nextSibling}
-                            style={{
-                              ...styles.branchNavButton,
-                              opacity: nextSibling ? 1 : 0.3,
-                              cursor: nextSibling ? 'pointer' : 'default'
-                            }}
-                            title="Next edit"
-                          >
-                            ▶
-                          </button>
-                        </span>
-                      );
-                    })()}
-                    {(() => {
-                      return msg.timestamp ? (
+                      ) : <span />}
+                      {/* Branch navigation - show only for user messages with siblings */}
+                      {msg.role === 'user' && (() => {
+                        if (!msg.id) return null;
+                        const siblings = getSiblings(allMessages, msg.id);
+                        if (siblings.length <= 1) return null;
+                        const currentIndex = siblings.findIndex(s => s.id === msg.id);
+                        const prevSibling = currentIndex > 0 ? siblings[currentIndex - 1] : null;
+                        const nextSibling = currentIndex < siblings.length - 1 ? siblings[currentIndex + 1] : null;
+                        return (
+                          <span style={styles.branchNav}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); if (prevSibling?.id) switchBranch(prevSibling.id); }}
+                              disabled={!prevSibling}
+                              style={{
+                                ...styles.branchNavButton,
+                                opacity: prevSibling ? 1 : 0.3,
+                                cursor: prevSibling ? 'pointer' : 'default'
+                              }}
+                              title="Previous edit"
+                            >
+                              ◀
+                            </button>
+                            <span style={styles.branchNavText}>{currentIndex + 1}/{siblings.length}</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); if (nextSibling?.id) switchBranch(nextSibling.id); }}
+                              disabled={!nextSibling}
+                              style={{
+                                ...styles.branchNavButton,
+                                opacity: nextSibling ? 1 : 0.3,
+                                cursor: nextSibling ? 'pointer' : 'default'
+                              }}
+                              title="Next edit"
+                            >
+                              ▶
+                            </button>
+                          </span>
+                        );
+                      })()}
+                      {msg.timestamp && (
                         <span style={styles.messageTimestamp}>{formatTimestamp(msg.timestamp)}</span>
-                      ) : null;
-                    })()}
+                      )}
+                    </div>
+                    <div style={styles.messageFooterBreakdown}>
+                      {(msg as any).flag_agent_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Flags: {formatUsageString((msg as any).flag_agent_usage)}
+                          {typeof (msg as any).flag_agent_cost === 'number' && ` | $${(msg as any).flag_agent_cost.toFixed(6)}`}
+                          {' '}(Haiku)
+                        </span>
+                      )}
+                      {(msg as any).recall_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Recall: {formatUsageString((msg as any).recall_usage)}
+                          {typeof (msg as any).recall_cost === 'number' && ` | $${(msg as any).recall_cost.toFixed(6)}`}
+                          {' '}(Haiku)
+                        </span>
+                      )}
+                      {(msg as any).character_agent_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          State: {formatUsageString((msg as any).character_agent_usage)}
+                          {typeof (msg as any).character_agent_cost === 'number' && ` | $${(msg as any).character_agent_cost.toFixed(6)}`}
+                          {' '}(Sonnet)
+                        </span>
+                      )}
+                      {(msg as any).off_screen_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Off-screen: {formatUsageString((msg as any).off_screen_usage)}
+                          {typeof (msg as any).off_screen_cost === 'number' && ` | $${(msg as any).off_screen_cost.toFixed(6)}`}
+                          {' '}(Opus 4.5)
+                        </span>
+                      )}
+                      {(msg as any).inner_state_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Inner: {formatUsageString((msg as any).inner_state_usage)}
+                          {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
+                          {' '}(Sonnet)
+                        </span>
+                      )}
+                      {(msg as any).image_reading_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Vision: {formatUsageString((msg as any).image_reading_usage)}
+                          {typeof (msg as any).image_reading_cost === 'number' && ` | $${(msg as any).image_reading_cost.toFixed(6)}`}
+                          {' '}({(msg as any).image_reading_model || 'Opus 4.5'})
+                          {(msg as any).image_reading_count ? `, ${(msg as any).image_reading_count} image${(msg as any).image_reading_count === 1 ? '' : 's'}` : ''}
+                        </span>
+                      )}
+                      {(msg as any).search_usage && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Search: {(msg as any).search_calls || 0} call{((msg as any).search_calls || 0) === 1 ? '' : 's'}
+                          {typeof (msg as any).search_cost === 'number' && ` | $${(msg as any).search_cost.toFixed(6)}`}
+                          {' '}({(msg as any).search_model || 'Sonar'})
+                        </span>
+                      )}
+                      {(msg as any).meme_calls > 0 && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          Meme: {(msg as any).meme_calls} call{(msg as any).meme_calls === 1 ? '' : 's'}
+                          {' '}(Imgflip + Reddit + vision-pick)
+                        </span>
+                      )}
+                      {(msg as any).fetch_url_calls > 0 && (
+                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                          URL fetch: {(msg as any).fetch_url_calls} call{(msg as any).fetch_url_calls === 1 ? '' : 's'}
+                        </span>
+                      )}
+                      {/* Aggregate Total: sums every per-agent cost displayed above
+                          plus the main reply's cost. Confirms what your turn actually
+                          cost. Suppressed when no side-agents fired (would just
+                          duplicate the main line's cost). */}
+                      {msg.role === 'assistant' && msg.cost && (() => {
+                        const agentCosts =
+                          ((msg as any).flag_agent_cost || 0) +
+                          ((msg as any).recall_cost || 0) +
+                          ((msg as any).character_agent_cost || 0) +
+                          ((msg as any).off_screen_cost || 0) +
+                          ((msg as any).inner_state_cost || 0) +
+                          ((msg as any).image_reading_cost || 0) +
+                          ((msg as any).search_cost || 0);
+                        const totalNum = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
+                        if (agentCosts < 1e-9) return null;
+                        return (
+                          <span style={{ ...styles.messageTokens, fontWeight: 600, marginTop: '2px' }}>
+                            Total: ${totalNum.toFixed(6)}
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </div>
                 </>
               )}
