@@ -6195,6 +6195,28 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if profiles:
                 sex_system_content += "\n\n" + profiles
 
+            # Characters projects: ALSO inject character_profile.di for general
+            # grounding (voice, body baseline, dynamics, history). Profile.di is
+            # the canonical character document that the regular Characters
+            # pipeline loads; pulling it into sex mode means the scene has real
+            # context about who the participant is, not just whatever upload
+            # docs happen to exist. The upload-based Character Descs / Intimate
+            # docs above layer scene-specific detail on top of this baseline.
+            if gs and gs.get("id") == "characters":
+                project_dir = get_project_dir(username, request.project)
+                profile_path = os.path.join(project_dir, "character_profile.di")
+                if os.path.isfile(profile_path):
+                    try:
+                        with open(profile_path, "r", encoding="utf-8") as _pf:
+                            profile_content = _pf.read()
+                        if profile_content.strip():
+                            sex_system_content += (
+                                "\n\n[CHARACTER PROFILE — canonical voice + body + history]\n"
+                                + profile_content
+                            )
+                    except OSError as e:
+                        logger.warning(f"sex_mode: failed to read profile.di for {username}: {e}")
+
         # Append scene context to system prompt (cacheable — stable across the scene)
         sex_injection = _build_sex_injection(sex_ps, sex_scene)
         if sex_injection:
