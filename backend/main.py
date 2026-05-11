@@ -6793,7 +6793,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 if _inner_state_usage:
                     data["inner_state_usage"] = _inner_state_usage
                     data["inner_state_cost"] = compute_inner_state_cost(_inner_state_usage)
-                    data["inner_state_model"] = "claude-sonnet-4-6"
+                    data["inner_state_model"] = "claude-opus-4-5"
                 # Persist the actual {feeling/wanting/noticing/holding_back} payload
                 # on the assistant message so it can be inspected from the chat
                 # JSON later. Parallels how character_agent_ops are persisted.
@@ -11374,7 +11374,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if data.get("inner_state_usage"):
                             assistant_msg_data["inner_state_usage"] = data["inner_state_usage"]
                             assistant_msg_data["inner_state_cost"] = float(data.get("inner_state_cost", 0.0) or 0.0)
-                            assistant_msg_data["inner_state_model"] = data.get("inner_state_model", "claude-sonnet-4-6")
+                            assistant_msg_data["inner_state_model"] = data.get("inner_state_model", "claude-opus-4-5")
                             # Per-turn snapshot of the four-field inner state so you
                             # can inspect "what was Zara feeling on this turn" from
                             # the chat JSON. Hidden from the rendered chat — design

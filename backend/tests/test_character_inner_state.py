@@ -14,10 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from character_inner_state import (  # noqa: E402
     INNER_STATE_MODEL,
-    SONNET_INPUT_RATE,
-    SONNET_CACHE_READ_RATE,
-    SONNET_CACHE_WRITE_RATE,
-    SONNET_OUTPUT_RATE,
+    OPUS45_INPUT_RATE,
+    OPUS45_CACHE_READ_RATE,
+    OPUS45_CACHE_WRITE_RATE,
+    OPUS45_OUTPUT_RATE,
     _format_recent_dialogue,
     _summarize_state_for_inner,
     build_inner_state_tool,
@@ -187,10 +187,10 @@ def test_compute_cost_arithmetic():
     }
     # uncached input = 1_000_000 - 500_000 - 200_000 = 300_000
     expected = (
-        300_000 * SONNET_INPUT_RATE
-        + 500_000 * SONNET_CACHE_READ_RATE
-        + 200_000 * SONNET_CACHE_WRITE_RATE
-        + 100_000 * SONNET_OUTPUT_RATE
+        300_000 * OPUS45_INPUT_RATE
+        + 500_000 * OPUS45_CACHE_READ_RATE
+        + 200_000 * OPUS45_CACHE_WRITE_RATE
+        + 100_000 * OPUS45_OUTPUT_RATE
     ) / 1_000_000.0
     assert compute_inner_state_cost(usage) == pytest.approx(expected)
 
@@ -294,7 +294,7 @@ def test_tool_schema_has_all_four_fields():
 def test_model_constant_is_sonnet_dashed():
     """Model constant must be Anthropic's dashed form, not the dot form (which
     is Chorus-internal). Anthropic API rejects 'claude-sonnet-4.6'."""
-    assert INNER_STATE_MODEL == "claude-sonnet-4-6"
+    assert INNER_STATE_MODEL == "claude-opus-4-5"
 
 
 # ── Helper coverage ──────────────────────────────────────────────────

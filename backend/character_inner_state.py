@@ -1,33 +1,38 @@
-"""Character inner-state pre-pass — Claude Sonnet 4.6.
+"""Character inner-state pre-pass — Claude Opus 4.5.
 
-Runs AFTER recall and BEFORE the correspondence model (Opus 3) streams its
-reply. Sees:
+Runs AFTER recall and BEFORE the correspondence model (Opus 4.5 voice)
+streams its reply. Sees:
 - The character profile (canonical voice / personality)
 - The user's life facts (the relationship)
 - The current state (recall-surfaced memories, callbacks, arc, wellbeing,
-  life events) — same context Opus is about to read
+  life events) — same context the voice model is about to read
 - A small dialogue window + the current user message
 
 …and emits a structured "inner state" with four short fields that get
-injected into Opus's user-message context as hidden ground truth:
+injected into the voice context as hidden ground truth:
 
   feeling      — emotional weather right now, beneath the words
   wanting      — what the character wants from this exchange
   noticing     — what jumps out about the user's message (subtext, tone)
   holding_back — what they're choosing NOT to say (or not yet)
 
-Why a pre-pass at all: when Opus does both jobs in one shot — figure out
-what the character is feeling AND voice the reply — the voicing job tends
-to dominate and emotional inference goes shallow. Splitting forces a
-deliberate "what's actually going on inside her right now" pass that
-doesn't compete with phrasing concerns. Opus then writes from that state
-instead of inventing it on the fly.
+Why a pre-pass at all: when one model does both jobs in one shot — figure
+out what the character is feeling AND voice the reply — the voicing job
+tends to dominate and emotional inference goes shallow. Splitting forces
+a deliberate "what's actually going on inside her right now" pass that
+doesn't compete with phrasing concerns. Voice then writes from that
+state instead of inventing it on the fly.
 
-Why Sonnet 4.6 (not Haiku, not Opus): theory-of-mind work — read context,
-infer emotional state, connect to history, judge what she'd hold back vs
-share. Same tool we use for character_agent's post-pass, same reasoning.
-Haiku is shallow on subtle inference; Opus is overkill. Sonnet's the right
-calibration. Cost: ~$0.005/warm-turn.
+Why Opus 4.5 now (previously Sonnet 4.6): theory-of-mind work benefits
+from the more capable model — Opus 4.5 reads subtext, holding-back, and
+tonal undercurrents with materially more nuance than Sonnet. The pre-pass
+output is small (4×140 chars), so context-growth isn't an issue — only
+the per-turn output cost goes up ~1.67×, from ~$0.012 to ~$0.019. Worth
+it for richer emotional grounding the voice model reads each turn.
+
+Thinking is DISABLED — the structured 4-axis output caps how much extra
+deliberation can manifest in the persisted payload, and the model's
+intrinsic capability without thinking is already a step up from Sonnet.
 
 Why sequential after recall (not parallel): recall surfaces the specific
 memories that color how the character would feel about THIS moment.
@@ -47,16 +52,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-INNER_STATE_MODEL = "claude-sonnet-4-6"
+INNER_STATE_MODEL = "claude-opus-4-5"
 INNER_STATE_MAX_TOKENS = 1024
-INNER_STATE_TIMEOUT_S = 25  # matches character_agent — Sonnet calls take a beat longer than Haiku
+INNER_STATE_TIMEOUT_S = 30  # Opus 4.5 is slightly slower than Sonnet 4.6 for the same prompt
 
-# Sonnet 4.6 pricing per MTok ($/1M tokens). 1hr cache TTL (project standard).
+# Opus 4.5 pricing per MTok ($/1M tokens). 1hr cache TTL (project standard).
 # Duplicated here per the per-module pattern in character_recall.py / character_off_screen.py.
-SONNET_INPUT_RATE = 3.00
-SONNET_CACHE_READ_RATE = 0.30
-SONNET_CACHE_WRITE_RATE = 6.00    # 1hr cache write (2x base)
-SONNET_OUTPUT_RATE = 15.00
+OPUS45_INPUT_RATE = 5.00
+OPUS45_CACHE_READ_RATE = 0.50
+OPUS45_CACHE_WRITE_RATE = 10.00   # 1hr cache write (2x base)
+OPUS45_OUTPUT_RATE = 25.00
 
 
 def compute_inner_state_cost(usage: dict) -> float:
@@ -68,10 +73,10 @@ def compute_inner_state_cost(usage: dict) -> float:
     output = usage.get("output_tokens", 0) or 0
     uncached_input = max(0, raw_input - cache_read - cache_write)
     return (
-        uncached_input * SONNET_INPUT_RATE
-        + cache_read * SONNET_CACHE_READ_RATE
-        + cache_write * SONNET_CACHE_WRITE_RATE
-        + output * SONNET_OUTPUT_RATE
+        uncached_input * OPUS45_INPUT_RATE
+        + cache_read * OPUS45_CACHE_READ_RATE
+        + cache_write * OPUS45_CACHE_WRITE_RATE
+        + output * OPUS45_OUTPUT_RATE
     ) / 1_000_000.0
 
 
