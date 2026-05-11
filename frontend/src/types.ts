@@ -1,5 +1,14 @@
-// Convert LaTeX-style math delimiters to dollar-sign style for remark-math
-export const convertMathDelimiters = (text: string): string => {
+// Convert LaTeX-style math delimiters to dollar-sign style for remark-math.
+// Guards against undefined/null input — historically this took `text: string`
+// at the type level but several callers pass msg.content / msg.reasoning /
+// other fields that can legitimately be missing on a stored message (e.g.,
+// side-agent short-circuit replies, malformed chat JSON, a streaming
+// placeholder whose `done` event lacked assistant_message). Without the
+// guard, the unprotected .replace inside messages.map() crashes the entire
+// chat render — and because no top-level error boundary was in place
+// historically, the whole app white-screened with no recovery.
+export const convertMathDelimiters = (text: string | null | undefined): string => {
+  if (text == null) return '';
   return text
     .replace(/\\\[/g, '$$')      // \[ to $$
     .replace(/\\\]/g, '$$')      // \] to $$

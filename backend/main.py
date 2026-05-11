@@ -4892,6 +4892,16 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         user_msg_data["attached_files"] = attached_files_data
 
     data["messages"].append(user_msg_data)
+    # Persist the user message to disk IMMEDIATELY, before any side-agent
+    # work or streaming begins. If anything between here and the end-of-stream
+    # save_chat (~6000 lines down) raises — pipeline crash, side-agent error,
+    # client disconnect, render crash on the frontend — the user message would
+    # otherwise be lost on refresh: the user sees their input vanish with no
+    # explanation. Matches the pattern used in the non-streaming send
+    # endpoint above. Side-agent results / assistant message append a second
+    # save_chat at end-of-stream; this one only guarantees the user's text
+    # survives a mid-stream failure.
+    save_chat(username, request.chat_name, data, request.project)
 
     # Create chat key for sync broadcasts
     chat_key = sync_manager.make_chat_key(username, request.project, request.chat_name)
@@ -5065,9 +5075,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         _characters_project_dir = get_project_dir(username, request.project)
         _pf = _characters_preflight(gs, data, _characters_project_dir, request.message or "")
         if _pf.is_hard_fail():
-            # Roll back the appended user message; nothing was saved yet.
+            # Roll back the appended user message. The user message was
+            # persisted right after append (see save_chat after data["messages"]
+            # .append(user_msg_data) above), so the pop must be followed by a
+            # save_chat — otherwise the rejected message ghosts back into the
+            # chat on the next refresh.
             if data["messages"] and data["messages"][-1].get("id") == user_msg_id:
                 data["messages"].pop()
+                save_chat(username, request.chat_name, data, request.project)
             raise HTTPException(
                 status_code=412,
                 detail={
