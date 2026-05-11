@@ -73,6 +73,7 @@
 !backend/scripts/strip_printed_hud.py
 !backend/scripts/simulate_callback_chili.py
 !backend/scripts/migrate_memories_to_files.py
+!backend/scripts/simulate_profile_new_person.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_e2e.py
