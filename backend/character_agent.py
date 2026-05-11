@@ -64,6 +64,8 @@ SYSTEM_PROMPT = """You are a state extractor for an ongoing character-correspond
 You are NOT writing the character. You are reading what was written and updating five small structures:
 
 1) **character_memories** — tiered (impact 1-5). Add when a moment is **likely to matter to a future scene** between these two: a confession, a conflict, a turning point in their relationship, a vulnerability shared, a promise made, a strong reaction. DO NOT add ambient texture, single-scene jokes, or things that resolve in this turn. Be selective.
+
+   Memories are stored as an index + a per-memory body file. The `text` field is the FULL body (up to 5000 chars — quotes, full context, threading). The `hook` field is a one-line summary (≤220 chars) that future-you will see when scanning the [MEMORIES] index on later turns. Always provide both: write `text` like you'd write a passage, and write `hook` like a tagline you'd recognize when scrolling a list of 50 memories. If you omit `hook`, the backend derives one from your first sentence — usable but less curated than what you'd write.
    - impact 5: defining moment
    - impact 4: significant
    - impact 3: notable
@@ -133,11 +135,12 @@ def build_character_agent_tool() -> dict:
                         "required": ["action"],
                         "properties": {
                             "action": {"type": "string", "enum": ["add", "drop"]},
-                            "text": {"type": "string", "description": "What happened, in 1-2 sentences (or longer for high-impact, file-backed entries). Required for add."},
+                            "text": {"type": "string", "description": "Full body of the memory (up to 5000 chars — go long for high-impact entries). Required for add. Stored in a per-memory file; future-turn agents only see this when recall surfaces this memory's id."},
+                            "hook": {"type": "string", "description": "Optional ≤220-char one-line summary for the memory index. The tagline future-you sees when scanning. If omitted, derived from the first sentence of text."},
                             "impact": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1=small but durable, 5=defining. Required for add."},
                             "quote": {"type": "string", "description": "Optional pithy quote (≤300 chars) that captures the moment."},
-                            "focus": {"type": "string", "description": "Optional 1-3 word topic tag."},
-                            "id": {"type": "integer", "description": "For drop: the memory id (NOT index — entries now live in jsonl with stable ids)."},
+                            "focus": {"type": "string", "description": "Optional 1-3 word topic tag — used in the filename for the body file."},
+                            "id": {"type": "integer", "description": "For drop: the memory id."},
                         },
                     },
                 },
@@ -301,13 +304,19 @@ def _summarize_state(
     if project_dir:
         from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
         store = CharacterStore(project_dir)
-        mems = store.read_filtered(KIND_MEMORIES, branch_msg_ids)
+        # Memories use split storage (index + body file). We only show the hook
+        # here — the agent shouldn't be reading 12 full memory bodies on every
+        # turn just to decide whether to add a new one. resolve_bodies=False
+        # skips the file-read round-trips for entries written under the split
+        # format. Legacy entries (text-in-line) still display via .get('text').
+        mems = store.read_filtered(KIND_MEMORIES, branch_msg_ids, resolve_bodies=False)
         if mems:
-            parts.append("[MEMORIES] (active set — emit drop with id to remove):")
+            parts.append("[MEMORIES] (active set — scan hooks; emit drop with id to remove):")
             for m in sorted(mems, key=lambda e: (e.get("impact", 0), e.get("date") or ""), reverse=True):
                 if not isinstance(m, dict):
                     continue
-                parts.append(f"  #{m.get('id')} ({m.get('impact', '?')}★ {m.get('date', '?')}) {m.get('text', '')[:200]}")
+                hook = m.get("hook") or (m.get("text") or "")[:200]
+                parts.append(f"  #{m.get('id')} ({m.get('impact', '?')}★ {m.get('date', '?')}) {hook}")
         profile = store.read_filtered(KIND_USER_PROFILE, branch_msg_ids)
         if profile:
             parts.append("[USER LIFE]:")

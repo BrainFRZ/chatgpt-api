@@ -8,6 +8,17 @@ Why files instead of in-state lists:
   on demand by the recall agent.
 - Inspectable: jsonl files in the project dir can be read/edited directly.
 
+Memories are split storage (index + body file) as of the 2026-05-11 refactor:
+- character_memories.jsonl  ← INDEX (one line per memory, ~100 char hook for scan)
+- memories/<focus_slug>_<id:04d>.md  ← BODY (full prose, frontmatter for humans)
+
+This mirrors the Claude Code memory pattern: a small always-loaded index +
+on-demand body loading. The character_agent / inner_state Sonnet calls scan
+the index only (cheap); when recall picks ids, the runtime loads full bodies
+for those specific ids into Opus 3's context. Legacy entries (with `text` in
+the index line and no body_file) are read-compatible — the migration script
+upgrades them in place.
+
 Branching:
 - Each entry tags itself with the message_id where it was created (`branch_id`)
   for audit/debugging purposes. As of the cross-chat fix, branch_id is NOT used
@@ -38,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -57,6 +69,95 @@ _KIND_FILE = {
     KIND_GROWTH: "character_growth.jsonl",
 }
 
+# Memory bodies live in a subdir; one .md per memory.
+MEMORIES_BODY_DIR = "memories"
+
+# Hard ceiling on memory body length (per docstring's "file-backed memory can be
+# 5000 chars" claim). The agent-emitted text is capped at this on write.
+MEMORY_BODY_MAX_CHARS = 5000
+
+# Hard ceiling on the index-line "hook" (one-line scannable summary).
+MEMORY_HOOK_MAX_CHARS = 220
+
+
+def _slugify(s: str, max_len: int = 60) -> str:
+    """Filesystem-safe slug. Lowercase; non-alphanumerics collapse to underscore."""
+    s = (s or "").lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        return "untitled"
+    return s[:max_len]
+
+
+def _memory_body_filename(entry: dict) -> str:
+    """Build `<focus_slug>_<id:04d>.md` for a memory entry. Falls back to
+    text-derived slug when focus is missing."""
+    focus = entry.get("focus") or ""
+    if not focus:
+        focus = (entry.get("text") or "")[:40]
+    slug = _slugify(focus) or "untitled"
+    return f"{slug}_{int(entry.get('id') or 0):04d}.md"
+
+
+def _derive_hook(text: str, max_len: int = MEMORY_HOOK_MAX_CHARS) -> str:
+    """Pull a one-line hook from prose. First sentence (split on . ! ?), with
+    fallback to the leading max_len chars + ellipsis. Used when the agent didn't
+    emit an explicit hook on add."""
+    s = (text or "").strip().replace("\n", " ")
+    if not s:
+        return ""
+    # Split on first sentence terminator
+    m = re.search(r"[.!?](?:\s|$)", s)
+    if m:
+        first = s[: m.start() + 1].strip()
+        if len(first) <= max_len:
+            return first
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1].rstrip() + "…"
+
+
+def _extract_body_from_md(content: str) -> str:
+    """Strip YAML-ish frontmatter from a markdown file; return body prose."""
+    if not content:
+        return ""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content.strip()
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[i + 1:]).strip()
+    # No closing marker — treat the rest after `---` as body anyway
+    return "\n".join(lines[1:]).strip()
+
+
+def _build_memory_md(entry: dict, body_text: str) -> str:
+    """Compose the markdown body file: YAML-ish frontmatter + prose.
+
+    The frontmatter is for human browsing only — the index jsonl is the source
+    of truth for structured metadata. We never parse the frontmatter back.
+    """
+    fm: list[str] = ["---"]
+    for key in ("id", "date", "focus", "impact", "tier", "branch_id",
+                "turn_created", "last_referenced_date", "archived",
+                "archived_date", "archived_reason", "quote", "hook"):
+        if key not in entry:
+            continue
+        val = entry.get(key)
+        if val is None:
+            fm.append(f"{key}: null")
+        elif isinstance(val, bool):
+            fm.append(f"{key}: {'true' if val else 'false'}")
+        elif isinstance(val, (int, float)):
+            fm.append(f"{key}: {val}")
+        else:
+            # Strings: keep simple. If the value contains a newline, fold to space.
+            s = str(val).replace("\n", " ").replace("\r", "")
+            fm.append(f"{key}: {s}")
+    fm.append("---")
+    return "\n".join(fm) + "\n\n" + (body_text or "").strip() + "\n"
+
 
 class CharacterStore:
     """Thin jsonl-backed CRUD for character entries. Per-project."""
@@ -73,6 +174,60 @@ class CharacterStore:
 
     def exists(self, kind: str) -> bool:
         return os.path.isfile(self._path(kind))
+
+    # ── Memory body files (index + per-memory .md split) ────────────
+
+    def _memory_body_path(self, entry: dict) -> Optional[str]:
+        """Absolute path to a memory's body .md file, or None for legacy entries
+        (no body_file field — text is still in the index line)."""
+        body_file = entry.get("body_file")
+        if not body_file or not isinstance(body_file, str):
+            return None
+        return os.path.join(self.project_dir, body_file)
+
+    def _load_memory_body(self, entry: dict) -> str:
+        """Resolve the body text for a memory entry. Prefers the body file;
+        falls back to entry['text'] for legacy / mid-migration cases."""
+        path = self._memory_body_path(entry)
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return _extract_body_from_md(f.read())
+            except OSError as e:
+                logger.warning(f"character_storage: failed to read body {path}: {e}")
+        return entry.get("text") or ""
+
+    def _write_memory_body(self, entry: dict, body_text: str) -> str:
+        """Write the body .md file for a memory entry. Returns the relative
+        body_file path (suitable for storing on the index entry)."""
+        os.makedirs(os.path.join(self.project_dir, MEMORIES_BODY_DIR), exist_ok=True)
+        rel = os.path.join(MEMORIES_BODY_DIR, _memory_body_filename(entry)).replace("\\", "/")
+        abs_path = os.path.join(self.project_dir, rel)
+        content = _build_memory_md(entry, body_text)
+        temp_path = f"{abs_path}.tmp.{uuid.uuid4().hex[:8]}"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(temp_path, abs_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
+        return rel
+
+    def _delete_memory_body(self, entry: dict) -> bool:
+        path = self._memory_body_path(entry)
+        if not path or not os.path.isfile(path):
+            return False
+        try:
+            os.remove(path)
+            return True
+        except OSError as e:
+            logger.warning(f"character_storage: failed to delete body {path}: {e}")
+            return False
 
     # ── Read ────────────────────────────────────────────────────────
 
@@ -105,6 +260,7 @@ class CharacterStore:
         branch_msg_ids: Optional[set] = None,
         *,
         include_archived: bool = False,
+        resolve_bodies: bool = True,
     ) -> list[dict]:
         """Read entries excluding archived by default.
 
@@ -116,11 +272,20 @@ class CharacterStore:
         include_archived: when False (default), entries with archived=True are
         skipped. Hygiene-archived memories are excluded from normal reads, recall
         indices, and rendering — they stay on disk for forensics only.
+
+        resolve_bodies (memories only): when True (default — backward-compatible)
+        the returned memory entries get `text` populated from their body .md file
+        for any entries written under the split-storage format. Pass False when
+        you only need index data (scanning hooks, building cheap context for
+        Sonnet pre-passes) to skip the file-load round trip.
         """
         out = []
         for e in self.read_all(kind):
             if not include_archived and e.get("archived"):
                 continue
+            if kind == KIND_MEMORIES and resolve_bodies and "text" not in e and e.get("body_file"):
+                e = dict(e)
+                e["text"] = self._load_memory_body(e)
             out.append(e)
         return out
 
@@ -131,15 +296,29 @@ class CharacterStore:
         branch_msg_ids: Optional[set] = None,
         *,
         include_archived: bool = False,
+        resolve_bodies: bool = True,
     ) -> list[dict]:
-        """Read entries matching the given ids, optionally branch-filtered. Skips archived by default."""
+        """Read entries matching the given ids, optionally branch-filtered. Skips archived by default.
+
+        resolve_bodies: see read_filtered. Default True so callers that pass ids
+        to surface to Opus 3 get text loaded transparently.
+        """
         if not ids:
             return []
         ids_set = set(ids)
         if branch_msg_ids is not None:
-            candidates = self.read_filtered(kind, branch_msg_ids, include_archived=include_archived)
+            candidates = self.read_filtered(
+                kind, branch_msg_ids,
+                include_archived=include_archived, resolve_bodies=resolve_bodies,
+            )
         else:
             candidates = [e for e in self.read_all(kind) if include_archived or not e.get("archived")]
+            if kind == KIND_MEMORIES and resolve_bodies:
+                # Manual body-resolve for the no-branch-filter branch
+                candidates = [
+                    {**e, "text": self._load_memory_body(e)} if ("text" not in e and e.get("body_file")) else e
+                    for e in candidates
+                ]
         return [e for e in candidates if e.get("id") in ids_set]
 
     def bump_last_referenced(self, kind: str, ids: list[int], today_iso: str) -> int:
@@ -237,11 +416,16 @@ class CharacterStore:
         return False
 
     def delete_many(self, kind: str, ids: list[int]) -> int:
-        """Hard-delete multiple by id. Returns count deleted."""
+        """Hard-delete multiple by id. Returns count deleted. For memories, also
+        removes the per-memory body .md files (if they exist)."""
         if not ids:
             return 0
         ids_set = set(ids)
         entries = self.read_all(kind)
+        if kind == KIND_MEMORIES:
+            for e in entries:
+                if e.get("id") in ids_set:
+                    self._delete_memory_body(e)
         kept = [e for e in entries if e.get("id") not in ids_set]
         deleted = len(entries) - len(kept)
         if deleted > 0:
@@ -455,7 +639,7 @@ def apply_memory_ops_to_store(
         n = store.delete_many(KIND_MEMORIES, drop_ids)
         mutated += n
 
-    # Adds
+    # Adds — write the index line + the per-memory body .md file (split storage).
     new_entries: list[dict] = []
     next_id = store.next_id(KIND_MEMORIES)
     for op in ops:
@@ -466,22 +650,35 @@ def apply_memory_ops_to_store(
         except (TypeError, ValueError):
             impact = 1
         impact = max(1, min(5, impact))
-        text = str(op.get("text") or "")[:1500].strip()
-        if not text:
+        body_text = str(op.get("text") or "")[:MEMORY_BODY_MAX_CHARS].strip()
+        if not body_text:
             continue
         date = op.get("date") or today_iso
+        hook = str(op.get("hook") or "").strip()[:MEMORY_HOOK_MAX_CHARS]
+        if not hook:
+            hook = _derive_hook(body_text)
+        # Build the index entry FIRST (with all fields) so we can use it to
+        # compute the body filename. Then write the body file. Then append the
+        # index line (which carries the body_file relative path).
         entry = {
             "id": next_id,
             "branch_id": branch_msg_id,
-            "text": text,
             "quote": str(op.get("quote") or "")[:300] or None,
             "date": date,
             "impact": impact,
             "tier": _memory_tier(impact),
             "turn_created": current_turn,
             "focus": str(op.get("focus") or "")[:60] or None,
+            "hook": hook,
             "last_referenced_date": date,  # bumped by recall agent on each surface
         }
+        try:
+            rel = store._write_memory_body(entry, body_text)
+            entry["body_file"] = rel
+        except OSError as e:
+            logger.error(f"character_storage: failed to write memory body for id={next_id}: {e}")
+            # Fall back to legacy in-line text so the memory isn't lost.
+            entry["text"] = body_text
         new_entries.append(entry)
         next_id += 1
     if new_entries:

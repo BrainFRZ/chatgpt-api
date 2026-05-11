@@ -165,8 +165,9 @@ def _build_index_text(entries: list, kind: str, exclude_ids: Optional[set] = Non
             lines.append(f"  ... ({len(entries) - count} more not shown)")
             break
         if kind == "memories":
+            hook = e.get("hook") or (e.get("text") or "")[:140]
             lines.append(
-                f"  id={eid} | {e.get('impact', '?')}★ {e.get('date', '?')} | {e.get('text', '')[:140]}"
+                f"  id={eid} | {e.get('impact', '?')}★ {e.get('date', '?')} | {hook}"
             )
         elif kind == "user_profile":
             cat = f"[{e.get('category')}] " if e.get('category') else ""
@@ -269,7 +270,11 @@ def run_recall(
         return empty, {}
 
     store = CharacterStore(project_dir)
-    memories = store.read_filtered(KIND_MEMORIES, branch_msg_ids)
+    # Index-only read for memories — Haiku scans hooks to decide which ids to
+    # surface; loading 100 memory bodies just to render an index Haiku will
+    # squint at is wasted I/O and tokens. fetch_by_ids below DOES resolve
+    # bodies for the small set Haiku picks (those go to Opus 3 with full text).
+    memories = store.read_filtered(KIND_MEMORIES, branch_msg_ids, resolve_bodies=False)
     profile = store.read_filtered(KIND_USER_PROFILE, branch_msg_ids)
     growth = store.read_filtered(KIND_GROWTH, branch_msg_ids)
 

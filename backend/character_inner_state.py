@@ -195,7 +195,12 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
         if all_mems:
             parts.append("[MEMORIES — what she remembers about this relationship]:")
             for m in sorted(all_mems, key=lambda e: (e.get("impact", 0), e.get("date") or ""), reverse=True):
-                parts.append(f"  ({m.get('impact', '?')}★ {m.get('date', '?')}) {m.get('text', '')[:200]}")
+                # Show hook (one-line summary). Full bodies live in body files
+                # and load only when Haiku surfaces the id for Opus 3 itself.
+                # Inner-state is a pre-pass — it grounds the EMOTIONAL register
+                # of this turn, which the hook captures plenty well.
+                hook = m.get("hook") or (m.get("text") or "")[:200]
+                parts.append(f"  ({m.get('impact', '?')}★ {m.get('date', '?')}) {hook}")
 
         growth_active = payload.get("growth_active") or []
         if growth_active:

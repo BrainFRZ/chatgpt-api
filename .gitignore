@@ -33,6 +33,7 @@
 !backend/tests/test_character_interview_bands.py
 !backend/tests/test_character_planner.py
 !backend/tests/test_character_project_state.py
+!backend/tests/test_character_storage.py
 !backend/tests/test_character_schedule.py
 !backend/tests/test_character_resolver.py
 !backend/tests/test_character_meme.py
@@ -71,6 +72,7 @@
 !backend/scripts/measure_injections.py
 !backend/scripts/strip_printed_hud.py
 !backend/scripts/simulate_callback_chili.py
+!backend/scripts/migrate_memories_to_files.py
 !backend/migrate_to_branching.py
 !backend/test_branching.py
 !backend/test_e2e.py
