@@ -30,15 +30,14 @@ output is small (4×140 chars), so context-growth isn't an issue — only
 the per-turn output cost goes up ~1.67×, from ~$0.012 to ~$0.019. Worth
 it for richer emotional grounding the voice model reads each turn.
 
-Thinking is ENABLED (budget 1000) as of the callback-chain-trace fix.
-The structured 4-axis output caps how much deliberation surfaces in the
-persisted payload, but inner_state's actual JOB on hard turns is 2-3 step
-inference: tracing user-message wordplay back to a prior character
-phrasing, computing what the callback means, deciding which read to
-commit to. That's thinking-shaped work. Disabled-thinking Opus 4.5
-reliably handled the first two inference steps but stopped one short
-of the punch on multi-step callback chains. 1000 tokens of thinking
-buys the missing third step at ~$0.025/turn.
+Thinking is DISABLED. Enabling it was tried (commit 3eff8c2) but didn't
+fire meaningfully — forced tool_choice ({"type": "tool", "name": X})
+short-circuits the thinking budget, since the model is constrained to
+immediate tool-call output. Output_tokens stayed at ~215 with budget
+1000, meaning <100 tokens of actual reasoning, and the noticing field
+came out byte-identical to the no-thinking run. Reverted; the
+G-cap-raise on noticing (400 chars for callback chains) is the actual
+steady-state fix.
 
 Why sequential after recall (not parallel): recall surfaces the specific
 memories that color how the character would feel about THIS moment.
@@ -59,16 +58,8 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 INNER_STATE_MODEL = "claude-opus-4-5"
-# With extended thinking enabled, the model needs room for both the thinking
-# budget AND the structured tool-call output. Sized at thinking_budget +
-# 2K for the tool call + headroom.
-INNER_STATE_MAX_TOKENS = 3072
-INNER_STATE_TIMEOUT_S = 45  # Thinking adds 1-3s; bump timeout
-# Extended thinking budget. Set to 1000 to give room for the 2-3 step
-# inference task (callback chains, layered reads) that inner_state was
-# bottlenecking on without thinking. Larger budgets don't materially
-# help on a 4-field structured output task.
-INNER_STATE_THINKING_BUDGET = 1000
+INNER_STATE_MAX_TOKENS = 1024
+INNER_STATE_TIMEOUT_S = 30  # Opus 4.5 is slightly slower than Sonnet 4.6 for the same prompt
 
 # Opus 4.5 pricing per MTok ($/1M tokens). 1hr cache TTL (project standard).
 # Duplicated here per the per-module pattern in character_recall.py / character_off_screen.py.
@@ -447,10 +438,6 @@ def run_inner_state(
             }],
             tools=[tool],
             tool_choice={"type": "tool", "name": "report_inner_state"},
-            thinking={
-                "type": "enabled",
-                "budget_tokens": INNER_STATE_THINKING_BUDGET,
-            },
             timeout=INNER_STATE_TIMEOUT_S,
         )
     except Exception as e:
