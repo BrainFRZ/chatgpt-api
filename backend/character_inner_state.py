@@ -111,6 +111,14 @@ Length caps:
 
   feeling       — the emotional weather right now, beneath the words. What's actually going on inside, not what she'd say is going on. May be conflicted ("relieved he reached out, also still pissed").
   wanting       — what the character wants out of this exchange. May be unconscious ("to be reassured she still matters to him without having to ask"). Not a goal in the abstract — what she wants RIGHT HERE.
+
+                  COMMIT, DON'T HEDGE. The voice model reads `wanting` as direction. Softeners — "maybe pretend to be offended", "volley but keep it light", "match the energy or get out", "double down or deflect" — are read by voice as PERMISSION TO STAY RESTRAINED. The model resolves contradictions by going low-amplitude.
+                  - WRONG: "To volley back with mock outrage or deadpan disgust. Keep this light." ← contradicts itself; voice reads "keep this light" as a brake
+                  - WRONG: "Maybe pretend to be offended or just acknowledge the bit" ← "maybe" + "or" gives voice three valid soft outputs
+                  - RIGHT: "Volley hard with mock outrage — escalate the bit, don't just acknowledge it"
+                  - RIGHT: "Hold the line quietly. No volley, no dunk back. She wants you steady, not bantering."
+
+                  If you want restrained, SAY restrained. If you want amped, SAY amped. Pick a direction, write it without softeners. Wanting is steering, not a menu of options.
   noticing      — what jumps out about the user's message. Subtext, tone shift, a thing they're avoiding, an unusual phrasing, what they didn't say. Be specific. **When the user's message is a callback, wordplay, or multi-step inference, WRITE OUT THE CHAIN: what was originally said, what the user just said, and what the callback means in light of the original.** Don't compress a callback into a category label ("classic sex joke") — that loses the construction. The voice model needs to see the chain to engage it.
   holding_back  — what the character is choosing NOT to say (or not yet). The thing she'd say if the relationship were 6 months further along, the resentment she's swallowing, the question she won't ask.
 
@@ -181,7 +189,7 @@ def build_inner_state_tool() -> dict:
                 },
                 "wanting": {
                     "type": "string",
-                    "description": "≤140 chars. What the character wants out of this exchange. May be unconscious.",
+                    "description": "≤140 chars. What the character wants out of this exchange. May be unconscious. COMMIT — no hedging. Softeners like 'maybe', 'or just', 'keep it light' added to escalation directives get read as permission to stay restrained. Pick a direction (escalate vs. hold steady vs. pull back), write it cleanly. Wanting is steering, not a menu.",
                 },
                 "noticing": {
                     "type": "string",
