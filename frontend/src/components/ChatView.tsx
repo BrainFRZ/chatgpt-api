@@ -967,7 +967,7 @@ export default function ChatView({
                         <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
                           Inner: {formatUsageString((msg as any).inner_state_usage)}
                           {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
-                          {' '}(Sonnet)
+                          {' '}({(msg as any).inner_state_model === 'claude-sonnet-4-6' ? 'Sonnet' : 'Opus 4.5'})
                         </span>
                       )}
                       {(msg as any).image_reading_usage && (
