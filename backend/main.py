@@ -6452,6 +6452,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 get_characters_state,
                 prepare_state_for_turn,
                 maybe_generate_off_screen,
+                maybe_run_catchup_resolver,
                 maybe_migrate_storage,
                 populate_render_payload,
                 clear_render_payload,
@@ -6674,6 +6675,21 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 # Opus 4.5 has native vision — images are attached directly to the
                 # user message below, no transcription step needed. The
                 # character_image_reading module is preserved for revert path.
+
+                # Catch-up resolver: stamp any elapsed schedule events to
+                # life_stream BEFORE off-screen + recall read it. Fills the
+                # gap between cron firings — e.g. a 06:00-14:00 shift ending
+                # at 14:00 with no cron until 18:00 ET would otherwise leave
+                # the character with no record of the shift when the user
+                # asks "how was the cafe?" at 15:00. Sequential, not in the
+                # gather, because both consumers downstream depend on it.
+                try:
+                    await asyncio.to_thread(
+                        maybe_run_catchup_resolver, client, _project_dir
+                    )
+                except Exception as _cu_err:
+                    logger.warning(f"Characters catch-up resolver failed: {_cu_err}")
+
                 _osc_meta, _recall_result = await asyncio.gather(
                     _run_off_screen(), _run_recall()
                 )

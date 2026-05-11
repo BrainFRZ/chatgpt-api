@@ -209,6 +209,30 @@ def _event_end_iso(ev: dict, fallback_dt: datetime) -> str:
     return end.isoformat(timespec="seconds")
 
 
+def _event_start_iso(ev: dict, fallback_dt: datetime) -> str:
+    """Return the event's start timestamp (when_local) normalized to ISO,
+    or `fallback_dt.isoformat()` if when_local is missing/malformed.
+
+    Used as `at_local` on resolved_planned life_stream entries so the
+    ledger reads chronologically by when events *happened* in the
+    character's day — "Open the cafe — Monday morning shift" lands at
+    06:00 (shift start), not 14:00 (resolution stamp). resolution.at
+    on the schedule event keeps the end time; that field is the
+    bookkeeping "when did the resolver commit this", not the lived
+    timestamp.
+    """
+    raw = ev.get("when_local")
+    if isinstance(raw, str):
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.astimezone()
+            return dt.isoformat(timespec="seconds")
+        except (ValueError, TypeError):
+            pass
+    return fallback_dt.isoformat(timespec="seconds")
+
+
 def _event_end_dt(ev: dict) -> Optional[datetime]:
     """Parse an event's end datetime from when_local + duration_min.
     Returns None if unparseable. Used for "is this event in the past/future"
@@ -353,6 +377,7 @@ def run_daily_resolver(
     *,
     now_dt: Optional[datetime] = None,
     rng: Optional[random.Random] = None,
+    preroll: bool = True,
 ) -> dict:
     """Forward-rolling resolver pass. Three stages:
 
@@ -385,6 +410,13 @@ def run_daily_resolver(
     invalidate any pending_resolution → next cron re-rolls based on
     the chat-updated state. Chat is authoritative between crons; cron
     is authoritative at stamp time.
+
+    preroll: when False, skip Stage 3 (pre-rolling upcoming events).
+    Use False for on-message catch-up triggered between cron firings:
+    Stages 1+2 are deterministic and write the life_stream entries that
+    the turn's off-screen log needs, while skipping the Sonnet call that
+    would add latency to the user's reply. The next scheduled cron does
+    Stage 3 normally.
     """
     from character_schedule import (
         load_schedule,
@@ -418,7 +450,7 @@ def run_daily_resolver(
         if elapsed_stamped:
             append_life_stream_many(
                 project_dir,
-                [_thin_ls_entry(ev, _event_end_iso(ev, now_dt)) for ev in elapsed_stamped],
+                [_thin_ls_entry(ev, _event_start_iso(ev, now_dt)) for ev in elapsed_stamped],
             )
         _stamp_last_run(project_dir, state, now_dt)
         return {"skipped": True, "reason": "no flakiness_bands", "elapsed_count": len(elapsed_stamped)}
@@ -445,6 +477,7 @@ def run_daily_resolver(
         how_it_went = pending.get("how_it_went") if pending.get("how_it_went") in VALID_TONES else "even"
         mood_delta = max(-2, min(2, int(pending.get("mood_delta") or 0)))
         end_iso = ev_end.isoformat(timespec="seconds")
+        start_iso = _event_start_iso(ev, ev_end)
         ev["status"] = outcome
         ev["resolution"] = {
             "at": end_iso,
@@ -457,8 +490,8 @@ def run_daily_resolver(
         stamped_event_count += 1
         total_mood_delta += mood_delta
         stage1_ls_entries.append({
-            "id": _ls_id(end_iso),
-            "at_local": end_iso,
+            "id": _ls_id(start_iso),
+            "at_local": start_iso,
             "kind": "resolved_planned",
             "ref": ev.get("id"),
             "summary": what_happened or ev.get("title") or "(scheduled event)",
@@ -506,6 +539,7 @@ def run_daily_resolver(
             continue
         # Thin stamp — system missed pre-rolling, degrade gracefully
         end_iso = ev_end.isoformat(timespec="seconds")
+        start_iso = _event_start_iso(ev, ev_end)
         ev["status"] = "as_planned"
         ev["resolution"] = {
             "at": end_iso,
@@ -514,7 +548,7 @@ def run_daily_resolver(
             "how_it_went": "even",
             "mood_delta": 0,
         }
-        fallback_ls_entries.append(_thin_ls_entry(ev, end_iso))
+        fallback_ls_entries.append(_thin_ls_entry(ev, start_iso))
 
     # Persist all of STAGE 1 + 2's writes
     if stage1_ls_entries or fallback_ls_entries:
@@ -528,6 +562,20 @@ def run_daily_resolver(
         wb = state.setdefault("wellbeing", {"state": "Even", "wb_mod": 0})
         wb["wb_mod"] = max(-WB_MOD_CAP, min(WB_MOD_CAP, int(wb.get("wb_mod", 0) or 0) + total_mood_delta))
         save_project_state(project_dir, state)
+
+    # Catch-up path stops here: stamping is enough to surface elapsed
+    # events in this turn's off-screen log. The next scheduled cron does
+    # Stage 3 (pre-roll + Sonnet call) on its own cadence.
+    if not preroll:
+        _stamp_last_run(project_dir, state, now_dt)
+        return {
+            "skipped": False,
+            "stage": "stamp_only",
+            "stamped_events": stamped_event_count,
+            "stamped_unplanned": stamped_unplanned_count,
+            "fallback_stamped": len(fallback_ls_entries),
+            "stage1_mood_delta": total_mood_delta,
+        }
 
     # ── STAGE 3: PRE-ROLL outcomes for events ending in next window ─────
     # Forward-looking: cron at T_N pre-rolls events ending [T_N, T_{N+1}].
@@ -648,6 +696,33 @@ def run_daily_resolver(
         window_end=next_cron_dt,
         sleep_windows=sleep_for_context,
     )
+
+    # If the Sonnet call failed entirely (caught exception → empty usage),
+    # don't lock in thin pending_resolution for the upcoming events and
+    # don't stamp last_resolver_run_at forward. Leaving events as
+    # status=planned with no pending lets the next cron retry the pre-roll
+    # cleanly; leaving last_run alone preserves the chat-revision
+    # force-no-skip window. Stage 1 + Stage 2 results already persisted
+    # above (line ~522) — we keep those. Distinguished from "model
+    # returned empty resolutions" (a real model response with no
+    # narration) by the usage dict: a successful call always reports
+    # usage, even when payload is sparse.
+    if not usage:
+        logger.warning(
+            "resolver: Sonnet call failed — Stage 3 pre-roll skipped; "
+            "next cron will retry."
+        )
+        return {
+            "skipped": False,
+            "stage": "preroll",
+            "stamped_events": stamped_event_count,
+            "stamped_unplanned": stamped_unplanned_count,
+            "fallback_stamped": len(fallback_ls_entries),
+            "preroll_events": 0,
+            "preroll_unplanned": 0,
+            "stage1_mood_delta": total_mood_delta,
+            "error": "sonnet_call_failed",
+        }
 
     # Apply pre-rolled resolutions to events as `pending_resolution`
     rolled_by_id = {r["event"]["id"]: r["outcome"] for r in rolled}

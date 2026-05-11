@@ -633,12 +633,16 @@ def test_full_lifecycle_pre_roll_then_stamp_at_next_cron(project_dir):
     assert "pending_resolution" not in ev
     assert ev["resolution"]["what_happened"] == "afternoon was steady"
     assert ev["resolution"]["mood_delta"] == 1
-    # Life stream now has the entry, timestamped at event_end (5pm)
+    # Life stream now has the entry, timestamped at event_start (4pm).
+    # at_local on resolved_planned reflects when the event happened in the
+    # character's day, not when the resolver stamped it. resolution.at on
+    # the schedule event keeps the end-time stamp for bookkeeping.
     stream = read_life_stream_all(project_dir)
     assert len(stream) == 1
     assert stream[0]["ref"] == "sch-1"
     assert stream[0]["summary"] == "afternoon was steady"
-    assert stream[0]["at_local"].startswith("2026-05-09T17:00")
+    assert stream[0]["at_local"].startswith("2026-05-09T16:00")
+    assert ev["resolution"]["at"].startswith("2026-05-09T17:00")
     # Wellbeing wb_mod bumped by +1 from the stamped mood_delta
     from character_project_state import load_project_state
     state = load_project_state(project_dir)
@@ -726,3 +730,230 @@ def test_api_failure_does_not_strand_elapsed_events(project_dir):
     assert len(stream) == 1
     assert stream[0]["kind"] == "resolved_planned"
     assert stream[0]["ref"] == "sch-1"
+
+
+# ── preroll=False (on-message catch-up) ──────────────────────────────
+
+
+def test_preroll_false_fallback_stamps_elapsed_without_api(project_dir):
+    """Catch-up mode: an elapsed planned event with no pre-roll gets thin-
+    stamped to life_stream via Stage 2 fallback. No Sonnet call. Stage 3
+    pre-roll is skipped entirely."""
+    # Elapsed event (06:00-14:00 shift) at "now" = 15:00. No pre-roll on it
+    # because the prior cron at 13:00 was the bands-bail case (or whatever)
+    # so it's still status=planned with no pending_resolution.
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T06:00:00-04:00", kind="work", duration_min=480),
+        # An upcoming event later today — would be pre-rolled by normal cron
+        # but catch-up must NOT touch it.
+        _planned_event("sch-2", "2026-05-09T17:00:00-04:00", kind="social", duration_min=60),
+    ])
+    client = MagicMock()
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 15, 0).astimezone(),
+        preroll=False,
+    )
+
+    assert out["stage"] == "stamp_only"
+    assert out["fallback_stamped"] == 1
+    assert out["stamped_events"] == 0
+    # No Sonnet call regardless of pre-roll window contents
+    assert client.messages.create.call_count == 0
+
+    sched = load_schedule(project_dir)
+    assert sched["events"][0]["status"] == "as_planned"  # fallback-stamped
+    assert sched["events"][1]["status"] == "planned"     # upcoming untouched
+    assert sched["events"][1].get("pending_resolution") is None  # Stage 3 skipped
+
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 1
+    assert stream[0]["ref"] == "sch-1"
+    assert stream[0]["kind"] == "resolved_planned"
+
+
+def test_preroll_false_stamps_pending_preroll_at_event_end(project_dir):
+    """Catch-up mode: a previously pre-rolled event whose ev_end has now
+    passed gets Stage-1-stamped with the model's narration intact. No
+    Sonnet call (we're using the cached pre-roll)."""
+    ev = _planned_event("sch-1", "2026-05-09T06:00:00-04:00", kind="work", duration_min=480)
+    ev["pending_resolution"] = {
+        "outcome": "modified",
+        "what_happened": "Marcus brought a friend; she stayed twenty minutes past close.",
+        "how_it_went": "buoyant",
+        "mood_delta": 1,
+    }
+    _seed_schedule(project_dir, [ev])
+
+    client = MagicMock()
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 15, 0).astimezone(),
+        preroll=False,
+    )
+
+    assert out["stage"] == "stamp_only"
+    assert out["stamped_events"] == 1
+    assert out["fallback_stamped"] == 0
+    assert client.messages.create.call_count == 0
+
+    sched = load_schedule(project_dir)
+    assert sched["events"][0]["status"] == "modified"
+    assert sched["events"][0].get("pending_resolution") is None
+    # life_stream picks up the narrated summary
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 1
+    assert "Marcus" in stream[0]["summary"]
+    assert stream[0]["tone"] == "buoyant"
+
+
+def test_preroll_false_does_not_call_sonnet_with_upcoming_events(project_dir):
+    """Catch-up mode: even when there ARE events in the pre-roll window
+    (next_cron horizon), Stage 3 is skipped and no Sonnet call happens.
+    Schedule remains untouched for those events."""
+    _seed_schedule(project_dir, [
+        # Upcoming event well within the pre-roll horizon
+        _planned_event("sch-1", "2026-05-09T17:00:00-04:00", kind="social", duration_min=60),
+    ])
+    client = MagicMock()
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 15, 0).astimezone(),
+        preroll=False,
+    )
+
+    assert out["stage"] == "stamp_only"
+    assert client.messages.create.call_count == 0
+
+    sched = load_schedule(project_dir)
+    assert sched["events"][0]["status"] == "planned"
+    assert sched["events"][0].get("pending_resolution") is None
+
+
+# ── maybe_run_catchup_resolver wrapper ───────────────────────────────
+
+
+def test_catchup_no_op_when_nothing_elapsed(project_dir, monkeypatch):
+    """Wrapper skips the resolver entirely when no events have elapsed
+    and no pending unplanned moments are due. Critical: no last_run stamp
+    bump in this case — otherwise we'd shadow the cron's chat-revision
+    skip-roll override."""
+    from characters_runtime import maybe_run_catchup_resolver
+
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T17:00:00-04:00", kind="social", duration_min=60),
+    ])
+    # Pin "now" to before the only event starts
+    import character_resolver
+    monkeypatch.setattr(
+        "game_systems.characters.now_et",
+        lambda: datetime(2026, 5, 9, 15, 0).astimezone(),
+    )
+
+    result = maybe_run_catchup_resolver(MagicMock(), project_dir)
+    assert result is None
+    # No last_run stamp written → state unchanged
+    from character_project_state import load_project_state
+    state = load_project_state(project_dir) or {}
+    assert "last_resolver_run_at" not in (state.get("scheduler_state") or {})
+
+
+def test_stamped_entry_at_local_is_event_start_not_end(project_dir):
+    """Regression for the cafe-shift confusion: a Stage-2-fallback-stamped
+    resolved_planned entry must use the event's START (when_local) as its
+    at_local, not the end. A 06:00-14:00 shift should appear in life_stream
+    at 06:00, not 14:00 — otherwise the title 'Open the cafe — Monday
+    morning shift' combined with at_local=14:00 reads as 'she opened the
+    cafe at 2pm'."""
+    _seed_schedule(project_dir, [
+        _planned_event("sch-cafe", "2026-05-11T06:00:00-04:00", kind="work", duration_min=480,
+                       title="Open the cafe — Monday morning shift"),
+    ])
+    client = MagicMock()
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 11, 15, 0).astimezone(),
+        preroll=False,  # catch-up mode — Stage 2 fallback-stamps
+    )
+    assert out["fallback_stamped"] == 1
+
+    stream = read_life_stream_all(project_dir)
+    assert len(stream) == 1
+    assert stream[0]["at_local"].startswith("2026-05-11T06:00"), \
+        f"at_local should be event start (06:00), got {stream[0]['at_local']}"
+    # resolution.at on the schedule event keeps end time for bookkeeping
+    sched = load_schedule(project_dir)
+    assert sched["events"][0]["resolution"]["at"].startswith("2026-05-11T14:00")
+
+
+def test_sonnet_failure_does_not_lock_upcoming_events_thin(project_dir):
+    """Regression: when Sonnet fails entirely (exception → empty usage),
+    upcoming events in the pre-roll window must NOT be locked in with
+    thin pending_resolution. They stay status=planned with no pending
+    so the next cron retries the pre-roll cleanly.
+
+    Also: last_resolver_run_at must NOT be stamped forward — otherwise
+    the chat-revision force-no-skip window silently shrinks and the
+    failure becomes invisible to the next cron.
+
+    This is distinct from a successful Sonnet call that returns no
+    resolutions for a specific event (model judgment) — that path
+    legitimately writes thin pending for the un-narrated ones."""
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T17:00:00-04:00", kind="social", duration_min=60),
+    ])
+    client = MagicMock()
+    client.messages.create.side_effect = RuntimeError("api auth busted")
+
+    class _NoSkipRng:
+        def __init__(self):
+            self.i = 0
+            self.vals = [0.99]
+        def random(self):
+            v = self.vals[self.i % len(self.vals)]; self.i += 1
+            return v
+
+    out = run_daily_resolver(
+        client, project_dir,
+        now_dt=datetime(2026, 5, 9, 15, 0).astimezone(),
+        rng=_NoSkipRng(),
+    )
+
+    assert out.get("error") == "sonnet_call_failed"
+    assert out["preroll_events"] == 0
+
+    # Event remains untouched — next cron will retry
+    sched = load_schedule(project_dir)
+    assert sched["events"][0]["status"] == "planned"
+    assert sched["events"][0].get("pending_resolution") is None
+
+    # last_run NOT stamped — the failure stays visible to the next cron
+    from character_project_state import load_project_state
+    state = load_project_state(project_dir) or {}
+    assert "last_resolver_run_at" not in (state.get("scheduler_state") or {})
+
+
+def test_catchup_fires_when_event_elapsed(project_dir, monkeypatch):
+    """Wrapper triggers run_daily_resolver(preroll=False) when there's an
+    elapsed planned event without resolution. This is the Zara cafe-shift
+    case: 06:00-14:00 shift ended at 14:00, user messages at 15:00."""
+    from characters_runtime import maybe_run_catchup_resolver
+
+    _seed_schedule(project_dir, [
+        _planned_event("sch-1", "2026-05-09T06:00:00-04:00", kind="work", duration_min=480),
+    ])
+    monkeypatch.setattr(
+        "game_systems.characters.now_et",
+        lambda: datetime(2026, 5, 9, 15, 0).astimezone(),
+    )
+
+    client = MagicMock()
+    result = maybe_run_catchup_resolver(client, project_dir)
+    assert result is not None
+    assert result["stage"] == "stamp_only"
+    assert result["fallback_stamped"] == 1
+    assert client.messages.create.call_count == 0
+
+    # The elapsed event landed in life_stream so off-screen / recall can find it
+    stream = read_life_stream_all(project_dir)
+    assert any(e.get("ref") == "sch-1" for e in stream)

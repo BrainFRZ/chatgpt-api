@@ -647,6 +647,77 @@ def maybe_generate_off_screen(client, characters_state: dict, project_dir: Optio
     return {"log": log, "usage": usage} if log else None
 
 
+def maybe_run_catchup_resolver(client, project_dir: Optional[str]) -> Optional[dict]:
+    """Stamp any elapsed schedule events to life_stream before this turn's
+    off-screen / recall passes read it. Fills the gap between cron firings:
+    e.g. a 06:00-14:00 shift ends at 14:00 with no cron until 18:00 ET, so a
+    user message at 15:00 ("how was the cafe?") would otherwise land with no
+    record of the shift in the character's context.
+
+    Skips Stage 3 pre-roll (no Sonnet call) — cheap and deterministic. The
+    next scheduled cron pre-rolls upcoming events on its own cadence.
+
+    Returns the resolver result dict, or None when no catch-up is needed
+    (no elapsed events; nothing changed; load failure).
+    """
+    if not project_dir or not os.path.isdir(project_dir):
+        return None
+
+    try:
+        from character_schedule import load_schedule
+        from character_resolver import _event_end_dt, run_daily_resolver
+        from game_systems.characters import now_et
+    except ImportError as e:
+        logger.warning(f"maybe_run_catchup_resolver: import failed: {e}")
+        return None
+
+    schedule = load_schedule(project_dir)
+    if not isinstance(schedule, dict):
+        return None
+
+    now_dt = now_et()
+
+    # Cheap pre-check: anything elapsed that hasn't been stamped?
+    needs_catchup = False
+    for ev in schedule.get("events") or []:
+        if not isinstance(ev, dict):
+            continue
+        ev_end = _event_end_dt(ev)
+        if ev_end is None or ev_end > now_dt:
+            continue
+        if ev.get("status") == "planned":
+            needs_catchup = True
+            break
+        if ev.get("pending_resolution"):
+            needs_catchup = True
+            break
+
+    if not needs_catchup:
+        for up in schedule.get("pending_unplanned") or []:
+            if not isinstance(up, dict):
+                continue
+            try:
+                up_at = datetime.fromisoformat(up.get("at_local", ""))
+                if up_at.tzinfo is None:
+                    up_at = up_at.astimezone()
+            except (ValueError, TypeError):
+                continue
+            if up_at <= now_dt:
+                needs_catchup = True
+                break
+
+    if not needs_catchup:
+        return None
+
+    try:
+        result = run_daily_resolver(client, project_dir, now_dt=now_dt, preroll=False)
+        logger.info(f"catch-up resolver ran: {result}")
+        return result
+    except Exception as e:
+        logger.warning(f"catch-up resolver failed: {e}")
+        return None
+
+
 # ── Message building ────────────────────────────────────────────────
 
 def _read_file(path: str) -> str:
