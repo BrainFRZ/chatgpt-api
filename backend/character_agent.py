@@ -88,6 +88,12 @@ You are NOT writing the character. You are reading what was written and updating
 
 3) **profile_ops** (user_profile) — durable, stable facts about the user that the character should always know. Job, family, pets, hometown, recurring people, health, ongoing situation. NOT moments — *facts*. Add/edit/delete when these change. Most turns: no profile_ops.
 
+   **Strong positive trigger:** when the user introduces a person you didn't previously know about — by name, with any of (years of history, an ongoing dynamic, a role in their life, recurring context) — that's an `add`. "Recurring people" is explicitly in scope. Examples that absolutely warrant a profile_op:
+   - "David — my friend of 10 years, plays MUSH with me, I'm shipping him a laptop"
+   - "my sister Jenny just moved to Portland with her kid"
+   - "Marco from work has been kind of weirdly hostile lately"
+   The bar is "would I remember this person exists 6 months from now and want them in the character's awareness?" If yes, add them. Don't wait for a third mention to commit — by the time the third mention happens, the character is already pretending to remember someone they never logged. The user implying "I told you about him already" is a cue the character SHOULD have a profile entry; if not, add one now.
+
 4) **wb_mod_ops** — emit `change: 2` or `change: -2` ONLY for genuinely large emotional events that should affect the character's mood TOMORROW. Never ±1. Most turns: no wb_mod. Backend caps cumulative ±2.
    - +2: deeply meaningful positive moment (real connection, joy, repair, big news in a good direction)
    - -2: cutting argument, betrayal, devastating user news, character treated badly
