@@ -223,11 +223,14 @@ def test_injection_renders_only_populated_fields():
     }
     block = build_inner_state_injection(state)
     assert block.startswith("[INNER STATE")
-    assert "weave into voice" in block
+    assert "weave into voice" in block.lower()
     assert "- feeling: warm but cautious" in block
     assert "- noticing: he replied fast for once" in block
-    assert "wanting" not in block
-    assert "holding back" not in block
+    # Empty fields don't render as bullets. (The header may reference field
+    # names like 'wanting' as part of its directive text — we check the
+    # bullet form specifically, not just the substring.)
+    assert "- wanting:" not in block
+    assert "- holding back:" not in block
 
 
 def test_injection_field_order_stable():
