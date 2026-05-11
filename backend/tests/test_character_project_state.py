@@ -61,6 +61,10 @@ def test_save_then_load_round_trip(project_dir):
             "last_planner_run_week_of": "2026-05-04",
         },
         "last_ripeness_rolled_date": "2026-05-09",
+        "custom_holidays": [
+            {"rule": "day_after_labor_day", "name": "Brewing Day"},
+            {"month": 11, "day": 14, "name": "Zara's birthday"},
+        ],
         # Chat-level field that should NOT be saved
         "channel": "text",
         "wall_clock": {"last_user_message_at": "2026-05-09T12:00:00Z"},
