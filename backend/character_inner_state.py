@@ -90,11 +90,17 @@ Inputs you see:
 - A short dialogue window of the most recent exchanges
 - The user's message right now
 
-Output four short strings via the `report_inner_state` tool. ALL FOUR ARE OPTIONAL. Most turns have 2-3 fields populated, not 4. Keep each ≤140 characters.
+Output four strings via the `report_inner_state` tool. ALL FOUR ARE OPTIONAL. Most turns have 2-3 fields populated, not 4.
+
+Length caps:
+- feeling: ≤140 chars
+- wanting: ≤140 chars
+- holding_back: ≤140 chars
+- noticing: ≤400 chars — extra room specifically so callback chains and multi-step reads can be WRITTEN OUT rather than compressed into a label
 
   feeling       — the emotional weather right now, beneath the words. What's actually going on inside, not what she'd say is going on. May be conflicted ("relieved he reached out, also still pissed").
   wanting       — what the character wants out of this exchange. May be unconscious ("to be reassured she still matters to him without having to ask"). Not a goal in the abstract — what she wants RIGHT HERE.
-  noticing      — what jumps out about the user's message. Subtext, tone shift, a thing they're avoiding, an unusual phrasing, what they didn't say. Be specific.
+  noticing      — what jumps out about the user's message. Subtext, tone shift, a thing they're avoiding, an unusual phrasing, what they didn't say. Be specific. **When the user's message is a callback, wordplay, or multi-step inference, WRITE OUT THE CHAIN: what was originally said, what the user just said, and what the callback means in light of the original.** Don't compress a callback into a category label ("classic sex joke") — that loses the construction. The voice model needs to see the chain to engage it.
   holding_back  — what the character is choosing NOT to say (or not yet). The thing she'd say if the relationship were 6 months further along, the resentment she's swallowing, the question she won't ask.
 
 CALIBRATION:
@@ -138,7 +144,7 @@ def build_inner_state_tool() -> dict:
         "name": "report_inner_state",
         "description": (
             "Emit the character's private inner-state for this turn. All fields "
-            "optional; empty allowed when nothing pulls. ≤140 chars per field."
+            "optional; empty allowed when nothing pulls. feeling/wanting/holding_back ≤140 chars; noticing ≤400 chars (room for callback chains)."
         ),
         "input_schema": {
             "type": "object",
@@ -153,7 +159,7 @@ def build_inner_state_tool() -> dict:
                 },
                 "noticing": {
                     "type": "string",
-                    "description": "≤140 chars. What jumps out about the user's message — subtext, tone, what's underneath.",
+                    "description": "≤400 chars. What jumps out about the user's message — subtext, tone, what's underneath. When the message contains a callback, wordplay, or multi-step inference, WRITE OUT THE FULL CHAIN here (what was originally said → what the user just said → what the callback means). Don't compress to a category label like 'sex joke' or 'classic callback'; that loses the construction the voice model needs to engage.",
                 },
                 "holding_back": {
                     "type": "string",
