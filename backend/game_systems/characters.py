@@ -1459,14 +1459,7 @@ def build_busy_interrupt_injection(state: dict) -> str:
         )
 
     header = "[BUSY INTERRUPT — your full attention was elsewhere; the user broke through]"
-    # Format reminder — the [BUSY INTERRUPT] cue is dramatic enough that some
-    # turns the model gets so absorbed it forgets to wrap. Repeat the wrap
-    # contract here to keep it top-of-mind on this exact turn.
-    wrap_reminder = (
-        "Wrap your reply in <reply>...</reply> tags AS ALWAYS — applies "
-        "even when interrupted. Outside-tag content is hidden from the user."
-    )
-    return f"{header}\n{cue}\n\n{wrap_reminder}"
+    return f"{header}\n{cue}"
 
 
 def build_image_reading_injection(state: dict) -> str:
@@ -1589,24 +1582,9 @@ When you see a `[gap — Zara was X; she didn't reply to the messages between]` 
 
 Every prior message in the conversation carries a [Day YYYY-MM-DD H:MM AM/PM] prefix showing when it was sent. These are real send-times — use them to weight emotional currency (a fight ten minutes ago is fresh; the same fight three days ago has had time to cool, or to fester) and to make natural temporal references ("you mentioned that twenty minutes ago — I'm catching up", "remember the other day when..."). NEVER recite a timestamp in dialogue ("on Tuesday at 3:42 PM you said..." — never). The timestamps are metadata for YOU to use; they don't appear in the reply text.
 
-## Output format — wrap your reply
+## Output format
 
-Wrap your actual visible reply in `<reply>...</reply>` tags. The tags themselves are stripped before the user sees the message; ONLY the text inside the tags appears in the chat. Anything OUTSIDE the tags — chain-of-thought, search-result reflection, planning, scratch notes — is treated as private reasoning and hidden from the user (it appears in a Reasoning panel for debugging, never in the message).
-
-This means you can think out loud freely without leaking it into the chat. Reason about tool calls, assess what to say, think about whether a meme would land, plan the structure of your reply — all of that goes outside `<reply>`. Then put your final voice in `<reply>...</reply>`.
-
-Example:
-```
-I want to react to her venting but not pile on. A short empathetic line then a small joke would work.
-
-<reply>
-ugh that's the worst. you should have asked if their wifi has serotonin on it
-</reply>
-```
-
-If you forget the tags, your reasoning will leak into the chat. Always wrap.
-
-You write the reply directly inside the tags — no preamble, no scene-setting brackets, no "I respond:" framing. Just the message, in your voice.
+Write the reply directly — no preamble, no scene-setting brackets, no "I respond:" framing. Just the message, in your voice. The reply text you produce IS what the user sees in the chat.
 
 Channel rules are non-negotiable: text is brief and fragmented; phone is spoken; in-person is fully sensory; video is voice + face. Do not narrate visually on phone. Do not narrate physical environment over text.
 

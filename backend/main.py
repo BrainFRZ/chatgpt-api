@@ -201,7 +201,7 @@ ProviderRegistry.register(AnthropicOpusProvider())
 ProviderRegistry.register(AnthropicOpus3Provider())
 
 # Default model for new chats
-DEFAULT_MODEL = "claude-3-opus"
+DEFAULT_MODEL = "claude-opus-4.5"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
 COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
@@ -216,9 +216,9 @@ PIPELINE_NARRATION_MODEL = "gpt-5.4"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return claude-3-opus if user has Anthropic key, else gpt-5.4 if OpenAI key."""
+    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
     if get_api_key(username, "anthropic"):
-        return DEFAULT_MODEL  # claude-3-opus
+        return DEFAULT_MODEL  # claude-opus-4.5
     if get_api_key(username, "openai"):
         return "gpt-5.4"
     return DEFAULT_MODEL
@@ -6633,22 +6633,14 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         if _b_pre:
                             _character_image_blocks.append(_b_pre)
 
-                async def _run_image_reading():
-                    if not _character_image_blocks:
-                        return [], {}
-                    try:
-                        from character_image_reading import read_images
-                        _ank = get_api_key(username, "anthropic") or ""
-                        return await asyncio.to_thread(
-                            read_images, _ank, _character_image_blocks
-                        )
-                    except Exception as e:
-                        logger.warning(f"Characters image-reading failed: {e}")
-                        return [], {"error": f"{type(e).__name__}: {e}"}
-
-                _osc_meta, _recall_result, _image_reading_result = await asyncio.gather(
-                    _run_off_screen(), _run_recall(), _run_image_reading()
+                # Image-reading pre-pass deprecated as of the Opus 4.5 voice switch.
+                # Opus 4.5 has native vision — images are attached directly to the
+                # user message below, no transcription step needed. The
+                # character_image_reading module is preserved for revert path.
+                _osc_meta, _recall_result = await asyncio.gather(
+                    _run_off_screen(), _run_recall()
                 )
+                _image_reading_result = ([], {})
 
                 # Off-screen telemetry
                 if isinstance(_osc_meta, dict) and _osc_meta.get("usage"):
@@ -6817,15 +6809,10 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 user_content = _characters_build_user(characters_state, user_content)
 
                 # Image handling for Characters: the voice slot is Opus 3, whose
-                # vision is older. The pre-pass above (Opus 4.5 by default) already
-                # produced a structured reading which is in the [IMAGES …] injection
-                # block. So normally we attach NO image blocks to Opus 3.
-                #
-                # Fallback: if the reading failed (network error, API error) but we
-                # have raw image blocks, attach them so Opus 3 at least sees
-                # something — older vision is better than nothing.
-                _readings_succeeded = isinstance(_image_readings, list) and len(_image_readings) > 0
-                if _character_image_blocks and not _readings_succeeded:
+                # Opus 4.5 has native vision — always attach raw image blocks
+                # to the user message when present. The image-reading pre-pass
+                # was a workaround for Opus 3's weaker vision and is now retired.
+                if _character_image_blocks:
                     new_user_msg = {
                         "role": "user",
                         "content": _character_image_blocks + [{"type": "text", "text": user_content}],
