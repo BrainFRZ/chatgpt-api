@@ -10,7 +10,7 @@ const SIDE_AGENT_DONE_FIELDS = [
   'character_agent_usage', 'character_agent_cost', 'character_agent_model', 'character_agent_ops',
   'off_screen_usage', 'off_screen_cost', 'off_screen_model',
   'recall_usage', 'recall_cost', 'recall_model', 'recall_ids',
-  'inner_state_usage', 'inner_state_cost', 'inner_state_model', 'inner_state_payload',
+  'inner_state_usage', 'inner_state_cost', 'inner_state_model', 'inner_state_payload', 'inner_state_scratchpad_status',
   'search_usage', 'search_cost', 'search_calls', 'search_model', 'search_log',
   'fetch_url_calls', 'fetch_url_log',
   'image_reading_usage', 'image_reading_cost', 'image_reading_model', 'image_reading_count',

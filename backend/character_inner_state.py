@@ -95,9 +95,15 @@ Inputs you see:
 - A short dialogue window of the most recent exchanges
 - The user's message right now
 
-Output four strings via the `report_inner_state` tool. ALL FOUR ARE OPTIONAL. Most turns have 2-3 fields populated, not 4.
+Output via the `report_inner_state` tool. The tool has FIVE fields: a `reasoning` scratchpad (write first, discarded after) and four output fields (`feeling`, `wanting`, `noticing`, `holding_back`). All four output fields are OPTIONAL; most turns have 2-3 populated, not 4.
+
+ORDER MATTERS — fill the scratchpad first:
+The `reasoning` field is listed first in the tool's input schema. Fill it FIRST. Write out your reading step-by-step: what the user just said, what callback or wordplay might be in play (if any), what the layered read is vs the surface read, which one to commit to. The voice model NEVER sees this scratchpad — it's discarded after extraction. It exists so YOU have room to think before committing.
+
+The four output fields below should then be CONSISTENT with what you reasoned to. If you skip the scratchpad and jump straight to the four fields, you'll compress the read — defaulting to whichever interpretation is loudest/laziest, not the one your full chain actually points to. The scratchpad is what unlocks layered reads, callback traces, and multi-step inference.
 
 Length caps:
+- reasoning: ≤600 chars (scratchpad — discarded; use the room to think)
 - feeling: ≤140 chars
 - wanting: ≤140 chars
 - holding_back: ≤140 chars
@@ -154,6 +160,21 @@ def build_inner_state_tool() -> dict:
         "input_schema": {
             "type": "object",
             "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": (
+                        "≤600 chars. SCRATCHPAD — write this FIRST, before the four fields "
+                        "below. This is YOUR space to think step-by-step. The voice model "
+                        "NEVER sees this field; it's discarded after extraction. Use it to: "
+                        "trace callbacks and wordplay (what was originally said → what the "
+                        "user just said → what the callback means → confirm the read), "
+                        "weigh competing interpretations, commit to the right one. The four "
+                        "fields below must be CONSISTENT with what you reasoned to here. "
+                        "If you skip this scratchpad and jump to the four fields, you'll "
+                        "compress the read and default to the loudest interpretation. "
+                        "Filling this first is what unlocks layered reads."
+                    ),
+                },
                 "feeling": {
                     "type": "string",
                     "description": "≤140 chars. The emotional weather right now — beneath the words. What's actually going on inside.",
@@ -445,12 +466,31 @@ def run_inner_state(
         return {}, {}
 
     inner_state: dict = {}
+    # Scratchpad-status detection for the Pattern-C `reasoning` field.
+    # JSON property order isn't formally guaranteed by spec, but Anthropic
+    # models in practice emit keys in schema-declaration order with high
+    # reliability. Detect the rare reorder/missing cases so we can audit
+    # the empirical rate over time. Status surfaces on assistant_msg_data.
+    scratchpad_status = "no_call"
     for block in response.content:
         if block.type == "tool_use" and block.name == "report_inner_state":
             inp = block.input
             if isinstance(inp, dict):
+                # Order check FIRST (before we filter to the 4 voice-visible
+                # fields, since 'reasoning' is intentionally excluded from voice).
+                ordered_keys = list(inp.keys())
+                if not ordered_keys:
+                    scratchpad_status = "no_output"
+                elif "reasoning" not in inp:
+                    scratchpad_status = "missing"
+                elif ordered_keys[0] == "reasoning":
+                    scratchpad_status = "ordered"
+                else:
+                    scratchpad_status = "reordered"
                 # Filter to known fields and non-empty strings only — the schema
-                # has all fields optional, so the model may omit some.
+                # has all fields optional, so the model may omit some. The
+                # `reasoning` field is intentionally NOT included; it's a
+                # discarded scratchpad that the voice model never sees.
                 for k in ("feeling", "wanting", "noticing", "holding_back"):
                     v = inp.get(k)
                     if isinstance(v, str) and v.strip():
@@ -465,8 +505,18 @@ def run_inner_state(
         "cache_read_tokens": getattr(ru, 'cache_read_input_tokens', 0) or 0,
         "cache_creation_tokens": getattr(ru, 'cache_creation_input_tokens', 0) or 0,
         "output_tokens": ru.output_tokens,
+        # Pattern-C scratchpad detection. One of:
+        #   "ordered"    — reasoning was generated first, scratchpad worked
+        #   "reordered"  — reasoning came after some other field (post-hoc rationalization)
+        #   "missing"    — reasoning field absent entirely
+        #   "no_output"  — tool_use block was empty
+        #   "no_call"    — model didn't call the tool at all
+        "scratchpad_status": scratchpad_status,
     }
 
     if inner_state:
-        logger.info(f"character_inner_state: emitted {list(inner_state.keys())}")
+        logger.info(
+            f"character_inner_state: emitted {list(inner_state.keys())} "
+            f"(scratchpad: {scratchpad_status})"
+        )
     return inner_state, usage

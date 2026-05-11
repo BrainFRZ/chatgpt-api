@@ -1001,13 +1001,23 @@ export default function ChatView({
                           {' '}(Opus 4.5)
                         </span>
                       )}
-                      {(msg as any).inner_state_usage && (
-                        <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
-                          Inner: {formatUsageString((msg as any).inner_state_usage)}
-                          {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
-                          {' '}({(msg as any).inner_state_model === 'claude-sonnet-4-6' ? 'Sonnet' : 'Opus 4.5'})
-                        </span>
-                      )}
+                      {(msg as any).inner_state_usage && (() => {
+                        const sp = (msg as any).inner_state_scratchpad_status;
+                        let spTag: string | null = null;
+                        if (sp === 'reordered') spTag = ' · ⚠️ scratchpad reordered';
+                        else if (sp === 'missing') spTag = ' · ⚠️ scratchpad missing';
+                        else if (sp === 'no_output') spTag = ' · ⚠️ no inner output';
+                        else if (sp === 'no_call') spTag = ' · ⚠️ inner not called';
+                        // 'ordered' (happy path) and undefined (legacy / pre-Pattern-C) show nothing
+                        return (
+                          <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                            Inner: {formatUsageString((msg as any).inner_state_usage)}
+                            {typeof (msg as any).inner_state_cost === 'number' && ` | $${(msg as any).inner_state_cost.toFixed(6)}`}
+                            {' '}({(msg as any).inner_state_model === 'claude-sonnet-4-6' ? 'Sonnet' : 'Opus 4.5'})
+                            {spTag}
+                          </span>
+                        );
+                      })()}
                       {(msg as any).image_reading_usage && (
                         <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
                           Vision: {formatUsageString((msg as any).image_reading_usage)}

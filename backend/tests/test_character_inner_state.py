@@ -283,12 +283,16 @@ def test_inner_state_builder_in_injection_assembly():
 # ── Tool schema sanity ───────────────────────────────────────────────
 
 
-def test_tool_schema_has_all_four_fields():
-    """report_inner_state tool exposes exactly the four expected optional fields."""
+def test_tool_schema_has_expected_fields():
+    """report_inner_state tool exposes the four output fields plus the
+    Pattern-C `reasoning` scratchpad field, with reasoning declared first."""
     tool = build_inner_state_tool()
     assert tool["name"] == "report_inner_state"
     props = tool["input_schema"]["properties"]
-    assert set(props.keys()) == {"feeling", "wanting", "noticing", "holding_back"}
+    assert set(props.keys()) == {"reasoning", "feeling", "wanting", "noticing", "holding_back"}
+    # `reasoning` must be FIRST in declaration order — Pattern C relies on
+    # the model generating it before the four output fields.
+    assert list(props.keys())[0] == "reasoning"
     # All optional — schema must not have a 'required' key (or it must be empty)
     required = tool["input_schema"].get("required", [])
     assert required == [] or "required" not in tool["input_schema"]
