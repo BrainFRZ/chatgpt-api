@@ -710,34 +710,72 @@ export default function ChatView({
                 </>
               ) : (
                 <>
-                  {/* Collapsible reasoning section for assistant messages */}
-                  {msg.role === 'assistant' && msg.reasoning && (
-                    <div
-                      className="reasoningContainer"
-                      style={styles.reasoningContainer}
-                      onClick={() => {
-                        setExpandedReasoning(prev => {
-                          const next = new Set(prev);
-                          if (next.has(i)) {
-                            next.delete(i);
-                          } else {
-                            next.add(i);
-                          }
-                          return next;
-                        });
-                      }}
-                    >
-                      <div style={styles.reasoningHeader}>
-                        <span>{expandedReasoning.has(i) ? '▲' : '▼'}</span>
-                        <span style={styles.reasoningLabel}>Reasoning...</span>
-                      </div>
-                      {expandedReasoning.has(i) && (
-                        <div style={styles.reasoningContent} className="messageContent">
-                          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.reasoning || '')}</ReactMarkdown>
+                  {/* Collapsible reasoning section for assistant messages.
+                      Combines the voice model's own reasoning (when present —
+                      e.g., native thinking blocks or parsed inline <thinking>)
+                      with the inner_state pre-pass payload (the 4-axis
+                      emotional grounding Opus 4.5 / Sonnet 4.6 produced
+                      before voice streamed). Inner state is rendered as
+                      pseudo-reasoning so the user can see what was driving
+                      the voice register on turns where the voice model
+                      itself produced no reasoning trace. */}
+                  {(() => {
+                    if (msg.role !== 'assistant') return null;
+                    const inner = (msg as any).inner_state_payload;
+                    const hasInner = (
+                      inner && typeof inner === 'object' &&
+                      Object.values(inner).some(
+                        (v: any) => typeof v === 'string' && v.trim()
+                      )
+                    );
+                    const hasReasoning = !!msg.reasoning;
+                    if (!hasInner && !hasReasoning) return null;
+                    const parts: string[] = [];
+                    if (hasInner) {
+                      parts.push('**Inner state — pre-pass emotional grounding:**');
+                      parts.push('');
+                      if (inner.feeling) parts.push(`- **Feeling:** ${inner.feeling}`);
+                      if (inner.wanting) parts.push(`- **Wanting:** ${inner.wanting}`);
+                      if (inner.noticing) parts.push(`- **Noticing:** ${inner.noticing}`);
+                      if (inner.holding_back) parts.push(`- **Holding back:** ${inner.holding_back}`);
+                    }
+                    if (hasReasoning) {
+                      if (parts.length > 0) {
+                        parts.push('');
+                        parts.push('---');
+                        parts.push('');
+                      }
+                      parts.push(msg.reasoning as string);
+                    }
+                    const combined = parts.join('\n');
+                    return (
+                      <div
+                        className="reasoningContainer"
+                        style={styles.reasoningContainer}
+                        onClick={() => {
+                          setExpandedReasoning(prev => {
+                            const next = new Set(prev);
+                            if (next.has(i)) {
+                              next.delete(i);
+                            } else {
+                              next.add(i);
+                            }
+                            return next;
+                          });
+                        }}
+                      >
+                        <div style={styles.reasoningHeader}>
+                          <span>{expandedReasoning.has(i) ? '▲' : '▼'}</span>
+                          <span style={styles.reasoningLabel}>Reasoning...</span>
                         </div>
-                      )}
-                    </div>
-                  )}
+                        {expandedReasoning.has(i) && (
+                          <div style={styles.reasoningContent} className="messageContent">
+                            <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(combined)}</ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {/* Attached files display */}
                   {msg.role === 'user' && msg.attached_files && msg.attached_files.length > 0 && (
                     <div style={styles.attachedFilesDisplay}>
