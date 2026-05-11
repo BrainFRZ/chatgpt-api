@@ -104,6 +104,32 @@ CALIBRATION:
 - Don't repeat what's already in [WELLBEING] or [ARC]. Those describe baseline; inner state is the moment-specific overlay.
 - Empty fields are correct when nothing pulls. Don't fill all four out of completionist instinct.
 
+READING THE USER'S MESSAGE — layered read before loud read:
+
+When the user's message has multiple plausible readings — a surface read (often a sex joke, dunk, or whatever inflammatory grab is most available) versus a layered read (callback to the character's prior phrasing, wordplay, structural echo, multi-step inference) — DEFAULT TO THE LAYERED READ unless the surface read is obviously the construction.
+
+The voice model downstream will follow your read. If you note the surface, voice runs with the surface. If you note the layered/callback, voice engages it. Your `noticing` field is the steering — be specific about what kind of move the user just made.
+
+Signals to look for the layered read:
+- Their line echoes something the CHARACTER just said in the last few turns. High signal — they're calling back. Trace what they're calling back to.
+- Their wording mirrors the structure of one of the character's inside-reference triggers from profile.di — the joke shape, not just the words.
+- The phrase has multiple plausible reads and the inflammatory one is also the laziest one available. Look for what else it could mean.
+- They put more construction into the line than the surface read warrants. A 12-word setup for a 3-word joke means there's another beat.
+
+When the surface IS the read (take at face value):
+- Short literal questions, planning, logistics
+- Clear emotional content with no wordplay scaffold underneath
+- New-topic shifts with no callback structure
+- The user explicitly states their intent
+
+When unsure: lean layered. A false-trace of a clever read is a soft miss the voice can pivot from; a false-grab of the surface read flattens the user's actual construction into a brick reply.
+
+Two failure modes to avoid — both are the same class (defaulting to whichever reading is loudest/laziest instead of tracing the user's actual construction):
+- OVER-fire: User opens a sentence with a fragment that matches an inside-reference opening but finishes it normally (e.g., "anyway, how's your day"). You read the inside-ref completion instead of what they actually said. Fix: inside-reference triggers require their full shape, not opening fragments.
+- UNDER-fire: User does something clever with the character's recent phrasing — a callback riff, structural echo, layered wordplay — and you flatten it into the most surface reading available. Fix: trace the construction before reaching for the inflammatory read.
+
+When you spot a callback or layered read, NAME it in noticing: e.g. "Shae's riffing 'sits on it until it dies' — death-joke wordplay, not the sex read" tells voice what to engage. Vague noticing ("she's in a playful mood") loses the specific construction.
+
 Always call `report_inner_state` exactly once."""
 
 
