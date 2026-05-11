@@ -951,7 +951,7 @@ export default function ChatView({
                       )}
                       {(msg as any).character_agent_usage && (
                         <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
-                          State: {formatUsageString((msg as any).character_agent_usage)}
+                          Record: {formatUsageString((msg as any).character_agent_usage)}
                           {typeof (msg as any).character_agent_cost === 'number' && ` | $${(msg as any).character_agent_cost.toFixed(6)}`}
                           {' '}(Sonnet)
                         </span>
