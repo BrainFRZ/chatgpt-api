@@ -51,6 +51,10 @@ PROJECT_LEVEL_FIELDS = (
     "scheduler_state",
     "last_ripeness_rolled_date",
     "custom_holidays",
+    # Rolled/mandatory-free busy cycle state (see character_busy.py). Project-
+    # level because Zara is one person — busy state is global across any open
+    # chats with her, not per-chat.
+    "work_busy_window",
 )
 
 
