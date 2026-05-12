@@ -1440,10 +1440,68 @@ export default function ChatView({
         {stagedFiles.length > 0 && (
           <div style={styles.stagedFilesBar}>
             {stagedFiles.map((file, idx) => {
-              const isImage = (file as any).mime_type?.startsWith('image/');
+              const fileMime = (file as any).mime_type as string | undefined;
+              const fileContent = (file as any).content as string | undefined;
+              const isImage = !!fileMime?.startsWith('image/');
+              if (isImage && fileMime && fileContent) {
+                // Image thumbnail with overlaid X button. data: URL from
+                // the base64 staged content — same bytes the backend will
+                // send to Anthropic as a vision content block on send.
+                return (
+                  <div
+                    key={idx}
+                    title={file.filename}
+                    style={{
+                      position: 'relative' as const,
+                      width: '64px',
+                      height: '64px',
+                      borderRadius: '6px',
+                      overflow: 'hidden' as const,
+                      backgroundColor: '#3a3a5e',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <img
+                      src={`data:${fileMime};base64,${fileContent}`}
+                      alt={file.filename}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover' as const,
+                        display: 'block' as const,
+                      }}
+                    />
+                    <button
+                      onClick={() => removeStagedFile(idx)}
+                      title="Remove image"
+                      style={{
+                        position: 'absolute' as const,
+                        top: '2px',
+                        right: '2px',
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '50%',
+                        background: 'rgba(0,0,0,0.7)',
+                        color: '#fff',
+                        border: 'none',
+                        cursor: 'pointer' as const,
+                        fontSize: '0.7rem',
+                        display: 'flex' as const,
+                        alignItems: 'center' as const,
+                        justifyContent: 'center' as const,
+                        padding: 0,
+                        lineHeight: 1,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              }
+              // Non-image: keep the existing chip-with-filename layout.
               return (
                 <div key={idx} style={styles.stagedFileChip}>
-                  <span style={styles.stagedFileName}>{isImage ? '🖼️' : '📄'} {file.filename}</span>
+                  <span style={styles.stagedFileName}>📄 {file.filename}</span>
                   <button
                     onClick={() => removeStagedFile(idx)}
                     style={styles.stagedFileRemove}
