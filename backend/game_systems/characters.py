@@ -1447,11 +1447,12 @@ def build_busy_interrupt_injection(state: dict) -> str:
     when the user's message contained an SOS marker AND the schedule says the
     character was in a busy event (sleep / work shift) at the moment.
 
-    The block tells the voice agent two things:
+    The block tells the voice agent three things:
       1. They were doing X (asleep / at work / etc.)
-      2. The user flagged this as urgent and broke through, so they ARE
-         responding — but the response should acknowledge the interruption
-         in voice, not pretend they were sitting around waiting for a text.
+      2. The user flagged this as urgent and broke through.
+      3. The character JUDGES whether the SOS content actually warranted the
+         interruption — and gets irritable in voice if it didn't, including
+         the option to disengage without addressing the content.
     """
     payload = state.get("_render_payload") or {}
     bi = payload.get("busy_interrupt") if isinstance(payload, dict) else None
@@ -1460,42 +1461,65 @@ def build_busy_interrupt_injection(state: dict) -> str:
     desc = (bi.get("description") or "busy").strip()
     kind = (bi.get("kind") or "").strip()
 
+    # Universal judgment cue — applies to all kinds. The character reads the
+    # SOS content and decides whether the interruption was warranted. SOS
+    # being deployed for not-actually-urgent things should land as misuse
+    # the character calls out, not as something to be patient about.
+    sos_judgment = (
+        "JUDGE THE SOS CONTENT FIRST. The user marked this urgent — that's "
+        "why you're awake/pulled-away. Read what they actually said.\n\n"
+        "If the content IS urgent (real crisis, medical, family emergency, "
+        "actually-bad news, genuine emotional emergency they need you for): "
+        "respond engaged, with the kind-specific texture below.\n\n"
+        "If the content is NOT urgent (a meme, casual question, 'i'm bored', "
+        "'what should i watch', plans that could have waited, anything that "
+        "doesn't justify the wake-up/interruption): be IRRITABLE. Friend-"
+        "cranky, not stranger-cranky — the relationship is intact, but you "
+        "are not rewarding SOS-misuse with attentive engagement. You do NOT "
+        "have to respond to the content at all. You can call out the misuse "
+        "and disengage. Examples: 'the fuck shae. this better be good.' / "
+        "'absolutely not. go to sleep. love you, goodnight.' / 'shae im AT "
+        "WORK this had better not be about the couch.' / even a sleepy "
+        "'fuck off lol' followed by going dark is valid. Don't be cruel — "
+        "but don't reward misuse by being patient about it."
+    )
+
     # Voice cues per kind so the model lands the right tone for being woken
     # up vs being pulled away from work. CHANNEL-AWARE — most channels for
     # Characters chat are TEXT, so cues avoid phone-call narration that would
     # be wrong for text format.
     if kind == "sleep":
-        cue = (
-            "You were ASLEEP. The user just sent something marked urgent "
-            "(SOS / 911 / emergency / /sos). You're now half-awake, thumbing "
-            "at your phone in the dark. Respond, but in shorter, rougher, "
-            "less-polished beats than usual — half-asleep texture. Don't "
-            "pretend you weren't asleep. MATCH [CHANNEL]: if text, write "
-            "fragmented half-asleep texts (no phone-call narration, no "
-            "third-person scene-setting like '*phone buzzes*'). If phone or "
-            "in-person/video, voice is groggy, words slurring slightly. "
-            "Real-friend energy: groggy concern, focus shifting in real time."
+        kind_cue = (
+            "You were ASLEEP. You're now half-awake, thumbing at your phone "
+            "in the dark. Half-asleep texture either way — engaged or "
+            "irritable. Shorter, rougher, less-polished beats than your "
+            "usual register. Don't pretend you weren't asleep. MATCH "
+            "[CHANNEL]: if text, write fragmented half-asleep texts (no "
+            "phone-call narration, no third-person scene-setting like "
+            "'*phone buzzes*'). If phone or in-person/video, voice is "
+            "groggy, words slurring slightly."
         )
     elif kind == "work":
-        cue = (
-            "You were AT WORK at the cafe — hands full, on the floor. The "
-            "user broke through with something urgent. Respond, with the "
-            "texture of being yanked away from work in the reply. 'one sec, "
-            "i'm at the bar' or 'hold on lemme step into the back' kind of "
-            "energy — brief, slightly distracted. MATCH [CHANNEL]: text is "
-            "fragmented and quick; phone is full sentences with kitchen "
-            "sounds; in-person you'd literally step away. Don't overdo the "
-            "work narration — one beat, then engage with what they said."
+        kind_cue = (
+            "You were AT WORK at the cafe — hands full, on the floor. "
+            "Whether responding engaged or cranky, the texture is the same: "
+            "being yanked away from work. 'one sec, i'm at the bar' / 'hold "
+            "on lemme step into the back' if engaged; 'shae i'm AT WORK' / "
+            "'i'll text you on my break, this isn't a wake-the-staff "
+            "emergency' if cranky. Brief, distracted. MATCH [CHANNEL]: "
+            "text is fragmented; phone is full sentences with kitchen "
+            "sounds; in-person you'd step away. Don't overdo the work "
+            "narration."
         )
     else:
-        cue = (
-            f"You were {desc}. The user broke through with something urgent. "
-            f"Respond — but acknowledge being pulled away from {desc}. Don't "
-            f"pretend you were idle. Match [CHANNEL] format strictly."
+        kind_cue = (
+            f"You were {desc}. Acknowledge being pulled away from {desc} "
+            f"in voice — engaged if the SOS content warranted it, cranky "
+            f"if it didn't. Match [CHANNEL]."
         )
 
-    header = "[BUSY INTERRUPT — your full attention was elsewhere; the user broke through]"
-    return f"{header}\n{cue}"
+    header = "[BUSY INTERRUPT — your full attention was elsewhere; the user broke through with an SOS]"
+    return f"{header}\n{sos_judgment}\n\n{kind_cue}"
 
 
 def build_image_reading_injection(state: dict) -> str:
