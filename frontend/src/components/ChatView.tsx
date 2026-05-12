@@ -53,6 +53,30 @@ function formatUsageString(usage: any): string {
   return `I:${nonCached} C:${r} W:${w} O:${output} R:${reasoning} T:${total}`;
 }
 
+// Backend folds every side-agent cost into msg.cost (see main.py:11437-11443):
+// msg.cost = voice + flag + recall + character_agent + off_screen + inner_state
+//          + image_reading + search + meme. So msg.cost IS the per-turn total.
+// The frontend shows side agents on their own rows; to render the main line as
+// voice-only and the Total as the rolled-up spend, subtract this sum from msg.cost.
+function sumSideAgentCosts(msg: any): number {
+  if (!msg || typeof msg !== 'object') return 0;
+  return (
+    (msg.flag_agent_cost || 0) +
+    (msg.recall_cost || 0) +
+    (msg.character_agent_cost || 0) +
+    (msg.off_screen_cost || 0) +
+    (msg.inner_state_cost || 0) +
+    (msg.image_reading_cost || 0) +
+    (msg.search_cost || 0) +
+    (msg.meme_cost || 0)
+  );
+}
+
+function parseRolledCost(costStr: any): number {
+  if (costStr == null) return 0;
+  return parseFloat(String(costStr).replace(/[^0-9.\-]/g, '')) || 0;
+}
+
 function _extractHudFromMsg(msg: any): any | null {
   if (!msg || typeof msg !== 'object') return null;
   const psa = msg.pipeline_state_after;
@@ -938,13 +962,24 @@ export default function ChatView({
                   )}
                   <div style={styles.messageFooter}>
                     <div style={styles.messageFooterMainRow}>
-                      {msg.tokens ? (
-                        <span style={styles.messageTokens}>
-                          {msg.tokens}{msg.cost && ` | ${msg.cost}`}
-                          {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
-                          {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
-                        </span>
-                      ) : <span />}
+                      {msg.tokens ? (() => {
+                        // Display voice-only cost on the main line. msg.cost from
+                        // backend is the rolled-up turn total (voice + side agents);
+                        // subtract the side-agent sum to recover the voice spend.
+                        // Side agents are shown on their own rows below; the Total
+                        // row shows the rolled-up msg.cost as the real per-turn spend.
+                        const rolled = parseRolledCost(msg.cost);
+                        const agents = sumSideAgentCosts(msg);
+                        const voiceCost = Math.max(0, rolled - agents);
+                        const costStr = msg.cost && rolled > 0 ? ` | $${voiceCost.toFixed(6)}` : '';
+                        return (
+                          <span style={styles.messageTokens}>
+                            {msg.tokens}{costStr}
+                            {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
+                            {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
+                          </span>
+                        );
+                      })() : <span />}
                       {/* Branch navigation - show only for user messages with siblings */}
                       {msg.role === 'user' && (() => {
                         if (!msg.id) return null;
@@ -1060,24 +1095,17 @@ export default function ChatView({
                           URL fetch: {(msg as any).fetch_url_calls} call{(msg as any).fetch_url_calls === 1 ? '' : 's'}
                         </span>
                       )}
-                      {/* Aggregate Total: msg.cost is just the voice agent's cost
-                          (Opus 3 reply); the side-agent costs are billed separately
-                          and tracked on their own fields. We sum them here so the
-                          Total row is the actual money spent on this turn.
-                          Suppressed when no side-agents fired (would equal main). */}
+                      {/* Aggregate Total: msg.cost from the backend is already the
+                          rolled-up per-turn total (voice + every side agent), see
+                          sumSideAgentCosts comment up top and main.py:11437-11443.
+                          The main row above shows voice-only (msg.cost minus the
+                          side-agent sum), so showing msg.cost here as Total makes
+                          the row math add up. Suppressed when no side-agents fired
+                          (would equal the main row). */}
                       {msg.role === 'assistant' && msg.cost && (() => {
-                        const agentCosts =
-                          ((msg as any).flag_agent_cost || 0) +
-                          ((msg as any).recall_cost || 0) +
-                          ((msg as any).character_agent_cost || 0) +
-                          ((msg as any).off_screen_cost || 0) +
-                          ((msg as any).inner_state_cost || 0) +
-                          ((msg as any).image_reading_cost || 0) +
-                          ((msg as any).search_cost || 0) +
-                          ((msg as any).meme_cost || 0);
-                        const voiceCost = parseFloat(String(msg.cost).replace(/[^0-9.\-]/g, '')) || 0;
-                        const totalNum = voiceCost + agentCosts;
+                        const agentCosts = sumSideAgentCosts(msg);
                         if (agentCosts < 1e-9) return null;
+                        const totalNum = parseRolledCost(msg.cost);
                         return (
                           <span style={{ ...styles.messageTokens, fontWeight: 600, marginTop: '2px' }}>
                             Total: ${totalNum.toFixed(6)}
