@@ -1353,6 +1353,19 @@ export default function ChatView({
                   </div>
                 );
               }
+              if (n.type === 'character_misread_captured') {
+                const trunc = (s?: string, n2: number = 60) =>
+                  s && s.length > n2 ? s.slice(0, n2 - 1) + '…' : (s || '');
+                return (
+                  <div key={i} style={styles.searchNotification}>
+                    <span style={styles.notificationLabel}>🔁 misread logged</span>
+                    {': '}
+                    <span style={styles.notificationReason}>
+                      "{trunc(n.original_message)}" → "{trunc(n.user_correction)}"
+                    </span>
+                  </div>
+                );
+              }
               if (n.type === 'character_find_meme_post') {
                 const failed = n.ok === false;
                 return (

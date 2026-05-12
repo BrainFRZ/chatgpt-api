@@ -5210,6 +5210,16 @@ def extract_character_agent_notifications(ops: dict) -> list:
             "category": op.get("category"),
         })
 
+    for op in ops.get("misread_ops", []) or []:
+        if op.get("action") != "capture":
+            continue
+        notifications.append({
+            "type": "character_misread_captured",
+            "original_message": op.get("original_message"),
+            "model_read": op.get("model_read"),
+            "user_correction": op.get("user_correction"),
+        })
+
     return notifications
 
 

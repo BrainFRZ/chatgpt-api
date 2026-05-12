@@ -58,8 +58,9 @@ logger = logging.getLogger(__name__)
 KIND_MEMORIES = "memories"
 KIND_USER_PROFILE = "user_profile"
 KIND_GROWTH = "growth"
+KIND_MISREAD_LOG = "misread_log"
 
-VALID_KINDS = (KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH)
+VALID_KINDS = (KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH, KIND_MISREAD_LOG)
 
 # File-name suffix per kind. character_memories / user_profile / character_growth
 # match what the user would expect to see in the project directory.
@@ -67,6 +68,7 @@ _KIND_FILE = {
     KIND_MEMORIES: "character_memories.jsonl",
     KIND_USER_PROFILE: "user_profile.jsonl",
     KIND_GROWTH: "character_growth.jsonl",
+    KIND_MISREAD_LOG: "character_misread_log.jsonl",
 }
 
 # Memory bodies live in a subdir; one .md per memory.
@@ -832,3 +834,66 @@ def apply_growth_ops_to_store(
                 mutated += 1
 
     return mutated
+
+
+def apply_misread_ops_to_store(
+    store: CharacterStore,
+    ops: list,
+    *,
+    current_turn: int,
+    branch_msg_id: Optional[str] = None,
+) -> list[dict]:
+    """Apply misread_ops to the file store. Append-only.
+
+    Op shape: {action: "capture", original_message, model_read, user_correction}
+
+    Returns the list of newly-written entries (so the caller can emit a
+    user-visible banner per entry). Ids are mr-NNNN, zero-padded, assigned
+    by scanning the max existing id + 1.
+    """
+    if not ops:
+        return []
+
+    from datetime import datetime
+
+    existing = store.read_all(KIND_MISREAD_LOG)
+    max_n = 0
+    for e in existing:
+        if not isinstance(e, dict):
+            continue
+        eid = e.get("id")
+        if isinstance(eid, str) and eid.startswith("mr-"):
+            try:
+                n = int(eid[3:])
+                if n > max_n:
+                    max_n = n
+            except ValueError:
+                continue
+    next_n = max_n + 1
+
+    now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    written: list[dict] = []
+    for op in ops:
+        if not isinstance(op, dict) or op.get("action") != "capture":
+            continue
+        orig = str(op.get("original_message") or "")[:200].strip()
+        read = str(op.get("model_read") or "")[:200].strip()
+        corr = str(op.get("user_correction") or "")[:200].strip()
+        if not orig or not corr or not read:
+            continue
+        written.append({
+            "id": f"mr-{next_n:04d}",
+            "at": now_iso,
+            "turn": current_turn,
+            "original_message": orig,
+            "model_read": read,
+            "user_correction": corr,
+            "branch_id": branch_msg_id,
+        })
+        next_n += 1
+
+    if written:
+        store.append_many(KIND_MISREAD_LOG, written)
+
+    return written

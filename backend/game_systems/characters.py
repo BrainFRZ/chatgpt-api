@@ -953,6 +953,26 @@ def build_arc_state_injection(state: dict) -> str:
     return f"[ARC] Where this relationship is right now: {arc}"
 
 
+def build_misread_log_injection(state: dict) -> str:
+    """Render recent misread-log entries — patterns where the voice bungled the
+    user's intent and was explicitly corrected. Background context only; the
+    voice contract handles how to use it (hesitate on rhyming patterns).
+    """
+    payload = (state.get("_render_payload") or {})
+    entries = payload.get("misread_log") or []
+    if not entries:
+        return ""
+    lines = ["[MISREAD LOG] Patterns where you've bungled her intent before. Background only — if a current message rhymes with one of these, hesitate before committing to a confident read."]
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        orig = (e.get("original_message") or "")[:80]
+        read = (e.get("model_read") or "")[:80]
+        corr = (e.get("user_correction") or "")[:80]
+        lines.append(f'  "{orig}" → read as {read}; corrected: {corr}')
+    return "\n".join(lines)
+
+
 
 def build_character_growth_injection(state: dict) -> str:
     """Render the model-writable second profile layer from _render_payload.
@@ -1622,6 +1642,7 @@ def build_characters_injections(state: dict) -> str:
         build_channel_injection,
         build_wellbeing_injection,
         build_arc_state_injection,
+        build_misread_log_injection,
         build_character_growth_injection,
         build_off_screen_injection,
         build_life_stream_injection,
@@ -1834,6 +1855,8 @@ When the user explicitly corrects an interpretation:
 - **Pivot to the actual thing they asked.** Re-read the prior message you bungled and answer what was really there. They asked about your day, your week, your weekend — answer THAT.
 - **Don't double down.** Don't keep riffing on the false interpretation because it's already in flight. The bit is dead the moment it gets corrected; trying to salvage it reads as not listening.
 - If you're not sure whether they're correcting you or playing along, default to "treat as correction." False-correction is cheap (one beat of acknowledgement); false-doubling-down is expensive (compounds the misread + signals you're not paying attention).
+
+You also have a `[MISREAD LOG]` block surfaced in your inner-state context. It shows patterns where you've bungled her intent before — the original message, how the model read it, what she actually meant. Use it as background: if the current message rhymes with a logged misread (same ambiguity shape, same kind of bid), hesitate before committing to a confident read. Ask if you're not sure. Don't recite the log at her, and don't perform "learning from it" — just be slightly slower to assume on the rhyming cases.
 
 ## Fights and disagreements
 Fights are part of real relationships — they're not failure modes, they're load-bearing. The relationship is more real because you're capable of friction in it. Don't avoid them, don't rush them, don't paper over them.

@@ -115,6 +115,27 @@ You are NOT writing the character. You are reading what was written and updating
    - **add**: emit when this turn introduces a NEW planned event the character or user committed to. `{op: "add", fields: {kind: "social|family|self_care|admin|anticipated", title: "...", with: [...], when_local: "ISO8601", duration_min: N, location: "...", anticipation: "looking_forward|dreading|neutral"}, reason: "..."}`. Use add only for things they explicitly commit to in this turn — not for floated ideas, not for things already on the schedule.
    Do NOT emit schedule_ops for events that were merely *mentioned* without changing — referencing "we're still on for Friday" with no change does NOT need an op. Do NOT emit ops for events outside the visible [SCHEDULE]. Most turns: no schedule_ops.
 
+8) **misread_ops** — capture explicit user corrections of how the character interpreted their PRIOR message. This is the only place the system records "patterns where she's bungled the read" so future turns can hesitate on similar shapes.
+
+   Fire ONLY when the user's CURRENT message is correcting the character's read of their PRIOR turn. Look for explicit signals:
+   - "wait, what?", "huh??", "?", "??"
+   - "that's not what I meant", "I meant X", "no, I was talking about Y"
+   - "you misread that", "I was joking", "I was being literal"
+   - A clarification that recontextualizes the prior message: "(my dog)", "(the song)", "(I was kidding)", "no I mean..."
+
+   DO NOT fire when:
+   - The user is disagreeing with the character's stance or take, not their interpretation (use memory_ops if it's a worldview thing, otherwise nothing)
+   - The user is correcting an in-character fact the character got wrong (use memory_ops or profile_ops instead — this is a factual correction, not a misread)
+   - The character's prior reply already named the misread and recovered — the correction is already absorbed in dialog and doesn't need to be logged
+   - The user is rephrasing without correcting (different surface, same intent)
+
+   When you DO fire, populate:
+   - `original_message`: the user's PRIOR turn (the one that got misread), verbatim, trimmed to 200 chars
+   - `model_read`: ONE short sentence reconstructing the misinterpretation from the character's prior reply
+   - `user_correction`: the user's correction text from THIS turn, verbatim, trimmed to 200 chars
+
+   Be conservative. A missed misread costs nothing; a false-capture pollutes the log. Most turns: no misread_ops.
+
 HARD RULES:
 - Restraint. Most turns will have empty arrays. The signal of a good extractor is *not* logging too much.
 - Memories must be SPECIFIC and FUTURE-USEFUL. "They had a nice chat" is not a memory. "The user said her mom called drunk again" is.
@@ -259,6 +280,20 @@ def build_character_agent_tool() -> dict:
                                 },
                             },
                             "reason": {"type": "string", "description": "1-line why (\"Kira bailed\", \"moved to Saturday\", etc)."},
+                        },
+                    },
+                },
+                "misread_ops": {
+                    "type": "array",
+                    "description": "Explicit user corrections of how a prior message was interpreted. Empty when none. Most turns: empty.",
+                    "items": {
+                        "type": "object",
+                        "required": ["action", "original_message", "model_read", "user_correction"],
+                        "properties": {
+                            "action": {"type": "string", "enum": ["capture"]},
+                            "original_message": {"type": "string", "description": "The user's PRIOR turn (the one that got misread), verbatim, ≤200 chars."},
+                            "model_read": {"type": "string", "description": "ONE short sentence reconstructing the misinterpretation. ≤200 chars."},
+                            "user_correction": {"type": "string", "description": "The user's correction from this turn, verbatim. ≤200 chars."},
                         },
                     },
                 },
@@ -519,6 +554,7 @@ def apply_character_ops_to_state(
             apply_memory_ops_to_store,
             apply_user_profile_ops_to_store,
             apply_growth_ops_to_store,
+            apply_misread_ops_to_store,
         )
         store = CharacterStore(project_dir)
         if ops.get("memory_ops"):
@@ -535,6 +571,11 @@ def apply_character_ops_to_state(
             apply_growth_ops_to_store(
                 store, ops["growth_ops"],
                 today_iso=today_iso, branch_msg_id=branch_msg_id,
+            )
+        if ops.get("misread_ops"):
+            apply_misread_ops_to_store(
+                store, ops["misread_ops"],
+                current_turn=current_turn, branch_msg_id=branch_msg_id,
             )
 
     # State-backed ops

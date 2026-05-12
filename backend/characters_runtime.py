@@ -148,16 +148,22 @@ def populate_render_payload(
         # Slice of schedule.json events visible to Opus this turn (planned-status
         # events in the current+near-future window). Loaded below from disk.
         "schedule": [],
+        # Last 5 misread-log entries — patterns where the voice bungled the user's
+        # intent and was explicitly corrected. Surfaced to both inner_state and
+        # voice as background context (soft hint, not hard rule).
+        "misread_log": [],
     }
     if project_dir:
         try:
-            from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH
+            from character_storage import CharacterStore, KIND_MEMORIES, KIND_USER_PROFILE, KIND_GROWTH, KIND_MISREAD_LOG
             store = CharacterStore(project_dir)
             payload["memories_core"] = store.core(KIND_MEMORIES, branch_msg_ids=branch_msg_ids, n=8)
             payload["profile_core"] = store.core(KIND_USER_PROFILE, branch_msg_ids=branch_msg_ids, n=12)
             growth_all = store.read_filtered(KIND_GROWTH, branch_msg_ids)
             payload["growth_active"] = [g for g in growth_all if not g.get("obsolete")]
             payload["growth_obsolete"] = [g for g in growth_all if g.get("obsolete")]
+            misread_all = store.read_all(KIND_MISREAD_LOG)
+            payload["misread_log"] = misread_all[-5:] if misread_all else []
         except Exception as e:
             logger.warning(f"populate_render_payload: store read failed: {e}")
 

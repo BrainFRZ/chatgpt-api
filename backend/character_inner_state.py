@@ -155,6 +155,9 @@ Two failure modes to avoid — both are the same class (defaulting to whichever 
 
 When you spot a callback or layered read, NAME it in noticing: e.g. "Shae's riffing 'sits on it until it dies' — death-joke wordplay, not the sex read" tells voice what to engage. Vague noticing ("she's in a playful mood") loses the specific construction.
 
+CHECK THE MISREAD LOG:
+If a `[MISREAD LOG]` block appears in your context, it lists recent moments the character bungled the user's intent (original message → how the model read it → what the user actually meant). When the current user message has structural similarity to a logged misread — same kind of ambiguity, same pivot pattern, same flavor of bid — NAME the ambiguity in noticing rather than committing to one read. The log is not a rule; you still judge THIS message. But if you'd be guessing between two reads, prefer the corrected-direction read. This is the only system mechanism for not repeating the same misread; use it.
+
 Always call `report_inner_state` exactly once."""
 
 
@@ -293,6 +296,17 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
                 tone = e.get("tone")
                 tone_part = f" [{tone}]" if tone and tone != "even" else ""
                 parts.append(f"  ({ts}){tone_part} {summary}")
+
+        misread_log = payload.get("misread_log") or []
+        if misread_log:
+            parts.append("[MISREAD LOG — patterns where she's bungled her intent before. Background, not a rule]:")
+            for e in misread_log:
+                if not isinstance(e, dict):
+                    continue
+                orig = (e.get("original_message") or "")[:80]
+                read = (e.get("model_read") or "")[:80]
+                corr = (e.get("user_correction") or "")[:80]
+                parts.append(f'  "{orig}" → read as {read}; corrected: {corr}')
 
     cbs = (characters_state.get("callbacks") or {}).get("open") or []
     if cbs:
