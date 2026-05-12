@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -308,6 +308,50 @@ def _summarize_state_for_inner(characters_state: dict) -> str:
                 read = (e.get("model_read") or "")[:80]
                 corr = (e.get("user_correction") or "")[:80]
                 parts.append(f'  "{orig}" → read as {read}; corrected: {corr}')
+
+        schedule = payload.get("schedule") or []
+        if schedule:
+            now_dt = datetime.now().astimezone()
+            in_progress: list[str] = []
+            upcoming: list[str] = []
+            past: list[str] = []
+            for ev in schedule:
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("kind") == "sleep":
+                    continue
+                when_local = ev.get("when_local")
+                if not isinstance(when_local, str) or not when_local:
+                    continue
+                try:
+                    ev_start = datetime.fromisoformat(when_local)
+                    if ev_start.tzinfo is None:
+                        ev_start = ev_start.astimezone()
+                    ev_end = ev_start + timedelta(minutes=int(ev.get("duration_min") or 60))
+                except (ValueError, TypeError):
+                    continue
+                title = ev.get("title") or "(untitled)"
+                kind = ev.get("kind") or ""
+                location = ev.get("location") or ""
+                loc_part = f" at {location}" if location else ""
+                kind_part = f" [{kind}]" if kind else ""
+                wd = ev_start.strftime("%a")
+                time_part = ev_start.strftime("%I:%M%p").lstrip("0").lower().replace(":00", "")
+                end_time = ev_end.strftime("%I:%M%p").lstrip("0").lower().replace(":00", "")
+                status = ev.get("status")
+                if status == "planned" and ev_start <= now_dt < ev_end:
+                    # Right now
+                    in_progress.append(f"  IN PROGRESS now (until {end_time}): {title}{loc_part}{kind_part}")
+                elif status == "planned" and ev_start > now_dt:
+                    upcoming.append(f"  {wd} {time_part}: {title}{loc_part}{kind_part}")
+                elif status in ("as_planned", "modified", "cancelled"):
+                    marker = "happened" if status == "as_planned" else status
+                    past.append(f"  {wd} {time_part}: {title}{kind_part} ({marker})")
+            if in_progress or upcoming or past:
+                parts.append("[SCHEDULE — where you are in time right now]:")
+                parts.extend(in_progress)
+                parts.extend(past)
+                parts.extend(upcoming)
 
     cbs = (characters_state.get("callbacks") or {}).get("open") or []
     if cbs:
