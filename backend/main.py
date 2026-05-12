@@ -6633,6 +6633,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 _busy_event = current_busy_event(
                     _current_schedule, _now_for_busy,
                     channel=characters_state.get("channel") if isinstance(characters_state, dict) else None,
+                    characters_state=characters_state if isinstance(characters_state, dict) else None,
                 )
                 _busy_sos_break = bool(_busy_event) and _is_sos_user_message
                 _pending_sos_break_notif = None  # populated below if SOS-break

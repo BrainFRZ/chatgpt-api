@@ -24,23 +24,94 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
-# Per-channel probability the character is too busy to reply at any given
-# moment during a work shift. Rolled FRESH per incoming message — most
-# messages mid-shift get through (slow-shift moments), some don't (rush
-# moments). Realistic baseline: a cafe owner with employees can text between
-# customers cheaply but phone/video pulls her off the floor, and inperson
-# is essentially incompatible with being mid-shift.
+# Work-shift busy modeling. Replaces the prior per-message coin flip with a
+# windowed cycle: a rolled window (random length, comes up BUSY at a per-
+# channel probability) followed by a mandatory-free window (random length,
+# always FREE — her guaranteed breather between waves). When the free window
+# expires, we reroll. State persists on characters_state["work_busy_window"]
+# so the same window's outcome is sticky across multiple messages.
 #
-# Tunable.
+# Rolled-window length (minutes): triangular(low, high, mode). Mean ≈ 23 min,
+# capturing the "she's in the weeds for a quarter hour" cadence of a cafe
+# shift while leaving room for both quick pulses and longer stretches.
+ROLLED_WINDOW_LENGTH_MIN = (10, 40, 20)
+# Mandatory-free window length (minutes). Mean ≈ 6 min. Caps achievable
+# effective-busy at rolled_mean / (rolled_mean + free_mean) ≈ 79%, even on
+# inperson — she still gets brief breaks even when running the floor hard.
+FREE_WINDOW_LENGTH_MIN = (2, 12, 4)
+
+# Per-channel probability the rolled window comes up BUSY (vs free). Effective
+# busy fraction over a full shift ≈ p_busy × rolled_mean / cycle_mean,
+# i.e. ≈ p_busy × 0.79. Targets:
+#   text     0.38 → ~30% effective
+#   phone    0.88 → ~70%
+#   video    0.99 → ~78%
+#   inperson 1.00 → ~79% (cap)
 WORK_BUSY_PROBABILITY_BY_CHANNEL = {
-    "text": 0.30,      # 5-second hits between customers; rushes lock her out
-    "phone": 0.70,     # needs uninterrupted minutes off the floor
-    "video": 0.80,     # phone cost + a quiet spot + not being on camera mid-service
-    "inperson": 0.95,  # physically can't be elsewhere — only break-time exceptions
+    "text": 0.38,
+    "phone": 0.88,
+    "video": 0.99,
+    "inperson": 1.00,
 }
-# Fallback when channel is missing or unrecognized — matches text (the
-# Characters default and the cheapest cognitive load).
-WORK_BUSY_PROBABILITY_DEFAULT = 0.30
+# Fallback when channel is missing or unrecognized.
+WORK_BUSY_PROBABILITY_DEFAULT = 0.38
+
+
+def _roll_window_length(spec: tuple, rng: Optional[random.Random] = None) -> float:
+    low, high, mode = spec
+    r = rng if rng is not None else random
+    return r.triangular(low, high, mode)
+
+
+def _update_work_busy_window(
+    characters_state: Optional[dict],
+    now_dt: datetime,
+    channel: Optional[str],
+    rng: Optional[random.Random] = None,
+) -> bool:
+    """Maintain the rolled/mandatory-free cycle and return whether she's busy
+    RIGHT NOW. Mutates characters_state["work_busy_window"] in place.
+
+    Cycle invariant: a "rolled" window (busy or free per the per-channel roll)
+    always alternates with a "mandatory_free" window (always free). When the
+    current window expires we flip to the other kind; when transitioning into
+    a rolled window we roll the busy outcome using the channel at that
+    moment. The outcome is then sticky for the duration of that window,
+    even if the user switches channels mid-window.
+    """
+    if not isinstance(characters_state, dict):
+        # No place to persist; fall back to per-message rolling.
+        prob = WORK_BUSY_PROBABILITY_BY_CHANNEL.get(channel or "", WORK_BUSY_PROBABILITY_DEFAULT)
+        r = (rng if rng is not None else random).random()
+        return r < prob
+
+    window = characters_state.get("work_busy_window")
+    if not isinstance(window, dict):
+        window = None
+
+    ends_at = _parse_iso(window.get("ends_at")) if window else None
+    if window is None or ends_at is None or ends_at <= now_dt:
+        prev_kind = window.get("kind") if window else None
+        new_kind = "mandatory_free" if prev_kind == "rolled" else "rolled"
+        if new_kind == "rolled":
+            length = _roll_window_length(ROLLED_WINDOW_LENGTH_MIN, rng)
+            prob = WORK_BUSY_PROBABILITY_BY_CHANNEL.get(channel or "", WORK_BUSY_PROBABILITY_DEFAULT)
+            r = (rng if rng is not None else random).random()
+            is_busy = r < prob
+        else:
+            length = _roll_window_length(FREE_WINDOW_LENGTH_MIN, rng)
+            is_busy = False
+        new_ends_at = now_dt + timedelta(minutes=length)
+        characters_state["work_busy_window"] = {
+            "started_at": now_dt.isoformat(timespec="seconds"),
+            "ends_at": new_ends_at.isoformat(timespec="seconds"),
+            "kind": new_kind,
+            "is_busy": is_busy,
+            "channel_at_roll": channel,
+        }
+        return is_busy
+
+    return bool(window.get("is_busy"))
 
 
 def _is_event_busy_now(
@@ -49,6 +120,7 @@ def _is_event_busy_now(
     rng: Optional[random.Random] = None,
     *,
     channel: Optional[str] = None,
+    characters_state: Optional[dict] = None,
 ) -> bool:
     """Decide whether THIS active event makes the character unable to reply
     RIGHT NOW. Layered logic:
@@ -60,9 +132,11 @@ def _is_event_busy_now(
 
     2. Sleep is unconditionally busy (she's unconscious — no roll).
 
-    3. Work shifts roll a per-channel probability (see
-       WORK_BUSY_PROBABILITY_BY_CHANNEL). Texts mostly get through during a
-       cafe shift; phone/video usually don't; inperson essentially never.
+    3. Work shifts run a windowed busy cycle (see _update_work_busy_window):
+       random-length rolled window (busy/free per channel), then a random-
+       length mandatory-free window, then reroll. The current window's state
+       is sticky across messages so the user gets a coherent "she's in the
+       weeds for the next 20 min" feel instead of a coin per message.
 
     4. Everything else (social, self_care, family, admin, anticipated)
        is NOT busy by default — only the explicit override path makes
@@ -78,9 +152,7 @@ def _is_event_busy_now(
     if kind == "sleep":
         return True
     if kind == "work":
-        prob = WORK_BUSY_PROBABILITY_BY_CHANNEL.get(channel or "", WORK_BUSY_PROBABILITY_DEFAULT)
-        r = (rng if rng is not None else random).random()
-        return r < prob
+        return _update_work_busy_window(characters_state, now_dt, channel, rng=rng)
     return False
 
 
@@ -102,6 +174,7 @@ def current_busy_event(
     *,
     rng: Optional[random.Random] = None,
     channel: Optional[str] = None,
+    characters_state: Optional[dict] = None,
 ) -> Optional[dict]:
     """Return the schedule event whose window contains `now_dt` AND whose
     busy-status logic resolves to busy. Otherwise None.
@@ -162,7 +235,7 @@ def current_busy_event(
     candidates = non_sleep if non_sleep else in_window
 
     for ev in candidates:
-        if _is_event_busy_now(ev, now_dt, rng=rng, channel=channel):
+        if _is_event_busy_now(ev, now_dt, rng=rng, channel=channel, characters_state=characters_state):
             return ev
     return None
 
