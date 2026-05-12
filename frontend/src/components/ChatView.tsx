@@ -739,6 +739,14 @@ export default function ChatView({
                     if (!hasInner && !hasReasoning) return null;
                     const parts: string[] = [];
                     if (hasInner) {
+                      if (inner.reasoning) {
+                        parts.push('**Inner state reasoning (scratchpad — voice never saw this):**');
+                        parts.push('');
+                        parts.push(inner.reasoning);
+                        parts.push('');
+                        parts.push('---');
+                        parts.push('');
+                      }
                       parts.push('**Inner state — pre-pass emotional grounding:**');
                       parts.push('');
                       if (inner.feeling) parts.push(`- **Feeling:** ${inner.feeling}`);
