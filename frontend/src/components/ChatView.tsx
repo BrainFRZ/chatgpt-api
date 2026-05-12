@@ -1565,7 +1565,7 @@ export default function ChatView({
               Notes
             </button>
             <button
-              onClick={sendMessage}
+              onClick={() => sendMessage()}
               disabled={isLoading.has(currentChat)}
               style={{
                 ...styles.sendButton,
