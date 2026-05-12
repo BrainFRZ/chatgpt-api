@@ -24,19 +24,32 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 
-# Probability the character is too busy to reply at any given moment during
-# a work shift. Rolled FRESH per incoming message — most messages mid-shift
-# get through (slow-shift moments), some don't (rush moments). Realistic:
-# a barista isn't either fully-blocked or fully-free for an entire 8-hour
-# block; busyness pulses moment-to-moment.
+# Per-channel probability the character is too busy to reply at any given
+# moment during a work shift. Rolled FRESH per incoming message — most
+# messages mid-shift get through (slow-shift moments), some don't (rush
+# moments). Realistic baseline: a cafe owner with employees can text between
+# customers cheaply but phone/video pulls her off the floor, and inperson
+# is essentially incompatible with being mid-shift.
 #
-# Tunable. 0.25 = ~1 in 4 messages mid-shift get the silent treatment until
-# she has a slow moment. Bump up to ~0.4 if production feels too responsive
-# during shifts.
-WORK_BUSY_PROBABILITY = 0.25
+# Tunable.
+WORK_BUSY_PROBABILITY_BY_CHANNEL = {
+    "text": 0.30,      # 5-second hits between customers; rushes lock her out
+    "phone": 0.70,     # needs uninterrupted minutes off the floor
+    "video": 0.80,     # phone cost + a quiet spot + not being on camera mid-service
+    "inperson": 0.95,  # physically can't be elsewhere — only break-time exceptions
+}
+# Fallback when channel is missing or unrecognized — matches text (the
+# Characters default and the cheapest cognitive load).
+WORK_BUSY_PROBABILITY_DEFAULT = 0.30
 
 
-def _is_event_busy_now(event: dict, now_dt: datetime, rng: Optional[random.Random] = None) -> bool:
+def _is_event_busy_now(
+    event: dict,
+    now_dt: datetime,
+    rng: Optional[random.Random] = None,
+    *,
+    channel: Optional[str] = None,
+) -> bool:
     """Decide whether THIS active event makes the character unable to reply
     RIGHT NOW. Layered logic:
 
@@ -47,8 +60,9 @@ def _is_event_busy_now(event: dict, now_dt: datetime, rng: Optional[random.Rando
 
     2. Sleep is unconditionally busy (she's unconscious — no roll).
 
-    3. Work shifts roll WORK_BUSY_PROBABILITY per call. Most of the shift
-       she can text between customers; sometimes she's in the weeds.
+    3. Work shifts roll a per-channel probability (see
+       WORK_BUSY_PROBABILITY_BY_CHANNEL). Texts mostly get through during a
+       cafe shift; phone/video usually don't; inperson essentially never.
 
     4. Everything else (social, self_care, family, admin, anticipated)
        is NOT busy by default — only the explicit override path makes
@@ -64,8 +78,9 @@ def _is_event_busy_now(event: dict, now_dt: datetime, rng: Optional[random.Rando
     if kind == "sleep":
         return True
     if kind == "work":
+        prob = WORK_BUSY_PROBABILITY_BY_CHANNEL.get(channel or "", WORK_BUSY_PROBABILITY_DEFAULT)
         r = (rng if rng is not None else random).random()
-        return r < WORK_BUSY_PROBABILITY
+        return r < prob
     return False
 
 
@@ -86,6 +101,7 @@ def current_busy_event(
     now_dt: datetime,
     *,
     rng: Optional[random.Random] = None,
+    channel: Optional[str] = None,
 ) -> Optional[dict]:
     """Return the schedule event whose window contains `now_dt` AND whose
     busy-status logic resolves to busy. Otherwise None.
@@ -99,10 +115,13 @@ def current_busy_event(
     was clearly up doing something.
 
     Busy logic: see _is_event_busy_now. Sleep is always busy in window;
-    work rolls a per-message probability (most messages get through);
-    other kinds need explicit busy: True; explicit busy: False overrides.
+    work rolls a per-channel probability (text mostly gets through; phone/
+    video usually don't; inperson essentially never); other kinds need
+    explicit busy: True; explicit busy: False overrides.
 
     rng: pass an injected random.Random for deterministic tests.
+    channel: current Characters channel (text/phone/inperson/video) — drives
+    the work-shift roll. Defaults to the text-equivalent rate when missing.
     """
     if not isinstance(schedule, dict):
         return None
@@ -143,7 +162,7 @@ def current_busy_event(
     candidates = non_sleep if non_sleep else in_window
 
     for ev in candidates:
-        if _is_event_busy_now(ev, now_dt, rng=rng):
+        if _is_event_busy_now(ev, now_dt, rng=rng, channel=channel):
             return ev
     return None
 
