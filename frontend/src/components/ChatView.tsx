@@ -236,6 +236,10 @@ export default function ChatView({
 }: ChatViewProps) {
   const tooltipHideTimeout = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Mobile-only photo-gallery picker. Separate from chatFileInputRef so
+  // its accept="image/*" surfaces the OS gallery picker on mobile rather
+  // than the generic mixed-files picker.
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   // Flakiness-bands review modal — opened from a "Review follow-through" button
   // on the interview-finalize assistant message. Bands are auto-committed
@@ -1463,11 +1467,25 @@ export default function ChatView({
             {showAttachMenu && (
               <div style={styles.attachMenu}>
                 <button
-                  onClick={() => chatFileInputRef.current?.click()}
+                  onClick={() => {
+                    chatFileInputRef.current?.click();
+                    setShowAttachMenu(false);
+                  }}
                   style={styles.attachMenuItem}
                 >
                   📄 Add a file
                 </button>
+                {isMobile && (
+                  <button
+                    onClick={() => {
+                      galleryInputRef.current?.click();
+                      setShowAttachMenu(false);
+                    }}
+                    style={styles.attachMenuItem}
+                  >
+                    🖼️ Gallery
+                  </button>
+                )}
               </div>
             )}
             <input
@@ -1476,6 +1494,17 @@ export default function ChatView({
               onChange={handleChatFileSelect}
               multiple
               accept=".txt,.md,.yaml,.yml,image/png,image/jpeg,image/gif,image/webp"
+              style={{ display: 'none' }}
+            />
+            {/* Mobile-only photo gallery picker. accept="image/*" plus no
+                capture attr → mobile OS shows native photo picker with
+                gallery access. iOS Safari, Android Chrome both handle this. */}
+            <input
+              type="file"
+              ref={galleryInputRef}
+              onChange={handleChatFileSelect}
+              multiple
+              accept="image/*"
               style={{ display: 'none' }}
             />
           </div>
