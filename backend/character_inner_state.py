@@ -95,15 +95,15 @@ Inputs you see:
 - A short dialogue window of the most recent exchanges
 - The user's message right now
 
-Output via the `report_inner_state` tool. The tool has FIVE fields: a `reasoning` scratchpad (write first, discarded after) and four output fields (`feeling`, `wanting`, `noticing`, `holding_back`). All four output fields are OPTIONAL; most turns have 2-3 populated, not 4.
+Output via the `report_inner_state` tool. The tool has FIVE fields: a `reasoning` scratchpad (write first, voice never sees) and four output fields (`feeling`, `wanting`, `noticing`, `holding_back`). All four output fields are OPTIONAL; most turns have 2-3 populated, not 4.
 
 ORDER MATTERS — fill the scratchpad first:
-The `reasoning` field is listed first in the tool's input schema. Fill it FIRST. Write out your reading step-by-step: what the user just said, what callback or wordplay might be in play (if any), what the layered read is vs the surface read, which one to commit to. The voice model NEVER sees this scratchpad — it's discarded after extraction. It exists so YOU have room to think before committing.
+The `reasoning` field is listed first in the tool's input schema. Fill it FIRST. Write out your reading step-by-step: what the user just said, what callback or wordplay might be in play (if any), what the layered read is vs the surface read, which one to commit to. The voice model NEVER sees this scratchpad — it's logged for the user's later inspection but never enters voice's context. It exists so YOU have room to think before committing to the four fields.
 
 The four output fields below should then be CONSISTENT with what you reasoned to. If you skip the scratchpad and jump straight to the four fields, you'll compress the read — defaulting to whichever interpretation is loudest/laziest, not the one your full chain actually points to. The scratchpad is what unlocks layered reads, callback traces, and multi-step inference.
 
 Length caps:
-- reasoning: ≤600 chars (scratchpad — discarded; use the room to think)
+- reasoning: ≤600 chars (scratchpad — voice never sees it; use the room to think)
 - feeling: ≤140 chars
 - wanting: ≤140 chars
 - holding_back: ≤140 chars
@@ -176,14 +176,15 @@ def build_inner_state_tool() -> dict:
                     "description": (
                         "≤600 chars. SCRATCHPAD — write this FIRST, before the four fields "
                         "below. This is YOUR space to think step-by-step. The voice model "
-                        "NEVER sees this field; it's discarded after extraction. Use it to: "
-                        "trace callbacks and wordplay (what was originally said → what the "
-                        "user just said → what the callback means → confirm the read), "
-                        "weigh competing interpretations, commit to the right one. The four "
-                        "fields below must be CONSISTENT with what you reasoned to here. "
-                        "If you skip this scratchpad and jump to the four fields, you'll "
-                        "compress the read and default to the loudest interpretation. "
-                        "Filling this first is what unlocks layered reads."
+                        "NEVER sees this field; it's logged for later inspection but never "
+                        "enters voice's context. Use it to: trace callbacks and wordplay "
+                        "(what was originally said → what the user just said → what the "
+                        "callback means → confirm the read), weigh competing "
+                        "interpretations, commit to the right one. The four fields below "
+                        "must be CONSISTENT with what you reasoned to here. If you skip "
+                        "this scratchpad and jump to the four fields, you'll compress the "
+                        "read and default to the loudest interpretation. Filling this "
+                        "first is what unlocks layered reads."
                     ),
                 },
                 "feeling": {
@@ -511,9 +512,13 @@ def run_inner_state(
                     scratchpad_status = "reordered"
                 # Filter to known fields and non-empty strings only — the schema
                 # has all fields optional, so the model may omit some. The
-                # `reasoning` field is intentionally NOT included; it's a
-                # discarded scratchpad that the voice model never sees.
-                for k in ("feeling", "wanting", "noticing", "holding_back"):
+                # `reasoning` field IS captured here (so it lands on
+                # inner_state_payload for the user's later inspection) but is
+                # NOT included in the voice-facing [INNER STATE] block — see
+                # build_inner_state_injection, which only renders the four
+                # labels. Reasoning is private scratchpad as far as voice is
+                # concerned; persistence is purely for debug visibility.
+                for k in ("reasoning", "feeling", "wanting", "noticing", "holding_back"):
                     v = inp.get(k)
                     if isinstance(v, str) and v.strip():
                         inner_state[k] = v.strip()
