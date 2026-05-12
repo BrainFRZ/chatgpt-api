@@ -240,6 +240,9 @@ export default function ChatView({
   // its accept="image/*" surfaces the OS gallery picker on mobile rather
   // than the generic mixed-files picker.
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  // Mobile-only camera capture — capture="environment" forces the rear
+  // camera open directly rather than the gallery/files picker.
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   // Flakiness-bands review modal — opened from a "Review follow-through" button
   // on the interview-finalize assistant message. Bands are auto-committed
@@ -1476,15 +1479,26 @@ export default function ChatView({
                   📄 Add a file
                 </button>
                 {isMobile && (
-                  <button
-                    onClick={() => {
-                      galleryInputRef.current?.click();
-                      setShowAttachMenu(false);
-                    }}
-                    style={styles.attachMenuItem}
-                  >
-                    🖼️ Gallery
-                  </button>
+                  <>
+                    <button
+                      onClick={() => {
+                        galleryInputRef.current?.click();
+                        setShowAttachMenu(false);
+                      }}
+                      style={styles.attachMenuItem}
+                    >
+                      🖼️ Gallery
+                    </button>
+                    <button
+                      onClick={() => {
+                        cameraInputRef.current?.click();
+                        setShowAttachMenu(false);
+                      }}
+                      style={styles.attachMenuItem}
+                    >
+                      📷 Camera
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -1505,6 +1519,16 @@ export default function ChatView({
               onChange={handleChatFileSelect}
               multiple
               accept="image/*"
+              style={{ display: 'none' }}
+            />
+            {/* Mobile-only camera capture. capture="environment" → rear camera
+                opens directly. accept="image/*" filters out video on iOS. */}
+            <input
+              type="file"
+              ref={cameraInputRef}
+              onChange={handleChatFileSelect}
+              accept="image/*"
+              capture="environment"
               style={{ display: 'none' }}
             />
           </div>
