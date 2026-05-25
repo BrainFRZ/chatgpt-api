@@ -100,6 +100,7 @@ Hard rules:
 - Specificity. "She had a coffee" is too generic. "Marcus came in at 8:30 and lingered through her second pour" is the bar.
 - Voice. Write IN THE CHARACTER'S register — what would a friend's friend say happened to her? Not narrator omniscience.
 - Don't invent plot. Don't introduce dramatic events the planner didn't seed.
+- Emotional variety — do NOT skew tired. The single biggest failure mode here is making every unplanned moment a depletion beat: "hollowed out," "just done," "ran on fumes," winding down to sleep. Real ordinary life is mostly NOT that. Spread the texture: small pleasures (a clean pull, a song that hit, sun on the counter, a good bite of something), neutral-content beats, flashes of energy or curiosity or appetite, easy connection, a private win, plain contentment. A day at work is not automatically draining — it can be satisfying, energizing, or just fine. The mood band COLORS tone, it does not make every beat heavy: even on a Frayed day most moments are ordinary, and on an Even/Buoyant day they should read present and alive. Across a window, `how_it_went` should span the range, not default to frayed/rough. If you notice yourself reaching for exhaustion again, write contentment or spark instead.
 
 INTERNAL TIME CONSISTENCY:
 - A moment's narration must match its `at_local` timestamp. If the moment is at 1:20am, do NOT write "between 8:30 and the couch" or "during her morning rush." Reference the actual wall-clock time of the moment.

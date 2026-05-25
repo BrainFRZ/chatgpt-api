@@ -825,6 +825,29 @@ def build_wall_clock_injection(state: dict) -> str:
         parts.append(f"Time since the user last messaged: {silence}.")
     else:
         parts.append("This is the first message of the correspondence.")
+
+    # Time-of-day phase. Colors mood/pacing — but the key correction is the
+    # evening framing: catching her after the workday should read as her OWN
+    # decompressed time (off the clock, in her own space), NOT "still drained
+    # from work." Without this the voice defaults to post-shift fatigue every
+    # evening, so she reads tired daily even when the wellbeing band is fine.
+    # Hedged so it defers to characters who actually work evenings/nights.
+    hour = now.hour
+    if 5 <= hour < 9:
+        phase = ("Early morning — soft and slow, just coming online. "
+                 "Unhurried, not yet braced for the day.")
+    elif 9 <= hour < 17:
+        phase = "Daytime — in the thick of her day, whatever it holds."
+    elif 17 <= hour < 22:
+        phase = ("Evening — typically her own time now: off-duty, in her own "
+                 "space, the day's obligations easing off. Read this as "
+                 "settled and decompressed, NOT drained-from-work tired — "
+                 "her hours to herself, when she's most herself. (Defer to "
+                 "her schedule/life-stream if she actually works evenings.)")
+    else:
+        phase = ("Late — quieter, more honest, a little unguarded; the day "
+                 "behind her.")
+    parts.append(phase)
     return "\n".join(parts)
 
 
@@ -899,13 +922,14 @@ def build_channel_injection(state: dict) -> str:
 def build_wellbeing_injection(state: dict) -> str:
     wb = state.get("wellbeing") or {}
     band = wb.get("state") or WELLBEING_DEFAULT
-    if band == "Even":
-        return "[WELLBEING] Even — your default register today. No special tells; baseline you. (Do not mention wellbeing explicitly.)"
-    # Each non-Even band lists short, observable surface tells. Character-
-    # specific voice still comes from character_profile.di's "Across moods"
-    # section — these are generic anchors so the band is VISIBLE in the
-    # reply rather than just internally true. Reader should be able to feel
-    # the band from how the reply lands, not just what it says.
+    # Every band — including Even — lists short, observable surface tells.
+    # (Even used to early-return a thin "no special tells; baseline you"
+    # string, which let the voice model read the common/neutral day as flat
+    # and therefore tired. Even now gets a positive, present anchor like the
+    # rest.) Character-specific voice still comes from character_profile.di's
+    # "Across moods" section — these are generic anchors so the band is
+    # VISIBLE in the reply rather than just internally true. Reader should be
+    # able to feel the band from how the reply lands, not just what it says.
     cues = {
         "Rough": (
             "off, overwhelmed, brittle. Visible tells: replies clipped or "
@@ -921,6 +945,14 @@ def build_wellbeing_injection(state: dict) -> str:
             "today\"); letting a beat sit instead of filling it. If your "
             "inner state says you want to vent — actually vent some, "
             "don't perform fine."
+        ),
+        "Even": (
+            "steady, present, baseline-engaged — this is her NORMAL, not a "
+            "down day. Warmth-via-teasing is online; she riffs, lands beats, "
+            "uses emoji and asides naturally; she's here for the exchange. "
+            "Even is the absence of strain, NOT the absence of spark — do "
+            "not read it as flat, muted, or low-energy. If nothing's "
+            "weighing on her, she reads present and alive, not tired."
         ),
         "Buoyant": (
             "warm, expansive, generative. Visible tells: a third sentence "
