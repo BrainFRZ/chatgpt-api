@@ -219,17 +219,33 @@ class AnthropicProvider(ModelProvider):
             is_cache_breakpoint = (cache_breakpoint_index is not None and i == cache_breakpoint_index)
 
             if is_cache_breakpoint:
-                # Add cache control to this assistant message
-                anthropic_msg = {
-                    "role": msg["role"],
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                # Add cache control to this assistant message.
+                if isinstance(content, list):
+                    # Follow-up turns: the last assistant message is already a
+                    # list of content blocks (text + tool_use). Re-wrapping it as
+                    # {"type":"text","text": <list>} sets `text` to a list and the
+                    # API rejects it (content.0.text.text: Input should be a valid
+                    # string), silently 400-ing every tool-using turn. Instead,
+                    # attach the breakpoint to the last block in place — cache_control
+                    # is valid on any block type (text, tool_use, etc.).
+                    new_blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+                    if new_blocks and isinstance(new_blocks[-1], dict):
+                        new_blocks[-1] = {
+                            **new_blocks[-1],
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
                         }
-                    ]
-                }
+                    anthropic_msg = {"role": msg["role"], "content": new_blocks}
+                else:
+                    anthropic_msg = {
+                        "role": msg["role"],
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                            }
+                        ]
+                    }
             else:
                 # Regular message without cache control
                 anthropic_msg = {
