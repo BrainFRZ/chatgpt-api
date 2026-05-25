@@ -5601,15 +5601,11 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         use_sex_mode = True
 
     # Auto-switch model for sex mode.
-    # - TTRPG game systems: stay on Opus 3 (more permissive on explicit
-    #   content, established behavior).
-    # - Characters game system: switch to Opus 4.5 — better instruction-
-    #   following for the third-person literary prose format the
-    #   Characters sex contract demands. Opus 3 reliably ignored the
-    #   "no stage directions" rule in live testing.
-    _sex_target_model = (
-        "claude-opus-4.5" if (gs and gs.get("id") == "characters") else "claude-3-opus"
-    )
+    # All game systems (TTRPG and Characters) use Opus 4.5 — better
+    # instruction-following than Opus 3, including for the third-person
+    # literary prose format the Characters sex contract demands. Opus 3
+    # reliably ignored the "no stage directions" rule in live testing.
+    _sex_target_model = "claude-opus-4.5"
     if use_sex_mode and model_id != _sex_target_model:
         _original_model = model_id
         model_id = _sex_target_model
@@ -6262,7 +6258,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             inferred_original_model = _original_model
             if not inferred_original_model:
                 current_chat_model = data.get("model")
-                if current_chat_model and current_chat_model != "claude-3-opus":
+                if current_chat_model and current_chat_model != "claude-opus-4.5":
                     inferred_original_model = current_chat_model
             if inferred_original_model:
                 sex_scene["original_model"] = inferred_original_model
@@ -11137,6 +11133,67 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                 data["meme_cost"] = _meme_cost_total
                                 data["meme_vision_usage"] = _meme_vision_usage_total
                                 data["meme_vision_model"] = "claude-sonnet-4-6"
+
+                            # ── Forced text completion: tool-only turn, empty body ──
+                            # If the character spent the whole turn on tool calls
+                            # (e.g. fetch_url + make_meme) and emitted ZERO text, the
+                            # reply body comes back empty — the user sees a blank
+                            # bubble, and any meme meant to ride along as embedded
+                            # ![](url) markdown is orphaned. Re-issue the existing
+                            # tool-result context ONCE with tools disabled so the
+                            # model must answer in prose (and embed the meme it was
+                            # told to). _followup_messages_base always ends cleanly at
+                            # the last user(tool_results) turn, so this works whether
+                            # the loop exited on "no more tools" or the hop cap.
+                            #
+                            # This is deliberately NOT the whole-turn retry removed in
+                            # b7b383a: it's a bounded continuation off context we
+                            # already have, capped at one shot, and wrapped so any
+                            # failure leaves the (empty) turn exactly as it is today
+                            # rather than killing the save pipeline.
+                            if _hop > 0 and not accumulated_content.strip():
+                                try:
+                                    logger.info(
+                                        f"Characters: tool-only turn produced empty body "
+                                        f"for {username}; forcing text completion"
+                                    )
+                                    _forced_params = provider.build_request(
+                                        messages=_followup_messages_base,
+                                        username=username,
+                                        project=request.project,
+                                        chat_name=request.chat_name,
+                                        is_free_chat=is_free_chat,
+                                        use_cache=True,
+                                    )
+                                    # No tools this hop — the model MUST produce text.
+                                    _forced_params.pop("tools", None)
+                                    _forced_params.pop("tool_choice", None)
+                                    _forced_params.pop("thinking", None)
+                                    _forced_params.pop("output_config", None)
+                                    _forced_stream = provider.send_request_stream(client, _forced_params)
+                                    for _ev in _forced_stream:
+                                        if _ev.event_type == 'content_delta' and not client_disconnected:
+                                            if _inline_thinking_filter is not None:
+                                                _fct, _ftt = _inline_thinking_filter.feed(_ev.content)
+                                                if _fct:
+                                                    accumulated_content += _fct
+                                                    yield f"event: content\ndata: {json.dumps({'delta': _fct})}\n\n"
+                                                if _ftt:
+                                                    accumulated_thinking += _ftt
+                                                    yield f"event: thinking\ndata: {json.dumps({'delta': _ftt})}\n\n"
+                                            else:
+                                                accumulated_content += _ev.content
+                                                yield f"event: content\ndata: {json.dumps({'delta': _ev.content})}\n\n"
+                                        elif _ev.event_type == 'done':
+                                            _fc_usage = _ev.usage
+                                            usage['input_tokens'] = usage.get('input_tokens', 0) + _fc_usage.get('input_tokens', 0)
+                                            usage['cache_read_tokens'] = usage.get('cache_read_tokens', 0) + _fc_usage.get('cache_read_tokens', 0)
+                                            usage['cache_creation_tokens'] = usage.get('cache_creation_tokens', 0) + _fc_usage.get('cache_creation_tokens', 0)
+                                            usage['output_tokens'] = usage.get('output_tokens', 0) + _fc_usage.get('output_tokens', 0)
+                                except Exception as _forced_err:
+                                    logger.error(
+                                        f"Characters: forced text completion failed for {username}: {_forced_err}"
+                                    )
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []

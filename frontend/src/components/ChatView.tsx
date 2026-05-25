@@ -900,6 +900,58 @@ export default function ChatView({
                   <div style={styles.messageContent} className="messageContent">
                     <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{convertMathDelimiters(msg.content)}</ReactMarkdown>
                   </div>
+                  {/* Orphaned memes: normally the model embeds ![](url) into its
+                      reply, but a tool-only turn (or a model that forgot) leaves
+                      the generated/found meme stranded in meme_log with an empty
+                      body. Render any meme URL not already in the content so it
+                      isn't silently lost — the user at least sees the image. */}
+                  {msg.role === 'assistant' && Array.isArray((msg as any).meme_log) && (() => {
+                    const body = msg.content || '';
+                    const orphans = ((msg as any).meme_log as any[])
+                      .filter(e => e && e.ok && e.url && !body.includes(e.url));
+                    if (orphans.length === 0) return null;
+                    return (
+                      <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap' as const, gap: 8 }}>
+                        {orphans.map((e: any, k: number) => (
+                          <img
+                            key={k}
+                            src={e.url}
+                            alt={e.template || e.title || 'meme'}
+                            style={{ maxWidth: '280px', width: '100%', borderRadius: 8, border: '1px solid #2a2a4e' }}
+                          />
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  {/* Fetched-link chips: persist what the character actually read
+                      (fetch_url_log) on the message, so even an empty-body turn
+                      shows "🔗 <title>" rather than nothing. */}
+                  {msg.role === 'assistant' && Array.isArray((msg as any).fetch_url_log) && (() => {
+                    const reads = ((msg as any).fetch_url_log as any[]).filter(e => e && e.ok && e.url);
+                    if (reads.length === 0) return null;
+                    return (
+                      <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap' as const, gap: 6 }}>
+                        {reads.map((e: any, k: number) => (
+                          <a
+                            key={k}
+                            href={e.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 6,
+                              padding: '4px 10px', borderRadius: 6,
+                              backgroundColor: '#1e1e3a', border: '1px solid #2a2a4e',
+                              fontSize: '0.72rem', color: '#9aa6cc', textDecoration: 'none',
+                              maxWidth: '320px', overflow: 'hidden', whiteSpace: 'nowrap' as const, textOverflow: 'ellipsis',
+                            }}
+                            title={e.url}
+                          >
+                            🔗 {e.title || e.url}
+                          </a>
+                        ))}
+                      </div>
+                    );
+                  })()}
                   {/* Interview-finalize review-bands button. Surfaces when the
                       finalize message includes flakiness_bands_proposal — the
                       bands have been auto-committed already; this is the

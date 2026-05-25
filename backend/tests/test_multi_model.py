@@ -890,12 +890,12 @@ class TestProviderRegistry:
         assert gpt is not None
         assert claude is not None
 
-    def test_get_default_returns_opus3(self):
-        """Default provider should be Claude 3 Opus."""
+    def test_get_default_returns_opus_4_5(self):
+        """Default provider should be Claude Opus 4.5."""
         from providers import ProviderRegistry
 
         default = ProviderRegistry.get_default()
-        assert default.model_id == "claude-3-opus"
+        assert default.model_id == "claude-opus-4.5"
 
     def test_list_models_returns_metadata(self):
         """list_models should return metadata for all providers."""

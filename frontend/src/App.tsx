@@ -187,7 +187,7 @@ function App() {
   const [error, setError] = useState('');
   const [docsRefreshed, setDocsRefreshed] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('claude-3-opus');
+  const [selectedModel, setSelectedModel] = useState<string>('claude-opus-4.5');
   const [anthropicSync, setAnthropicSync] = useState<boolean>(true);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [pendingModelSwitch, setPendingModelSwitch] = useState<string | null>(null);
@@ -910,7 +910,7 @@ function App() {
     }
 
     // Fetch project metadata to get the project's default model
-    let fetchedModel = 'claude-3-opus';
+    let fetchedModel = 'claude-opus-4.5';
     try {
       const metadataResponse = await fetch(`/api/project-metadata/${user.username}/${projectName}`);
       if (currentProjectRef.current !== projectName) return;
@@ -918,7 +918,7 @@ function App() {
       if (metadataResponse.ok) {
         const metadataData = await metadataResponse.json();
         if (currentProjectRef.current !== projectName) return;
-        fetchedModel = metadataData.model || 'claude-3-opus';
+        fetchedModel = metadataData.model || 'claude-opus-4.5';
         setProjectModel(fetchedModel);
         setProjectGameSystem(metadataData.game_system || 'dnd5e');
       }
@@ -1787,7 +1787,7 @@ function App() {
 
       // Set model selection from chat data
       // Priority: chat's model > project's model > default
-      setSelectedModel(data.model || projectModel || 'claude-3-opus');
+      setSelectedModel(data.model || projectModel || 'claude-opus-4.5');
       setAnthropicSync(data.anthropic_sync !== false);
 
       // Load pipeline state, game system, hack state, and artifacts for right panel

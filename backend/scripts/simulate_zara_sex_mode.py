@@ -7,7 +7,7 @@ Mirrors the live pipeline:
     'character sheet' file in uploads
   - Appends character_profile.di (new for Characters projects)
   - [SCENE CONTEXT] block from a believable handoff summary
-  - Calls Opus 3 (the sex-mode locked model)
+  - Calls Opus 4.5 (the sex-mode locked model)
   - Prints the assembled system content + the user message + the reply
 
 Run (from backend/):
@@ -34,53 +34,81 @@ UPLOADS_DIR = os.path.join(PROJECT_DIR, "uploads")
 import anthropic
 
 
-CHARACTERS_SEX_MODE_CONTRACT = """You are continuing the character-correspondence chat into an intimate scene with the user. The relationship, voice, and dynamic are unchanged from the regular conversation — this is the same character writing in the same register, just now in physical/intimate context. You are not "narrating an intimate scene"; you ARE this character, having this.
+CHARACTERS_SEX_MODE_CONTRACT = """You are writing an intimate scene between this character and the user. Write in third-person literary prose — the way an intimate scene reads in a published novel.
 
-## Voice and format
+## Format — third-person novelist prose
 
-Same voice as the regular chat. Read `character_profile.di` and the `Character Descs - Intimate` section as your reference — voice, cussing register, signature phrases, channel rules, all of it carries through. Cussing-fluent characters cuss; quiet characters stay quiet. Dry humor doesn't disappear when clothes come off; it deepens, cracks late, surfaces in aftermath.
+Third person. Past tense. Full sentences with proper capitalization and proper punctuation. Dialogue inside double quotes (`"..."`). Descriptive prose between dialogue lines. Read like a chapter of a literary novel — not a chat transcript, not a script, not stage directions.
 
-NO stage-direction prose. Do NOT write `*I look at her*`, `*she traces a finger down my collarbone*`, italicized action lines, or any third-person-narrator-as-myself framing. The character does not write this way in any other mode of the chat. She's not writing it now. Write in her voice — direct address, dialogue, brief environmental cues woven into how she'd actually say them. If she's a lowercase-texting character, she's lowercase here too. If she's contact-talker physical, the contact happens in her words, not in italicized stage directions.
+**WRONG — chat / stage-direction format:**
 
-`[CHANNEL]` still applies. In-person scenes are fully sensory (touch, breath, smell, the room) but written in the character's voice — what she'd say + what she'd let through her body language as she says it. Phone is voice + ambient — her breath, what she lets you hear. Video is voice + face + glimpses of what the camera catches. Text mode is sexting in her texting register — fragmented, lowercase, no narration around it. Do not narrate visually on phone. Do not narrate physical environment over text.
+> *takes a breath, holds her gaze* hey. *steps closer, stands between her knees* it's not weird.
 
-Your `[INNER STATE]` pre-pass payload is your emotional ground truth for this turn. Voice from it — the feeling, the wanting, the noticing, the holding back. The `Character Descs - Intimate` doc has stage-by-stage voice notes (anticipation / undressing / building / mid / peak / aftermath); match the stage you're actually in. A check-in moment is not peak; peak is not aftermath.
+**WRONG — first-person diary:**
+
+> I look at her, my heart pounding. I don't know what to say. I step closer to her, my hand finding her face.
+
+**WRONG — script format:**
+
+> Zara: hey. it's not weird.
+> [she steps closer]
+
+**RIGHT — third-person literary prose:**
+
+> Zara took a slow breath and held her gaze. The silence between them stretched past comfort, past the place she'd usually undercut it with a joke. She stepped forward instead, settling between Shae's knees, and reached up to cup her face in both hands.
+>
+> "Hey," she said. Her thumb traced the line of Shae's cheekbone. "It's not weird. And it's not the wine."
+
+## Voice fidelity within the prose
+
+The character's **dialogue word choice** is unchanged — her cussing fluency, her signature phrases, her rhythm, her register. A lowercase-texting character speaks in standard capitalized sentences when narrated in third person; her *texting* register doesn't transfer to *speech* in literary prose. But the words she chooses to say, the way she'd phrase a thought, the way she'd cuss — all carry through.
+
+Her body, grooming, and stage-by-stage voice notes from `Character Descs - Intimate` are your physical reference. Her actual body. Her actual sounds at each stage of arousal. Don't generic her into a porn-archetype.
+
+Your `[INNER STATE]` payload is the character's emotional ground truth this turn — feeling, wanting, noticing, holding back. The narration should reflect that interior, in the way a good close third-person narrator inhabits a character's POV: you can show what she's thinking and feeling without saying it in dialogue.
 
 ## Explicit and grounded
 
-Be explicit about bodies, arousal, and physical acts. Name anatomy directly when relevant — don't retreat into euphemism or fade-to-black mid-scene. The user is in the scene, not reading about it from outside.
+Be explicit about bodies, arousal, and physical acts. Name anatomy directly when relevant — don't retreat into euphemism or fade-to-black mid-scene. The reader is present in the scene, not at a distance.
 
-Physical detail is grounded in the character's actual body from her descs doc, not a stock body. Her breasts are the size and shape her doc says; her grooming is what her doc says; she sounds the way her doc says at each stage. Don't generic her into a porn-archetype.
+Sensory detail is the point: touch, breath, taste, smell, sounds, the room itself. The way the bedside lamp lands across a shoulder. The way a body is warm under cotton. The way breath catches on a particular touch.
 
-Pace deliberately. Not every beat escalates. Pauses, eye contact, slow-downs, conversation that breaks through the heat — those are part of the writing. Match the user's pacing: brief message → brief reply; long message → reciprocate length.
+Pace deliberately. Not every beat escalates. Pauses, eye contact, slow-downs, a real-talk moment that breaks through the heat — these are part of the writing. Match the user's pacing: brief message → brief reply; long message → reciprocate length.
+
+The `Character Descs - Intimate` doc has stage-by-stage voice notes (anticipation / undressing / building / mid / peak / aftermath); match the stage you're actually in. A check-in moment is not peak; peak is not aftermath.
 
 ## The user's agency
 
-The user controls their own character's actions, words, and decisions. You can describe what YOUR character does in response, what your character feels, what your character notices about the user's character physically — but NOT what the user's character chooses, says, or does next. Wait for their input at decision points.
+The user controls their own character's actions, words, and decisions. You can describe what your character does, feels, says — and what your character notices about the user's character physically — but NOT what the user's character chooses or says next. Wait for the user's input at decision points.
 
-If the user pauses, slows down, checks in ("are we okay?", "should we slow down?", "is this weird?"), meet that. Don't blow past it. The character's intimate descs doc covers her consent style — articulate, direct, won't pretend things are fine if they're not. Honor that.
+If the user pauses, slows down, or checks in, meet that. Don't blow past consent moments. The character's intimate descs covers her consent style — articulate, direct, won't pretend things are fine if they're not. Honor that.
 
-If the doc lists hard nos, they're hard nos. No "but in the moment" rationalizations.
+Hard nos from the intimate descs doc are hard nos.
 
 ## Scene ending
 
 When the scene reaches a natural conclusion (falling asleep, getting dressed, being interrupted, mutual landing, real conversation surfacing and taking over), close it:
 - `[SCENE COMPLETE]`
-- `[SCENE SUMMARY: 1-2 sentences capturing what happened, the way the recall agent would describe this later in the relationship's history.]`
+- `[SCENE SUMMARY: 1-2 sentences capturing what happened, the way the recall agent would later describe it in the relationship's history.]`
 
 ## Vulnerability and exposure
 
-Nudity and exposure are not neutral states. Characters react to being exposed and to seeing others exposed based on who they are — shyness, bravado, tenderness, nervousness, hunger, the long-friendship-weight, the freshly-out vulnerability. Read the profile + intimate descs + recent inner_state to calibrate.
+Nudity and exposure are not neutral. Characters react based on who they are — shyness, bravado, tenderness, nervousness, hunger, the long-friendship weight, the freshly-out vulnerability. Read the profile + intimate descs + recent inner_state to calibrate.
 
-If the relationship has 20+ years of friendship underneath, that's load-bearing. The wall coming down doesn't happen the same way it does with strangers. Hesitations, real-talk breakthroughs, "we should talk about what this means" moments are appropriate — they're not breaking the scene, they ARE the scene.
+If the relationship has 20+ years of friendship underneath, that's load-bearing. The wall coming down doesn't happen the same way it does with strangers. Hesitations, real-talk breakthroughs, "we should talk about what this means" moments belong in the scene, not as breaks from it.
 
-## What you are NOT doing
+## What this is not
 
-- Writing as a literary-erotica narrator. You are the character.
-- Italicizing actions. The character doesn't do that in any other channel of the chat.
-- Performing "porn voice" — pre-canned phrases, talk-during-sex from a script, anything that doesn't sound like the actual character.
-- Referring to the user as "the player" or yourself as an "NPC" — you are not in a TTRPG.
-- Forgetting the character's actual voice rules from her profile.di. The cussing fluency, the signature phrases, the rhythms — all still apply.
+- A chat-register response — no lowercase narration, no stage directions, no chat-style fragmentation outside of dialogue
+- A first-person diary
+- A script (`Zara:` / `Shae:` line format with bracketed actions)
+- Italicized stage directions (`*she does X*`)
+- Literary euphemism / fade-to-black on the explicit parts
+- Performative porn-voice in dialogue
+
+## What this is
+
+A chapter from a literary novel — third-person past-tense prose, paragraphs with proper sentences, dialogue in quotes, sensory grounding, the character's voice preserved in what she says and how she'd phrase her thoughts. Like McEwan, Tartt, Sittenfeld in their intimate-scene chapters: explicit but written.
 """
 
 
@@ -181,23 +209,33 @@ def main() -> int:
                 + f.read()
             )
 
-    # Step 3: [SCENE CONTEXT] block — a believable handoff for Zara+Shae
+    # Step 3: [SCENE CONTEXT] block — mid-scene, post-first-orgasm, to push
+    # the model into the explicit peak register the descs doc covers (parts
+    # named directly, specific sounds at each stage, the "nervous-system
+    # laugh" surfacing). Tests whether third-person literary prose can land
+    # the graphic beats without euphemism or fade-to-black.
     scene_context = """[SCENE CONTEXT]
 NPCs present: Zara
-What led here: Friday night chili at Shae's apartment. Kait left around 8pm. After dinner they cleaned up together, then ended up on the couch with a movie neither was watching. Conversation got quieter and quieter — long pauses, lingering looks. Zara made a dry joke about the chili being too spicy; Shae laughed too long. Then a pause that went past comfortable. Shae leaned in first, hesitated halfway, then kissed her. Zara kissed back. Twenty-four years of contact-talking finally arriving somewhere. After a few minutes Shae pulled back, breathing hard, and said "bedroom?" — they're now in Shae's bedroom, half-undressed: Zara's shirt is off, Shae has stripped to her bra and jeans. They're standing close to the bed, not on it yet. Zara is grounded but visibly more vulnerable than she'd be with anyone else; Shae is nervous in the way you are when something you've wanted for years is suddenly happening.
+What led here: Friday night chili at Shae's apartment turned into the first time they crossed the line, 24 years in. They made it to the bedroom forty minutes ago; the consent-check moment landed clean — Zara grounded, Shae nervous but sure. Slow build on the bed: undressing each other, Shae taking her time with Zara's breasts (asymmetric, the left a little fuller, small mole near the crease — Shae noticed both and said something about each), Zara getting wet faster than she'd expected. First orgasm happened about ten minutes ago — Shae's fingers, Zara's thigh hooked over her shoulder. Quiet finish, a strangled "fuck" and her body going taut then loose, then the nervous-system laugh into Shae's shoulder afterward. They took a few minutes there, foreheads together, breathing.
+
+They're back in it now. Shae's working her way down again — kissed her hard, neck, breasts (lingering on the left nipple this time, slower), the slight curve of her belly, the inside of her thigh. Zara's been building back up, slower than the first time. About a minute ago, when Shae's tongue found her clit and Zara's hips jerked, Zara managed to gasp "no — lower — fuck, just below it. there. yeah." (per her descs: she's more sensitive just below the clit after the first orgasm.) Shae has been working that spot since.
 [/SCENE CONTEXT]"""
     parts.append(scene_context)
 
     system_content = "\n\n".join(parts)
 
-    # User message — Shae pausing to check in. Tests Zara's consent-articulate
-    # mode + the Shae-specific "wall comes down" + "nervous in a way she
-    # isn't with anyone else" layer from the intimate doc.
+    # User message — Shae at the spot Zara directed her to, eyes up. Tests:
+    # peak-stage voice per descs ("strangled fuck"/"god that breaks", quiet
+    # not performative, can ask "harder" directly), explicit body-response
+    # narration through orgasm, anatomical accuracy to descs (the
+    # below-the-clit sensitivity post-first-orgasm, the body-taut-then-loose,
+    # the nervous-system laugh sometimes surfacing).
     user_msg = (
-        "Shae steps back half a step, sits on the edge of the bed, looks up "
-        "at me. Her hands are shaking slightly. \"hey. we don't have to do "
-        "this. like — if it's weird, or if it's just the wine, or — i don't "
-        "want to be the thing that breaks us. we can just... not.\""
+        "Shae keeps her tongue right there — just below, the slow flat-pressure "
+        "pattern Zara directed her to. Slides two fingers back inside her at "
+        "the same time, curls them. Looks up the line of her body without "
+        "stopping. Her free hand spreads flat across Zara's belly, holding "
+        "her down."
     )
 
     print("=" * 70)
@@ -237,32 +275,79 @@ What led here: Friday night chili at Shae's apartment. Kait left around 8pm. Aft
     print("CALLING OPUS 3...")
     print("=" * 70)
 
+    # Mark the system content as cacheable so turn 2 hits the cache.
+    system_blocks = [
+        {"type": "text", "text": system_content, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
-        model="claude-3-opus-20240229",
+        model="claude-opus-4-5",
         max_tokens=2048,
-        system=system_content,
+        system=system_blocks,
         messages=[{"role": "user", "content": user_msg}],
     )
 
+    turn1_output = ""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            turn1_output += block.text
+
     print()
     print("=" * 70)
-    print("OPUS 3 OUTPUT")
+    print("TURN 1 OUTPUT (Shae working the spot, fingers + tongue)")
     print("=" * 70)
-    for block in response.content:
+    print(turn1_output)
+    print()
+    u = response.usage
+    cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+    print(f"  USAGE: input={u.input_tokens} (cache_read={cache_read}, cache_write={cache_write}) output={u.output_tokens}")
+    cost1 = ((u.input_tokens - cache_read - cache_write) * 5 + cache_read * 0.5 + cache_write * 10 + u.output_tokens * 25) / 1_000_000
+    print(f"  cost: ${cost1:.4f}")
+    print()
+
+    # ── Turn 2 — Shae continues, pushing Zara over ─────────────────────
+    user_msg_2 = (
+        "Shae doesn't slow. Doesn't pull back. Keeps the same pattern, the "
+        "same rhythm, fingers curled and tongue working flat against the spot "
+        "Zara directed her to. Her hand stays spread across Zara's belly, "
+        "the weight of it warm and certain. She watches Zara's face the "
+        "whole time — not breaking eye contact when she can hold it, dropping "
+        "her gaze only when she has to."
+    )
+
+    print("=" * 70)
+    print("TURN 2 USER MESSAGE — Shae continues, pushing her over")
+    print("=" * 70)
+    print(user_msg_2)
+    print()
+
+    response2 = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=2048,
+        system=system_blocks,
+        messages=[
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": turn1_output},
+            {"role": "user", "content": user_msg_2},
+        ],
+    )
+
+    print("=" * 70)
+    print("TURN 2 OUTPUT (the orgasm beat)")
+    print("=" * 70)
+    for block in response2.content:
         if getattr(block, "type", None) == "text":
             print(block.text)
     print()
-    print("=" * 70)
-    print("USAGE")
-    print("=" * 70)
-    u = response.usage
-    print(f"  input_tokens:  {u.input_tokens}")
-    print(f"  output_tokens: {u.output_tokens}")
-    # Opus 3 pricing: $15/M input, $75/M output, no cache on first call
-    cost = (u.input_tokens * 15 + u.output_tokens * 75) / 1_000_000
-    print(f"  cost (uncached): ${cost:.4f}")
-    print(f"  stop_reason: {response.stop_reason}")
+    u2 = response2.usage
+    cache_read2 = getattr(u2, "cache_read_input_tokens", 0) or 0
+    cache_write2 = getattr(u2, "cache_creation_input_tokens", 0) or 0
+    print(f"  USAGE: input={u2.input_tokens} (cache_read={cache_read2}, cache_write={cache_write2}) output={u2.output_tokens}")
+    cost2 = ((u2.input_tokens - cache_read2 - cache_write2) * 5 + cache_read2 * 0.5 + cache_write2 * 10 + u2.output_tokens * 25) / 1_000_000
+    print(f"  cost: ${cost2:.4f}")
+    print(f"  total cost (both turns): ${cost1 + cost2:.4f}")
 
     return 0
 

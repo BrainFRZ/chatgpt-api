@@ -1941,7 +1941,7 @@ GAME_SYSTEM = {
     "default_instructions": CHARACTERS_DEFAULT_INSTRUCTIONS,
 
     # Default narration model + fallback
-    "default_model": "claude-3-opus",
+    "default_model": "claude-opus-4.5",
     "fallback_model": "claude-opus-4.5",
 
     # Marker so main.py can take the Characters branch
