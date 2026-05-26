@@ -690,13 +690,21 @@ def roll_major_event(
 # ── Wellbeing ───────────────────────────────────────────────────────
 
 def _wb_state_from_total(total: int) -> str:
-    if total <= 6:
+    # 2d10 (+mod) peaks at 11. Bands are centered slightly ABOVE the peak so the
+    # curve tilts positive — matching her profile's "Default register: Even,
+    # tilting slightly toward Buoyant. Life's fine." Resulting split (mod 0):
+    # Rough 6% / Frayed 15% / Even 51% / Buoyant 22% / Excellent 6%
+    # → down (Rough+Frayed) 21%, up (Buoyant+Excellent) 28%. The previous
+    # cutoffs (<=6/<=9/<=15/<=18) skewed the other way (down 36% / up 15%):
+    # "Even" ran 10-15, absorbing the mild-good range so good days needed 16+
+    # while bad days only needed <=9. Applies to every character in this system.
+    if total <= 4:
         return "Rough"
-    if total <= 9:
+    if total <= 7:
         return "Frayed"
-    if total <= 15:
+    if total <= 13:
         return "Even"
-    if total <= 18:
+    if total <= 17:
         return "Buoyant"
     return "Excellent"
 
