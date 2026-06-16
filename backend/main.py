@@ -8209,10 +8209,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
                 total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
 
-                if service_tier:
-                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
-                else:
-                    total_cost = provider.calculate_cost(parsed)
+                # Per-stage aggregate (planning on gpt-5.2 + narration on v3.2, each at
+                # its own rate) — single-provider recompute would misprice narration.
+                total_cost = mode_result.aggregate_cost
                 tokens_str = provider.format_token_string(parsed)
 
                 actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
@@ -8280,6 +8279,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["reasoning"] = reasoning_summary
                 if service_tier:
                     assistant_msg_data["service_tier"] = service_tier
+                if mode_result.stage_usage is not None:
+                    assistant_msg_data["pipeline_stage_usage"] = mode_result.stage_usage
                 if data.get("pipeline_state"):
                     assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
                 if data.get("hack_state"):
@@ -8316,6 +8317,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     done_data['service_tier'] = service_tier
                 if _original_model:
                     done_data['original_model'] = _original_model
+                if mode_result.stage_usage is not None:
+                    done_data['pipeline_stage_usage'] = mode_result.stage_usage
                 if hack_json.get("hack_complete"):
                     done_data['hack_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
@@ -8826,10 +8829,9 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
                 total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
 
-                if service_tier:
-                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
-                else:
-                    total_cost = provider.calculate_cost(parsed)
+                # Per-stage aggregate (planning on gpt-5.2 + narration on v3.2, each at
+                # its own rate) — single-provider recompute would misprice narration.
+                total_cost = mode_result.aggregate_cost
                 tokens_str = provider.format_token_string(parsed)
 
                 actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
@@ -8864,6 +8866,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["reasoning"] = reasoning_summary
                 if service_tier:
                     assistant_msg_data["service_tier"] = service_tier
+                if mode_result.stage_usage is not None:
+                    assistant_msg_data["pipeline_stage_usage"] = mode_result.stage_usage
                 if data.get("pipeline_state"):
                     assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
 
@@ -8908,6 +8912,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     done_data['service_tier'] = service_tier
                 if _original_model:
                     done_data['original_model'] = _original_model
+                if mode_result.stage_usage is not None:
+                    done_data['pipeline_stage_usage'] = mode_result.stage_usage
                 if _nc_both_done:
                     done_data['net_combat_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"
