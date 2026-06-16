@@ -178,6 +178,12 @@ class DeepSeekProvider(ModelProvider):
     BASE_URL = "https://api.deepseek.com"
     MAX_TOKENS = 8000
     MAX_OUTPUT_TOKENS_FREE_CHAT = 1200
+    # OpenRouter provider-routing prefs (e.g. {"ignore": ["sambanova"], "order": [...]}).
+    # None on direct DeepSeek; set on OpenRouter subclasses. Sent as extra_body.
+    PROVIDER_ROUTING = None
+
+    def _extra(self) -> dict:
+        return {"extra_body": {"provider": self.PROVIDER_ROUTING}} if self.PROVIDER_ROUTING else {}
 
     @property
     def model_id(self) -> str:
@@ -231,6 +237,27 @@ class DeepSeekProvider(ModelProvider):
             "messages": conversation,
         }
 
+    def build_pipeline_request(self, messages: list[dict], username: str, project: Optional[str],
+                               chat_name: str, stage_name: str, reasoning_effort: str = "medium",
+                               service_tier: str = "auto", json_mode: bool = False) -> dict:
+        """For use as the GPT-pipeline narration provider (mirrors GeminiProvider).
+        reasoning_effort/service_tier are accepted for interface parity; deepseek-chat
+        (non-thinking) ignores effort."""
+        system_content = None
+        conversation = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_content = msg.get("content", "")
+            else:
+                conversation.append({"role": msg["role"], "content": msg["content"]})
+        return {
+            "model": self.MODEL_NAME,
+            "max_tokens": self.MAX_TOKENS,
+            "system": system_content,
+            "messages": conversation,
+            "_json_mode": json_mode,
+        }
+
     # ---- Translate Anthropic-shaped params -> OpenAI Chat Completions kwargs ----
     def _build_openai_args(self, request_params: dict) -> dict:
         system = _system_text(request_params.get("system"))
@@ -243,6 +270,8 @@ class DeepSeekProvider(ModelProvider):
             "messages": oai_messages,
             "max_tokens": request_params.get("max_tokens", self.MAX_TOKENS),
         }
+        if request_params.get("_json_mode"):
+            kwargs["response_format"] = {"type": "json_object"}
 
         tools = request_params.get("tools")
         if tools:
@@ -280,7 +309,7 @@ class DeepSeekProvider(ModelProvider):
         recovered = False
 
         stream = client.chat.completions.create(
-            stream=True, stream_options={"include_usage": True}, **kwargs)
+            stream=True, stream_options={"include_usage": True}, **kwargs, **self._extra())
         for chunk in stream:
             if getattr(chunk, "usage", None):
                 usage_obj = chunk.usage
@@ -371,7 +400,7 @@ class DeepSeekProvider(ModelProvider):
             "content": f"Call {target} now with the structured arguments for the turn. "
                        f"Respond with the function call only."})
         try:
-            resp = client.chat.completions.create(stream=False, **kwargs)
+            resp = client.chat.completions.create(stream=False, **kwargs, **self._extra())
         except Exception as e:  # noqa: BLE001 - recovery is best-effort
             logger.warning(f"DeepSeek force_tool_call failed: {e}")
             return [], None
@@ -411,7 +440,7 @@ class DeepSeekProvider(ModelProvider):
     # ---- Non-streaming (parity with base interface) ----
     def send_request(self, client: Any, request_params: dict) -> Any:
         kwargs = self._build_openai_args(request_params)
-        return client.chat.completions.create(stream=False, **kwargs)
+        return client.chat.completions.create(stream=False, **kwargs, **self._extra())
 
     def parse_response(self, response: Any) -> ParsedResponse:
         text = ""

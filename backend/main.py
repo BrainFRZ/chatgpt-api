@@ -32,6 +32,7 @@ from providers.openai_provider import OpenAIProvider, OpenAI54Provider, OpenAI55
 from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider, AnthropicOpus3Provider, AnthropicSonnet46Provider
 from providers.gemini_provider import GeminiProvider
 from providers.deepseek_provider import DeepSeekProvider
+from providers.openrouter_provider import OpenRouterDeepSeekV32, OpenRouterDeepSeekV4Flash, OpenRouterDeepSeekV4Pro
 from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
@@ -204,9 +205,15 @@ ProviderRegistry.register(AnthropicOpusProvider())
 ProviderRegistry.register(AnthropicOpus3Provider())
 ProviderRegistry.register(GeminiProvider())
 ProviderRegistry.register(DeepSeekProvider())
+ProviderRegistry.register(OpenRouterDeepSeekV32())
+ProviderRegistry.register(OpenRouterDeepSeekV4Flash())
+ProviderRegistry.register(OpenRouterDeepSeekV4Pro())
 
-# Default model for new chats
-DEFAULT_MODEL = "gemini-3.1-pro"
+# Default model for new chats. DeepSeek V3.2 via OpenRouter — chosen over Gemini
+# 3.1 Pro (preview-only, 30-48s latency / heavy 503s = not deployable for real-time)
+# and over Opus on cost: blind writing ~ on par with Sonnet, no context rot to 125k,
+# at ~1% of Sonnet's price. (Sex mode + Characters voice still force Opus 4.5.)
+DEFAULT_MODEL = "deepseek-v3.2-or"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
 COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
@@ -214,21 +221,22 @@ COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 # Per-stage models for both pipelines.
 # Reasoning stages (Events / Mechanics-as-model / Planning) are JSON-only with
 # heavy rules reasoning — 5.2's strength. Narration is streaming prose —
-# handled by Gemini 3.1 Pro (a stronger writer). These override the caller-picked
-# model inside the pipelines but only when both stage providers are registered.
-# NOTE: narration now runs on a different provider/key than planning, so the
+# handled by DeepSeek V3.2 (writing ~ on par with Sonnet in blind tests, ~1% cost).
+# These override the caller-picked model inside the pipelines but only when both
+# stage providers are registered.
+# NOTE: narration runs on a different provider/key than planning, so the
 # pipeline creates a narration-specific client (see run_pipeline call site).
 PIPELINE_PLANNING_MODEL = "gpt-5.2"
-PIPELINE_NARRATION_MODEL = "gemini-3.1-pro"
+PIPELINE_NARRATION_MODEL = "deepseek-v3.2-or"
 
 
 def get_default_model_for_user(username: str) -> str:
     """Return the default model for a user based on which API keys they hold.
 
-    Prefers Gemini 3.1 Pro (the global default) when a Google key is present,
-    then falls back to Opus 4.5 (Anthropic) or GPT-5.4 (OpenAI)."""
-    if get_api_key(username, "google"):
-        return DEFAULT_MODEL  # gemini-3.1-pro
+    Prefers DeepSeek V3.2 via OpenRouter (the global default) when an OpenRouter
+    key is present, then falls back to Opus 4.5 (Anthropic) or GPT-5.4 (OpenAI)."""
+    if get_api_key(username, "openrouter"):
+        return DEFAULT_MODEL  # deepseek-v3.2-or
     if get_api_key(username, "anthropic"):
         return "claude-opus-4.5"
     if get_api_key(username, "openai"):
@@ -239,10 +247,11 @@ def get_default_model_for_user(username: str) -> str:
 def is_stateful_family(model_id: str) -> bool:
     """Models that drive a turn via the single-call tool path (report_state /
     resolve_mechanics + the combat/hack/ship/chase mode tool handlers) rather
-    than the GPT events→mechanics→narration pipeline. Claude and Gemini both work
-    this way; GPT does not. Used to gate routing (not token bookkeeping, where
-    Gemini intentionally shares the GPT token bucket)."""
-    return bool(model_id) and (model_id.startswith("claude") or model_id.startswith("gemini"))
+    than the GPT events→mechanics→narration pipeline. Claude, Gemini, and DeepSeek
+    all work this way; GPT does not. Used to gate routing (not token bookkeeping,
+    where these intentionally share the GPT token bucket)."""
+    return bool(model_id) and (model_id.startswith("claude") or model_id.startswith("gemini")
+                               or model_id.startswith("deepseek"))
 
 
 def _resolve_narration(provider, client, username):

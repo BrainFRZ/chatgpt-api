@@ -230,6 +230,8 @@ class ProviderRegistry:
     @classmethod
     def get_required_api_key(cls, model_id: str) -> str:
         """Get which API key is required for a model ('openai', 'anthropic', or 'google')."""
+        if model_id.endswith("-or"):
+            return "openrouter"  # OpenRouter-pinned models (e.g. deepseek-v3.2-or)
         if model_id.startswith("claude"):
             return "anthropic"
         if model_id.startswith("gemini"):

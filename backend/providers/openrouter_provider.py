@@ -16,6 +16,14 @@ from .deepseek_provider import DeepSeekProvider
 
 class _OpenRouterBase(DeepSeekProvider):
     BASE_URL = "https://openrouter.ai/api/v1"
+    MAX_TOKENS = 16000  # room for full report_state when used as the main model
+    # Never route to SambaNova (32k context cap — too small for ~125k turns);
+    # prefer large-context, high-quality hosts, but allow fallbacks to others.
+    PROVIDER_ROUTING = {
+        "ignore": ["sambanova"],
+        "order": ["deepinfra", "siliconflow", "novita", "baidu"],
+        "allow_fallbacks": True,
+    }
 
 
 class OpenRouterDeepSeekV32(_OpenRouterBase):
