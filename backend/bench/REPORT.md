@@ -113,6 +113,24 @@ python -m bench.deepseek_id_diag --keys <keys>     # what deepseek-chat really i
 python -m bench.gemini_diag --keys <keys>          # Gemini endpoints + 503/latency
 python -m bench.dm_judgment --keys <keys> --models deepseek-v3.2-or,deepseek-v4-flash-or,claude-sonnet-4.6
 python -m bench.ds_prompt_probe --keys <keys> --models deepseek-v3.2-or,deepseek-v4-flash-or   # prompt matrix
+python -m bench.combat_bench --keys <keys> --dry-run   # combat orchestration (V3.2 vs GPT-5.4)
 ```
 
-**Spend so far: ~$23** of the $50 ceiling.
+---
+
+## Combat orchestration — can V3.2 also take over combat? (No.)
+
+`combat_bench.py` drives the REAL combat engine (`cpred_mechanics.resolve_actions`) in an agentic `resolve_mechanics` loop and scores the model's orchestration. The backend rolls dice/RAW and (via `build_cpred_combat_injection`) injects the `[COMBAT STATE]` order + current actor; the model picks actions and iterates turns.
+
+| | First exchange (model rolls initiative) | Mid-combat (backend injects the order) |
+|---|---|---|
+| **DeepSeek V3.2** | **catastrophic** — re-rolls initiative 14-28× even WITH explicit "roll once" guards (guards made it *worse*); never resolves a turn | flow OK (no re-roll, completes), **but malforms the action** — dumps the `[COMBAT STATE]` text into the `character` field, omits `target`/params → backend can't resolve real damage |
+| **GPT-5.4** (incumbent) | clean — 0 redundant init, correct flow | clean — `character`→`target`, proper params |
+
+**Verdict: combat stays on GPT-5.4.** The existing split — **V3.2 narrative + GPT-5.4 combat auto-switch** — is the correct, validated architecture. V3.2 is not combat-ready: it botches the `resolve_mechanics` schema, and on a first exchange spirals on initiative. Combat is high-stakes for RAW/state correctness and GPT-5.4 handles it cleanly today.
+
+Nuance (credit where due): V3.2's *worst* failure (the init death-loop) is specific to the first-exchange roll, which the backend's order-persistence sidesteps after exchange 1 — so mid-combat it's far less catastrophic than the first test suggested. Its residual problem (malformed action structure) is a format/instruction-following issue that *might* respond to a few-shot/strict-schema fix later — unlike the init-loop, which prompting made worse. Not worth pursuing while GPT-5.4 works.
+
+Unlike flag-honoring (which prompting fixed 72%→90%), **combat did not respond to prompting** — tested with the full real `CPRED_COMBAT_CONTRACT` + targeted guards.
+
+**Spend so far: ~$30** of the $50 ceiling.

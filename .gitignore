@@ -101,6 +101,7 @@
 !backend/bench/deepseek_id_diag.py
 !backend/bench/ds_prompt_probe.py
 !backend/bench/context_rot_v32.py
+!backend/bench/combat_bench.py
 !backend/game_systems/
 !backend/game_systems/__init__.py
 !backend/game_systems/dnd5e.py
