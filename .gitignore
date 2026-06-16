@@ -88,6 +88,7 @@
 !backend/providers/anthropic_provider.py
 !backend/providers/gemini_provider.py
 !backend/providers/deepseek_provider.py
+!backend/providers/openrouter_provider.py
 !backend/pipeline.py
 !backend/bench/
 !backend/bench/__init__.py
@@ -96,6 +97,9 @@
 !backend/bench/run.py
 !backend/bench/dm_judgment.py
 !backend/bench/REPORT.md
+!backend/bench/gemini_diag.py
+!backend/bench/deepseek_id_diag.py
+!backend/bench/ds_prompt_probe.py
 !backend/game_systems/
 !backend/game_systems/__init__.py
 !backend/game_systems/dnd5e.py

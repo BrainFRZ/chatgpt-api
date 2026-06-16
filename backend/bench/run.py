@@ -27,14 +27,21 @@ _TRANSIENT = ("503", "unavailable", "overloaded", "429", "rate_limit", "ratelimi
 from providers.anthropic_provider import AnthropicSonnet46Provider
 from providers.deepseek_provider import DeepSeekProvider
 from providers.gemini_provider import GeminiProvider
+from providers.openrouter_provider import (
+    OpenRouterDeepSeekV32, OpenRouterDeepSeekV4Flash, OpenRouterDeepSeekV4Pro)
 
 from bench import scenarios as S
 from bench.pricing import SpendMeter, BudgetExceeded, estimate_cost, cost_of, DEFAULT_CAPS
 
 MODEL_REGISTRY = {
     "claude-sonnet-4.6": (AnthropicSonnet46Provider, "anthropic"),
-    "deepseek-v3.2": (DeepSeekProvider, "deepseek"),
+    # NOTE: DeepSeek-direct `deepseek-chat` routes to V4 Flash (V3.2 unavailable
+    # direct). Use the OpenRouter-pinned ids below for explicit versions.
+    "deepseek-direct-chat": (DeepSeekProvider, "deepseek"),  # == V4 Flash
     "gemini-3.1-pro": (GeminiProvider, "google"),
+    "deepseek-v3.2-or": (OpenRouterDeepSeekV32, "openrouter"),
+    "deepseek-v4-flash-or": (OpenRouterDeepSeekV4Flash, "openrouter"),
+    "deepseek-v4-pro-or": (OpenRouterDeepSeekV4Pro, "openrouter"),
 }
 
 EST_OUT = {"tool": 1500, "probe": 120}  # conservative per-call output token estimate
