@@ -29,8 +29,9 @@ import threading
 # Provider imports
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider, OpenAI54Provider, OpenAI55Provider
-from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider, AnthropicOpus3Provider
+from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider, AnthropicOpus3Provider, AnthropicSonnet46Provider
 from providers.gemini_provider import GeminiProvider
+from providers.deepseek_provider import DeepSeekProvider
 from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
@@ -197,10 +198,12 @@ ProviderRegistry.register(OpenAIProvider())
 ProviderRegistry.register(OpenAI54Provider())
 ProviderRegistry.register(OpenAI55Provider())
 ProviderRegistry.register(AnthropicProvider())
+ProviderRegistry.register(AnthropicSonnet46Provider())
 ProviderRegistry.register(AnthropicOpus45Provider())
 ProviderRegistry.register(AnthropicOpusProvider())
 ProviderRegistry.register(AnthropicOpus3Provider())
 ProviderRegistry.register(GeminiProvider())
+ProviderRegistry.register(DeepSeekProvider())
 
 # Default model for new chats
 DEFAULT_MODEL = "gemini-3.1-pro"

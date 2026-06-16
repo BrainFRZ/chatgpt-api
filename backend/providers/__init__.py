@@ -234,4 +234,6 @@ class ProviderRegistry:
             return "anthropic"
         if model_id.startswith("gemini"):
             return "google"
+        if model_id.startswith("deepseek"):
+            return "deepseek"
         return "openai"

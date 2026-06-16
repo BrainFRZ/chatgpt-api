@@ -614,6 +614,50 @@ class AnthropicOpusProvider(AnthropicProvider):
         return params
 
 
+class AnthropicSonnet46Provider(AnthropicProvider):
+    """Provider for Claude Sonnet 4.6 (adaptive thinking).
+
+    Sonnet 4.6 removed the fixed thinking budget — `budget_tokens` 400s — so it
+    uses adaptive thinking + the effort parameter, like Opus 4.6. Same Sonnet
+    price tier as 4.5 ($3/$15), 1M context, 64K max output."""
+
+    MODEL_NAME = "claude-sonnet-4-6"
+    MAX_TOKENS = 16000
+
+    @property
+    def model_id(self) -> str:
+        return "claude-sonnet-4.6"
+
+    @property
+    def display_name(self) -> str:
+        return "Claude Sonnet 4.6"
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing(
+            input_base=3.00,     # $3/1M input
+            cache_write=6.00,    # 2x base for 1hr cache write
+            cache_read=0.30,     # 0.1x base
+            output=15.0,         # $15/1M output
+            reasoning=15.0       # $15/1M thinking
+        )
+
+    def build_request(
+        self,
+        messages: list[dict],
+        username: str,
+        project: Optional[str],
+        chat_name: str,
+        is_free_chat: bool,
+        use_cache: bool = True
+    ) -> dict:
+        """Sonnet 4.6 uses adaptive thinking + effort instead of a fixed budget."""
+        params = super().build_request(messages, username, project, chat_name, is_free_chat, use_cache=use_cache)
+        params["thinking"] = {"type": "adaptive"}
+        params["output_config"] = {"effort": "high"}
+        return params
+
+
 class AnthropicOpus3Provider(AnthropicProvider):
     """Provider for Claude 3 Opus (2024).
 

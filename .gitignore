@@ -87,7 +87,13 @@
 !backend/providers/openai_provider.py
 !backend/providers/anthropic_provider.py
 !backend/providers/gemini_provider.py
+!backend/providers/deepseek_provider.py
 !backend/pipeline.py
+!backend/bench/
+!backend/bench/__init__.py
+!backend/bench/pricing.py
+!backend/bench/scenarios.py
+!backend/bench/run.py
 !backend/game_systems/
 !backend/game_systems/__init__.py
 !backend/game_systems/dnd5e.py
