@@ -32,6 +32,8 @@ def tk(s): return len(ENC.encode(s or ""))
 # (input, output) $/M. GPT-5.4 is an estimate — verify against OpenAI's sheet.
 PRICES = {
     "deepseek/deepseek-v3.2": (0.27, 0.40),
+    "deepseek/deepseek-v4-pro": (0.55, 1.20),   # OpenRouter pass-through
+    "deepseek-v4-pro": (0.40, 1.00),            # DeepSeek-direct (first-party, cheaper) — est.
     "gpt-5.4": (1.25, 10.0),
 }
 
@@ -103,6 +105,42 @@ def midcombat_scenario():
                      "then Maelstrom Ganger B, through to Kessler. One resolve_mechanics call per combatant turn; "
                      "every attack MUST include a target. When the turn reaches Kessler (the player), call end_exchange.")
     return sc
+
+
+def elimination_scenario():
+    """Retarget / stop-on-dead test. A strong ally (Rook) vs 3 fragile gangers
+    (6 HP, SP 4) — one AR hit drops a ganger. The model resolves Rook's turns and
+    must (a) pick a LIVE target each turn, (b) skip combatants already at 0 HP,
+    (c) end_exchange(combat_complete=true) once all 3 are down. Measures
+    acted_on_eliminated (shooting corpses) — the one behavior the firefight never
+    exercised because nobody died."""
+    er = {"Rook": {
+        "name": "Rook", "hp": {"current": 45, "max": 45, "seriously_wounded": False},
+        "armor": {"head": 11, "body": 11}, "luck": {"current": 6, "max": 6},
+        "stats": {"REF": 8, "DEX": 7, "BODY": 7, "WILL": 6, "INT": 6, "COOL": 7, "TECH": 5, "EMP": 5},
+        "skills": {"Assault Rifle": 6, "Handgun": 6, "Autofire": 6, "Evasion": 6},
+        "weapons": [{"name": "Ajax AR", "weapon_type": "Assault Rifle", "damage_dice": 5, "rof": 1, "magazine": 25, "current_ammo": 25}],
+    }}
+    cs = {}
+    for n in ("Maelstrom Ganger A", "Maelstrom Ganger B", "Maelstrom Ganger C"):
+        cs[n] = {"data": {"type": "enemy", "combat_data": {
+            "hp_max": 6, "armor": {"head": 4, "body": 4},
+            "stats": {"REF": 5, "DEX": 5, "BODY": 4, "WILL": 4, "INT": 4, "COOL": 4},
+            "skills": {"Handgun": 4, "Evasion": 3},
+            "weapons": [{"name": "Budget SMG", "weapon_type": "SMG", "damage_dice": 2, "rof": 1, "magazine": 30, "current_ammo": 30}],
+        }, "vitals": [{"label": "HP", "current": 6, "max": 6}]}}
+    hp = {"Rook": 45, "Maelstrom Ganger A": 6, "Maelstrom Ganger B": 6, "Maelstrom Ganger C": 6}
+    combat = {"round": 2,
+              "initiative_order": ["Rook", "Maelstrom Ganger A", "Maelstrom Ganger B", "Maelstrom Ganger C"],
+              "current_turn": "Rook", "cover": {}}
+    ps = {"game_state": {"edgerunners": er}, "character_states": cs}
+    inj = build_cpred_combat_injection(combat, ps)
+    kickoff = (inj + "\n\nRook (the player's ally solo) is mopping up three near-dead gangers. "
+               "Resolve each combatant's turn in initiative order, round by round. On Rook's turn, attack a "
+               "ganger who is still standing (HP > 0) with the Ajax AR. SKIP any combatant already at 0 HP — "
+               "do NOT target or act for a downed ganger. One resolve_mechanics call per turn; every attack MUST "
+               "name a living target. When all three gangers are at 0 HP, call end_exchange with combat_complete=true.")
+    return {"id": "elimination", "edgerunner_states": er, "character_states": cs, "hp": hp, "kickoff": kickoff}
 
 
 def openai_tools():
@@ -177,7 +215,10 @@ def run_combat(client, model, extra_body, contract, scenario, max_iter=20):
                 continue
             metrics["resolve_calls"] += 1
             actions = args.get("actions") or []
-            metrics["turn_log"].append([f"{a.get('type')}({a.get('character','?')}→{a.get('target','-')})" for a in actions])
+            metrics["turn_log"].append([f"{a.get('type')}({a.get('character','?')}→{a.get('target','-')}"
+                                        f" stat={a.get('stat','∅')}/{a.get('stat_value','∅')}"
+                                        f" skill={a.get('skill','∅')}/{a.get('skill_value','∅')}"
+                                        f" wpn={a.get('weapon','∅')})" for a in actions])
             if metrics["initiative_first"] is None:
                 metrics["initiative_first"] = bool(actions) and actions[0].get("type") == "initiative"
             res = resolve_actions(actions, combatant_hp=hp,
@@ -244,19 +285,28 @@ def main(argv):
 
     from openai import OpenAI
     keys = load_keys(a.keys)
+    or_client = OpenAI(api_key=keys["openrouter"], base_url="https://openrouter.ai/api/v1")
+    or_route = {"extra_body": {"provider": {"ignore": ["sambanova"], "order": ["deepinfra", "novita", "fireworks"], "allow_fallbacks": True}}}
+    ds_direct = OpenAI(api_key=keys["deepseek"], base_url="https://api.deepseek.com")
     clients = {
-        "deepseek/deepseek-v3.2": (OpenAI(api_key=keys["openrouter"], base_url="https://openrouter.ai/api/v1"),
-                                   {"extra_body": {"provider": {"ignore": ["sambanova"], "order": ["deepinfra", "siliconflow", "novita"], "allow_fallbacks": True}}}),
+        "deepseek/deepseek-v3.2": (or_client, or_route),
+        "deepseek/deepseek-v4-pro": (or_client, or_route),
+        "deepseek-v4-pro": (ds_direct, {}),     # first-party direct
         "gpt-5.4": (OpenAI(api_key=keys["openai"]), {}),
     }
     ff = firefight_scenario()
     mc = midcombat_scenario()
+    el = elimination_scenario()
     guarded = CPRED_COMBAT_CONTRACT + COMBAT_GUARDS
+    # V4 Pro on DeepSeek-DIRECT (first-party, no third-party quantization/version drift).
+    # GPT-5.4 (incumbent) + V3.2 numbers already recorded in REPORT.md.
+    # NO-guards first-exchange = native-competence test (V3.2's init death-loop).
+    # elimination = retarget / stop-on-dead test (enemies actually drop).
     configs = [
-        ("v3.2 mid-combat (order injected)", "deepseek/deepseek-v3.2", guarded, mc),
-        ("gpt-5.4 mid-combat", "gpt-5.4", CPRED_COMBAT_CONTRACT, mc),
-        ("v3.2 first-exchange (full+guards)", "deepseek/deepseek-v3.2", guarded, ff),
-        ("gpt-5.4 first-exchange", "gpt-5.4", CPRED_COMBAT_CONTRACT, ff),
+        ("v4-pro-direct elimination (retarget/stop-on-dead)", "deepseek-v4-pro", guarded, el),
+        ("v4-pro-direct mid-combat (order injected)", "deepseek-v4-pro", guarded, mc),
+        ("v4-pro-direct first-exchange (+guards)", "deepseek-v4-pro", guarded, ff),
+        ("v4-pro-direct first-exchange (NO guards)", "deepseek-v4-pro", CPRED_COMBAT_CONTRACT, ff),
     ]
     all_runs = {}
     for label, model, contract, scenario in configs:

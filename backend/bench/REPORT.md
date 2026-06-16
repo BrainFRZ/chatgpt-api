@@ -124,13 +124,23 @@ python -m bench.combat_bench --keys <keys> --dry-run   # combat orchestration (V
 
 | | First exchange (model rolls initiative) | Mid-combat (backend injects the order) |
 |---|---|---|
-| **DeepSeek V3.2** | **catastrophic** — re-rolls initiative 14-28× even WITH explicit "roll once" guards (guards made it *worse*); never resolves a turn | flow OK (no re-roll, completes), **but malforms the action** — dumps the `[COMBAT STATE]` text into the `character` field, omits `target`/params → backend can't resolve real damage |
+| **DeepSeek V3.2** (OpenRouter) | **catastrophic** — re-rolls initiative 14-28× even WITH explicit "roll once" guards (guards made it *worse*); never resolves a turn | flow OK (no re-roll, completes), **but malforms the action** — dumps the `[COMBAT STATE]` text into the `character` field, omits `target`/params → backend can't resolve real damage |
+| **DeepSeek V4 Pro** (DeepSeek-direct) | **clean, natively** — redundant-init **0/6 even with NO guards**; 100% valid actions; 6/6 completed | **clean** — `character`→`target` correct, 100% valid (12/12), 6/6 completed |
 | **GPT-5.4** (incumbent) | clean — 0 redundant init, correct flow | clean — `character`→`target`, proper params |
 
-**Verdict: combat stays on GPT-5.4.** The existing split — **V3.2 narrative + GPT-5.4 combat auto-switch** — is the correct, validated architecture. V3.2 is not combat-ready: it botches the `resolve_mechanics` schema, and on a first exchange spirals on initiative. Combat is high-stakes for RAW/state correctness and GPT-5.4 handles it cleanly today.
+**Verdict (V3.2): combat does NOT move to V3.2.** It botches the `resolve_mechanics` schema mid-combat and spirals on initiative on a first exchange. Combat is high-stakes for RAW/state correctness and V3.2 is not combat-ready. (V3.2 stays the *narrative* default; its combat auto-switch was to GPT-5.4.)
 
-Nuance (credit where due): V3.2's *worst* failure (the init death-loop) is specific to the first-exchange roll, which the backend's order-persistence sidesteps after exchange 1 — so mid-combat it's far less catastrophic than the first test suggested. Its residual problem (malformed action structure) is a format/instruction-following issue that *might* respond to a few-shot/strict-schema fix later — unlike the init-loop, which prompting made worse. Not worth pursuing while GPT-5.4 works.
+**Finding (V4 Pro): combat-capable, high confidence.** 18/18 clean runs on **first-party DeepSeek-direct** (`deepseek-v4-pro`), 6 reps × {mid-combat, first-exchange +guards, first-exchange **no guards**}. The no-guards first-exchange — the exact scenario that destroyed V3.2 — was spotless: initiative rolled exactly once every time, 0 redundant init, 0 malformed actions, 0 acting-on-dead, 65/65 valid actions, all 18 completed. V4 Pro's combat competence is **native, not prompt-scaffolded**. It also reads scene fiction (opens with a RAW-legit `ambush`/surprise round before initiative). Cost: ~$0.20 for the whole pass; at ~$0.40/$1.00 per M it's ~10× cheaper output than GPT-5.4.
 
-Unlike flag-honoring (which prompting fixed 72%→90%), **combat did not respond to prompting** — tested with the full real `CPRED_COMBAT_CONTRACT` + targeted guards.
+**Provider choice for V4 Pro: DeepSeek-direct, not OpenRouter.** V4 Pro *is* served first-party (`deepseek-v4-pro` slug — only V3.2 is OpenRouter-exclusive), so we use the source of truth: no third-party quantization/version-drift risk (the trap that made `deepseek-chat` silently serve V4 Flash), and cheaper.
+
+**Retarget / stop-on-dead — tested (elimination scenario, 6 reps, 103 actions): clean.** A strong ally (Rook) vs 3 fragile gangers (6 HP). **acted-on-dead = 0/103** — V4 Pro never targeted a downed combatant; where a ganger dropped it skipped the corpse and retargeted a live one, then ended the exchange (rep2 = textbook clean sweep). The one behavior left untested by the firefight is now confirmed good.
+
+**Caveats that remain (don't flip production combat off GPT-5.4 yet):**
+- **Completion 2/6 in the elimination scenario** — mostly a *harness* artifact: the engine doesn't resolve `Ajax AR`→5d6 from the weapon name (confirmed via direct call), so it falls back to ~2d6 vs SP4/6HP → kills need ~2 hits, and interleaved enemy turns exceed the 20-iteration cap. When damage landed (rep2) V4 Pro completed perfectly. *But* a real wrinkle showed: in 2 reps V4 Pro kept attacking the same non-dying ganger for all 20 turns rather than re-evaluating — harmless here (it's "finish the target"), only surfaced by the damage bug, but worth noting.
+- **Latency.** The 24-run pass took ~12 min; V4 Pro-direct is clearly slow per call (likely a reasoning model). Combat tolerates latency better than narration, but measure it on real turns before committing.
+- **Weapon→damage wiring** must be verified on the *real* production combat path (not this harness) before a swap.
+
+**Verdict: V4 Pro (DeepSeek-direct) is the prime candidate to take combat off GPT-5.4 — but not a flip-today.** Orchestration is high-confidence excellent (no init loop even no-guards, no malformed actions, clean retarget/skip-dead, 169 actions 100% valid). Close the two real-path checks (weapon-damage wiring + latency) first. **Until then, combat stays on GPT-5.4 in production.**
 
 **Spend so far: ~$30** of the $50 ceiling.
