@@ -4,7 +4,7 @@
 1. My original "DeepSeek **V3.2**" results were actually **V4 Flash** (DeepSeek-direct's `deepseek-chat` alias routes to V4 Flash; V3.2 isn't served direct at all). Real V3.2 is now tested via OpenRouter.
 2. The DM-judgment honoring numbers were measured with a **bare prompt**; with a proper flag-check directive they improve a lot. Prompt-variant matrix below.
 
-> The **V3.2-vs-V4-Flash prompt matrix** (the headline DeepSeek table) is **running now** (6 reps × 3 prompt variants × 2 models + Sonnet reference). This doc will be finalized with those numbers the moment it lands. Everything else below is confirmed.
+> **Context-rot on V3.2 (real ~103k/125k context): no rot.** V3.2 retrieves AND reasons over buried facts perfectly through 125k of your real Chapter 1 + rules context (see Context-Rot section). The prompt-variant honoring matrix is **incomplete** — it exhausted the $10 OpenRouter balance mid-run; the directional honoring signal (below) stands without it.
 
 ---
 
@@ -12,10 +12,10 @@
 
 - **Sonnet 4.6** — passes every axis (writes, flag-honoring, omission, tool, retention) at ~100%. Safe default. The fairness anchor that validates the whole suite.
 - **Gemini 3.1 Pro** — **not deployable right now, on latency/availability, independent of quality.** It's preview-only (no GA `gemini-3.1-pro`), and every preview endpoint is both throttled (25-50% success) and **30-48 seconds per call** on trivial requests. 30-48s/turn is a non-starter for real-time play. Revisit at GA.
-- **DeepSeek V3.2** (your actual target) — early signal is **strong** (swept the DM-judgment suite at low N, including the tests V4 Flash failed). Final numbers pending the matrix run.
-- **DeepSeek V4 Flash** (what I originally mis-tested) — weaker at flag-honoring on a bare prompt (~48-72%, high variance) with ~7-29% blank-narration turns, **but substantially promptable** (72% → 90% honoring, omission → 15% with a flag-check directive + one neutral example).
+- **DeepSeek V3.2** (your actual target) — **the real contender, and it looks genuinely viable.** No context rot through 125k (retrieval + reasoning both perfect, matching Sonnet); swept the DM-judgment suite at low N including the tests V4 Flash failed. A high-N honoring number is the one gap (matrix ran out of OpenRouter credit), but every signal points strong.
+- **DeepSeek V4 Flash** (what I originally mis-tested) — weaker than V3.2: bare-prompt flag-honoring ~48-72% (high variance) and ~7-29% blank-narration turns, **but substantially promptable** (72% → 90% honoring, omission → 15% with a flag-check directive + one neutral example). No context rot.
 
-**Net so far:** Sonnet remains the safe default; Gemini is out for now on latency; **V3.2 is the real contender** and the matrix will tell us how close to Sonnet it gets, with and without prompt help.
+**Net:** Sonnet is the safe default; Gemini is out for now on latency; **V3.2 is a real candidate** — clean on context rot, strong on the judgment suite, and the writing comparison (`abc_test_broken_orbit_3.md`) is yours to read blind. The honoring hard-number (matrix) is the only piece left, blocked on OpenRouter credit.
 
 ---
 
@@ -73,8 +73,19 @@ Tool/dice discipline is excellent for both Sonnet and DeepSeek-V4-Flash. Gemini'
 
 → DeepSeek's weaknesses are **not DOA — substantially promptable.** (High run-to-run variance observed; the matrix uses real N.)
 
-### V3.2 vs V4 Flash — DM-judgment matrix
-**RUNNING — to be finalized.** Early (n=1) signal: V3.2 swept all DM-judgment tests (gate/prereq/gaslight/compound/branch) where V4 Flash had struggled. The matrix quantifies this across prompt variants with 6 reps.
+### Context rot — real Broken Orbit context (the test that matters for your sizes)
+Needles (continuity facts) inserted at depths 10-85% into the real Chapter 1 + uploads context, padded to true 103k and 125k; probed for **retrieval** (5 facts) and **reasoning** (3 derived). Control = needles only (ceiling).
+
+| Model | control | 103k | 125k |
+|---|---|---|---|
+| **DeepSeek V3.2** | 5/5 ret · 3/3 rea | **5/5 · 3/3** | **5/5 · 3/3** |
+| DeepSeek V4 Flash | 5/5 · 3/3 | 5/5 · 3/3 | 5/5 · 3/3 |
+| Sonnet 4.6 (ref) | 5/5 · 3/3 | 5/5 · 3/3 | 5/5 · 3/3 |
+
+**No context rot for V3.2 (or any model) at your real 103k/125k sizes** — retrieval and reasoning both perfect. (An earlier "2/3 at 125k" was a brittle-keyword scoring bug, not a model failure — caught by reading the actual answers; scorer fixed.) This directly addresses the 80-125k-without-rot requirement: V3.2 clears it.
+
+### V3.2 vs V4 Flash — DM-judgment honoring matrix
+**Incomplete.** The 6-rep × 3-prompt-variant matrix exhausted the $10 OpenRouter balance mid-run (402s). Directional signal from the pieces we do have: V3.2 swept the DM-judgment suite at low N (where V4 Flash struggled), and prompting lifts V4 Flash honoring 72%→90%. A clean high-N V3.2 honoring number needs an OpenRouter top-up to finish.
 
 ---
 
