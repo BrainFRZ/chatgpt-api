@@ -205,7 +205,7 @@ class ProviderRegistry:
     """Registry for managing available model providers."""
 
     _providers: dict[str, ModelProvider] = {}
-    _default_model: str = "claude-opus-4.5"
+    _default_model: str = "gemini-3.1-pro"
 
     @classmethod
     def register(cls, provider: ModelProvider) -> None:
@@ -229,7 +229,9 @@ class ProviderRegistry:
 
     @classmethod
     def get_required_api_key(cls, model_id: str) -> str:
-        """Get which API key is required for a model ('openai' or 'anthropic')."""
+        """Get which API key is required for a model ('openai', 'anthropic', or 'google')."""
         if model_id.startswith("claude"):
             return "anthropic"
+        if model_id.startswith("gemini"):
+            return "google"
         return "openai"

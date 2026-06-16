@@ -2909,6 +2909,7 @@ def run_pipeline(
     uploads_dir: Optional[str] = None,
     planning_provider: OpenAIProvider = None,
     narration_provider: OpenAIProvider = None,
+    narration_client=None,
 ) -> Iterator[tuple[str, dict]]:
     """
     Run the full pipeline, yielding SSE-ready events as (event_type, data) tuples.
@@ -2931,6 +2932,7 @@ def run_pipeline(
     """
     _planning_provider = planning_provider or provider
     _narration_provider = narration_provider or provider
+    _narration_client = narration_client or client
 
     # Resolve game system contracts and state functions
     from game_systems import get_game_system
@@ -3323,7 +3325,7 @@ def run_pipeline(
     narration_usage = None
     first_content = True
 
-    for stream_event in _narration_provider.send_request_stream(client, narration_params):
+    for stream_event in _narration_provider.send_request_stream(_narration_client, narration_params):
         if stream_event.event_type == 'content_delta':
             if first_content:
                 yield ("pipeline_stage", {"stage": "narration", "status": "streaming"})
@@ -3413,6 +3415,7 @@ def run_mode_pipeline(
     net_round: int = 1,
     planning_provider: OpenAIProvider = None,
     narration_provider: OpenAIProvider = None,
+    narration_client=None,
 ) -> Iterator[tuple[str, dict]]:
     """Run a 2-stage mode pipeline for combat/hack/net_combat.
 
@@ -3430,6 +3433,7 @@ def run_mode_pipeline(
     """
     _planning_provider = planning_provider or provider
     _narration_provider = narration_provider or provider
+    _narration_client = narration_client or client
     from game_systems.cpred_mechanics import resolve_actions
 
     # ---- STAGE 1: Planning ----
@@ -3662,7 +3666,7 @@ def run_mode_pipeline(
     narration_usage = None
     first_content = True
 
-    for stream_event in _narration_provider.send_request_stream(client, narration_params):
+    for stream_event in _narration_provider.send_request_stream(_narration_client, narration_params):
         if stream_event.event_type == 'content_delta':
             if first_content:
                 yield ("pipeline_stage", {"stage": "narration", "status": "streaming"})

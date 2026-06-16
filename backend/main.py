@@ -30,6 +30,7 @@ import threading
 from providers import ProviderRegistry, ModelProvider
 from providers.openai_provider import OpenAIProvider, OpenAI54Provider, OpenAI55Provider
 from providers.anthropic_provider import AnthropicProvider, AnthropicOpus45Provider, AnthropicOpusProvider, AnthropicOpus3Provider
+from providers.gemini_provider import GeminiProvider
 from combat_state import replace_combat_dict_preserving_backend_keys
 
 # Real-time sync imports
@@ -199,29 +200,66 @@ ProviderRegistry.register(AnthropicProvider())
 ProviderRegistry.register(AnthropicOpus45Provider())
 ProviderRegistry.register(AnthropicOpusProvider())
 ProviderRegistry.register(AnthropicOpus3Provider())
+ProviderRegistry.register(GeminiProvider())
 
 # Default model for new chats
-DEFAULT_MODEL = "claude-opus-4.5"
+DEFAULT_MODEL = "gemini-3.1-pro"
 
 # Model used for auto-switching during combat/hack/net_combat/ship_combat
 COMBAT_AUTO_SWITCH_MODEL = "gpt-5.4"
 
 # Per-stage models for both pipelines.
 # Reasoning stages (Events / Mechanics-as-model / Planning) are JSON-only with
-# heavy rules reasoning — 5.2's strength. Narration is streaming prose with
-# light reasoning — 5.4's strength. These override the caller-picked model
-# inside the pipelines but only when both stage providers are registered.
+# heavy rules reasoning — 5.2's strength. Narration is streaming prose —
+# handled by Gemini 3.1 Pro (a stronger writer). These override the caller-picked
+# model inside the pipelines but only when both stage providers are registered.
+# NOTE: narration now runs on a different provider/key than planning, so the
+# pipeline creates a narration-specific client (see run_pipeline call site).
 PIPELINE_PLANNING_MODEL = "gpt-5.2"
-PIPELINE_NARRATION_MODEL = "gpt-5.4"
+PIPELINE_NARRATION_MODEL = "gemini-3.1-pro"
 
 
 def get_default_model_for_user(username: str) -> str:
-    """Return claude-opus-4.5 if user has Anthropic key, else gpt-5.4 if OpenAI key."""
+    """Return the default model for a user based on which API keys they hold.
+
+    Prefers Gemini 3.1 Pro (the global default) when a Google key is present,
+    then falls back to Opus 4.5 (Anthropic) or GPT-5.4 (OpenAI)."""
+    if get_api_key(username, "google"):
+        return DEFAULT_MODEL  # gemini-3.1-pro
     if get_api_key(username, "anthropic"):
-        return DEFAULT_MODEL  # claude-opus-4.5
+        return "claude-opus-4.5"
     if get_api_key(username, "openai"):
         return "gpt-5.4"
     return DEFAULT_MODEL
+
+
+def is_stateful_family(model_id: str) -> bool:
+    """Models that drive a turn via the single-call tool path (report_state /
+    resolve_mechanics + the combat/hack/ship/chase mode tool handlers) rather
+    than the GPT events→mechanics→narration pipeline. Claude and Gemini both work
+    this way; GPT does not. Used to gate routing (not token bookkeeping, where
+    Gemini intentionally shares the GPT token bucket)."""
+    return bool(model_id) and (model_id.startswith("claude") or model_id.startswith("gemini"))
+
+
+def _resolve_narration(provider, client, username):
+    """Resolve the pipeline narration provider + a client for it.
+
+    Narration may run on a different provider/key than the planning stages
+    (e.g. planning=GPT, narration=Gemini), so it needs its own client. Falls
+    back to the planning provider/client if the narration provider isn't
+    registered or the user has no key for it."""
+    np = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+    if np is provider:
+        return np, client
+    key = get_api_key(username, ProviderRegistry.get_required_api_key(np.model_id))
+    if not key:
+        logger.warning(
+            f"Narration provider {np.model_id} has no API key for {username}; "
+            f"falling back to {getattr(provider, 'model_id', '?')} for narration."
+        )
+        return provider, client
+    return np, np.get_client(key)
 
 # ============================================================
 # Utility Functions
@@ -5281,7 +5319,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # Auto-switch Claude to GPT for hack mode (preserves Anthropic prompt cache)
     _original_model = None
-    if use_hack_mode and model_id.startswith("claude"):
+    if use_hack_mode and is_stateful_family(model_id):
         _original_model = model_id
         model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
@@ -5387,7 +5425,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         _net_combat = _expanded
 
     # Auto-switch Claude to GPT for net_combat mode
-    if use_net_combat_mode and model_id.startswith("claude"):
+    if use_net_combat_mode and is_stateful_family(model_id):
         _original_model = model_id
         model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
@@ -5417,7 +5455,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         use_combat_mode = True
 
     # Auto-switch Claude to GPT for combat mode (preserves Anthropic prompt cache)
-    if use_combat_mode and model_id.startswith("claude"):
+    if use_combat_mode and is_stateful_family(model_id):
         _original_model = model_id
         model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
@@ -5450,7 +5488,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         use_ship_combat_mode = True
 
     # Auto-switch Claude to GPT for ship combat mode
-    if use_ship_combat_mode and model_id.startswith("claude"):
+    if use_ship_combat_mode and is_stateful_family(model_id):
         _original_model = model_id
         model_id = COMBAT_AUTO_SWITCH_MODEL
         provider = ProviderRegistry.get(model_id)
@@ -5781,7 +5819,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     # Check if this is a stateful single-agent request (Claude + project chat, not pipeline)
     # Token-based trimming systems (e.g., "chats") fall through to the non-stateful else branch
-    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_chase_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and model_id.startswith("claude") and request.project and gs.get("trimming", "pair") == "pair"
+    use_stateful = (not use_hack_mode) and (not use_combat_mode) and (not use_net_combat_mode) and (not use_ship_combat_mode) and (not use_chase_mode) and (not use_sex_mode) and (not _sex_handoff_npcs) and is_stateful_family(model_id) and request.project and gs.get("trimming", "pair") == "pair"
     stateful_pipeline_state = None
     stateful_injected_snapshot = None
     _sex_first_exchange = False
@@ -7060,7 +7098,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             if contract:
                 base_content = contract + "\n\n" + base_content
             # Inject pinned artifact content into system prompt (cached across turns)
-            if gs.get("doc_tools") and model_id.startswith("claude"):
+            if gs.get("doc_tools") and is_stateful_family(model_id):
                 pinned = _build_pinned_artifacts(data.get("artifacts", {}))
                 if pinned:
                     base_content = base_content + "\n\n" + pinned
@@ -7068,7 +7106,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
             user_content = build_message_content(branch_path[-1])
             # Inject artifact summary so Claude knows what docs exist (Claude only — GPT doesn't get doc tools)
-            if gs.get("doc_tools") and model_id.startswith("claude"):
+            if gs.get("doc_tools") and is_stateful_family(model_id):
                 doc_summary = _build_artifact_summary(data.get("artifacts", {}))
                 if doc_summary:
                     user_content = doc_summary + "\n\n" + user_content
@@ -7078,7 +7116,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
         # Novels: hard token ceiling check (no auto-trimming — user controls context via staging)
         # Sum from source messages (cached tokens) + estimate fresh system/user messages
-        if gs.get("manual_staging") and model_id.startswith("claude"):
+        if gs.get("manual_staging") and is_stateful_family(model_id):
             _history_tokens = sum(
                 m.get("total_claude_tokens") or m.get("total_tokens") or count_tokens(m.get("content", ""))
                 for m in staged_history
@@ -7107,7 +7145,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
     is_free_chat = not request.project
     use_cache = data.get("anthropic_sync", True)
-    if use_hack_mode and model_id.startswith("claude"):
+    if use_hack_mode and is_stateful_family(model_id):
         # Claude hack mode: use standard build_request with hack tool
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -7126,7 +7164,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     elif use_hack_mode:
         # GPT-5.2 hack mode: request_params not used (hack_gpt_request_params used instead)
         request_params = {}
-    elif use_net_combat_mode and model_id.startswith("claude"):
+    elif use_net_combat_mode and is_stateful_family(model_id):
         # Claude net_combat mode: use standard build_request with net_combat tool
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -7145,7 +7183,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     elif use_net_combat_mode:
         # GPT-5.2 net_combat mode: request_params not used
         request_params = {}
-    elif use_combat_mode and model_id.startswith("claude"):
+    elif use_combat_mode and is_stateful_family(model_id):
         # Claude combat mode: use standard build_request with combat tool
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -7164,7 +7202,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     elif use_combat_mode:
         # GPT-5.2 combat mode: request_params not used (combat_gpt_request_params used instead)
         request_params = {}
-    elif use_ship_combat_mode and model_id.startswith("claude"):
+    elif use_ship_combat_mode and is_stateful_family(model_id):
         request_params = provider.build_request(
             messages=messages_for_api,
             username=username,
@@ -7177,7 +7215,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
         request_params["tool_choice"] = {"type": "auto"}
     elif use_ship_combat_mode:
         request_params = {}
-    elif use_chase_mode and model_id.startswith("claude"):
+    elif use_chase_mode and is_stateful_family(model_id):
         # Claude chase mode: standard build_request with chase tool
         request_params = provider.build_request(
             messages=messages_for_api,
@@ -7248,7 +7286,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
             # Narration is now a required field on report_state, so emitting it is
             # schema-enforced rather than contract-trusted.
             request_params["tool_choice"] = {"type": "any"}
-        elif gs.get("doc_tools") and model_id.startswith("claude"):
+        elif gs.get("doc_tools") and is_stateful_family(model_id):
             request_params["tools"] = gs["doc_tools"]
             request_params["tool_choice"] = {"type": "auto"}
         elif use_characters and not use_characters_interview and gs.get("search_tool_enabled"):
@@ -8008,7 +8046,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         return _PIPELINE_STOP
 
                 _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
-                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                _narration_prov, _narration_client = _resolve_narration(provider, client, username)
                 logger.info(
                     f"Hack mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
                     f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
@@ -8017,6 +8055,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     provider=provider, client=client,
                     planning_provider=_planning_prov,
                     narration_provider=_narration_prov,
+                    narration_client=_narration_client,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="hack",
                     planning_system=hack_planning_system,
@@ -8328,7 +8367,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         return _PIPELINE_STOP
 
                 _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
-                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                _narration_prov, _narration_client = _resolve_narration(provider, client, username)
                 logger.info(
                     f"Combat mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
                     f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
@@ -8337,6 +8376,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     provider=provider, client=client,
                     planning_provider=_planning_prov,
                     narration_provider=_narration_prov,
+                    narration_client=_narration_client,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="combat",
                     planning_system=combat_planning_system,
@@ -8631,7 +8671,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         return _PIPELINE_STOP
 
                 _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
-                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                _narration_prov, _narration_client = _resolve_narration(provider, client, username)
                 logger.info(
                     f"Net combat mode pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
                     f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
@@ -8640,6 +8680,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     provider=provider, client=client,
                     planning_provider=_planning_prov,
                     narration_provider=_narration_prov,
+                    narration_client=_narration_client,
                     username=username, project=request.project or "",
                     chat_name=request.chat_name, mode="net_combat",
                     planning_system=nc_planning_system,
@@ -9291,7 +9332,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 pipeline_uploads_dir = os.path.join(get_project_dir(username, request.project), "uploads") if request.project else None
                 pipeline_name_dice = generate_name_dice(pipeline_uploads_dir or "")
                 _planning_prov = ProviderRegistry.get(PIPELINE_PLANNING_MODEL) or provider
-                _narration_prov = ProviderRegistry.get(PIPELINE_NARRATION_MODEL) or provider
+                _narration_prov, _narration_client = _resolve_narration(provider, client, username)
                 logger.info(
                     f"Pipeline: planner={getattr(_planning_prov, 'MODEL_NAME', '?')}, "
                     f"narrator={getattr(_narration_prov, 'MODEL_NAME', '?')}"
@@ -9313,6 +9354,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     uploads_dir=pipeline_uploads_dir,
                     planning_provider=_planning_prov,
                     narration_provider=_narration_prov,
+                    narration_client=_narration_client,
                 )
 
                 client_disconnected = False
@@ -10211,7 +10253,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Handle hack mode tool output (Claude hack mode)
                         hack_tool_input = None
-                        if use_hack_mode and model_id.startswith("claude"):
+                        if use_hack_mode and is_stateful_family(model_id):
                             _hack_ps = data.get("pipeline_state", {})
                             _hack_gs = _hack_ps.get("game_state") if isinstance(_hack_ps, dict) else None
                             tool_input = usage.get('tool_use_input')
@@ -10280,7 +10322,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Handle net_combat mode tool output (Claude net_combat mode)
                         net_combat_tool_input = None
-                        if use_net_combat_mode and model_id.startswith("claude"):
+                        if use_net_combat_mode and is_stateful_family(model_id):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["net_combat_tool"]):
                                 if resolve_mechanics_ran:
@@ -10333,7 +10375,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                         # Handle combat mode tool output (Claude combat mode)
                         combat_tool_input = None
                         ship_combat_tool_input = None
-                        if use_combat_mode and model_id.startswith("claude"):
+                        if use_combat_mode and is_stateful_family(model_id):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["combat_tool"]):
                                 if resolve_mechanics_ran:
@@ -10384,7 +10426,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # Handle chase mode tool output (Claude chase mode)
                         chase_tool_input = None
-                        if use_chase_mode and model_id.startswith("claude"):
+                        if use_chase_mode and is_stateful_family(model_id):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["chase_tool"]):
                                 chase_tool_input = tool_input
@@ -10429,7 +10471,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                                     logger.error(f"Chase mode: retry error for {username}: {retry_err}")
 
                         # Handle ship combat mode tool output (Claude ship combat mode)
-                        if use_ship_combat_mode and model_id.startswith("claude"):
+                        if use_ship_combat_mode and is_stateful_family(model_id):
                             tool_input = usage.get('tool_use_input')
                             if tool_input and _tool_input_valid(tool_input, gs["ship_combat_tool"]):
                                 ship_combat_tool_input = tool_input
@@ -10750,7 +10792,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             )
 
                         # Emit state_update for Claude net_combat mode
-                        if use_net_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
+                        if use_net_combat_mode and is_stateful_family(model_id) and data.get("pipeline_state"):
                             yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -10758,7 +10800,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             )
 
                         # Emit state_update for Claude combat mode
-                        if use_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
+                        if use_combat_mode and is_stateful_family(model_id) and data.get("pipeline_state"):
                             yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -10766,7 +10808,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                             )
 
                         # Emit state_update for Claude ship combat mode
-                        if use_ship_combat_mode and model_id.startswith("claude") and data.get("pipeline_state"):
+                        if use_ship_combat_mode and is_stateful_family(model_id) and data.get("pipeline_state"):
                             yield f"event: state_update\ndata: {json.dumps(data['pipeline_state'])}\n\n"
                             await sync_manager.broadcast_to_chat(
                                 chat_key,
@@ -11197,7 +11239,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
 
                         # ── Artifact/doc tool processing (Novels system, Claude only) ──
                         artifact_ops = []
-                        if gs.get("doc_tools") and model_id.startswith("claude") and usage.get('tool_uses'):
+                        if gs.get("doc_tools") and is_stateful_family(model_id) and usage.get('tool_uses'):
                             doc_tool_names = {t["name"] for t in gs["doc_tools"]}
                             doc_calls = [t for t in usage['tool_uses'] if t.get("name") in doc_tool_names]
                             if doc_calls:

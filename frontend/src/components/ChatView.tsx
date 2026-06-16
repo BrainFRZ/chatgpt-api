@@ -1028,7 +1028,7 @@ export default function ChatView({
                           <span style={styles.messageTokens}>
                             {msg.tokens}{costStr}
                             {msg.service_tier && ` (${msg.service_tier === 'flex' ? 'Flex' : 'Standard'})`}
-                            {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
+                            {msg.model && ` | ${msg.model === 'gpt-5.2' ? 'GPT' : msg.model === 'gemini-3.1-pro' ? 'Gemini' : msg.model === 'claude-sonnet-4.5' ? 'Sonnet' : msg.model === 'claude-opus-4.5' ? 'Opus' : msg.model === 'claude-3-opus' ? 'Opus 3' : msg.model}`}
                           </span>
                         );
                       })() : <span />}

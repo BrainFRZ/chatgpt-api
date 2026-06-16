@@ -784,6 +784,7 @@ function App() {
       .catch(() => {
         // Fallback models if API fails
         setAvailableModels([
+          { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', pricing: { input_new: 2.00, input_cached: 0.20, output: 12, reasoning: 12 }, context_limits: { threshold: 400000, target: 300000 } },
           { id: 'gpt-5.5', name: 'GPT-5.5', pricing: { input_new: 5.00, input_cached: 0.50, output: 30, reasoning: 30 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.4', name: 'GPT-5.4', pricing: { input_new: 2.50, input_cached: 0.25, output: 15, reasoning: 15 }, context_limits: { threshold: 275000, target: 225000 } },
           { id: 'gpt-5.2', name: 'GPT-5.2', pricing: { input_new: 1.75, input_cached: 0.175, output: 14, reasoning: 14 }, context_limits: { threshold: 275000, target: 225000 } },

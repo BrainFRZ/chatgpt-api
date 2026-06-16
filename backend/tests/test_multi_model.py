@@ -890,19 +890,19 @@ class TestProviderRegistry:
         assert gpt is not None
         assert claude is not None
 
-    def test_get_default_returns_opus_4_5(self):
-        """Default provider should be Claude Opus 4.5."""
+    def test_get_default_returns_gemini(self):
+        """Default provider should be Gemini 3.1 Pro."""
         from providers import ProviderRegistry
 
         default = ProviderRegistry.get_default()
-        assert default.model_id == "claude-opus-4.5"
+        assert default.model_id == "gemini-3.1-pro"
 
     def test_list_models_returns_metadata(self):
         """list_models should return metadata for all providers."""
         from providers import ProviderRegistry
 
         models = ProviderRegistry.list_models()
-        assert len(models) == 6
+        assert len(models) == 8
 
         model_ids = [m["id"] for m in models]
         assert "gpt-5.2" in model_ids
@@ -912,6 +912,7 @@ class TestProviderRegistry:
         assert "claude-opus-4.5" in model_ids
         assert "claude-opus-4.6" in model_ids
         assert "claude-3-opus" in model_ids
+        assert "gemini-3.1-pro" in model_ids
 
     def test_get_required_api_key(self):
         """get_required_api_key should return correct provider."""
@@ -920,6 +921,57 @@ class TestProviderRegistry:
         assert ProviderRegistry.get_required_api_key("gpt-5.2") == "openai"
         assert ProviderRegistry.get_required_api_key("gpt-5.5") == "openai"
         assert ProviderRegistry.get_required_api_key("claude-sonnet-4.5") == "anthropic"
+        assert ProviderRegistry.get_required_api_key("gemini-3.1-pro") == "google"
+
+
+class TestGeminiProvider:
+    """Tests for the Gemini 3.1 Pro provider (Anthropic-contract shim)."""
+
+    def test_registered_with_google_key(self):
+        from providers import ProviderRegistry
+        g = ProviderRegistry.get("gemini-3.1-pro")
+        assert g is not None
+        assert g.display_name == "Gemini 3.1 Pro"
+        assert ProviderRegistry.get_required_api_key("gemini-3.1-pro") == "google"
+
+    def test_is_stateful_family(self):
+        """Gemini routes through the Claude-style stateful tool path, not the GPT pipeline."""
+        import main
+        assert main.is_stateful_family("gemini-3.1-pro") is True
+        assert main.is_stateful_family("claude-opus-4.5") is True
+        assert main.is_stateful_family("gpt-5.2") is False
+
+    def test_pipeline_and_combat_config(self):
+        import main
+        assert main.PIPELINE_NARRATION_MODEL == "gemini-3.1-pro"
+        assert main.PIPELINE_PLANNING_MODEL == "gpt-5.2"   # planning stays GPT
+        assert main.COMBAT_AUTO_SWITCH_MODEL == "gpt-5.4"  # combat auto-switch unchanged
+
+    def test_schema_sanitizer_converts_nullable_union(self):
+        """JSON-Schema ['object','null'] unions -> single type + nullable (Gemini-compatible)."""
+        from providers.gemini_provider import _sanitize_schema
+        out = _sanitize_schema({"type": ["object", "null"], "properties": {
+            "k": {"type": ["string", "null"]}}})
+        assert out["type"] == "object"
+        assert out["nullable"] is True
+        assert out["properties"]["k"]["type"] == "string"
+        assert out["properties"]["k"]["nullable"] is True
+
+    def test_messages_to_contents_maps_tool_blocks(self):
+        """Anthropic tool_use/tool_result blocks -> Gemini functionCall/functionResponse."""
+        from providers.gemini_provider import _messages_to_contents
+        contents = _messages_to_contents([
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "report_state", "input": {"x": 1}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "{\"ok\": true}"}]},
+        ])
+        assert contents[0]["role"] == "model"
+        assert contents[0]["parts"][0]["function_call"]["name"] == "report_state"
+        assert contents[1]["role"] == "user"
+        fr = contents[1]["parts"][0]["function_response"]
+        assert fr["name"] == "report_state"  # id->name mapping
+        assert fr["response"] == {"ok": True}
 
 
 class TestAddUpdatesToMessages:

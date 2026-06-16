@@ -86,6 +86,7 @@
 !backend/providers/__init__.py
 !backend/providers/openai_provider.py
 !backend/providers/anthropic_provider.py
+!backend/providers/gemini_provider.py
 !backend/pipeline.py
 !backend/game_systems/
 !backend/game_systems/__init__.py
