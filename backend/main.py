@@ -7398,7 +7398,7 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
     _outer_context_start_index = context_start_index
 
     async def event_generator():
-        nonlocal model_id, provider, client
+        nonlocal model_id, provider, client, request_params
         context_start_index = _outer_context_start_index
         accumulated_content = ""
         accumulated_thinking = ""
