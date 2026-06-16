@@ -82,6 +82,15 @@ def _sanitize_schema(node: Any) -> Any:
                 out[k] = _sanitize_schema(v)
             elif k in ("anyOf", "oneOf", "allOf"):
                 out["anyOf"] = [_sanitize_schema(x) for x in v]
+            elif k == "enum":
+                # Gemini's function schema requires enum entries to be strings
+                # (the google-genai Schema.enum field is typed list[str]). Keep
+                # all-string enums; drop non-string enums (e.g. integer value
+                # lists) so the tool still registers — the field keeps its type,
+                # it just loses the enum hint. Without this, any tool carrying an
+                # int/number enum (e.g. report_state.ip_ops) 400s the whole request.
+                if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                    out["enum"] = v
             else:
                 out[k] = _sanitize_schema(v)
         return out

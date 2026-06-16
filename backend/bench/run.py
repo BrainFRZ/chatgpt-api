@@ -19,7 +19,10 @@ import argparse
 import json
 import os
 import sys
+import time
 import traceback
+
+_TRANSIENT = ("503", "unavailable", "overloaded", "429", "rate_limit", "ratelimit", "timeout")
 
 from providers.anthropic_provider import AnthropicSonnet46Provider
 from providers.deepseek_provider import DeepSeekProvider
@@ -150,10 +153,19 @@ def real_run(models, keys, args):
         try:
             for req in iter_requests(provider, args.suite, args.depths, args.tool_turns,
                                      args.retention_repeats, args.full_contract):
-                try:
-                    usage = run_once(provider, client, req["params"])
-                except Exception as e:  # noqa: BLE001 - one bad call shouldn't kill the run
-                    print(f"   call error ({req['kind']}): {e}")
+                usage = None
+                for attempt in range(3):
+                    try:
+                        usage = run_once(provider, client, req["params"])
+                        break
+                    except Exception as e:  # noqa: BLE001 - one bad call shouldn't kill the run
+                        msg = str(e)
+                        if any(s in msg.lower() for s in _TRANSIENT) and attempt < 2:
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        print(f"   call error ({req['kind']}): {msg[:160]}")
+                        break
+                if usage is None:
                     continue
                 meter.add(model_id, provider, usage)
                 if req["kind"] == "tool":

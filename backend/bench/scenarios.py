@@ -73,6 +73,10 @@ def tool_request(provider, scenario, full_contract=False):
     ]
     params = provider.build_request(messages, "bench", None, "bench", is_free_chat=False)
     params["tools"] = DOC_TOOLS
+    # Mirror the app's stateful forced-tool path (main.py): thinking is disabled
+    # when tool_choice forces a tool — Anthropic 400s on thinking + forced tool.
+    params.pop("thinking", None)
+    params.pop("output_config", None)
     params["tool_choice"] = {"type": "any"}
     return params
 

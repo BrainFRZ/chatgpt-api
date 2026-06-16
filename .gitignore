@@ -94,6 +94,8 @@
 !backend/bench/pricing.py
 !backend/bench/scenarios.py
 !backend/bench/run.py
+!backend/bench/dm_judgment.py
+!backend/bench/REPORT.md
 !backend/game_systems/
 !backend/game_systems/__init__.py
 !backend/game_systems/dnd5e.py
