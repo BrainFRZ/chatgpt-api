@@ -15,6 +15,7 @@ const SIDE_AGENT_DONE_FIELDS = [
   'fetch_url_calls', 'fetch_url_log',
   'image_reading_usage', 'image_reading_cost', 'image_reading_model', 'image_reading_count',
   'meme_calls', 'meme_cost', 'meme_log', 'meme_vision_usage', 'meme_vision_model',
+  'pipeline_stage_usage',
 ] as const;
 
 function mergeSideAgentFields(target: any, data: any): void {

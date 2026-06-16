@@ -5125,3 +5125,67 @@ class TestCpredRelationshipOps:
                     assert 0 <= nrel.get("roms", 0) <= 100
             for faction in state["factions"].values():
                 assert -100 <= faction.get("fr", 0) <= 100
+
+
+# ============================================================
+# Regression: mixed-provider cost aggregation (combat/pipeline narration)
+# ============================================================
+# The mode pipeline runs Stage 1 (planning) on GPT and Stage 2 (narration) on a
+# shim provider (e.g. DeepSeek V3.2). The shim providers extend ModelProvider and
+# implement calculate_cost (no service tiers), NOT OpenAIProvider's
+# calculate_cost_with_tier. _aggregate_usage / _build_stage_usage must price each
+# stage with whichever method its provider supports, or the whole turn throws
+# AttributeError at finalize (after content already streamed) — breaking cost
+# accounting AND state persistence. This guards that regression.
+
+from pipeline import _aggregate_usage, _build_stage_usage, _stage_cost, PipelineStageResult
+
+
+def _stage(stage, provider, **usage):
+    base = {"input_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+            "output_tokens": 0, "reasoning_tokens": 0}
+    base.update(usage)
+    return PipelineStageResult(stage=stage, content="x", parsed_json=None,
+                               usage=base, service_tier="standard", provider=provider)
+
+
+def test_cost_aggregation_with_shim_narration_provider():
+    """V3.2 narration stage must price via calculate_cost, not crash."""
+    from providers.openrouter_provider import OpenRouterDeepSeekV32
+    v32 = OpenRouterDeepSeekV32()
+    narr = _stage("combat_narration", v32, input_tokens=776, output_tokens=400)
+    agg = _aggregate_usage([narr], v32)  # must not raise
+    assert agg["cost"] > 0
+    # matches v3.2 pricing: 776*0.27/M + 400*0.40/M
+    expected = (776 * 0.27 + 400 * 0.40) / 1_000_000
+    assert abs(agg["cost"] - expected) < 1e-9
+
+
+def test_cost_aggregation_mixed_gpt_planner_and_shim_narrator():
+    """Combat: gpt-5.2 planning + v3.2 narration are summed, each at its own rate."""
+    from providers.openrouter_provider import OpenRouterDeepSeekV32
+    from providers.openai_provider import OpenAIProvider
+    gpt, v32 = OpenAIProvider(), OpenRouterDeepSeekV32()
+    plan = _stage("combat_planning", gpt, input_tokens=1604, cache_read_tokens=1408,
+                  output_tokens=1219, reasoning_tokens=1650)
+    narr = _stage("combat_narration", v32, input_tokens=776, output_tokens=400)
+    agg = _aggregate_usage([plan, narr], gpt)
+    su = _build_stage_usage([plan, narr], gpt)
+    assert su["combat_planning"]["model"] == "gpt-5.2"
+    assert su["combat_narration"]["model"] == "deepseek/deepseek-v3.2"
+    # aggregate equals the sum of the two independently-priced stages
+    assert abs(agg["cost"] - (su["combat_planning"]["cost"] + su["combat_narration"]["cost"])) < 1e-9
+    # planner (gpt-5.2 @ $14/M out) dominates; narrator (v3.2) is tiny but nonzero
+    assert su["combat_planning"]["cost"] > su["combat_narration"]["cost"] > 0
+
+
+def test_stage_cost_prefers_tier_then_falls_back():
+    """_stage_cost uses tier pricing when available, plain calculate_cost otherwise."""
+    from providers.openai_provider import OpenAIProvider
+    from providers.openrouter_provider import OpenRouterDeepSeekV32
+    from providers import ParsedResponse
+    p = ParsedResponse(content="", reasoning=None, input_tokens=1000, cache_read_tokens=0,
+                       cache_creation_tokens=0, output_tokens=500, reasoning_tokens=0)
+    gpt, v32 = OpenAIProvider(), OpenRouterDeepSeekV32()
+    assert _stage_cost(gpt, p, "standard") == gpt.calculate_cost_with_tier(p, "standard")
+    assert _stage_cost(v32, p, "standard") == v32.calculate_cost(p)

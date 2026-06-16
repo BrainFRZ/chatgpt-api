@@ -3382,6 +3382,7 @@ class ModeResult:
     aggregate_cost: float
     reasoning_summaries: list[str]
     service_tier_label: str
+    stage_usage: Optional[dict] = None  # per-stage {planning, narration} usage+cost+model
 
 
 def run_mode_pipeline(
@@ -3694,6 +3695,7 @@ def run_mode_pipeline(
         reasoning_summaries.append(f"[Narration] {narration_usage['reasoning']}")
 
     aggregate = _aggregate_usage(stage_results, provider)
+    stage_usage = _build_stage_usage(stage_results, provider)
 
     yield ("pipeline_done", ModeResult(
         mode=mode,
@@ -3705,7 +3707,23 @@ def run_mode_pipeline(
         aggregate_cost=aggregate["cost"],
         reasoning_summaries=reasoning_summaries,
         service_tier_label="standard",
+        stage_usage=stage_usage,
     ))
+
+
+def _stage_cost(stage_provider, parsed: "ParsedResponse", tier: str) -> float:
+    """Per-stage cost for whichever provider ran the stage.
+
+    OpenAI providers price by service tier (flex/standard) via
+    calculate_cost_with_tier; the shim providers (DeepSeek/Gemini/Anthropic) used
+    for narration have no service tiers and implement plain calculate_cost. The
+    mode pipeline runs Stage 1 on GPT and Stage 2 on a shim narrator (e.g. V3.2),
+    so the aggregator must tolerate both. Mirrors the guarded calc in main.py.
+    """
+    fn = getattr(stage_provider, "calculate_cost_with_tier", None)
+    if callable(fn):
+        return fn(parsed, tier)
+    return stage_provider.calculate_cost(parsed)
 
 
 def _build_stage_usage(stage_results: list[PipelineStageResult], provider: OpenAIProvider) -> dict:
@@ -3728,7 +3746,7 @@ def _build_stage_usage(stage_results: list[PipelineStageResult], provider: OpenA
             "cache_creation_tokens": u.get('cache_creation_tokens', 0),
             "output_tokens": u.get('output_tokens', 0),
             "reasoning_tokens": u.get('reasoning_tokens', 0),
-            "cost": _stage_provider.calculate_cost_with_tier(parsed, sr.service_tier),
+            "cost": _stage_cost(_stage_provider, parsed, sr.service_tier),
             "service_tier": sr.service_tier,
             "model": getattr(_stage_provider, "MODEL_NAME", None) or getattr(_stage_provider, "model_id", None),
         }
@@ -3776,7 +3794,7 @@ def _aggregate_usage(stage_results: list[PipelineStageResult], provider: OpenAIP
             reasoning_tokens=reasoning_tokens
         )
         _stage_provider = result.provider or provider
-        stage_cost = _stage_provider.calculate_cost_with_tier(parsed, result.service_tier)
+        stage_cost = _stage_cost(_stage_provider, parsed, result.service_tier)
         total_cost += stage_cost
 
     return {

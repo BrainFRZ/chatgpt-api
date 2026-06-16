@@ -8509,10 +8509,12 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                 new_input_tokens = parsed.input_tokens - parsed.cache_read_tokens - parsed.cache_creation_tokens
                 total_tokens = parsed.input_tokens + parsed.output_tokens + parsed.reasoning_tokens
 
-                if service_tier:
-                    total_cost = provider.calculate_cost_with_tier(parsed, service_tier)
-                else:
-                    total_cost = provider.calculate_cost(parsed)
+                # Use the mode pipeline's per-stage aggregate cost: planning runs on
+                # the planner (gpt-5.2) and narration on the narrator (v3.2), so a
+                # single-provider recompute would misprice the narration tokens at the
+                # planner's rate. The aggregate prices each stage with its own provider
+                # (see pipeline._aggregate_usage), and matches the itemized footer rows.
+                total_cost = mode_result.aggregate_cost
                 tokens_str = provider.format_token_string(parsed)
 
                 actual_cost, cost_str, pending_usage = apply_free_tokens(username, total_tokens, total_cost, commit=False)
@@ -8580,6 +8582,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     assistant_msg_data["reasoning"] = reasoning_summary
                 if service_tier:
                     assistant_msg_data["service_tier"] = service_tier
+                if mode_result.stage_usage is not None:
+                    assistant_msg_data["pipeline_stage_usage"] = mode_result.stage_usage
                 if data.get("pipeline_state"):
                     assistant_msg_data["pipeline_state_after"] = copy.deepcopy(data["pipeline_state"])
 
@@ -8619,6 +8623,8 @@ async def send_message_stream(request: SendMessageRequest, http_request: Request
                     done_data['service_tier'] = service_tier
                 if _original_model:
                     done_data['original_model'] = _original_model
+                if mode_result.stage_usage is not None:
+                    done_data['pipeline_stage_usage'] = mode_result.stage_usage
                 if _is_combat_marked_complete(combat_json):
                     done_data['combat_complete'] = True
                 yield f"event: done\ndata: {json.dumps(done_data)}\n\n"

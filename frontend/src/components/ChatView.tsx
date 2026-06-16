@@ -77,6 +77,36 @@ function parseRolledCost(costStr: any): number {
   return parseFloat(String(costStr).replace(/[^0-9.\-]/g, '')) || 0;
 }
 
+// Pipeline / mode-pipeline per-stage breakdown labels. Combat & the other mode
+// pipelines run Planning on the reasoning model and Narration on the prose model;
+// the generic pipeline runs Events/Mechanics/Narration. Mechanics is deterministic
+// (backend) for cpred and carries no tokens — those rows are skipped at render.
+const STAGE_LABELS: Record<string, string> = {
+  events: 'Events', mechanics: 'Mechanics', narration: 'Narration',
+  combat_planning: 'Planning', combat_narration: 'Narration',
+  hack_planning: 'Planning', hack_narration: 'Narration',
+  net_combat_planning: 'Planning', net_combat_narration: 'Narration',
+  chase_planning: 'Planning', chase_narration: 'Narration',
+};
+function formatStageLabel(stage: string): string {
+  if (STAGE_LABELS[stage]) return STAGE_LABELS[stage];
+  const seg = stage.split('_').pop() || stage;
+  return seg.charAt(0).toUpperCase() + seg.slice(1);
+}
+function formatStageModel(m: string): string {
+  if (!m) return '';
+  if (m === 'gpt-5.2') return 'GPT-5.2';
+  if (m === 'gpt-5.4') return 'GPT-5.4';
+  if (m === 'gpt-5.5') return 'GPT-5.5';
+  if (m.includes('v3.2')) return 'V3.2';
+  if (m.includes('v4-pro')) return 'V4 Pro';
+  if (m.includes('v4-flash')) return 'V4 Flash';
+  if (m.includes('sonnet')) return 'Sonnet';
+  if (m.includes('opus')) return 'Opus';
+  if (m.startsWith('gemini')) return 'Gemini';
+  return m;
+}
+
 function _extractHudFromMsg(msg: any): any | null {
   if (!msg || typeof msg !== 'object') return null;
   const psa = msg.pipeline_state_after;
@@ -1075,6 +1105,23 @@ export default function ChatView({
                       )}
                     </div>
                     <div style={styles.messageFooterBreakdown}>
+                      {/* Pipeline / mode-pipeline per-stage breakdown (combat: Planning
+                          on GPT-5.2 + Narration on V3.2). Each stage priced with its own
+                          model; the rows sum to the main-row total. Mirrors the Characters
+                          side-agent rows. Mechanics (deterministic/backend) carries no
+                          tokens and is skipped. */}
+                      {(msg as any).pipeline_stage_usage && Object.entries((msg as any).pipeline_stage_usage).map(([stage, su]: [string, any]) => {
+                        const u = su || {};
+                        const totalTok = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.reasoning_tokens || 0);
+                        if (totalTok <= 0 && !(typeof u.cost === 'number' && u.cost > 0)) return null;
+                        return (
+                          <span key={stage} style={{ ...styles.messageTokens, opacity: 0.75 }}>
+                            {formatStageLabel(stage)}: {formatUsageString(u)}
+                            {typeof u.cost === 'number' && ` | $${u.cost.toFixed(6)}`}
+                            {u.model && ` (${formatStageModel(u.model)})`}
+                          </span>
+                        );
+                      })}
                       {(msg as any).flag_agent_usage && (
                         <span style={{ ...styles.messageTokens, opacity: 0.75 }}>
                           Flags: {formatUsageString((msg as any).flag_agent_usage)}
