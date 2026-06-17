@@ -28,6 +28,15 @@ class _OpenRouterBase(DeepSeekProvider):
 
 class OpenRouterDeepSeekV32(_OpenRouterBase):
     MODEL_NAME = "deepseek/deepseek-v3.2"
+    # Lead with Baidu: fp8 (vs deepinfra's fp4 — quality), reliable prompt caching
+    # (10x discount $0.025/M, probed surviving 45+ min), and ~2x faster generation
+    # (~18 vs ~8 tok/s) than the prior deepinfra-led order. siliconflow/novita are
+    # fp8 fallbacks; allow_fallbacks keeps uptime if Baidu is briefly unavailable.
+    PROVIDER_ROUTING = {
+        "ignore": ["sambanova"],
+        "order": ["baidu", "siliconflow", "novita"],
+        "allow_fallbacks": True,
+    }
 
     @property
     def model_id(self) -> str:
